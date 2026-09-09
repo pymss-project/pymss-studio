@@ -3,6 +3,7 @@ import { storeToRefs } from 'pinia'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import i18n from '@/i18n'
 import { clipIsActive, clipMediaTime, clipsForTrack } from '@/utils/editorClips'
+import { createEditorAudioElement } from '@/utils/editorAudio'
 import type { EditorClip, EditorSource, EditorTrack } from '@/types/editor'
 import type { useEditorStore } from '@/stores/editor'
 import { useEditorPlaybackStore } from '@/stores/editorPlayback'
@@ -490,10 +491,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
 
     const primaryUrl = resolveAudioUrl(source.path)
     const fallbackUrl = resolveFileFallbackUrl(source.path)
-    const audio = new Audio(primaryUrl)
-    audio.preload = 'auto'
-    audio.loop = false
-    audio.crossOrigin = 'anonymous'
+    const audio = createEditorAudioElement(primaryUrl)
 
     const entry: ManagedAudio = {
       clipId: clip.id,
