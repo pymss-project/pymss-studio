@@ -68,6 +68,19 @@ if ($sitePackages -and (Test-Path -LiteralPath $sitePackages)) {
         Sort-Object FullName -Descending |
         ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
 
+    # Keep package identity and installer markers for importlib.metadata, plugin discovery,
+    # and future pip updates. Remove only WHEEL bookkeeping; ROCm ships many distributions,
+    # so retaining every wheel metadata file makes the LZMA2 installer enumerate more files.
+    Get-ChildItem -LiteralPath $sitePackages -Recurse -Force -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match "(?i)\.dist-info$|\.egg-info$" } |
+        ForEach-Object {
+            Get-ChildItem -LiteralPath $_.FullName -Force -File -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.Name -match '^(WHEEL)$'
+                } |
+                ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+        }
+
 }
 
 # Prune torch build metadata that is not needed at runtime.

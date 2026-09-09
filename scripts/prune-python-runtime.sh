@@ -55,6 +55,13 @@ find "$RUNTIME_DIR" -type d -name 'site-packages' -print0 |
       -name 'wheel-*' \
     \) -prune -exec rm -rf {} + || true
   done
+# Keep package identity and installer markers for importlib.metadata, plugin discovery,
+# and future pip updates. Remove only WHEEL bookkeeping; ROCm ships many distributions,
+# so retaining every wheel metadata file makes the LZMA2 installer enumerate more files.
+find "$RUNTIME_DIR" -type d \( -name '*.dist-info' -o -name '*.egg-info' \) -print0 |
+  while IFS= read -r -d '' meta_dir; do
+    find "$meta_dir" -maxdepth 1 -type f -iname 'WHEEL' -delete || true
+  done
 du -sh "$RUNTIME_DIR" || true
 
 # Note: keep stdlib pydoc/pydoc_data. SciPy imports pydoc from runtime code paths.
