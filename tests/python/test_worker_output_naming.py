@@ -289,72 +289,83 @@ class OutputNamingTests(unittest.TestCase):
             self.assertFalse((root / "01_song_vocals.wav").exists())
             self.assertEqual(separator.studio_outputs(), [])
 
-    def test_folder_processing_keeps_prior_outputs_when_a_later_input_fails(self) -> None:
+    def _new_separator_for_upstream_process(self, *, stem_count: int = 1):
+        separator = object.__new__(_studio_separator_type())
+        separator.output_format = "wav"
+        separator._studio_naming = {
+            "enabled": True,
+            "template": "%input_number%_%filename%_%stem%",
+            "stem_order": ["vocals", "instrumental"],
+        }
+        separator._studio_output_model = "model-a"
+        separator._studio_output_lock = Lock()
+        separator._studio_claimed_paths = set()
+        separator._studio_last_outputs = []
+        separator._studio_input_path = ""
+        separator._studio_input_index = 1
+        separator._studio_now = worker_infer.datetime(2026, 8, 18, 2, 49, 0)
+        separator._studio_input_contexts = {}
+        separator._studio_active_context = None
+        separator._studio_active_output_count = 0
+        separator._studio_expected_output_count = stem_count
+        separator._studio_output_sources = {}
+        separator._studio_stem_indices = {"vocals": 0, "instrumental": 1}
+        separator.logger = mock.Mock()
+
+        def save_audio(_audio, _sr, file_name, store_dir):
+            Path(store_dir, f"{file_name}.wav").write_bytes(b"new")
+
+        separator.save_audio = save_audio
+        return separator
+
+    def test_process_folder_delegates_to_pymss_and_preserves_input_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "song.wav"
+            source.write_bytes(b"input")
+            separator = self._new_separator_for_upstream_process()
+
+            def upstream_process(base, input_folder):
+                self.assertEqual(input_folder, str(source))
+                base._save_output("vocals", object(), 44100, "song", str(root))
+                return ["song.wav"]
+
+            with mock.patch("pymss.MSSeparator.process_folder", autospec=True, side_effect=upstream_process) as process:
+                success_files = separator.process_folder(str(source), input_index=7)
+
+            process.assert_called_once_with(separator, str(source))
+            self.assertEqual(success_files, ["song.wav"])
+            self.assertEqual(
+                separator.studio_outputs(),
+                [{"stem": "vocals", "path": str(root / "07_song_vocals.wav")}],
+            )
+
+    def test_process_folder_cleans_failed_outputs_after_upstream_delegate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             first = root / "first.wav"
             second = root / "second.wav"
             first.write_bytes(b"input")
             second.write_bytes(b"input")
+            separator = self._new_separator_for_upstream_process()
 
-            with mock.patch.object(worker_infer, "ThreadPoolExecutor"), \
-                 mock.patch("pymss.load_audio", side_effect=[("first", 44100), ("second", 44100)]):
-                separator = object.__new__(_studio_separator_type())
-                separator.config = mock.Mock(audio={"sample_rate": 44100})
-                separator.logger = mock.Mock()
-                separator._studio_last_outputs = []
-                separator._studio_stem_indices = {"vocals": 0}
-                separator._start_output_capture = mock.Mock()
-                separator._stem_batches_to_save = mock.Mock(return_value=[["vocals"]])
-                separator._submit_save_outputs = mock.Mock(return_value=[])
-                separator._wait_save_futures = mock.Mock(return_value=True)
+            def upstream_process(base, input_folder):
+                self.assertEqual(input_folder, str(root))
+                base._save_output("vocals", object(), 44100, "first", str(root))
+                base._save_output("vocals", object(), 44100, "second", str(root))
+                return ["first.wav"]
 
-                def separate(mix, **_kwargs):
-                    if mix == "second":
-                        raise RuntimeError("second input failed")
-                    separator._studio_last_outputs.append({"stem": "vocals", "path": str(root / "first_vocals.wav")})
-                    return {"vocals": object()}
-
-                separator.separate = separate
+            with mock.patch("pymss.MSSeparator.process_folder", autospec=True, side_effect=upstream_process) as process:
                 success_files = separator.process_folder(str(root))
 
+            process.assert_called_once_with(separator, str(root))
             self.assertEqual(success_files, ["first.wav"])
-            self.assertEqual(separator.studio_outputs(), [{"stem": "vocals", "path": str(root / "first_vocals.wav")}])
-
-    def test_folder_processing_removes_partial_outputs_when_a_stem_save_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source = root / "song.wav"
-            source.write_bytes(b"input")
-            first_output = root / "song_vocals.wav"
-            first_output.write_bytes(b"incomplete")
-
-            with mock.patch("pymss.load_audio", return_value=("song", 44100)):
-                separator = object.__new__(_studio_separator_type())
-                separator.config = mock.Mock(audio={"sample_rate": 44100})
-                separator.logger = mock.Mock()
-                separator._studio_last_outputs = []
-                separator._studio_claimed_paths = set()
-                separator._studio_stem_indices = {"vocals": 0}
-                separator._start_output_capture = mock.Mock()
-                separator._stem_batches_to_save = mock.Mock(return_value=[["vocals"], ["instrumental"]])
-                separator._submit_save_outputs = mock.Mock(return_value=[])
-                separator._wait_save_futures = mock.Mock(side_effect=[True, False])
-
-                def separate(_mix, **_kwargs):
-                    if not separator._studio_last_outputs:
-                        separator._studio_last_outputs.append({"stem": "vocals", "path": str(first_output)})
-                        separator._studio_claimed_paths.add(first_output)
-                    return {"vocals": object()}
-
-                separator.separate = separate
-
-                success_files = separator.process_folder(str(source))
-
-            self.assertEqual(success_files, [])
-            self.assertFalse(first_output.exists())
-            self.assertEqual(separator.studio_outputs(), [])
-            self.assertNotIn(first_output, separator._studio_claimed_paths)
+            self.assertTrue((root / "01_first_vocals.wav").is_file())
+            self.assertFalse((root / "02_second_vocals.wav").exists())
+            self.assertEqual(
+                separator.studio_outputs(),
+                [{"stem": "vocals", "path": str(root / "01_first_vocals.wav")}],
+            )
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 import traceback
-from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
@@ -263,7 +263,7 @@ def apply_output_naming(
 
 def _studio_separator_type() -> type[Any]:
     """Build the pymss adapter lazily so non-inference worker commands do not import Torch."""
-    from pymss import MSSeparator, load_audio  # type: ignore
+    from pymss import MSSeparator  # type: ignore
 
     class StudioMSSeparator(MSSeparator):
         def __init__(self, *args: Any, output_naming: Any = None, output_model: str = "", **kwargs: Any) -> None:
@@ -276,6 +276,11 @@ def _studio_separator_type() -> type[Any]:
             self._studio_input_path = ""
             self._studio_input_index = 1
             self._studio_now = datetime.now()
+            self._studio_input_contexts: dict[str, deque[dict[str, Any]]] = {}
+            self._studio_active_context: dict[str, Any] | None = None
+            self._studio_active_output_count = 0
+            self._studio_expected_output_count = self._calculate_expected_output_count()
+            self._studio_output_sources: dict[Path, str] = {}
             stems = self._stems_to_save() or list(self.config.training.instruments)
             ordered_stems = [stem for _, stem in sorted(
                 enumerate(stems),
@@ -286,40 +291,107 @@ def _studio_separator_type() -> type[Any]:
                 for index, stem in enumerate(ordered_stems)
             }
 
+        def _calculate_expected_output_count(self) -> int:
+            try:
+                instruments = list(self.config.training.instruments)
+                batches = self._stem_batches_to_save()
+                count = sum(len(instruments if batch is None else batch) for batch in batches)
+                return max(1, count)
+            except Exception:
+                return 1
+
+        def _input_paths_for_context(self, input_folder: str, input_index: int) -> list[tuple[Path, int]]:
+            source = Path(input_folder)
+            if source.is_file():
+                return [(source, max(1, input_index))]
+            if source.is_dir():
+                # Match pymss.MSSeparator.process_folder() ordering so output
+                # indices stay aligned with the upstream processing loop.
+                return [
+                    (source / name, max(1, input_index + offset))
+                    for offset, name in enumerate(os.listdir(source))
+                ]
+            raise ValueError(f"Input path '{input_folder}' does not exist.")
+
         def _start_output_capture(self, input_path: str, input_index: int) -> None:
             self._studio_input_path = input_path
             self._studio_input_index = max(1, input_index)
             self._studio_now = datetime.now()
 
-        def _discard_outputs_from(self, output_start: int) -> None:
-            stale_outputs = self._studio_last_outputs[output_start:]
-            for output in stale_outputs:
+        def _prepare_output_contexts(self, input_folder: str, input_index: int) -> None:
+            contexts: dict[str, deque[dict[str, Any]]] = {}
+            for path, current_index in self._input_paths_for_context(input_folder, input_index):
+                contexts.setdefault(path.stem, deque()).append({
+                    "file_name": path.stem,
+                    "source_name": path.name,
+                    "input_path": str(path),
+                    "input_index": current_index,
+                    "now": datetime.now(),
+                })
+            self._studio_input_contexts = contexts
+            self._studio_active_context = None
+            self._studio_active_output_count = 0
+
+        def _output_context_for(self, file_name: str) -> dict[str, Any]:
+            active = getattr(self, "_studio_active_context", None)
+            expected_output_count = max(1, int(getattr(self, "_studio_expected_output_count", 1)))
+            active_output_count = int(getattr(self, "_studio_active_output_count", 0))
+            input_contexts = getattr(self, "_studio_input_contexts", {})
+            if (
+                active is None
+                or active.get("file_name") != file_name
+                or active_output_count >= expected_output_count
+            ):
+                pending = input_contexts.get(file_name)
+                active = pending.popleft() if pending else {
+                    "file_name": file_name,
+                    "source_name": file_name,
+                    "input_path": file_name,
+                    "input_index": 1,
+                    "now": datetime.now(),
+                }
+                self._studio_active_context = active
+                active_output_count = 0
+            self._studio_active_output_count = active_output_count + 1
+            return active
+
+        def _discard_outputs_for_failed_inputs(self, success_files: set[str]) -> None:
+            kept_outputs: list[dict[str, str]] = []
+            output_sources = getattr(self, "_studio_output_sources", {})
+            for output in self._studio_last_outputs:
                 path = Path(str(output.get("path") or ""))
+                source_name = output_sources.get(path)
+                if source_name is None or source_name in success_files:
+                    kept_outputs.append(output)
+                    continue
                 try:
                     path.unlink(missing_ok=True)
                 except OSError as exc:
                     self.logger.warning(f"Cannot remove incomplete output: {path}, error: {exc}")
                 self._studio_claimed_paths.discard(path)
-            del self._studio_last_outputs[output_start:]
+                output_sources.pop(path, None)
+            self._studio_last_outputs = kept_outputs
 
         def _save_output(self, instr: str, audio: Any, sr: int, file_name: str, save_dir: str) -> None:
-            stem = str(instr or "").strip() or file_name
-            if self._studio_naming["enabled"]:
-                target_name = _replace_output_tokens(
-                    self._studio_naming["template"],
-                    input_path=self._studio_input_path,
-                    stem=stem,
-                    stem_index=self._studio_stem_indices.get(stem.lower(), len(self._studio_stem_indices)),
-                    input_index=self._studio_input_index,
-                    model=self._studio_output_model,
-                    now=self._studio_now,
-                )
-            else:
-                target_name = _safe_filename_part(f"{file_name}_{stem}")
-
-            # Saving and claiming happen under one lock because pymss writes stems concurrently.
-            # This prevents two stems or a prior result from ever sharing an output path.
+            # pymss invokes _save_output from its own save executor. Keep the
+            # naming and reservation adapter under one lock, while leaving the
+            # separation, prefetch, and save scheduling to pymss itself.
             with self._studio_output_lock:
+                context = self._output_context_for(file_name)
+                stem = str(instr or "").strip() or file_name
+                if self._studio_naming["enabled"]:
+                    target_name = _replace_output_tokens(
+                        self._studio_naming["template"],
+                        input_path=str(context.get("input_path") or self._studio_input_path),
+                        stem=stem,
+                        stem_index=self._studio_stem_indices.get(stem.lower(), len(self._studio_stem_indices)),
+                        input_index=int(context.get("input_index") or self._studio_input_index),
+                        model=self._studio_output_model,
+                        now=context.get("now") or self._studio_now,
+                    )
+                else:
+                    target_name = _safe_filename_part(f"{file_name}_{stem}")
+
                 target = _claim_output_path(
                     Path(save_dir) / f"{target_name}.{self.output_format.lower()}",
                     self._studio_claimed_paths,
@@ -331,38 +403,27 @@ def _studio_separator_type() -> type[Any]:
                     raise
                 self._studio_claimed_paths.add(target)
                 self._studio_last_outputs.append({"stem": stem, "path": str(target)})
+                output_sources = getattr(self, "_studio_output_sources", None)
+                if output_sources is None:
+                    output_sources = {}
+                    self._studio_output_sources = output_sources
+                output_sources[target] = str(context.get("source_name") or file_name)
 
         def process_folder(self, input_folder: str, input_index: int = 1) -> list[str]:
-            """Run pymss separation while writing every stem under its final Studio name."""
-            source = Path(input_folder)
-            if source.is_file():
-                paths = [source]
-            elif source.is_dir():
-                paths = sorted(path for path in source.iterdir() if path.is_file())
-            else:
-                raise ValueError(f"Input path '{input_folder}' does not exist.")
-
-            sample_rate = int(self.config.audio.get("sample_rate", 44100))
-            success_files: list[str] = []
+            """Delegate separation to pymss and retain Studio output metadata."""
             self._studio_last_outputs = []
-            for offset, path in enumerate(paths):
-                output_start = len(self._studio_last_outputs)
-                try:
-                    mix, sr = load_audio(str(path), sr=sample_rate, mono=False)
-                    self._start_output_capture(str(path), input_index + offset)
-                    saved = True
-                    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="pymss-save") as save_executor:
-                        for stems in self._stem_batches_to_save():
-                            results = self.separate(mix, pbar=False, stems=stems)
-                            futures = self._submit_save_outputs(save_executor, results, sr, path.stem)
-                            saved = self._wait_save_futures(str(path), futures) and saved
-                    if saved:
-                        success_files.append(path.name)
-                    else:
-                        self._discard_outputs_from(output_start)
-                except Exception as exc:
-                    self._discard_outputs_from(output_start)
-                    self.logger.warning(f"Cannot separate track: {path}, error: {exc}")
+            self._studio_output_sources = {}
+            self._prepare_output_contexts(input_folder, input_index)
+            try:
+                success_files = super().process_folder(input_folder)
+            except Exception:
+                self._discard_outputs_for_failed_inputs(set())
+                raise
+            finally:
+                self._studio_input_contexts = {}
+                self._studio_active_context = None
+                self._studio_active_output_count = 0
+            self._discard_outputs_for_failed_inputs(set(success_files))
             return success_files
 
         def studio_outputs(self) -> list[dict[str, str]]:
@@ -416,6 +477,7 @@ def _close_separator(separator: Any) -> None:
             separator.del_cache()
         except Exception:
             pass
+
 
 def _normalize_output_dir(value: Any) -> str:
     default_output_dir = os.environ.get("PYMSS_STUDIO_DEFAULT_OUTPUT_DIR")
