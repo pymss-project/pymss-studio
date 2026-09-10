@@ -16,6 +16,75 @@ $ErrorActionPreference = "Stop"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $runtime = Join-Path $root $RuntimeDir
 $effectiveRuntimeEnvsDir = if ($RuntimeEnvsDir) { $RuntimeEnvsDir } else { Join-Path $runtime "runtime-envs" }
+$manifestPath = Join-Path $root "python\runtime-manifest.json"
+$runtimeManifest = Get-Content -Raw $manifestPath | ConvertFrom-Json
+if ($InitialBackend -eq "mps") {
+    # MPS is the historical name; the runtime directory and manifest backend are both mlx.
+    $InitialBackend = "mlx"
+}
+
+function Get-ManifestCommonRequirements {
+    @($runtimeManifest.common.PSObject.Properties |
+        Where-Object { $_.Name -notin @("pymss", "pymss-core") } |
+        ForEach-Object { [string]$_.Value })
+}
+
+function Get-ManifestRequirement {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+    $property = $runtimeManifest.common.PSObject.Properties[$Name]
+    if (!$property) {
+        throw "Runtime manifest is missing common requirement '$Name'"
+    }
+    return [string]$property.Value
+}
+
+function Get-ManifestBackendExtras {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Backend
+    )
+    $backendProperty = $runtimeManifest.backends.PSObject.Properties[$Backend]
+    if (!$backendProperty) { return @() }
+    return @($backendProperty.Value.extras | ForEach-Object { [string]$_ })
+}
+
+function Resolve-ManifestBackend {
+    if ($InitialBackend -in @("mps", "mlx")) { return "mlx" }
+    if ($InitialBackend) { return $InitialBackend }
+    if ($Variant -in @("mps", "mlx")) { return "mlx" }
+    if ($Variant -eq "rocm") { return "rocm" }
+    if ($Variant -eq "cuda") { return "cuda" }
+    return "cpu"
+}
+
+$manifestBackend = Resolve-ManifestBackend
+$manifestCommonRequirements = Get-ManifestCommonRequirements
+$manifestPymssRequirement = Get-ManifestRequirement "pymss"
+$manifestPymssCoreRequirement = Get-ManifestRequirement "pymss-core"
+$manifestBackendExtras = Get-ManifestBackendExtras $manifestBackend
+$manifestBackendProperty = $runtimeManifest.backends.PSObject.Properties[$manifestBackend]
+if (!$manifestBackendProperty -or !$manifestBackendProperty.Value.torch) {
+    throw "Runtime manifest is missing torch configuration for backend '$manifestBackend'"
+}
+$manifestTorch = $manifestBackendProperty.Value.torch
+$torchVersionOverride = $PSBoundParameters.ContainsKey("TorchVersion")
+$torchIndexOverride = $PSBoundParameters.ContainsKey("TorchIndexUrl")
+$effectiveTorchRequirement = if ($torchVersionOverride) {
+    if ([string]::IsNullOrWhiteSpace($TorchVersion)) { "torch" } else { "torch==$TorchVersion" }
+} else {
+    [string]$manifestTorch.requirement
+}
+$effectiveTorchIndexUrl = if ($torchIndexOverride) {
+    [string]$TorchIndexUrl
+} else {
+    [string]$manifestTorch.indexUrl
+}
+if ([string]::IsNullOrWhiteSpace($effectiveTorchRequirement) -and $manifestBackend -ne "rocm") {
+    throw "Runtime manifest is missing a torch requirement for backend '$manifestBackend'"
+}
 
 function Invoke-NativeChecked {
     param(
@@ -148,31 +217,22 @@ if ($InitialBackend) {
     Invoke-NativeChecked -FilePath $envPython -Arguments @('-m', 'pip', 'install', '--upgrade', 'pip', 'setuptools', 'wheel')
 
     # Step 3: Install packages for the backend
-    $torchRequirement = if ([string]::IsNullOrWhiteSpace($TorchVersion)) { "torch" } else { "torch==$TorchVersion" }
+    $torchRequirement = $effectiveTorchRequirement
     if ($InitialBackend -eq "rocm") {
-        $rocmSdkWheels = @(
-            "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_core-7.2.1-py3-none-win_amd64.whl",
-            "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_devel-7.2.1-py3-none-win_amd64.whl",
-            "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_libraries_custom-7.2.1-py3-none-win_amd64.whl",
-            "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm-7.2.1.tar.gz"
-        )
+        $rocmSdkWheels = @($manifestTorch.rocmRequirements | ForEach-Object { [string]$_ })
         Invoke-NativeChecked -FilePath $envPython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir') + $rocmSdkWheels)
-        $rocmWheels = @(
-            "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torch-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
-            "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torchaudio-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
-            "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torchvision-0.24.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl"
-        )
+        $rocmWheels = @($manifestTorch.requirements | ForEach-Object { [string]$_ })
         Invoke-NativeChecked -FilePath $envPython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir', '--no-deps') + $rocmWheels)
-    } elseif ([string]::IsNullOrWhiteSpace($TorchIndexUrl)) {
+    } elseif ([string]::IsNullOrWhiteSpace($effectiveTorchIndexUrl)) {
         Invoke-NativeChecked -FilePath $envPython -Arguments @('-m', 'pip', 'install', '--no-cache-dir', $torchRequirement)
     } else {
-        Invoke-NativeChecked -FilePath $envPython -Arguments @('-m', 'pip', 'install', '--no-cache-dir', $torchRequirement, '--index-url', $TorchIndexUrl)
+        Invoke-NativeChecked -FilePath $envPython -Arguments @('-m', 'pip', 'install', '--no-cache-dir', $torchRequirement, '--index-url', $effectiveTorchIndexUrl)
     }
-    Invoke-NativeChecked -FilePath $envPython -Arguments @('-m', 'pip', 'install', '--no-cache-dir', '--only-binary=:all:', '--prefer-binary', 'av', 'filelock', 'fsspec', 'jinja2', 'librosa', 'networkx', 'numpy', 'pysocks', 'requests', 'pyyaml', 'sympy', 'tqdm', 'typing-extensions')
-    if ($InitialBackend -in @("mps", "mlx")) {
-        Invoke-NativeChecked -FilePath $envPython -Arguments @('-m', 'pip', 'install', '--no-cache-dir', 'mlx')
+    Invoke-NativeChecked -FilePath $envPython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir', '--only-binary=:all:', '--prefer-binary') + $manifestCommonRequirements)
+    if ($manifestBackendExtras.Count -gt 0) {
+        Invoke-NativeChecked -FilePath $envPython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir') + $manifestBackendExtras)
     }
-    Invoke-NativeChecked -FilePath $envPython -Arguments @('-m', 'pip', 'install', '--no-cache-dir', '--upgrade', '--no-deps', 'pymss>=2.0.15', 'pymss-core>=0.1.6')
+    Invoke-NativeChecked -FilePath $envPython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir', '--upgrade') + @($manifestPymssRequirement, $manifestPymssCoreRequirement))
     $rocmToolDirs = if ($InitialBackend -eq "rocm") { Remove-RocmOffloadArchLauncher -EnvironmentDir $envDir } else { @() }
     & (Join-Path $PSScriptRoot "prune-python-runtime.ps1") -RuntimeDir $envDir -KeepScripts
     Invoke-NativeChecked -FilePath $envPython -Arguments @('-m', 'pip', '--version')
@@ -188,12 +248,45 @@ if ($InitialBackend) {
         Invoke-NativeChecked -FilePath $envPython -Arguments @('-c', "import importlib.util, pymss, pymss.graph, torch, librosa, av, yaml, tqdm; print('pymss', getattr(pymss, '__version__', 'unknown'), pymss.__file__); print('torch', torch.__version__, 'cuda', torch.version.cuda, 'cuda_available', torch.cuda.is_available()); print('librosa', librosa.__version__); print('av', av.__version__); print('mlx', importlib.util.find_spec('mlx') is not None)")
 
         # Step 5: Read manifest version and write state files
-        $manifestPath = Join-Path $root "python\runtime-manifest.json"
-        $manifest = Get-Content -Raw $manifestPath | ConvertFrom-Json
-        $manifestVersion = $manifest.manifestVersion
+        $manifestVersion = $runtimeManifest.manifestVersion
 
-        # Probe torch info from the env
-        $probeOutput = @(Invoke-NativeChecked -FilePath $envPython -Arguments @('-c', "import torch, json, platform; print(json.dumps({'torchVersion': torch.__version__, 'torchBackend': 'rocm' if getattr(torch.version, 'hip', None) else 'cuda' if getattr(torch.version, 'cuda', None) else 'cpu', 'acceleratorAvailable': torch.cuda.is_available(), 'pythonVersion': platform.python_version()}))"))
+        # Probe the complete manifest state from the environment itself. The bundled state is a
+        # cache, so it must describe this interpreter rather than the build machine's active env.
+        $manifestBackendExtraNames = @($manifestBackendExtras | ForEach-Object {
+                $match = [regex]::Match([string]$_, '^[A-Za-z0-9_.-]+')
+                if ($match.Success) { $match.Value }
+            })
+        $manifestPackageNames = @($runtimeManifest.common.PSObject.Properties | ForEach-Object { $_.Name }) + $manifestBackendExtraNames
+        $manifestPackageJson = $manifestPackageNames | ConvertTo-Json -Compress
+        $manifestMappingJson = '{"pyyaml":"yaml","pymss-core":"pymss_core","typing-extensions":"typing_extensions"}'
+        $probeScript = @'
+import importlib.util, json, platform
+from importlib import metadata
+names = json.loads(%NAMES%)
+mapping = json.loads(%MAPPING%)
+result = {'pythonVersion': platform.python_version(), 'torchVersion': None, 'torchBackend': 'missing', 'acceleratorAvailable': False, 'packages': {}, 'packageVersions': {}, 'pymssVersion': None, 'pymssCoreVersion': None, 'pymssGraphAvailable': False}
+for name in names:
+    result['packages'][name] = importlib.util.find_spec(mapping.get(name, name)) is not None
+    try:
+        result['packageVersions'][name] = metadata.version(name)
+    except metadata.PackageNotFoundError:
+        result['packageVersions'][name] = None
+result['pymssVersion'] = result['packageVersions'].get('pymss')
+result['pymssCoreVersion'] = result['packageVersions'].get('pymss-core')
+try:
+    result['pymssGraphAvailable'] = importlib.util.find_spec('pymss.graph') is not None
+except Exception:
+    result['pymssGraphAvailable'] = False
+try:
+    import torch
+    result['torchVersion'] = torch.__version__
+    result['torchBackend'] = 'rocm' if getattr(torch.version, 'hip', None) else 'cuda' if getattr(torch.version, 'cuda', None) else 'cpu'
+    result['acceleratorAvailable'] = torch.cuda.is_available()
+except Exception as exc:
+    result['torchBackend'] = 'error:' + str(exc)
+print(json.dumps(result))
+'@.Replace('%NAMES%', $manifestPackageJson).Replace('%MAPPING%', $manifestMappingJson)
+        $probeOutput = @(Invoke-NativeChecked -FilePath $envPython -Arguments @('-c', $probeScript))
     } finally {
         if ($null -eq $previousDontWriteBytecode) {
             Remove-Item Env:\PYTHONDONTWRITEBYTECODE -ErrorAction SilentlyContinue
@@ -215,11 +308,17 @@ if ($InitialBackend) {
     $envState = @{
         backend = $InitialBackend
         manifestVersion = $manifestVersion
+        stateVersion = 2
         installedAt = $now
         pythonVersion = $probed.pythonVersion
         torchVersion = $probed.torchVersion
         torchBackend = $probed.torchBackend
         acceleratorAvailable = $probed.acceleratorAvailable
+        packages = $probed.packages
+        packageVersions = $probed.packageVersions
+        pymssVersion = $probed.pymssVersion
+        pymssCoreVersion = $probed.pymssCoreVersion
+        pymssGraphAvailable = [bool]$probed.pymssGraphAvailable
     } | ConvertTo-Json -Depth 4
     $envStatePath = Join-Path $envDir "pymss-runtime-state.json"
     Set-Content -Path $envStatePath -Value $envState -Encoding UTF8
@@ -230,11 +329,17 @@ if ($InitialBackend) {
     $activeState = @{
         backend = $InitialBackend
         manifestVersion = $manifestVersion
+        stateVersion = 2
         installedAt = $now
         pythonVersion = $probed.pythonVersion
         torchVersion = $probed.torchVersion
         torchBackend = $probed.torchBackend
         acceleratorAvailable = $probed.acceleratorAvailable
+        packages = $probed.packages
+        packageVersions = $probed.packageVersions
+        pymssVersion = $probed.pymssVersion
+        pymssCoreVersion = $probed.pymssCoreVersion
+        pymssGraphAvailable = [bool]$probed.pymssGraphAvailable
         pythonPath = $relativePythonPath
         activatedAt = $now
     } | ConvertTo-Json -Depth 4
@@ -279,31 +384,22 @@ if ($Minimal) {
     Write-Host "Prepared minimal Python runtime without inference dependencies"
     exit 0
 }
-$torchRequirement = if ([string]::IsNullOrWhiteSpace($TorchVersion)) { "torch" } else { "torch==$TorchVersion" }
+$torchRequirement = $effectiveTorchRequirement
 if ($Variant -eq "rocm") {
-    $rocmSdkWheels = @(
-        "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_core-7.2.1-py3-none-win_amd64.whl",
-        "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_devel-7.2.1-py3-none-win_amd64.whl",
-        "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_libraries_custom-7.2.1-py3-none-win_amd64.whl",
-        "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm-7.2.1.tar.gz"
-    )
+    $rocmSdkWheels = @($manifestTorch.rocmRequirements | ForEach-Object { [string]$_ })
     Invoke-NativeChecked -FilePath $runtimePython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir') + $rocmSdkWheels)
-    $rocmWheels = @(
-        "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torch-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
-        "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torchaudio-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
-        "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torchvision-0.24.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl"
-    )
+    $rocmWheels = @($manifestTorch.requirements | ForEach-Object { [string]$_ })
     Invoke-NativeChecked -FilePath $runtimePython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir', '--no-deps') + $rocmWheels)
-} elseif ([string]::IsNullOrWhiteSpace($TorchIndexUrl)) {
+} elseif ([string]::IsNullOrWhiteSpace($effectiveTorchIndexUrl)) {
     Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-m', 'pip', 'install', '--no-cache-dir', $torchRequirement)
 } else {
-    Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-m', 'pip', 'install', '--no-cache-dir', $torchRequirement, '--index-url', $TorchIndexUrl)
+    Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-m', 'pip', 'install', '--no-cache-dir', $torchRequirement, '--index-url', $effectiveTorchIndexUrl)
 }
-Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-m', 'pip', 'install', '--no-cache-dir', '--only-binary=:all:', '--prefer-binary', 'av', 'filelock', 'fsspec', 'jinja2', 'librosa', 'networkx', 'numpy', 'pysocks', 'requests', 'pyyaml', 'sympy', 'tqdm', 'typing-extensions')
-if ($Variant -in @("mps", "mlx")) {
-    Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-m', 'pip', 'install', '--no-cache-dir', 'mlx')
+Invoke-NativeChecked -FilePath $runtimePython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir', '--only-binary=:all:', '--prefer-binary') + $manifestCommonRequirements)
+if ($manifestBackendExtras.Count -gt 0) {
+    Invoke-NativeChecked -FilePath $runtimePython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir') + $manifestBackendExtras)
 }
-Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-m', 'pip', 'install', '--no-cache-dir', '--upgrade', '--no-deps', 'pymss>=2.0.15', 'pymss-core>=0.1.6')
+Invoke-NativeChecked -FilePath $runtimePython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir', '--upgrade') + @($manifestPymssRequirement, $manifestPymssCoreRequirement))
 
 & (Join-Path $PSScriptRoot "prune-python-runtime.ps1") -RuntimeDir $runtime -KeepVenv
 Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-m', 'pip', '--version')

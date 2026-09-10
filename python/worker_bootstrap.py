@@ -168,6 +168,11 @@ def _env_python_path(backend: str) -> Path:
     return _runtime_command_path(candidate)
 
 
+def _python_path_for_env(env_dir: Path) -> Path:
+    """Resolve the interpreter inside an arbitrary environment directory."""
+    return _runtime_command_path(env_dir / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python"))
+
+
 def _env_state_path(backend: str) -> Path:
     return _env_dir(backend) / "pymss-runtime-state.json"
 
@@ -199,6 +204,73 @@ def _recover_reinstall_backups() -> None:
             continue
 
 
+def _recover_core_update_transactions() -> None:
+    """Finish or roll back a core update interrupted during the directory swap.
+
+    The update is deliberately transactional, but a process can still be killed between the
+    two renames.  Never leave a hidden backup to be mistaken for an installed environment:
+    validate the visible directory first, otherwise restore the original copy.
+    """
+    if not RUNTIME_ENVS_DIR.is_dir():
+        return
+    for backup in RUNTIME_ENVS_DIR.glob(".*.core-backup"):
+        backend = backup.name.removeprefix(".").removesuffix(".core-backup")
+        if not _supported_backend(backend):
+            continue
+        target = _env_dir(backend)
+        staging = RUNTIME_ENVS_DIR / f".{backend}.core-updating"
+        try:
+            target_is_valid = False
+            if target.is_dir():
+                target_python = _env_python_path(backend)
+                if target_python.is_file():
+                    try:
+                        probed = _probe_python_runtime(target_python, _backend_extra_names(_manifest(), backend))
+                        target_is_valid = _runtime_probe_is_ready(backend, probed, _manifest())
+                    except Exception:
+                        target_is_valid = False
+            if target_is_valid:
+                # The process may have stopped after promoting the staged directory but before
+                # committing its state files. Rebuild the cache from the promoted interpreter so
+                # an otherwise successful transaction does not keep advertising the old manifest.
+                recovered_state = _discover_runtime_state(
+                    backend,
+                    target_python,
+                    _manifest(),
+                    persist=True,
+                )
+                active_state = _resolve_runtime_state_from(ACTIVE_RUNTIME_FILE)
+                if recovered_state and active_state and _same_path(active_state.get("pythonPath"), target_python):
+                    _write_runtime_state({
+                        **active_state,
+                        **recovered_state,
+                        "pythonPath": str(target_python),
+                    })
+                shutil.rmtree(backup, ignore_errors=True)
+            else:
+                if target.exists():
+                    shutil.rmtree(target, ignore_errors=True)
+                backup.rename(target)
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+        except OSError:
+            # Leave the directories in place for the next startup; deleting either copy here
+            # would turn a recoverable interrupted update into data loss.
+            continue
+
+    # A staging copy without its backup is never safe to activate: it may have been created
+    # before pip completed.  The next update can recreate it from the visible environment.
+    for staging in RUNTIME_ENVS_DIR.glob(".*.core-updating"):
+        backend = staging.name.removeprefix(".").removesuffix(".core-updating")
+        if _supported_backend(backend):
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+def _recover_runtime_transactions() -> None:
+    _recover_reinstall_backups()
+    _recover_core_update_transactions()
+
+
 def _bootstrap_python_path() -> Path:
     python_path = Path(os.environ.get("PYMSS_STUDIO_BOOTSTRAP_PYTHON") or sys.executable)
     return python_path if python_path.is_file() else Path(sys.executable)
@@ -223,7 +295,7 @@ def _resolve_pypi_mirror(mirror: str, locale: str) -> tuple[str, str | None]:
 
 
 def _backend_extra_names(manifest: dict[str, Any], backend: str | None) -> list[str]:
-    return [extra.split("=", 1)[0] for extra in manifest["backends"].get(backend or "", {}).get("extras", [])]
+    return [re.split(r"[<>=!~;\[]", str(extra), maxsplit=1)[0].strip() for extra in manifest["backends"].get(backend or "", {}).get("extras", [])]
 
 
 def _state_matches_backend(backend: str, state: dict[str, Any]) -> bool:
@@ -282,6 +354,52 @@ def _read_installed_env_state(backend: str) -> dict[str, Any] | None:
     if int(state.get("stateVersion") or 1) < ENV_STATE_VERSION and not _state_matches_backend(backend, state):
         state = _repaired_env_state(backend, state)
     state.pop("source", None)
+    return state
+
+
+def _discover_runtime_state(
+    backend: str,
+    python_path: Path,
+    manifest: dict[str, Any],
+    *,
+    persist: bool,
+) -> dict[str, Any] | None:
+    """Rebuild the per-environment record from the interpreter when its cache is absent.
+
+    The directory and interpreter are the durable installation.  ``pymss-runtime-state.json``
+    is a cache written after a successful install, so losing it during an overwrite must not
+    make an otherwise runnable environment disappear from the environment list.
+    """
+    try:
+        probed = _probe_python_runtime(python_path, _backend_extra_names(manifest, backend))
+    except Exception:
+        return None
+    if not _runtime_probe_is_ready(backend, probed, manifest):
+        return None
+    manifest_version = manifest.get("manifestVersion")
+    if not _manifest_versions_are_satisfied(probed, manifest, backend)[0]:
+        # A directory can be runnable while still carrying an older or incomplete dependency
+        # set. Do not stamp a newly discovered cache as current in that case.
+        manifest_version = None
+    state = {
+        "backend": backend,
+        "manifestVersion": manifest_version,
+        "stateVersion": ENV_STATE_VERSION,
+        "pythonVersion": probed.get("pythonVersion"),
+        "torchVersion": probed.get("torchVersion"),
+        "torchBackend": probed.get("torchBackend"),
+        "acceleratorAvailable": bool(probed.get("acceleratorAvailable")),
+        "packages": probed.get("packages"),
+        "packageVersions": probed.get("packageVersions"),
+        "pymssVersion": probed.get("pymssVersion"),
+        "pymssCoreVersion": probed.get("pymssCoreVersion"),
+        "pymssGraphAvailable": bool(probed.get("pymssGraphAvailable")),
+    }
+    if persist:
+        try:
+            _atomic_write_json(_env_state_path(backend), state)
+        except OSError:
+            pass
     return state
 
 
@@ -380,11 +498,17 @@ def _incomplete_env_backends(manifest: dict[str, Any]) -> list[str]:
     An interrupted or failed install leaves the venv behind (state is only written on
     success), so these directories can hold gigabytes while not counting as installed.
     Reporting them is what lets the UI offer to reclaim the space."""
-    return [
-        backend
-        for backend in manifest.get("backends", {})
-        if _env_python_path(backend).is_file() and not _read_installed_env_state(backend)
-    ]
+    incomplete: list[str] = []
+    for backend in manifest.get("backends", {}):
+        python_path = _env_python_path(backend)
+        if not python_path.is_file():
+            continue
+        state = _read_installed_env_state(backend)
+        if state and str(state.get("backend") or "").strip().lower() in {"", backend}:
+            continue
+        if _discover_runtime_state(backend, python_path, manifest, persist=True) is None:
+            incomplete.append(backend)
+    return incomplete
 
 
 def _env_size_targets(manifest: dict[str, Any]) -> dict[str, Path]:
@@ -526,6 +650,10 @@ def _installed_envs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
                 pass
         state = _read_installed_env_state(backend)
         python_path = _env_python_path(backend)
+        if state and str(state.get("backend") or "").strip().lower() not in {"", backend}:
+            state = None
+        if python_path.is_file() and state is None:
+            state = _discover_runtime_state(backend, python_path, manifest, persist=True)
         if state and python_path.is_file():
             package_versions = _probe_python_package_versions(python_path, ["pymss", "pymss-core"])
             items.append({
@@ -533,6 +661,7 @@ def _installed_envs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
                 "backend": backend,
                 "pythonPath": str(python_path),
                 "logPath": str(_env_log_path(backend)),
+                "health": _runtime_health(backend, state, manifest),
                 "coreUpdateSupported": True,
                 "packageVersions": {**(state.get("packageVersions") or {}), **package_versions},
                 "pymssVersion": (package_versions.get("pymss") or state.get("pymssVersion")),
@@ -554,11 +683,18 @@ def _installed_envs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
         try:
             probed = _probe_python_runtime(bundled_python, _backend_extra_names(manifest, bundled_backend))
             if _runtime_probe_is_ready(bundled_backend, probed, manifest):
+                bundled_live_state = {
+                    **bundled_state,
+                    "packages": probed.get("packages"),
+                    "packageVersions": probed.get("packageVersions"),
+                    "torchBackend": probed.get("torchBackend"),
+                }
                 items.append({
                     **bundled_state,
                     "backend": bundled_backend,
                     "pythonPath": str(bundled_python),
                     "source": "bundled",
+                    "health": _runtime_health(bundled_backend, bundled_live_state, manifest),
                     "coreUpdateSupported": False,
                     "packages": probed.get("packages"),
                     "packageVersions": probed.get("packageVersions"),
@@ -575,11 +711,17 @@ def _installed_envs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
             bundled_env = BUNDLED_RUNTIME_ENVS_DIR / backend
             bundled_state_path = bundled_env / "pymss-runtime-state.json"
             bundled_python = bundled_env / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
-            if not bundled_state_path.is_file() or not bundled_python.is_file():
+            if not bundled_python.is_file():
                 continue
             try:
-                state = json.loads(bundled_state_path.read_text(encoding="utf-8"))
+                state = json.loads(bundled_state_path.read_text(encoding="utf-8")) if bundled_state_path.is_file() else None
             except Exception:
+                state = None
+            if isinstance(state, dict) and str(state.get("backend") or "").strip().lower() not in {"", backend}:
+                state = None
+            if not isinstance(state, dict):
+                state = _discover_runtime_state(backend, bundled_python, manifest, persist=False)
+            if not state:
                 continue
             package_versions = _probe_python_package_versions(bundled_python, ["pymss", "pymss-core"])
             items.append({
@@ -587,6 +729,7 @@ def _installed_envs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
                 "backend": backend,
                 "pythonPath": str(bundled_python),
                 "source": "bundled",
+                "health": _runtime_health(backend, state, manifest),
                 "coreUpdateSupported": False,
                 "packageVersions": {**(state.get("packageVersions") or {}), **package_versions},
                 "pymssVersion": package_versions.get("pymss") or state.get("pymssVersion"),
@@ -624,10 +767,17 @@ def _envs_with_live_active(
     for entry in environments:
         if not _same_path(entry.get("pythonPath"), active_python):
             continue
+        active_state = {
+            **entry,
+            "packages": {**(entry.get("packages") or {}), **(active_probe.get("packages") or {})},
+            "packageVersions": {**(entry.get("packageVersions") or {}), **(active_probe.get("packageVersions") or {})},
+            "torchBackend": active_probe.get("torchBackend"),
+        }
         entry.update({
             "torchVersion": active_probe.get("torchVersion"),
             "torchBackend": active_probe.get("torchBackend"),
             "acceleratorAvailable": bool(active_probe.get("acceleratorAvailable")),
+            "health": _runtime_health(str(entry.get("backend") or ""), active_state, manifest),
             # Merged, not replaced: the probe's extras follow the requested backend, so a
             # replace could drop a key (mlx) the recording legitimately carries.
             "packages": {**(entry.get("packages") or {}), **(active_probe.get("packages") or {})},
@@ -729,6 +879,13 @@ def _target_runtime_from_payload(payload: dict[str, Any], backend: str) -> tuple
                 state = None
             if state and str(state.get("backend") or "").strip().lower() not in {"", backend}:
                 return None
+        if state is None:
+            state = _discover_runtime_state(
+                backend,
+                target_python,
+                _manifest(),
+                persist=not _is_bundled_runtime_env(env_dir),
+            )
         if state is not None and _is_bundled_runtime_env(env_dir):
             state["source"] = "bundled"
         return state, env_dir, env_state_path, target_python
@@ -756,7 +913,12 @@ def _target_runtime_from_payload(payload: dict[str, Any], backend: str) -> tuple
         return state, env_dir, env_state_path, python_path
 
     if python_path.is_file():
-        return None, env_dir, env_state_path, python_path
+        return (
+            _discover_runtime_state(backend, python_path, _manifest(), persist=True),
+            env_dir,
+            env_state_path,
+            python_path,
+        )
 
     if BUNDLED_RUNTIME_ENVS_DIR:
         bundled_env = BUNDLED_RUNTIME_ENVS_DIR / backend
@@ -788,14 +950,86 @@ def _target_runtime_from_payload(payload: dict[str, Any], backend: str) -> tuple
 
 def _runtime_probe_is_ready(backend: str, probed: dict[str, Any], manifest: dict[str, Any]) -> bool:
     packages = probed.get("packages") or {}
-    required = [*manifest.get("common", {})]
-    required.extend(_backend_extra_names(manifest, backend))
+    required = _manifest_requirement_names(manifest, backend)
     if not all(packages.get(name) is True for name in required):
         return False
     expected_torch_backend = "cpu" if backend == "mlx" else backend
     if probed.get("torchBackend") != expected_torch_backend:
         return False
     return True
+
+
+def _runtime_health(backend: str, state: dict[str, Any] | None, manifest: dict[str, Any]) -> str:
+    """Classify a cached environment without spawning another interpreter."""
+    if not isinstance(state, dict):
+        return "unknown"
+    packages = state.get("packages")
+    if not isinstance(packages, dict):
+        return "unknown"
+    required = _manifest_requirement_names(manifest, backend)
+    if any(packages.get(name) is False for name in required):
+        return "broken"
+    expected_torch_backend = "cpu" if backend == "mlx" else backend
+    recorded_torch_backend = str(state.get("torchBackend") or "")
+    if recorded_torch_backend and recorded_torch_backend != expected_torch_backend:
+        return "broken"
+    if all(name in packages for name in required) and all(packages.get(name) is True for name in required):
+        versions = state.get("packageVersions")
+        if isinstance(versions, dict) and versions:
+            manifest_ok, _failures = _manifest_versions_are_satisfied(state, manifest, backend)
+            if not manifest_ok:
+                return "degraded"
+        return "ready"
+    return "unknown"
+
+
+def _manifest_requirement_names(manifest: dict[str, Any], backend: str) -> list[str]:
+    """Return distribution names that the selected backend must provide."""
+    return [*manifest.get("common", {}), *_backend_extra_names(manifest, backend)]
+
+
+def _manifest_versions_are_satisfied(
+    probed: dict[str, Any],
+    manifest: dict[str, Any],
+    backend: str,
+) -> tuple[bool, list[str]]:
+    """Validate installed distribution versions against the shipped manifest.
+
+    Pip resolves the requirements during installation, but a successful command alone is not
+    enough to justify recording the new manifest version: an old, partially-installed runtime
+    can still make pip exit successfully when only one package was updated.  Use the same
+    requirement parser as pip when it is available in the runtime, and report missing or
+    incompatible distributions to the caller before state is committed.
+    """
+    try:
+        from packaging.requirements import Requirement
+        from packaging.version import Version
+    except Exception as exc:
+        return False, [f"manifest version validation is unavailable: {exc}"]
+
+    versions = probed.get("packageVersions") or {}
+    requirements: dict[str, Any] = dict(manifest.get("common", {}))
+    for extra in manifest.get("backends", {}).get(backend, {}).get("extras", []) or []:
+        name = str(extra).split("[", 1)[0].split("=", 1)[0].strip()
+        if name:
+            requirements.setdefault(name, extra)
+    torch_requirement = manifest.get("backends", {}).get(backend, {}).get("torch", {}).get("requirement")
+    if torch_requirement:
+        requirements["torch"] = torch_requirement
+        versions = {**versions, "torch": probed.get("torchVersion")}
+    failures: list[str] = []
+    for name, requirement in requirements.items():
+        actual = versions.get(name)
+        if not actual:
+            failures.append(f"{name} is not installed")
+            continue
+        try:
+            parsed = Requirement(str(requirement))
+            if parsed.specifier and Version(str(actual)) not in parsed.specifier:
+                failures.append(f"{name}=={actual} does not satisfy {parsed.specifier}")
+        except Exception as exc:
+            failures.append(f"{name}: invalid requirement {requirement!r}: {exc}")
+    return not failures, failures
 
 
 def _runtime_info_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -895,7 +1129,7 @@ def _runtime_info_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def cmd_runtime_info(payload: dict[str, Any]) -> int:
-    _recover_reinstall_backups()
+    _recover_runtime_transactions()
     _emit("runtime_info", _runtime_info_payload(payload))
     return 0
 
@@ -918,7 +1152,7 @@ def cmd_runtime_env_sizes(payload: dict[str, Any]) -> int:
     del payload
     sizes: dict[str, int] = {}
     incomplete: list[str] = []
-    _recover_reinstall_backups()
+    _recover_runtime_transactions()
     manifest = _manifest()
     try:
         targets = _env_size_targets(manifest)
@@ -951,24 +1185,60 @@ def cmd_activate_runtime(payload: dict[str, Any]) -> int:
     if not target:
         from worker_protocol import emit_error
         return emit_error("RUNTIME_NOT_INSTALLED", f"Backend {backend} is not installed")
-    state, env_dir, _env_state_path_value, python_path = target
-    if not state and not _is_bundled_runtime_env(env_dir) and not _is_bundled_bootstrap_python(python_path):
-        from worker_protocol import emit_error
-        return emit_error("RUNTIME_NOT_INSTALLED", f"Backend {backend} has no completed installation state")
+    state, env_dir, env_state_path, python_path = target
+    manifest = _manifest()
+
+    def preserve_existing_pointer() -> bool:
+        if not payload.get("onlyIfNoActive"):
+            return False
+        try:
+            # The startup caller uses this guard to avoid replacing a pointer that a user
+            # created while the probe was in flight.  A file that cannot be parsed or whose
+            # interpreter disappeared is not an active environment, though, and must not block
+            # recovery of the only usable runtime.
+            state = _resolve_runtime_state_from(ACTIVE_RUNTIME_FILE)
+            if not state or not state.get("pythonPath"):
+                return False
+            pointer_backend = str(state.get("backend") or "").strip().lower()
+            if not _supported_backend(pointer_backend):
+                return False
+            pointer_python = _runtime_command_path(Path(str(state["pythonPath"])))
+            if not pointer_python.is_file():
+                return False
+            if _is_bundled_bootstrap_python(pointer_python):
+                return True
+            pointer_env = _runtime_env_dir_for_python(pointer_python)
+            return (
+                pointer_env.name == pointer_backend
+                and (_is_user_runtime_env(pointer_env) or _is_bundled_runtime_env(pointer_env))
+            )
+        except OSError:
+            # Startup recovery must not replace a pointer it cannot safely inspect.
+            return True
+
+    # The startup probe and this command are separate operations. A user action can create an
+    # active pointer between them, so honour the guard for both bundled and managed runtimes.
+    if preserve_existing_pointer():
+        return 0
     if _is_bundled_runtime_env(env_dir) or _is_bundled_bootstrap_python(python_path):
+        try:
+            probed = _probe_python_runtime(python_path, _backend_extra_names(manifest, backend))
+        except Exception as exc:
+            from worker_protocol import emit_error
+            return emit_error("RUNTIME_ACTIVATION_FAILED", f"Bundled runtime {backend} failed validation: {exc}", recoverable=True)
+        if not _runtime_probe_is_ready(backend, probed, manifest):
+            from worker_protocol import emit_error
+            return emit_error(
+                "RUNTIME_ACTIVATION_FAILED",
+                f"Bundled runtime {backend} failed validation: torchBackend={probed.get('torchBackend')}, "
+                f"acceleratorAvailable={probed.get('acceleratorAvailable')}",
+                recoverable=True,
+            )
         # Startup recovery is intentionally non-destructive.  The frontend may have inspected
         # an empty pointer just before a user switched to a managed runtime.  In that mode leave
         # the pointer untouched; the packaged active-runtime.json is the fallback for a genuinely
         # empty user state, so no write or unlink is needed.
-        if payload.get("onlyIfNoActive"):
-            try:
-                if ACTIVE_RUNTIME_FILE.exists():
-                    return 0
-            except OSError:
-                # A permission failure is safer to treat as an existing user-owned pointer than
-                # to remove or replace it during startup recovery.
-                return 0
-        else:
+        if not payload.get("onlyIfNoActive"):
             try:
                 ACTIVE_RUNTIME_FILE.unlink()
             except FileNotFoundError:
@@ -982,7 +1252,6 @@ def cmd_activate_runtime(payload: dict[str, Any]) -> int:
         }
         _emit("runtime_activated", active)
         return 0
-    manifest = _manifest()
     try:
         probed = _probe_python_runtime(python_path, _backend_extra_names(manifest, backend))
     except Exception as exc:
@@ -1000,13 +1269,56 @@ def cmd_activate_runtime(payload: dict[str, Any]) -> int:
             f"acceleratorAvailable={probed.get('acceleratorAvailable')}",
             recoverable=True,
         )
+    if not state:
+        manifest_version = manifest.get("manifestVersion")
+        if not _manifest_versions_are_satisfied(probed, manifest, backend)[0]:
+            manifest_version = None
+        state = {
+            "backend": backend,
+            "manifestVersion": manifest_version,
+            "stateVersion": ENV_STATE_VERSION,
+            "pythonVersion": probed.get("pythonVersion"),
+            "torchVersion": probed.get("torchVersion"),
+            "torchBackend": probed.get("torchBackend"),
+            "acceleratorAvailable": bool(probed.get("acceleratorAvailable")),
+            "packages": probed.get("packages"),
+            "packageVersions": probed.get("packageVersions"),
+            "pymssVersion": probed.get("pymssVersion"),
+            "pymssCoreVersion": probed.get("pymssCoreVersion"),
+            "pymssGraphAvailable": bool(probed.get("pymssGraphAvailable")),
+        }
+    else:
+        state = {
+            **state,
+            "stateVersion": max(int(state.get("stateVersion") or 1), ENV_STATE_VERSION),
+            "pythonVersion": probed.get("pythonVersion") or state.get("pythonVersion"),
+            "torchVersion": probed.get("torchVersion"),
+            "torchBackend": probed.get("torchBackend"),
+            "acceleratorAvailable": bool(probed.get("acceleratorAvailable")),
+            "packages": probed.get("packages") or state.get("packages"),
+            "packageVersions": probed.get("packageVersions") or state.get("packageVersions"),
+            "pymssVersion": probed.get("pymssVersion") or state.get("pymssVersion"),
+            "pymssCoreVersion": probed.get("pymssCoreVersion") or state.get("pymssCoreVersion"),
+            "pymssGraphAvailable": bool(probed.get("pymssGraphAvailable")),
+        }
+    if env_state_path:
+        try:
+            _atomic_write_json(env_state_path, state)
+        except OSError:
+            # Activation remains valid when state persistence is unavailable; the next probe can
+            # rebuild the cache again from the interpreter.
+            pass
     active = {
-        **(state or {}),
+        **state,
         "backend": backend,
         "pythonPath": str(python_path),
         "logPath": str(env_dir / "pymss-runtime-install.log"),
         "activatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    # Close the remaining race window while the live probe was running. Per-environment cache
+    # refreshes above are harmless, but an active pointer created meanwhile belongs to the user.
+    if preserve_existing_pointer():
+        return 0
     _write_runtime_state(active)
     _emit("runtime_activated", active)
     return 0
@@ -1195,7 +1507,7 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
     mirror = str(payload.get("mirror") or "auto").strip().lower()
     locale = str(payload.get("locale") or "").strip().lower()
     manifest = _manifest()
-    _recover_reinstall_backups()
+    _recover_runtime_transactions()
     supported = _supported_backend(backend, manifest)
     if not supported:
         from worker_protocol import emit_error
@@ -1207,16 +1519,23 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
     index_url = None
     mirror, index_url = _resolve_pypi_mirror(mirror, locale)
     env_dir = _env_dir(backend)
+    try:
+        had_existing_environment = env_dir.is_dir() and any(env_dir.iterdir())
+    except OSError:
+        had_existing_environment = env_dir.exists()
     env_dir.mkdir(parents=True, exist_ok=True)
     env_python = _env_python_path(backend)
     install_log_path = _env_log_path(backend)
     reinstall_backup: Path | None = None
-    if env_dir.is_dir() and env_python.is_file() and _env_state_path(backend).is_file():
-        import shutil
+    if had_existing_environment:
         reinstall_backup = RUNTIME_ENVS_DIR / f".{backend}.reinstalling"
         if reinstall_backup.exists():
             shutil.rmtree(reinstall_backup)
         env_dir.rename(reinstall_backup)
+        # The install log is written before venv creation, so recreate the destination root after
+        # moving the previous environment aside. Without this, every real reinstall fails before
+        # the first pip command because the log's parent directory no longer exists.
+        env_dir.mkdir(parents=True, exist_ok=True)
     def append_log(stage: str, message: str) -> None:
         with install_log_path.open("a", encoding="utf-8", errors="replace") as file:
             file.write(f"[{stage}] {message}\n")
@@ -1310,7 +1629,10 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
         pymss_requirement = manifest["common"]["pymss"]
         pymss_core_requirement = manifest["common"]["pymss-core"]
         run_pip_with_pypi_fallback(common, "common")
-        run_pip_with_pypi_fallback(["--no-deps", pymss_requirement, pymss_core_requirement], "pymss")
+        # Install the declared pymss extras with dependency resolution enabled.  The previous
+        # --no-deps path silently skipped PySocks required by pymss[proxy], so a fresh runtime
+        # passed the basic import probe but failed when a SOCKS proxy was used.
+        run_pip_with_pypi_fallback([pymss_requirement, pymss_core_requirement], "pymss")
         if spec.get("extras"):
             run_pip_with_pypi_fallback(list(spec["extras"]), "extras")
         # Probe the interpreter that was just built, not _runtime_info_payload(): that one reads
@@ -1326,6 +1648,11 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
                 f"Runtime probe failed for {backend}: missing packages={missing}, "
                 f"torchBackend={probed.get('torchBackend')}, "
                 f"acceleratorAvailable={probed.get('acceleratorAvailable')}"
+            )
+        manifest_ok, manifest_failures = _manifest_versions_are_satisfied(probed, manifest, backend)
+        if not manifest_ok:
+            raise RuntimeError(
+                "Runtime manifest verification failed: " + "; ".join(manifest_failures)
             )
         state = {
             "backend": backend,
@@ -1382,6 +1709,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
     mirror = str(payload.get("mirror") or "auto").strip().lower()
     locale = str(payload.get("locale") or "").strip().lower()
     manifest = _manifest()
+    _recover_runtime_transactions()
     supported = _supported_backend(backend)
     if not supported:
         from worker_protocol import emit_error
@@ -1431,10 +1759,23 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] update pymss core mirror={mirror}\n", encoding="utf-8")
     _emit("runtime_core_update_started", {"backend": backend, "logPath": str(log_path)}, task_id)
+    previous_active_state = _read_runtime_state()
+
+    staging_dir: Path | None = None
+    swap_backup_dir: Path | None = None
 
     def append_log(stage: str, message: str) -> None:
         with log_path.open("a", encoding="utf-8", errors="replace") as file:
             file.write(f"[{stage}] {message}\n")
+        # The active directory is copied before pip runs.  Mirror subsequent log lines into the
+        # staged copy so the final environment retains the complete update log after the swap.
+        if staging_dir and staging_dir.exists():
+            try:
+                staged_log = staging_dir / log_path.name
+                with staged_log.open("a", encoding="utf-8", errors="replace") as file:
+                    file.write(f"[{stage}] {message}\n")
+            except OSError:
+                pass
 
     # Keep dependency resolution enabled so new dependencies introduced by pymss are installed,
     # but constrain Torch to the build already installed in this backend.
@@ -1447,62 +1788,89 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
     if not torch_version:
         from worker_protocol import emit_error
         return emit_error("RUNTIME_CORE_UPDATE_FAILED", "Unable to determine the installed Torch version; refusing to update the runtime core.", task_id=task_id, recoverable=True)
-    constraints_path = env_dir / ".pymss-core-update-constraints.txt"
-    _atomic_write_text(constraints_path, f"torch=={torch_version}\n")
-    command = [str(python_path), "-m", "pip", "install", "--upgrade", "--no-cache-dir", "--only-binary=:all:", "--prefer-binary"]
-    command.extend(["--constraint", str(constraints_path)])
-    if index_url:
-        command.extend(["--index-url", index_url])
-    # Keep extras declared by the shipped manifest (currently ``[proxy]``) when
-    # upgrading an environment created by an older manifest.  Installing only
-    # the bare distribution would leave newly declared optional dependencies
-    # absent even though the core package itself was updated successfully.
-    pymss_requirement = _pin_manifest_requirement(
-        manifest.get("common", {}).get("pymss"),
-        target_pymss_version,
-    )
-    pymss_core_requirement = f"pymss-core=={target_pymss_core_version}"
-    command.extend([pymss_requirement, pymss_core_requirement])
-
-    def run_pip(command: list[str], stage: str) -> None:
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=os.environ.copy(),
-        )
-        assert process.stdout is not None
-        try:
-            for line in process.stdout:
-                message = line.rstrip()
-                append_log(stage, message)
-                _emit("runtime_core_update_log", {"stage": stage, "message": message}, task_id)
-        except Exception:
-            # Do not leave pip running after a broken event pipe.  Otherwise a failed update can
-            # continue changing the environment and make the next click appear to repair it.
-            if process.poll() is None:
-                process.kill()
-            process.wait()
-            raise
-        finally:
-            close_stdout = getattr(process.stdout, "close", None)
-            if close_stdout:
-                close_stdout()
-        if process.wait() != 0:
-            raise RuntimeError(f"pip failed during {stage} with exit code {process.returncode}")
-
+    constraints_path: Path | None = None
     try:
-        _ensure_runtime_pip(python_path, task_id, append_log)
+        # Work on a sibling copy.  The active environment remains runnable while pip resolves
+        # packages, and a failed update can discard the copy without touching the user's working
+        # runtime.  The final directory swap is performed only after the live probe succeeds.
+        environment_bytes = _dir_size_bytes(env_dir)
+        free_bytes = shutil.disk_usage(RUNTIME_ENVS_DIR).free
+        required_bytes = environment_bytes + 256 * 1024 * 1024
+        if free_bytes < required_bytes:
+            raise RuntimeError(
+                "Insufficient disk space for a transactional runtime update: "
+                f"need {required_bytes} bytes, available {free_bytes} bytes"
+            )
+        staging_dir = RUNTIME_ENVS_DIR / f".{backend}.core-updating"
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        shutil.copytree(env_dir, staging_dir, symlinks=True)
+        _repair_runtime_venv_config(staging_dir)
+        work_python_path = _python_path_for_env(staging_dir)
+        if not work_python_path.is_file():
+            raise RuntimeError(f"Staged runtime Python not found: {work_python_path}")
+
+        constraints_path = staging_dir / ".pymss-core-update-constraints.txt"
+        _atomic_write_text(constraints_path, f"torch=={torch_version}\n")
+        command = [str(work_python_path), "-m", "pip", "install", "--upgrade", "--no-cache-dir", "--only-binary=:all:", "--prefer-binary"]
+        command.extend(["--constraint", str(constraints_path)])
+        if index_url:
+            command.extend(["--index-url", index_url])
+        # Keep extras declared by the shipped manifest (currently ``[proxy]``) when
+        # upgrading an environment created by an older manifest.  Installing only
+        # the bare distribution would leave newly declared optional dependencies
+        # absent even though the core package itself was updated successfully.
+        pymss_requirement = _pin_manifest_requirement(
+            manifest.get("common", {}).get("pymss"),
+            target_pymss_version,
+        )
+        pymss_core_requirement = f"pymss-core=={target_pymss_core_version}"
+        common_requirements = [
+            str(requirement)
+            for name, requirement in manifest.get("common", {}).items()
+            if name not in {"pymss", "pymss-core"}
+        ]
+        backend_extras = [str(requirement) for requirement in _spec.get("extras", []) or []]
+        command.extend([*common_requirements, pymss_requirement, pymss_core_requirement, *backend_extras])
+
+        def run_pip(command: list[str], stage: str) -> None:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=os.environ.copy(),
+            )
+            assert process.stdout is not None
+            try:
+                for line in process.stdout:
+                    message = line.rstrip()
+                    append_log(stage, message)
+                    _emit("runtime_core_update_log", {"stage": stage, "message": message}, task_id)
+            except Exception:
+                # Do not leave pip running after a broken event pipe.  Otherwise a failed update can
+                # continue changing the environment and make the next click appear to repair it.
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
+                raise
+            finally:
+                close_stdout = getattr(process.stdout, "close", None)
+                if close_stdout:
+                    close_stdout()
+            if process.wait() != 0:
+                raise RuntimeError(f"pip failed during {stage} with exit code {process.returncode}")
+
+        _ensure_runtime_pip(work_python_path, task_id, append_log)
 
         # Releases before the metadata-preserving prune fix may have a working package but no
         # RECORD file.  Pip refuses to uninstall such a distribution, so repair only these two
         # small core packages from their currently installed versions before the real upgrade.
         # ``--ignore-installed --no-deps`` is deliberately limited to this repair command: the
         # normal update below keeps dependency resolution and the Torch constraint unchanged.
-        missing_records = _runtime_core_missing_records(python_path)
+        missing_records = _runtime_core_missing_records(work_python_path)
         if missing_records:
             repair_requirements = [
                 f"{name}=={missing_records[name]}"
@@ -1510,7 +1878,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
                 if name in missing_records
             ]
             repair_command = [
-                str(python_path), "-m", "pip", "install", "--ignore-installed", "--no-deps",
+                str(work_python_path), "-m", "pip", "install", "--ignore-installed", "--no-deps",
                 "--no-cache-dir", "--only-binary=:all:", "--prefer-binary",
             ]
             if index_url:
@@ -1523,16 +1891,30 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             append_log("metadata", repair_message)
             _emit("runtime_core_update_stage", {"stage": "metadata", "message": repair_message}, task_id)
             run_pip(repair_command, "metadata")
-            remaining_records = _runtime_core_missing_records(python_path)
+            remaining_records = _runtime_core_missing_records(work_python_path)
             if remaining_records:
                 raise RuntimeError(
                     "pip metadata repair did not restore RECORD for: "
                     + ", ".join(sorted(remaining_records))
                 )
 
-        _emit("runtime_core_update_stage", {"stage": "pymss", "command": f"pip install --upgrade {pymss_requirement} {pymss_core_requirement}"}, task_id)
-        run_pip(command, "pymss")
-        probed = _probe_python_runtime(python_path, _backend_extra_names(_manifest(), backend))
+        _emit(
+            "runtime_core_update_stage",
+            {
+                "stage": "manifest",
+                "command": "pip install --upgrade " + " ".join(
+                    [*common_requirements, pymss_requirement, pymss_core_requirement, *backend_extras]
+                ),
+            },
+            task_id,
+        )
+        run_pip(command, "manifest")
+        probed = _probe_python_runtime(work_python_path, _backend_extra_names(_manifest(), backend))
+        manifest_ok, manifest_failures = _manifest_versions_are_satisfied(probed, manifest, backend)
+        if not manifest_ok:
+            raise RuntimeError(
+                "Runtime manifest verification failed: " + "; ".join(manifest_failures)
+            )
         if probed.get("pymssVersion") != target_pymss_version:
             raise RuntimeError(f"pymss stayed at {probed.get('pymssVersion') or 'unknown'} after update; expected {target_pymss_version}")
         if probed.get("pymssCoreVersion") != target_pymss_core_version:
@@ -1561,14 +1943,35 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             "pymssGraphAvailable": bool(probed.get("pymssGraphAvailable")),
             "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        if env_state_path:
-            env_state = dict(updated)
-            env_state.pop("pythonPath", None)
-            env_state.pop("logPath", None)
-            env_state.pop("activatedAt", None)
-            env_state.pop("source", None)
-            _atomic_write_json(env_state_path, env_state)
-        _write_runtime_state(updated)
+        swap_backup_dir = RUNTIME_ENVS_DIR / f".{backend}.core-backup"
+        if swap_backup_dir.exists():
+            shutil.rmtree(swap_backup_dir, ignore_errors=True)
+        env_dir.rename(swap_backup_dir)
+        try:
+            staging_dir.rename(env_dir)
+            staging_dir = None
+            if env_state_path:
+                env_state = dict(updated)
+                env_state.pop("pythonPath", None)
+                env_state.pop("logPath", None)
+                env_state.pop("activatedAt", None)
+                env_state.pop("source", None)
+                _atomic_write_json(env_state_path, env_state)
+            _write_runtime_state(updated)
+        except Exception:
+            if env_dir.exists():
+                shutil.rmtree(env_dir, ignore_errors=True)
+            if swap_backup_dir.exists():
+                swap_backup_dir.rename(env_dir)
+            swap_backup_dir = None
+            if previous_active_state:
+                try:
+                    _write_runtime_state(previous_active_state)
+                except OSError:
+                    pass
+            raise
+        shutil.rmtree(swap_backup_dir, ignore_errors=True)
+        swap_backup_dir = None
         _emit("runtime_core_update_finished", {"backend": backend, "state": updated, "logPath": str(log_path)}, task_id)
         return 0
     except Exception as exc:
@@ -1583,7 +1986,20 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             extra={"backend": backend, "logPath": str(log_path)},
         )
     finally:
-        try:
-            constraints_path.unlink()
-        except OSError:
-            pass
+        for path in {constraints_path, env_dir / ".pymss-core-update-constraints.txt"}:
+            if not path:
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        if staging_dir and staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        if swap_backup_dir and swap_backup_dir.exists():
+            if not env_dir.exists():
+                try:
+                    swap_backup_dir.rename(env_dir)
+                except OSError:
+                    pass
+            else:
+                shutil.rmtree(swap_backup_dir, ignore_errors=True)

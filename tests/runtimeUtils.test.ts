@@ -3,7 +3,7 @@ import test from 'node:test'
 
 import {
   activeRuntimeEnvironment,
-  bundledRuntimeToActivate,
+  runtimeToActivate,
   detectRuntimePlatform,
   isKnownRuntimeBackend,
   preferredInstalledRuntimeBackend,
@@ -154,28 +154,35 @@ test('runtime core update is hidden when the installed version is newer than PyP
   assert.equal(runtimeCoreUpdateAvailable({ pymssVersion: '2.0.20', pymssCoreVersion: '0.1.7' }, '2.0.19', '0.1.6'), false)
 })
 
-test('bundled runtime is selected for first-launch activation', () => {
+test('the only bundled runtime is selected for first-launch activation', () => {
   const bundled = { backend: 'cpu', source: 'bundled', pythonPath: 'runtime-envs/cpu/Scripts/python.exe' }
-  assert.equal(bundledRuntimeToActivate({ ready: false, installedEnvironments: [bundled] }), bundled)
-  assert.equal(bundledRuntimeToActivate({ ready: true, installedEnvironments: [bundled] }), undefined)
+  assert.equal(runtimeToActivate({ ready: false, installedEnvironments: [bundled] }), bundled)
+  assert.equal(runtimeToActivate({ ready: true, installedEnvironments: [bundled] }), undefined)
 })
 
-test('first-launch activation does not guess between bundled environments or user environments', () => {
-  assert.equal(bundledRuntimeToActivate({
+test('startup activation does not guess between multiple environments', () => {
+  assert.equal(runtimeToActivate({
     ready: false,
     installedEnvironments: [
       { backend: 'cpu', source: 'bundled', pythonPath: 'cpu/python.exe' },
       { backend: 'cuda', source: 'bundled', pythonPath: 'cuda/python.exe' },
     ],
   }), undefined)
-  assert.equal(bundledRuntimeToActivate({
+  assert.equal(runtimeToActivate({
     ready: false,
     installedEnvironments: [{ backend: 'cpu', source: 'managed', pythonPath: 'cpu/python.exe' }],
+  })?.backend, 'cpu')
+  assert.equal(runtimeToActivate({
+    ready: false,
+    installedEnvironments: [
+      { backend: 'cpu', source: 'managed', pythonPath: 'managed/python.exe' },
+      { backend: 'cuda', source: 'bundled', pythonPath: 'bundled/python.exe' },
+    ],
   }), undefined)
 })
 
-test('first-launch activation does not replace an active managed runtime that is not ready', () => {
-  assert.equal(bundledRuntimeToActivate({
+test('startup activation does not replace an active managed runtime that is not ready', () => {
+  assert.equal(runtimeToActivate({
     ready: false,
     installedBackend: 'cuda',
     installState: { backend: 'cuda', pythonPath: 'cuda/Scripts/python.exe' },
@@ -186,12 +193,25 @@ test('first-launch activation does not replace an active managed runtime that is
   }), undefined)
 })
 
+test('startup activation skips a uniquely detected broken runtime', () => {
+  const broken = { backend: 'cpu', pythonPath: 'cpu/python.exe', health: 'broken' }
+  assert.equal(runtimeToActivate({ ready: false, installedEnvironments: [broken] }), undefined)
+})
+
 test('runtime core sync is available for an older dependency manifest', () => {
   assert.equal(runtimeCoreSyncAvailable({ manifestVersion: '2026.07.2' }, '2026.08.1'), true)
 })
 
+test('runtime core sync is not offered to a newer environment after app downgrade', () => {
+  assert.equal(runtimeCoreSyncAvailable({ manifestVersion: '2026.09.1' }, '2026.08.1'), false)
+})
+
 test('runtime core sync is available when advanced workflow support is missing', () => {
   assert.equal(runtimeCoreSyncAvailable({ manifestVersion: '2026.08.1', pymssGraphAvailable: false }, '2026.08.1'), true)
+})
+
+test('runtime core sync is not offered to a legacy environment without a manifest marker', () => {
+  assert.equal(runtimeCoreSyncAvailable({ pymssGraphAvailable: false }, '2026.08.1'), false)
 })
 
 test('runtime core sync stays hidden for bundled environments', () => {
@@ -244,13 +264,11 @@ test('undetectable hardware yields no recommendation at all', () => {
 
 test('manifest status compares the environment against the shipped manifest', () => {
   assert.equal(runtimeManifestStatus({ manifestVersion: '2026.07.1' }, '2026.07.1'), 'current')
-  assert.equal(runtimeManifestStatus({ manifestVersion: '2026.06.2' }, '2026.07.1'), 'outdated')
+  assert.equal(runtimeManifestStatus({ manifestVersion: '2026.06.2' }, '2026.07.1'), 'older')
 })
 
-test('a newer environment than the app also counts as a mismatch', () => {
-  // After an app downgrade the environment can be ahead; "reinstall to match" is still right,
-  // so the check reports a plain mismatch instead of pretending to order the versions.
-  assert.equal(runtimeManifestStatus({ manifestVersion: '2026.09.1' }, '2026.07.1'), 'outdated')
+test('a newer environment than the app is kept distinct from an older one', () => {
+  assert.equal(runtimeManifestStatus({ manifestVersion: '2026.09.1' }, '2026.07.1'), 'newer')
 })
 
 test('manifest status is unknown when either side did not record a version', () => {

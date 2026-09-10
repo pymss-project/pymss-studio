@@ -85,26 +85,24 @@ export function preferredInstalledRuntimeBackend(info: RuntimeInfo | null | unde
 }
 
 /**
- * Return the single bundled runtime that should be made active on first launch.
+ * Return the only ready runtime that should be made active when the pointer is absent.
  *
- * Packaged builds ship a completed environment alongside the bootstrap Python.  In
- * that case the environment is usable immediately and should not require the user
- * to open Settings and press the switch button.  User-managed environments are
- * deliberately excluded, and multiple bundled environments remain ambiguous.
+ * This covers both a fresh packaged install and an overwrite where the existing active
+ * pointer was lost.  Selecting is safe only when exactly one usable environment remains;
+ * multiple environments require an explicit user choice.
  */
-export function bundledRuntimeToActivate(info: RuntimeInfo | null | undefined): InstalledRuntime | undefined {
+export function runtimeToActivate(info: RuntimeInfo | null | undefined): InstalledRuntime | undefined {
   if (info?.ready) return undefined
-  // Never replace an environment that is already recorded as active.  A managed
-  // runtime may be temporarily unready (for example after a failed package update),
-  // and activating the bundled fallback would silently delete the user's pointer.
+  // Never replace an environment that is already recorded as active. A managed runtime
+  // may be temporarily unready (for example after a failed package update).
   const activeBackend = String(info?.installedBackend || info?.installState?.backend || '').trim()
   if (activeBackend || info?.installState?.pythonPath) return undefined
-  const bundled = (info?.installedEnvironments || []).filter((entry) =>
-    (entry.source === 'bundled' || entry.coreUpdateSupported === false)
-      && isKnownRuntimeBackend(String(entry.backend || ''))
-      && Boolean(entry.pythonPath),
+  const candidates = (info?.installedEnvironments || []).filter((entry) =>
+    isKnownRuntimeBackend(String(entry.backend || ''))
+      && Boolean(entry.pythonPath)
+      && entry.health !== 'broken',
   )
-  return bundled.length === 1 ? bundled[0] : undefined
+  return candidates.length === 1 ? candidates[0] : undefined
 }
 
 export function runtimeCoreUpdateAvailable(
@@ -131,8 +129,9 @@ export function runtimeCoreSyncAvailable(
   currentManifestVersion: string | undefined,
 ) {
   if (!env || env.coreUpdateSupported === false) return false
-  return runtimeManifestStatus(env, currentManifestVersion) === 'outdated'
-    || env.pymssGraphAvailable === false
+  const manifestStatus = runtimeManifestStatus(env, currentManifestVersion)
+  return manifestStatus === 'older'
+    || (manifestStatus === 'current' && env.pymssGraphAvailable === false)
 }
 
 function versionGreaterThan(candidate: string | null | undefined, current: string | null | undefined) {
@@ -201,15 +200,14 @@ export function recommendedRuntimeBackend(info: RuntimeInfo | null | undefined):
   return 'cpu'
 }
 
-export type RuntimeManifestStatus = 'current' | 'outdated' | 'unknown'
+export type RuntimeManifestStatus = 'current' | 'older' | 'newer' | 'unknown'
 
 /**
  * Whether an environment was built from the dependency manifest the app ships today.
  *
- * Reports a plain mismatch rather than trying to order the versions: after an app downgrade
- * the environment can legitimately be newer, and "reinstall to match" is the right advice
- * either way. 'unknown' covers environments that never recorded a version — the bootstrap
- * interpreter, mainly — where no honest claim can be made.
+ * Keeps older and newer environments distinct. An older environment can be synchronized in
+ * place; a newer environment usually means the app was downgraded and must not be rewritten with
+ * the older app's manifest marker.
  */
 export function runtimeManifestStatus(
   env: InstalledRuntime | undefined,
@@ -218,5 +216,14 @@ export function runtimeManifestStatus(
   const expected = String(currentManifestVersion || '')
   const actual = String(env?.manifestVersion || '')
   if (!expected || !actual) return 'unknown'
-  return actual === expected ? 'current' : 'outdated'
+  if (actual === expected) return 'current'
+  const expectedParts = parseVersionParts(expected)
+  const actualParts = parseVersionParts(actual)
+  if (!expectedParts || !actualParts) return 'unknown'
+  const length = Math.max(expectedParts.length, actualParts.length)
+  for (let index = 0; index < length; index += 1) {
+    const difference = (actualParts[index] || 0) - (expectedParts[index] || 0)
+    if (difference !== 0) return difference < 0 ? 'older' : 'newer'
+  }
+  return 'current'
 }

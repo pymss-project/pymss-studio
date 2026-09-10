@@ -48,11 +48,11 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "{#SourceDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "python-runtime\runtime-envs\*"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SourceDir}\python-runtime\runtime-envs\*"; DestDir: "{app}\python-runtime\runtime-envs"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: CachedFreshInstall
-; The runtime is private to this app and is granted to the installing user below.
+Source: "{#SourceDir}\python-runtime\runtime-envs\*"; DestDir: "{app}\python-runtime\runtime-envs"; Excludes: "active-runtime.json"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallBundledRuntimeEnvs
+; The bootstrap runtime stays read-only; only runtime-envs is writable for managed installs.
 
 [Dirs]
-Name: "{app}\python-runtime"; Permissions: users-modify
+; Keep the bootstrap interpreter read-only. Only managed environments need user write access.
 Name: "{app}\python-runtime\runtime-envs"; Permissions: users-modify
 
 [Icons]
@@ -91,6 +91,40 @@ begin
     FreshInstallKnown := True;
   end;
   Result := FreshInstallResult;
+end;
+
+function BundledBackend(): string;
+begin
+  if Pos('cpu', LowerCase('{#PackageSuffix}')) > 0 then
+    Result := 'cpu'
+  else if Pos('cuda', LowerCase('{#PackageSuffix}')) > 0 then
+    Result := 'cuda'
+  else if Pos('rocm', LowerCase('{#PackageSuffix}')) > 0 then
+    Result := 'rocm'
+  else
+    Result := '';
+end;
+
+function ExistingBundledBackendPython(): Boolean;
+var
+  Backend: string;
+begin
+  Backend := BundledBackend();
+  if Backend = '' then
+  begin
+    Result := False;
+    Exit;
+  end;
+  Result := FileExists(
+    ExpandConstant('{app}\python-runtime\runtime-envs\') + Backend + '\Scripts\python.exe'
+  );
+end;
+
+function ShouldInstallBundledRuntimeEnvs(): Boolean;
+begin
+  { Fresh installs and upgrades from layouts without the current backend receive the package env.
+    A valid current backend is preserved so an upgrade does not replace a user-managed env. }
+  Result := CachedFreshInstall() or not ExistingBundledBackendPython();
 end;
 
 procedure RemoveIfExists(Path: string);

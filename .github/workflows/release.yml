@@ -77,6 +77,8 @@ jobs:
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: pnpm/action-setup@v4
         with:
           version: 10.33.2
@@ -93,7 +95,8 @@ jobs:
             exit 1
           fi
           version="${version#v}"
-          echo "RELEASE_TAG=v${version}" >> "$GITHUB_ENV"
+          release_tag="v${version}"
+          echo "RELEASE_TAG=${release_tag}" >> "$GITHUB_ENV"
           echo "RELEASE_NAME=Pymss Studio v${version}" >> "$GITHUB_ENV"
           echo "RELEASE_VERSION=${version}" >> "$GITHUB_ENV"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
@@ -105,7 +108,27 @@ jobs:
           else
             echo "RELEASE_PRERELEASE=${{ github.event_name == 'workflow_dispatch' && inputs.prerelease == true }}" >> "$GITHUB_ENV"
           fi
-          echo "RELEASE_AUTO_UPDATE_SUPPORTED=${{ github.event_name == 'workflow_dispatch' && inputs.allow_auto_update == true }}" >> "$GITHUB_ENV"
+          requested_auto_update="${{ github.event_name == 'workflow_dispatch' && inputs.allow_auto_update == true }}"
+          previous_tag="$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' | grep -v "^${release_tag}$" | head -n 1 || true)"
+          runtime_compatible=false
+          if [[ -n "$previous_tag" ]] && git diff --quiet "$previous_tag" "$GITHUB_SHA" -- \
+              python/ \
+              scripts/prepare-python-runtime.ps1 \
+              scripts/prepare-python-runtime.sh \
+              scripts/prune-python-runtime.ps1 \
+              scripts/prune-python-runtime.sh \
+              src-tauri/src/python \
+              src-tauri/src/storage.rs \
+              src-tauri/tauri.conf.json \
+              installer/pymss-studio.iss; then
+            runtime_compatible=true
+          fi
+          if [[ "$requested_auto_update" == "true" && "$runtime_compatible" == "true" ]]; then
+            echo "RELEASE_AUTO_UPDATE_SUPPORTED=true" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_AUTO_UPDATE_SUPPORTED=false" >> "$GITHUB_ENV"
+          fi
+          echo "RELEASE_RUNTIME_COMPATIBLE=$runtime_compatible" >> "$GITHUB_ENV"
       - name: Download Windows portable artifacts
         if: needs.windows.result == 'success'
         uses: actions/download-artifact@v4

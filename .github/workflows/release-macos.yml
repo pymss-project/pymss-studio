@@ -53,8 +53,6 @@ jobs:
       - name: Prepare bootstrap and MLX runtime environment
         working-directory: .
         env:
-          TORCH_VERSION: "2.7.1"
-          TORCH_INDEX_URL: ""
           INITIAL_BACKEND: mlx
         run: bash scripts/prepare-python-runtime.sh mlx
 

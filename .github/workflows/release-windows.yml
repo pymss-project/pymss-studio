@@ -18,8 +18,6 @@ jobs:
       stage_artifact: ${{ steps.meta.outputs.stage_artifact }}
     env:
       PYMSS_VERSION_INPUT: ${{ inputs.version }}
-      TORCH_VERSION: 2.7.1
-      TORCH_INDEX_URL: https://download.pytorch.org/whl/cu128
     steps:
       - uses: actions/checkout@v4
 
@@ -39,7 +37,7 @@ jobs:
 
       - name: Prepare bootstrap runtime + CUDA environment seed
         shell: pwsh
-        run: ./scripts/prepare-python-runtime.ps1 -Variant cuda -TorchVersion $env:TORCH_VERSION -TorchIndexUrl $env:TORCH_INDEX_URL -InitialBackend cuda
+        run: ./scripts/prepare-python-runtime.ps1 -Variant cuda -InitialBackend cuda
 
       - name: Sync build version metadata
         shell: pwsh
@@ -215,8 +213,6 @@ jobs:
       stage_artifact: ${{ steps.meta.outputs.stage_artifact }}
     env:
       PYMSS_VERSION_INPUT: ${{ inputs.version }}
-      TORCH_VERSION: 2.7.1
-      TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
     steps:
       - uses: actions/checkout@v4
 
@@ -236,7 +232,7 @@ jobs:
 
       - name: Prepare bootstrap runtime + CPU environment seed
         shell: pwsh
-        run: ./scripts/prepare-python-runtime.ps1 -Variant default -TorchVersion $env:TORCH_VERSION -TorchIndexUrl $env:TORCH_INDEX_URL -InitialBackend cpu
+        run: ./scripts/prepare-python-runtime.ps1 -Variant default -InitialBackend cpu
 
       - name: Sync build version metadata
         shell: pwsh
@@ -577,7 +573,7 @@ jobs:
           echo "stage_artifact=$stageName-stage" >> $env:GITHUB_OUTPUT
       - name: Prepare bootstrap runtime + ROCm environment seed
         shell: pwsh
-        run: ./scripts/prepare-python-runtime.ps1 -Variant rocm -TorchVersion 2.9.1 -TorchIndexUrl "" -InitialBackend rocm
+        run: ./scripts/prepare-python-runtime.ps1 -Variant rocm -InitialBackend rocm
       - name: Sync build version metadata
         shell: pwsh
         env:

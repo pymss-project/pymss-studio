@@ -78,6 +78,7 @@ export type RuntimeInfo = {
 export type InstalledRuntime = {
   backend?: RuntimeBackend | string
   source?: 'managed' | 'bundled' | string
+  health?: 'ready' | 'degraded' | 'broken' | 'unknown' | string
   manifestVersion?: string
   installedAt?: string
   pythonVersion?: string

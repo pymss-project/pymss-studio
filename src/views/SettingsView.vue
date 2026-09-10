@@ -198,7 +198,9 @@ type RuntimeBackendCard = {
   state: BackendCardState
   recommended: boolean
   manifestOutdated: boolean
+  manifestNewer: boolean
   workflowGraphUnavailable: boolean
+  health: string
   leftover: boolean
   leftoverLabel: string
   vendorMissing: boolean
@@ -269,8 +271,11 @@ const runtimeBackendCards = computed(() => {
       const diskBytes = app.runtimeEnvSizes[String(item.backend)]
       const pymssVersion = env?.pymssVersion || env?.packageVersions?.pymss || ''
       const pymssCoreVersion = env?.pymssCoreVersion || env?.packageVersions?.['pymss-core'] || ''
-      const manifestOutdated = runtimeManifestStatus(env, app.runtimeInfo?.manifestVersion) === 'outdated'
+      const manifestStatus = runtimeManifestStatus(env, app.runtimeInfo?.manifestVersion)
+      const manifestOutdated = manifestStatus === 'older' || manifestStatus === 'newer'
+      const manifestNewer = manifestStatus === 'newer'
       const workflowGraphUnavailable = env?.pymssGraphAvailable === false
+      const health = String(env?.health || 'unknown')
       // A manifest mismatch can mean that the environment was created by an
       // older app even when PyPI already reports the same pymss/core versions.
       // Offer the no-Torch-reinstall core sync so the environment metadata and
@@ -291,7 +296,9 @@ const runtimeBackendCards = computed(() => {
         state,
         recommended: runtimeRecommendedBackend.value === item.backend,
         manifestOutdated,
+        manifestNewer,
         workflowGraphUnavailable,
+        health,
         leftover,
         leftoverLabel: leftover && diskBytes ? formatBytes(diskBytes) : '',
         // Only warn on GPU backends: it explains why a card is there without hiding it, and
@@ -1443,6 +1450,12 @@ onMounted(async () => {
                   <n-tag v-else-if="card.state === 'installed'" :bordered="false" size="small" type="info" round>
                     {{ t('settings.runtimeInstalled') }}
                   </n-tag>
+                  <n-tag v-if="card.health === 'degraded'" :bordered="false" size="small" type="warning" round>
+                    {{ t('settings.runtimeHealthDegraded') }}
+                  </n-tag>
+                  <n-tag v-else-if="card.health === 'broken'" :bordered="false" size="small" type="error" round>
+                    {{ t('settings.runtimeHealthBroken') }}
+                  </n-tag>
                   <n-tag v-if="card.recommended" :bordered="false" size="small" type="warning" round>
                     {{ t('settings.runtimeRecommended') }}
                   </n-tag>
@@ -1457,10 +1470,11 @@ onMounted(async () => {
                 <p v-if="card.description" class="runtime-env-card__desc">{{ card.description }}</p>
                 <p v-if="card.offCatalog" class="runtime-env-card__desc">{{ t('settings.runtimeBackendUnsupported') }}</p>
                 <p v-if="card.vendorMissing" class="runtime-env-card__desc">{{ t('settings.runtimeVendorNotDetected') }}</p>
+                <p v-if="card.health === 'broken'" class="runtime-env-card__desc">{{ t('settings.runtimeHealthBrokenHint') }}</p>
                 <p v-if="card.manifestOutdated" class="runtime-env-card__desc">
                   {{ card.env?.coreUpdateSupported === false
-                    ? t('settings.runtimeManifestOutdatedBundledHint')
-                    : t('settings.runtimeManifestOutdatedHint') }}
+                    ? t(card.manifestNewer ? 'settings.runtimeManifestNewerBundledHint' : 'settings.runtimeManifestOutdatedBundledHint')
+                    : t(card.manifestNewer ? 'settings.runtimeManifestNewerHint' : 'settings.runtimeManifestOutdatedHint') }}
                 </p>
                 <p v-if="card.workflowGraphUnavailable" class="runtime-env-card__desc">
                   {{ card.env?.coreUpdateSupported === false
@@ -1502,7 +1516,7 @@ onMounted(async () => {
                     {{ card.installing ? t('settings.runtimeInstalling') : t('settings.runtimeInstallBackend') }}
                   </n-button>
                   <n-button
-                    v-if="card.state === 'installed'"
+                    v-if="card.state === 'installed' && card.health !== 'broken'"
                     size="tiny"
                     secondary
                     type="primary"

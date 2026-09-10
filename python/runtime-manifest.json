@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "manifestVersion": "2026.08.1",
+  "manifestVersion": "2026.09.1",
   "python": "3.12",
   "common": {
     "av": "av>=14,<15",
@@ -46,6 +46,7 @@
       ],
       "python": "3.12",
       "torch": {
+        "requirement": "torch==2.9.1",
         "rocmRequirements": [
           "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_core-7.2.1-py3-none-win_amd64.whl",
           "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_devel-7.2.1-py3-none-win_amd64.whl",

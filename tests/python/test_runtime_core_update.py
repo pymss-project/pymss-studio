@@ -29,13 +29,19 @@ def _manifest():
             "cpu": {"platforms": ["win32", "linux", "darwin"], "torch": {"requirement": "torch==2.7.1"}},
             "cuda": {"platforms": ["win32", "linux"], "torch": {"requirement": "torch==2.7.1+cu128"}},
             "rocm": {"platforms": ["win32", "linux"], "torch": {"requirement": "torch==2.7.1+rocm6.3"}},
-            "mlx": {"platforms": ["darwin"], "torch": {"requirement": "torch==2.7.1"}},
+            "mlx": {"platforms": ["darwin"], "torch": {"requirement": "torch==2.7.1"}, "extras": ["mlx"]},
         },
     }
 
 
 def _probe_result(backend: str) -> dict[str, object]:
     torch_backend = "cpu" if backend == "mlx" else backend
+    package_versions = {name: "2.0.0" for name in COMMON_PACKAGES}
+    package_versions.update({"pymss": "2.1.4", "pymss-core": "0.1.6"})
+    packages = {name: True for name in COMMON_PACKAGES}
+    if backend == "mlx":
+        packages["mlx"] = True
+        package_versions["mlx"] = "0.21.0"
     return {
         "pythonVersion": "3.12.0",
         "torchVersion": {
@@ -46,8 +52,8 @@ def _probe_result(backend: str) -> dict[str, object]:
         }[backend],
         "torchBackend": torch_backend,
         "acceleratorAvailable": backend in {"cuda", "rocm"},
-        "packages": {name: True for name in COMMON_PACKAGES},
-        "packageVersions": {name: "2.0.0" for name in COMMON_PACKAGES},
+        "packages": packages,
+        "packageVersions": package_versions,
         "pymssVersion": "2.1.4",
         "pymssCoreVersion": "0.1.6",
         "pymssGraphAvailable": True,
@@ -136,6 +142,8 @@ class RuntimeCoreUpdateTests(unittest.TestCase):
         self.assertIn("--upgrade", upgrade_cmd)
         self.assertIn("pymss[proxy]==2.1.4", upgrade_cmd)
         self.assertIn("pymss-core==0.1.6", upgrade_cmd)
+        self.assertIn("av", upgrade_cmd)
+        self.assertIn("numpy", upgrade_cmd)
         self.assertTrue((env_dir / "pymss-core-update.log").is_file())
 
     def test_update_core_skips_repair_when_records_are_present(self):
@@ -175,6 +183,74 @@ class RuntimeCoreUpdateTests(unittest.TestCase):
             "2.1.3",
         )
 
+    def test_failed_update_keeps_the_original_environment(self):
+        env_dir, python_path = self._make_env("cpu")
+        marker = env_dir / "keep-me.txt"
+        marker.write_text("original", encoding="utf-8")
+        original_state = (env_dir / "pymss-runtime-state.json").read_text(encoding="utf-8")
+
+        def popen(command, **kwargs):
+            del command, kwargs
+            return mock.Mock(
+                stdout=iter(["pip failed\n"]),
+                wait=mock.Mock(return_value=1),
+                returncode=1,
+                poll=mock.Mock(return_value=1),
+            )
+
+        with mock.patch.object(worker_bootstrap, "RUNTIME_ENVS_DIR", self.envs_dir), \
+             mock.patch.object(worker_bootstrap, "ACTIVE_RUNTIME_FILE", self.active_file), \
+             mock.patch.object(worker_bootstrap, "_manifest", return_value=_manifest()), \
+             mock.patch.object(worker_bootstrap, "_latest_pypi_version", side_effect=lambda name: {"pymss": "2.1.4", "pymss-core": "0.1.6"}[name]), \
+             mock.patch.object(worker_bootstrap, "_probe_python_runtime", return_value=_probe_result("cpu")), \
+             mock.patch.object(worker_bootstrap, "_runtime_core_missing_records", return_value={}), \
+             mock.patch.object(worker_bootstrap, "_ensure_runtime_pip"), \
+             mock.patch.object(worker_bootstrap.subprocess, "Popen", side_effect=popen), \
+             mock.patch.object(sys, "platform", "win32"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            result = worker_bootstrap.cmd_update_runtime_core({"backend": "cpu", "mirror": "pypi", "pythonPath": str(python_path)})
+
+        self.assertNotEqual(result, 0)
+        self.assertTrue(env_dir.is_dir())
+        self.assertEqual(marker.read_text(encoding="utf-8"), "original")
+        self.assertEqual((env_dir / "pymss-runtime-state.json").read_text(encoding="utf-8"), original_state)
+        self.assertFalse((self.envs_dir / ".cpu.core-updating").exists())
+        self.assertFalse((self.envs_dir / ".cpu.core-backup").exists())
+
+    def test_interrupted_core_swap_restores_backup_when_final_directory_is_missing(self):
+        env_dir, _python_path = self._make_env("cpu")
+        backup = self.envs_dir / ".cpu.core-backup"
+        env_dir.rename(backup)
+        staging = self.envs_dir / ".cpu.core-updating"
+        staging.mkdir()
+        with mock.patch.object(worker_bootstrap, "RUNTIME_ENVS_DIR", self.envs_dir), \
+             mock.patch.object(worker_bootstrap, "_manifest", return_value=_manifest()):
+            worker_bootstrap._recover_core_update_transactions()
+        self.assertTrue(env_dir.is_dir())
+        self.assertTrue((env_dir / "Scripts" / "python.exe").is_file())
+        self.assertFalse(backup.exists())
+        self.assertFalse(staging.exists())
+
+    def test_interrupted_core_swap_discards_backup_after_valid_final_directory(self):
+        env_dir, _python_path = self._make_env("cpu")
+        backup = self.envs_dir / ".cpu.core-backup"
+        env_dir.rename(backup)
+        env_dir.mkdir()
+        (env_dir / "Scripts").mkdir()
+        (env_dir / "Scripts" / "python.exe").write_text("new", encoding="utf-8")
+        with mock.patch.object(worker_bootstrap, "RUNTIME_ENVS_DIR", self.envs_dir), \
+             mock.patch.object(worker_bootstrap, "ACTIVE_RUNTIME_FILE", self.active_file), \
+             mock.patch.object(worker_bootstrap, "_manifest", return_value=_manifest()), \
+             mock.patch.object(worker_bootstrap, "_probe_python_runtime", return_value=_probe_result("cpu")):
+            worker_bootstrap._recover_core_update_transactions()
+        self.assertTrue(env_dir.is_dir())
+        self.assertEqual((env_dir / "Scripts" / "python.exe").read_text(encoding="utf-8"), "new")
+        self.assertFalse(backup.exists())
+        recovered_state = json.loads((env_dir / "pymss-runtime-state.json").read_text(encoding="utf-8"))
+        active_state = json.loads(self.active_file.read_text(encoding="utf-8"))
+        self.assertEqual(recovered_state["manifestVersion"], "test-1")
+        self.assertEqual(active_state["manifestVersion"], "test-1")
+
     def test_update_core_preserves_torch_constraints_for_mlx(self):
         with mock.patch.object(worker_bootstrap.Path, "unlink", autospec=True, side_effect=lambda self, missing_ok=False: None):
             result, popen_calls, env_dir, _python_path = self._run_update("mlx", missing_records=None)
@@ -186,6 +262,7 @@ class RuntimeCoreUpdateTests(unittest.TestCase):
         self.assertEqual((env_dir / ".pymss-core-update-constraints.txt").read_text(encoding="utf-8"), "torch==2.7.1\n")
         self.assertIn("pymss[proxy]==2.1.4", upgrade_cmd)
         self.assertIn("pymss-core==0.1.6", upgrade_cmd)
+        self.assertIn("mlx", upgrade_cmd)
 
     def test_missing_record_helper_keeps_only_core_packages(self):
         python_path = self.root / "python.exe"
