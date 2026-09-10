@@ -76,10 +76,52 @@ export type SimpleStepDraft = {
 
 export type SimpleEditorPoint = { x: number; y: number }
 
+export type SimpleEditorBounds = {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
 export type SimpleEditorUi = {
   editor: 'simple'
   viewport: { x: number; y: number; zoom: number }
   nodes: Record<string, SimpleEditorPoint>
+}
+
+/** Calculate a centered viewport that contains all visible simple-editor nodes. */
+export function fitSimpleEditorViewport(
+  bounds: SimpleEditorBounds[],
+  canvasWidth: number,
+  canvasHeight: number,
+  options: { padding?: number; minZoom?: number; maxZoom?: number } = {},
+) {
+  const validBounds = bounds.filter(item => [item.x, item.y, item.width, item.height].every(Number.isFinite))
+  if (!validBounds.length || !Number.isFinite(canvasWidth) || !Number.isFinite(canvasHeight) || canvasWidth <= 0 || canvasHeight <= 0) {
+    return { x: 0, y: 0, zoom: 1 }
+  }
+
+  const paddingValue = Number(options.padding ?? 48)
+  const minZoomValue = Number(options.minZoom ?? 0.35)
+  const maxZoomValue = Number(options.maxZoom ?? 1.8)
+  const padding = Number.isFinite(paddingValue) ? Math.max(0, paddingValue) : 48
+  const minZoom = Number.isFinite(minZoomValue) ? Math.max(0.01, minZoomValue) : 0.35
+  const maxZoom = Number.isFinite(maxZoomValue) ? Math.max(minZoom, maxZoomValue) : Math.max(minZoom, 1.8)
+  const left = Math.min(...validBounds.map(item => item.x))
+  const top = Math.min(...validBounds.map(item => item.y))
+  const right = Math.max(...validBounds.map(item => item.x + Math.max(0, item.width)))
+  const bottom = Math.max(...validBounds.map(item => item.y + Math.max(0, item.height)))
+  const contentWidth = Math.max(1, right - left)
+  const contentHeight = Math.max(1, bottom - top)
+  const availableWidth = Math.max(1, canvasWidth - padding * 2)
+  const availableHeight = Math.max(1, canvasHeight - padding * 2)
+  const zoom = Math.min(maxZoom, Math.max(minZoom, Math.min(availableWidth / contentWidth, availableHeight / contentHeight)))
+
+  return {
+    x: (canvasWidth - contentWidth * zoom) / 2 - left * zoom,
+    y: (canvasHeight - contentHeight * zoom) / 2 - top * zoom,
+    zoom,
+  }
 }
 
 export type SimpleDraft = {

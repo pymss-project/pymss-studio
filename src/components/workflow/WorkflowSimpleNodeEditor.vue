@@ -9,6 +9,7 @@ import {
   createDefaultSimpleEditorUi,
   createStepDraft,
   renderSimpleOutputFilename,
+  fitSimpleEditorViewport,
   type SimpleDraft,
   type SimpleEditorPoint,
   type SimpleStepDraft,
@@ -568,8 +569,30 @@ function autoLayout() {
 }
 
 function fitView() {
-  if (draft.value.ui.viewport.x === 0 && draft.value.ui.viewport.y === 0 && draft.value.ui.viewport.zoom === 1) return
-  draft.value.ui.viewport = { x: 0, y: 0, zoom: 1 }
+  const canvas = canvasRef.value
+  if (!canvas || canvas.clientWidth <= 0 || canvas.clientHeight <= 0) return
+
+  const currentZoom = Math.max(0.01, zoom.value)
+  const stepIds = draft.value.steps.map(step => step.id)
+  let stepIndex = 0
+  const bounds = Array.from(canvas.querySelectorAll<HTMLElement>('[data-simple-node]')).flatMap((element) => {
+    const id = element.dataset.simpleNode === 'step' ? stepIds[stepIndex++] : element.dataset.simpleNode
+    if (!id) return []
+    const point = nodePoint(id)
+    const rect = element.getBoundingClientRect()
+    const width = rect.width / currentZoom
+    const height = rect.height / currentZoom
+    return width > 0 && height > 0 ? [{ x: point.x, y: point.y, width, height }] : []
+  })
+  if (!bounds.length) return
+
+  const viewport = fitSimpleEditorViewport(bounds, canvas.clientWidth, canvas.clientHeight)
+  if (
+    Math.abs(viewport.x - draft.value.ui.viewport.x) < 0.01
+    && Math.abs(viewport.y - draft.value.ui.viewport.y) < 0.01
+    && Math.abs(viewport.zoom - draft.value.ui.viewport.zoom) < 0.001
+  ) return
+  draft.value.ui.viewport = viewport
   recordHistory()
 }
 

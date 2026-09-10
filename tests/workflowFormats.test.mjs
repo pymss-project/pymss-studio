@@ -36,6 +36,7 @@ const {
   analyzeSimpleWorkflow,
   buildSimpleWorkflowDefinition,
   createDefaultSimpleEditorUi,
+  fitSimpleEditorViewport,
   hydrateSimpleWorkflow,
   renderSimpleOutputFilename,
   resolveWorkflowOpenMode,
@@ -264,6 +265,17 @@ test('simple editor layout metadata round-trips and legacy definitions receive d
   assert.deepEqual(restored.ui.viewport, ui.viewport)
   assert.deepEqual(restored.ui.nodes[legacy.steps[0].id], { x: 512, y: 96 })
   assert.equal(analyzeSimpleWorkflow(definition).editable, true)
+})
+
+test('simple editor fit view centers the complete node bounds instead of resetting zoom', () => {
+  const viewport = fitSimpleEditorViewport([
+    { x: 120, y: 80, width: 100, height: 80 },
+    { x: 520, y: 260, width: 140, height: 100 },
+  ], 800, 600, { padding: 40 })
+
+  assert.ok(Math.abs(viewport.zoom - 4 / 3) < 1e-9)
+  assert.ok(Math.abs(viewport.x + 120) < 1e-9)
+  assert.ok(Math.abs(viewport.y - 20 / 3) < 1e-9)
 })
 
 test('simple filename preview follows edited template and output format', () => {
