@@ -2887,11 +2887,6 @@ pub async fn start_runtime_core_update(
     state: State<'_, AppState>,
     payload: Value,
 ) -> AppResult<Value> {
-    if let Ok(tasks) = state.tasks.lock() {
-        if tasks.keys().any(|id| id.starts_with("runtime_core_update_")) {
-            return Err(AppError::Worker("runtime core update is already running".into()));
-        }
-    }
     let task_id = payload
         .get("taskId")
         .and_then(Value::as_str)

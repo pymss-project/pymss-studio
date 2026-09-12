@@ -208,11 +208,6 @@ def _env_python_path(backend: str) -> Path:
     return _runtime_command_path(candidate)
 
 
-def _python_path_for_env(env_dir: Path) -> Path:
-    """Resolve the interpreter inside an arbitrary environment directory."""
-    return _runtime_command_path(env_dir / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python"))
-
-
 def _env_state_path(backend: str) -> Path:
     return _env_dir(backend) / "pymss-runtime-state.json"
 
@@ -245,10 +240,10 @@ def _recover_reinstall_backups() -> None:
 
 
 def _recover_core_update_transactions() -> None:
-    """Finish or roll back a core update interrupted during the directory swap.
+    """Recover directory swaps left by releases with transactional core updates.
 
-    The update is deliberately transactional, but a process can still be killed between the
-    two renames.  Never leave a hidden backup to be mistaken for an installed environment:
+    New updates run in place, but an older process may have stopped between its two renames.
+    Never leave a hidden backup to be mistaken for an installed environment:
     validate the visible directory first, otherwise restore the original copy.
     """
     if not RUNTIME_ENVS_DIR.is_dir():
@@ -1941,23 +1936,10 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] update pymss core mirror={mirror}\n", encoding="utf-8")
     _emit("runtime_core_update_started", {"backend": backend, "logPath": str(log_path)}, task_id)
-    previous_active_state = _read_runtime_state()
-
-    staging_dir: Path | None = None
-    swap_backup_dir: Path | None = None
 
     def append_log(stage: str, message: str) -> None:
         with log_path.open("a", encoding="utf-8", errors="replace") as file:
             file.write(f"[{stage}] {message}\n")
-        # The active directory is copied before pip runs.  Mirror subsequent log lines into the
-        # staged copy so the final environment retains the complete update log after the swap.
-        if staging_dir and staging_dir.exists():
-            try:
-                staged_log = staging_dir / log_path.name
-                with staged_log.open("a", encoding="utf-8", errors="replace") as file:
-                    file.write(f"[{stage}] {message}\n")
-            except OSError:
-                pass
 
     # Keep dependency resolution enabled so new dependencies introduced by pymss are installed,
     # but constrain Torch to the build already installed in this backend.
@@ -1972,29 +1954,29 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
         return emit_error("RUNTIME_CORE_UPDATE_FAILED", "Unable to determine the installed Torch version; refusing to update the runtime core.", task_id=task_id, recoverable=True)
     constraints_path: Path | None = None
     try:
-        # Work on a sibling copy.  The active environment remains runnable while pip resolves
-        # packages, and a failed update can discard the copy without touching the user's working
-        # runtime.  The final directory swap is performed only after the live probe succeeds.
-        environment_bytes = _dir_size_bytes(env_dir)
-        free_bytes = shutil.disk_usage(RUNTIME_ENVS_DIR).free
-        required_bytes = environment_bytes + 256 * 1024 * 1024
-        if free_bytes < required_bytes:
-            raise RuntimeError(
-                "Insufficient disk space for a transactional runtime update: "
-                f"need {required_bytes} bytes, available {free_bytes} bytes"
-            )
-        staging_dir = RUNTIME_ENVS_DIR / f".{backend}.core-updating"
-        if staging_dir.exists():
-            shutil.rmtree(staging_dir, ignore_errors=True)
-        shutil.copytree(env_dir, staging_dir, symlinks=True)
-        _repair_runtime_venv_config(staging_dir)
-        work_python_path = _python_path_for_env(staging_dir)
-        if not work_python_path.is_file():
-            raise RuntimeError(f"Staged runtime Python not found: {work_python_path}")
+        from packaging.requirements import Requirement
 
-        constraints_path = staging_dir / ".pymss-core-update-constraints.txt"
-        _atomic_write_text(constraints_path, f"torch=={torch_version}\n")
-        command = [str(work_python_path), "-m", "pip", "install", "--upgrade", "--no-cache-dir", "--only-binary=:all:", "--prefer-binary"]
+        # Update the selected environment directly. A failed pip run may need a retry, but must
+        # never remove or replace this directory. Runtime metadata is committed after validation.
+        _repair_runtime_venv_config(env_dir)
+        common_requirements = [
+            str(requirement)
+            for name, requirement in manifest.get("common", {}).items()
+            if name not in {"pymss", "pymss-core"}
+        ]
+        backend_extras = [str(requirement) for requirement in _spec.get("extras", []) or []]
+        # Keep manifest bounds during core-only resolution too. Constraints do not install or
+        # upgrade these packages; they reject incompatible dependencies before pip replaces files.
+        constraints = [f"torch=={torch_version}"]
+        for value in [*manifest.get("common", {}).values(), *backend_extras]:
+            requirement = Requirement(str(value))
+            requirement.extras.clear()  # Pip constraints accept distributions, not extras.
+            constraints.append(str(requirement))
+        constraints_path = env_dir / ".pymss-core-update-constraints.txt"
+        _atomic_write_text(constraints_path, "\n".join(constraints) + "\n")
+        # Exact core pins select the requested versions without --upgrade. This keeps already
+        # satisfied dependencies, including manifest requirements, at their installed versions.
+        command = [str(python_path), "-m", "pip", "install", "--no-cache-dir", "--only-binary=:all:", "--prefer-binary"]
         command.extend(["--constraint", str(constraints_path)])
         if index_url:
             command.extend(["--index-url", index_url])
@@ -2007,13 +1989,10 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             target_pymss_version,
         )
         pymss_core_requirement = f"pymss-core=={target_pymss_core_version}"
-        common_requirements = [
-            str(requirement)
-            for name, requirement in manifest.get("common", {}).items()
-            if name not in {"pymss", "pymss-core"}
-        ]
-        backend_extras = [str(requirement) for requirement in _spec.get("extras", []) or []]
-        command.extend([*common_requirements, pymss_requirement, pymss_core_requirement, *backend_extras])
+        requirements = [pymss_requirement, pymss_core_requirement]
+        if manifest_status == "older":
+            requirements.extend([*common_requirements, *backend_extras])
+        command.extend(requirements)
 
         def run_pip(command: list[str], stage: str) -> None:
             process = subprocess.Popen(
@@ -2045,14 +2024,15 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             if process.wait() != 0:
                 raise RuntimeError(f"pip failed during {stage} with exit code {process.returncode}")
 
-        _ensure_runtime_pip(work_python_path, task_id, append_log)
+        _emit("runtime_core_update_stage", {"stage": "prepare", "message": "Preparing core package update"}, task_id)
+        _ensure_runtime_pip(python_path, task_id, append_log)
 
         # Releases before the metadata-preserving prune fix may have a working package but no
         # RECORD file.  Pip refuses to uninstall such a distribution, so repair only these two
         # small core packages from their currently installed versions before the real upgrade.
         # ``--ignore-installed --no-deps`` is deliberately limited to this repair command: the
         # normal update below keeps dependency resolution and the Torch constraint unchanged.
-        missing_records = _runtime_core_missing_records(work_python_path)
+        missing_records = _runtime_core_missing_records(python_path)
         if missing_records:
             repair_requirements = [
                 f"{name}=={missing_records[name]}"
@@ -2060,7 +2040,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
                 if name in missing_records
             ]
             repair_command = [
-                str(work_python_path), "-m", "pip", "install", "--ignore-installed", "--no-deps",
+                str(python_path), "-m", "pip", "install", "--ignore-installed", "--no-deps",
                 "--no-cache-dir", "--only-binary=:all:", "--prefer-binary",
             ]
             if index_url:
@@ -2073,25 +2053,26 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             append_log("metadata", repair_message)
             _emit("runtime_core_update_stage", {"stage": "metadata", "message": repair_message}, task_id)
             run_pip(repair_command, "metadata")
-            remaining_records = _runtime_core_missing_records(work_python_path)
+            remaining_records = _runtime_core_missing_records(python_path)
             if remaining_records:
                 raise RuntimeError(
                     "pip metadata repair did not restore RECORD for: "
                     + ", ".join(sorted(remaining_records))
                 )
 
+        stage = "manifest" if manifest_status == "older" else "core"
         _emit(
             "runtime_core_update_stage",
             {
-                "stage": "manifest",
-                "command": "pip install --upgrade " + " ".join(
-                    [*common_requirements, pymss_requirement, pymss_core_requirement, *backend_extras]
-                ),
+                "stage": stage,
+                "message": "Synchronizing runtime dependencies" if stage == "manifest" else "Updating core packages",
+                "command": "pip install " + " ".join(requirements),
             },
             task_id,
         )
-        run_pip(command, "manifest")
-        probed = _probe_python_runtime(work_python_path, _backend_extra_names(_manifest(), backend))
+        run_pip(command, stage)
+        _emit("runtime_core_update_stage", {"stage": "verify", "message": "Verifying runtime packages"}, task_id)
+        probed = _probe_python_runtime(python_path, _backend_extra_names(manifest, backend))
         manifest_ok, manifest_failures = _manifest_versions_are_satisfied(probed, manifest, backend)
         if not manifest_ok:
             raise RuntimeError(
@@ -2125,35 +2106,15 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             "pymssGraphAvailable": bool(probed.get("pymssGraphAvailable")),
             "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        swap_backup_dir = RUNTIME_ENVS_DIR / f".{backend}.core-backup"
-        if swap_backup_dir.exists():
-            shutil.rmtree(swap_backup_dir, ignore_errors=True)
-        env_dir.rename(swap_backup_dir)
-        try:
-            staging_dir.rename(env_dir)
-            staging_dir = None
-            if env_state_path:
-                env_state = dict(updated)
-                env_state.pop("pythonPath", None)
-                env_state.pop("logPath", None)
-                env_state.pop("activatedAt", None)
-                env_state.pop("source", None)
-                _atomic_write_json(env_state_path, env_state)
-            _write_runtime_state(updated)
-        except Exception:
-            if env_dir.exists():
-                shutil.rmtree(env_dir, ignore_errors=True)
-            if swap_backup_dir.exists():
-                swap_backup_dir.rename(env_dir)
-            swap_backup_dir = None
-            if previous_active_state:
-                try:
-                    _write_runtime_state(previous_active_state)
-                except OSError:
-                    pass
-            raise
-        shutil.rmtree(swap_backup_dir, ignore_errors=True)
-        swap_backup_dir = None
+        if env_state_path:
+            env_state = dict(updated)
+            env_state.pop("pythonPath", None)
+            env_state.pop("logPath", None)
+            env_state.pop("activatedAt", None)
+            env_state.pop("source", None)
+            _atomic_write_json(env_state_path, env_state)
+        _write_runtime_state(updated)
+        append_log("complete", "Core package update completed")
         _emit("runtime_core_update_finished", {"backend": backend, "state": updated, "logPath": str(log_path)}, task_id)
         return 0
     except Exception as exc:
@@ -2168,20 +2129,8 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             extra={"backend": backend, "logPath": str(log_path)},
         )
     finally:
-        for path in {constraints_path, env_dir / ".pymss-core-update-constraints.txt"}:
-            if not path:
-                continue
+        if constraints_path:
             try:
-                path.unlink()
+                constraints_path.unlink()
             except OSError:
                 pass
-        if staging_dir and staging_dir.exists():
-            shutil.rmtree(staging_dir, ignore_errors=True)
-        if swap_backup_dir and swap_backup_dir.exists():
-            if not env_dir.exists():
-                try:
-                    swap_backup_dir.rename(env_dir)
-                except OSError:
-                    pass
-            else:
-                shutil.rmtree(swap_backup_dir, ignore_errors=True)

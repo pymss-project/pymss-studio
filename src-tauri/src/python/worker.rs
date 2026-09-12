@@ -23,6 +23,63 @@ const PYTHON_TERMINAL_LOG_PREFIX: &str = "__PYMSS_STUDIO_TERMINAL_LOG__";
 
 static PAYLOAD_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+// Core packages are updated in the active environment. Hold a shared lease for every worker
+// using that interpreter, and an exclusive lease for pip, including the process-start window.
+static RUNTIME_ACCESS: Mutex<RuntimeAccess> = Mutex::new(RuntimeAccess { users: 0, updating: false });
+
+#[derive(Default)]
+struct RuntimeAccess {
+    users: usize,
+    updating: bool,
+}
+
+struct RuntimeAccessGuard<'a> {
+    access: &'a Mutex<RuntimeAccess>,
+    updating: bool,
+}
+
+impl Drop for RuntimeAccessGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut access) = self.access.lock() {
+            if self.updating {
+                access.updating = false;
+            } else {
+                access.users -= 1;
+            }
+        }
+    }
+}
+
+fn uses_bootstrap_python(command: &str) -> bool {
+    matches!(command,
+        "health" | "runtime_info" | "runtime_env_sizes" | "runtime_core_versions"
+        | "install_runtime" | "activate_runtime" | "delete_runtime" | "update_runtime_core"
+        | "test_connection"
+    )
+}
+
+fn acquire_runtime_access<'a>(
+    access: &'a Mutex<RuntimeAccess>, command: &str,
+) -> AppResult<Option<RuntimeAccessGuard<'a>>> {
+    let updating = command == "update_runtime_core";
+    if !updating && uses_bootstrap_python(command) {
+        return Ok(None);
+    }
+    let mut state = access.lock()
+        .map_err(|_| AppError::Worker("runtime access lock poisoned".into()))?;
+    if state.updating || (updating && state.users > 0) {
+        return Err(AppError::Worker(
+            "RUNTIME_BUSY: The runtime is in use. Wait for running operations to finish before updating core packages or starting another operation.".into(),
+        ));
+    }
+    if updating {
+        state.updating = true;
+    } else {
+        state.users += 1;
+    }
+    Ok(Some(RuntimeAccessGuard { access, updating }))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ActiveRuntimeRecord {
@@ -424,18 +481,7 @@ fn build_worker_command(
     // Runtime management must never run inside the environment it is managing: the bootstrap
     // interpreter is the only one guaranteed to exist while an environment is being built,
     // switched, or deleted.
-    let python = if matches!(
-        command,
-        "health"
-            | "runtime_info"
-            | "runtime_env_sizes"
-            | "runtime_core_versions"
-            | "install_runtime"
-            | "activate_runtime"
-            | "delete_runtime"
-            | "update_runtime_core"
-            | "test_connection"
-    ) {
+    let python = if uses_bootstrap_python(command) {
         bootstrap_python.clone()
     } else {
         active_runtime_python_path(app)?.ok_or_else(|| {
@@ -827,6 +873,7 @@ pub fn run_worker_with_payload(
     command: &str,
     payload: Option<Value>,
 ) -> AppResult<Value> {
+    let _runtime_access = acquire_runtime_access(&RUNTIME_ACCESS, command)?;
     let payload_summary = payload.as_ref().map(summarize_payload).unwrap_or_else(|| "none".to_string());
     session_log::append(
         app,
@@ -962,6 +1009,7 @@ pub fn spawn_worker_background(
     task_id: String,
     payload: Value,
 ) -> AppResult<()> {
+    let mut runtime_access = acquire_runtime_access(&RUNTIME_ACCESS, command)?;
     let mut registered_task_ids = vec![task_id.clone()];
     if let Some(tasks) = payload.get("tasks").and_then(Value::as_array) {
         for item in tasks {
@@ -1053,6 +1101,8 @@ pub fn spawn_worker_background(
     }
     std::thread::spawn(move || {
         let mut terminal_task_ids: HashSet<String> = HashSet::new();
+        let mut core_terminal_events = Vec::new();
+        let mut core_terminal_error = None;
         read_lossy_lines(stdout, |line| {
             if line.trim().is_empty() {
                 return;
@@ -1073,12 +1123,22 @@ pub fn spawn_worker_background(
                                 terminal_task_ids.insert(request_id.to_string());
                             } else {
                                 let message = worker_error_message(&envelope);
-                                emit_task_error_to_all(&app, &registered_task_ids, message);
+                                if command_name == "update_runtime_core" {
+                                    core_terminal_error = Some(message);
+                                } else {
+                                    emit_task_error_to_all(&app, &registered_task_ids, message);
+                                }
                                 terminal_task_ids.extend(registered_task_ids.iter().cloned());
                             }
                         } else {
                             terminal_task_ids.insert(task_id.clone());
                         }
+                    }
+                    if command_name == "update_runtime_core"
+                        && is_background_terminal_event(&command_name, envelope.event_type.as_str())
+                    {
+                        core_terminal_events.push(envelope);
+                        return;
                     }
                     log_worker_event(&app, &command_name, &envelope);
                     let _ = app.emit("pymss://worker-event", &envelope);
@@ -1105,6 +1165,15 @@ pub fn spawn_worker_background(
         } else {
             None
         };
+        drop(runtime_access.take());
+        // Finish Python cleanup before the terminal event starts the UI's environment refresh.
+        if let Some(message) = core_terminal_error {
+            emit_task_error_to_all(&app, &registered_task_ids, message);
+        }
+        for envelope in core_terminal_events {
+            log_worker_event(&app, &command_name, &envelope);
+            let _ = app.emit("pymss://worker-event", &envelope);
+        }
         session_log::append(
             &app,
             match exit_status.as_ref() {
@@ -1190,6 +1259,44 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::path::Path;
+
+    #[test]
+    fn core_update_excludes_parallel_runtime_users_in_both_directions() {
+        let access = std::sync::Mutex::new(super::RuntimeAccess::default());
+        let inference = super::acquire_runtime_access(&access, "infer").unwrap();
+        let workflow = super::acquire_runtime_access(&access, "infer_workflow").unwrap();
+        assert!(super::acquire_runtime_access(&access, "update_runtime_core").is_err());
+        drop(inference);
+        assert!(super::acquire_runtime_access(&access, "update_runtime_core").is_err());
+        drop(workflow);
+
+        let update = super::acquire_runtime_access(&access, "update_runtime_core").unwrap();
+        for command in ["infer", "infer_workflow", "env_info", "list_models", "audio_tools", "update_runtime_core"] {
+            let result = super::acquire_runtime_access(&access, command);
+            assert!(result.is_err(), "{command} must wait for the core update");
+            assert!(result.err().unwrap().to_string().contains("RUNTIME_BUSY"));
+        }
+        for command in ["health", "runtime_info", "runtime_core_versions", "runtime_env_sizes"] {
+            assert!(super::acquire_runtime_access(&access, command).unwrap().is_none());
+        }
+        drop(update);
+        assert!(super::acquire_runtime_access(&access, "infer").is_ok());
+    }
+
+    #[test]
+    fn runtime_access_lease_can_follow_background_process_and_release_on_failure() {
+        let access = std::sync::Mutex::new(super::RuntimeAccess::default());
+        let lease = super::acquire_runtime_access(&access, "update_runtime_core").unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(move || drop(lease)).join().unwrap();
+        });
+        let fail_start = || -> crate::error::AppResult<()> {
+            let _lease = super::acquire_runtime_access(&access, "infer")?;
+            Err(crate::error::AppError::Worker("process start failed".into()))
+        };
+        assert!(fail_start().is_err());
+        assert!(super::acquire_runtime_access(&access, "update_runtime_core").is_ok());
+    }
 
     fn temp_root(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
