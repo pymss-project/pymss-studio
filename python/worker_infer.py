@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from threading import Lock
 from typing import Any
+from uuid import uuid4
 
 from worker_audio import _apply_stereo_pan, _equal_power_fade, _read_audio, _resample_audio
 from worker_models import (
@@ -140,9 +141,17 @@ def _claim_output_path(path: Path, reserved: set[Path] | None = None) -> Path:
         except FileExistsError:
             continue
         return candidate
-    fallback = path.with_name(f"{path.stem}_{int(datetime.now().timestamp_ns())}{path.suffix}")
-    fallback.touch(exist_ok=False)
-    return fallback
+    # Keep reservations exclusive even if a generated suffix also collides.
+    for _ in range(10):
+        fallback = path.with_name(f"{path.stem}_{uuid4().hex}{path.suffix}")
+        if fallback in reserved:
+            continue
+        try:
+            fallback.touch(exist_ok=False)
+        except FileExistsError:
+            continue
+        return fallback
+    raise FileExistsError(f"Failed to reserve a unique output filename: {path}")
 
 
 def _studio_separator_type() -> type[Any]:

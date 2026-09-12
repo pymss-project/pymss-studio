@@ -20,6 +20,8 @@ import json
 import re
 import tempfile
 import traceback
+from contextlib import ExitStack
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -423,6 +425,55 @@ def _finalize_simple_output_paths(
     return finalized
 
 
+def _ensemble_output_stem(definition: Any) -> str | None:
+    """Only Studio-generated ensemble graphs use the separation naming policy."""
+    if not isinstance(definition, dict) or not isinstance(definition.get("nodes"), list):
+        return None
+    extra = definition.get("extra")
+    if not isinstance(extra, dict) or "studioEnsemble" not in extra:
+        return None
+    ensemble = extra["studioEnsemble"]
+    stem = ensemble.get("outputStem") if isinstance(ensemble, dict) else None
+    if not isinstance(stem, str) or not stem.strip():
+        raise RuntimeError("Ensemble output stem is required")
+    return stem.strip()
+
+
+def _finalize_ensemble_output(saved: Any, *, payload: dict[str, Any], input_path: str,
+                              stem: str, output_dir: Path, temporary_dir: Path,
+                              started_at: datetime) -> dict[str, Any]:
+    from worker_infer import _claim_output_path, _normalize_output_naming, _replace_output_tokens
+    from worker_protocol import _as_int
+
+    paths = [Path(path) for path in saved if path is not None and str(path).strip()]
+    if len(paths) != 1:
+        raise RuntimeError("Ensemble must produce exactly one audio output")
+    source = paths[0]
+    if not source.is_file() or not source.resolve().is_relative_to(temporary_dir.resolve()):
+        raise RuntimeError("Ensemble audio output is missing or outside its output directory")
+    naming = _normalize_output_naming(payload.get("outputNaming"))
+    name = _replace_output_tokens(
+        naming["template"] if naming["enabled"] else "%filename%_%stem%",
+        input_path=input_path, stem=stem, stem_index=0,
+        input_index=_as_int(payload.get("inputIndex")) or 1, model="Ensemble", now=started_at,
+    )
+    record = next((record for record in getattr(saved, "records", []) or []
+                   if getattr(record, "path", None) and Path(record.path).resolve() == source.resolve()), None)
+    target = _claim_output_path(output_dir / f"{name}{source.suffix}")
+    try:
+        source.replace(target)
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+    output = {"stem": stem, "path": str(target), "name": target.name}
+    if record and record.sample_rate:
+        output["sampleRate"] = record.sample_rate
+    return {
+        "files": [str(target)], "outputs": [output],
+        "outputDir": str(output_dir.resolve()), "outputFormat": target.suffix.lstrip("."),
+    }
+
+
 def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
                inputs: dict[str, str] | None, output_dir: str, output_layout: str) -> dict[str, Any]:
     try:
@@ -435,6 +486,8 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
     runtime_payload, runtime_inputs = _prepare_legacy_global_input(payload, input_path, inputs)
     primary = input_path or (list(runtime_inputs.values())[0] if runtime_inputs else "")
     workflow_definition = runtime_payload.get("workflow")
+    ensemble_stem = _ensemble_output_stem(workflow_definition)
+    started_at = datetime.now()
     if isinstance(workflow_definition, dict) and "steps" in workflow_definition:
         runtime_payload = {
             **runtime_payload,
@@ -472,21 +525,34 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
         dag = graph.load_comfy_file(workflow_path)
 
     task_output_dir.mkdir(parents=True, exist_ok=True)
-    saved = graph.run_dag(
-        dag,
-        output_dir=task_output_dir,
-        input_path=input_path,
-        inputs=runtime_inputs or None,
-        progress_callback=_emit_progress(task_id),
-        device=_resolve_device(payload),
-        model_dir=payload.get("modelDir") or None,
-        download=bool(payload.get("downloadMethod") and payload.get("downloadMethod") != "never"),
-        source=str(payload.get("source") or "modelscope"),
-        output_format=output_format,
-        audio_params=payload.get("audioParams") if isinstance(payload.get("audioParams"), dict) else None,
-        debug=bool(payload.get("debug")),
-        strict=True,
-    )
+    with ExitStack() as cleanup:
+        graph_output_dir = task_output_dir
+        if ensemble_stem is not None:
+            # The ensemble node loses source/stem metadata and saves as audio.ext. Isolate that
+            # intermediate file, then reserve and rename the final output on the same filesystem.
+            graph_output_dir = Path(cleanup.enter_context(tempfile.TemporaryDirectory(
+                prefix=".pymss-ensemble-", dir=task_output_dir,
+            )))
+        saved = graph.run_dag(
+            dag,
+            output_dir=graph_output_dir,
+            input_path=input_path,
+            inputs=runtime_inputs or None,
+            progress_callback=_emit_progress(task_id),
+            device=_resolve_device(payload),
+            model_dir=payload.get("modelDir") or None,
+            download=bool(payload.get("downloadMethod") and payload.get("downloadMethod") != "never"),
+            source=str(payload.get("source") or "modelscope"),
+            output_format=output_format,
+            audio_params=payload.get("audioParams") if isinstance(payload.get("audioParams"), dict) else None,
+            debug=bool(payload.get("debug")),
+            strict=True,
+        )
+        if ensemble_stem is not None:
+            return _finalize_ensemble_output(
+                saved, payload=payload, input_path=primary, stem=ensemble_stem,
+                output_dir=task_output_dir, temporary_dir=graph_output_dir, started_at=started_at,
+            )
     saved_paths = [str(path).strip() for path in saved if path is not None and str(path).strip()]
     output_stems: list[str] = []
     if fmt == "yaml" and len(simple_output_metadata) == len(saved_paths):
@@ -571,7 +637,7 @@ def _cmd_infer_workflow_batch(payload: dict[str, Any], raw_tasks: list[Any]) -> 
 
     failed = False
     try:
-        for item in raw_tasks:
+        for input_index, item in enumerate(raw_tasks, 1):
             if not isinstance(item, dict):
                 continue
             task_id = str(item.get("taskId") or "")
@@ -591,7 +657,7 @@ def _cmd_infer_workflow_batch(payload: dict[str, Any], raw_tasks: list[Any]) -> 
             }, task_id=task_id)
             emit("task_stage", {"stage": "validating_input", "message": "Validating workflow input", "progress": 12}, task_id=task_id)
             try:
-                result = _run_pymss({**payload, "taskId": task_id}, task_id,
+                result = _run_pymss({**payload, "taskId": task_id, "inputIndex": item.get("inputIndex", input_index)}, task_id,
                                     input_path=input_path or None,
                                     inputs=item_inputs or None,
                                     output_dir=output_dir, output_layout=output_layout)

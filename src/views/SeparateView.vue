@@ -335,7 +335,9 @@ function normalizeStemOrder(order: string[], stems: string[]) {
   return next
 }
 
-const orderedOutputStems = computed(() => normalizeStemOrder(customStemOrder.value, checkedOutputStems.value))
+const orderedOutputStems = computed(() => runMode.value === 'model' && ensembleEnabled.value
+  ? [ensembleStem.value.trim()].filter(Boolean)
+  : normalizeStemOrder(customStemOrder.value, checkedOutputStems.value))
 const outputNamingConfig = computed(() => ({
   enabled: Boolean(outputNamingTemplate.value.trim()),
   template: outputNamingTemplate.value.trim() || '%index%_%filename%_%stem%',
@@ -894,7 +896,7 @@ function formatOutputNamingPreviewParts(stem: string, stemIndex: number) {
   const inputPath = inputFiles.value[0] || t('separate.resultFolderPreview')
   const modelName = runMode.value === 'workflow'
     ? selectedWorkflow.value?.name || t('separate.workflow')
-    : selectedModelName.value || t('separate.model')
+    : ensembleEnabled.value ? 'Ensemble' : selectedModelName.value || t('separate.model')
   const now = new Date()
   const values: Record<string, string> = {
     '%index%': padNumber(stemIndex + 1),
@@ -1516,7 +1518,7 @@ function buildEnsembleWorkflow(): WorkflowEntry {
       nodes,
       links,
       version: 1,
-      extra: { appDefaults: { device, output_format: fmt } },
+      extra: { appDefaults: { device, output_format: fmt }, studioEnsemble: { outputStem } },
     } as Record<string, unknown>,
   }
 }
@@ -1798,7 +1800,8 @@ async function retryCurrentTask() {
 
             <div v-if="runMode === 'model'" class="ofield ofield--stems">
               <span class="ofield__label">{{ t('separate.outputStems') }}</span>
-              <div v-if="availableStemNames.length" class="stem-chips">
+              <div v-if="ensembleEnabled" class="ofield__static">{{ ensembleStem || '—' }}</div>
+              <div v-else-if="availableStemNames.length" class="stem-chips">
                 <n-checkbox-group v-model:value="checkedOutputStems" :disabled="isRunModeLocked">
                   <n-checkbox
                     v-for="stem in availableStemNames"

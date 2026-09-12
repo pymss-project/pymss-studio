@@ -332,6 +332,51 @@ class OutputNamingTests(unittest.TestCase):
             self.assertEqual(original.read_bytes(), b"keep")
             self.assertTrue(claimed.is_file())
 
+    def test_claimed_path_remains_available_after_numbered_candidates_are_reserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            original = Path(tmp) / "song_vocals.wav"
+            reserved = {original, *(original.with_name(f"song_vocals_{index}.wav") for index in range(2, 1000))}
+
+            claimed = _claim_output_path(original, reserved)
+
+            self.assertNotIn(claimed, reserved)
+            self.assertEqual(claimed.parent, original.parent)
+            self.assertEqual(claimed.suffix, ".wav")
+            self.assertTrue(claimed.is_file())
+
+    def test_fallback_retries_existing_and_reserved_names_without_overwriting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            original = Path(tmp) / "song_vocals.wav"
+            reserved = {original, *(original.with_name(f"song_vocals_{index}.wav") for index in range(2, 1000))}
+            occupied = original.with_name(f"song_vocals_{'a' * 32}.wav")
+            occupied.write_bytes(b"keep")
+            reserved.add(original.with_name(f"song_vocals_{'b' * 32}.wav"))
+
+            with mock.patch.object(worker_infer, "uuid4", side_effect=[
+                SimpleNamespace(hex=char * 32) for char in "abc"
+            ]) as unique_id:
+                claimed = _claim_output_path(original, reserved)
+
+            self.assertEqual(unique_id.call_count, 3)
+            self.assertEqual(claimed.name, f"song_vocals_{'c' * 32}.wav")
+            self.assertTrue(claimed.is_file())
+            self.assertEqual(occupied.read_bytes(), b"keep")
+
+    def test_fallback_collisions_stop_after_a_bounded_number_of_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            original = Path(tmp) / "song_vocals.wav"
+            reserved = {original, *(original.with_name(f"song_vocals_{index}.wav") for index in range(2, 1000))}
+            occupied = original.with_name(f"song_vocals_{'a' * 32}.wav")
+            occupied.write_bytes(b"keep")
+
+            with mock.patch.object(worker_infer, "uuid4", return_value=SimpleNamespace(hex="a" * 32)) as unique_id:
+                with self.assertRaisesRegex(FileExistsError, "unique output filename"):
+                    _claim_output_path(original, reserved)
+
+            self.assertEqual(unique_id.call_count, 10)
+            self.assertEqual(occupied.read_bytes(), b"keep")
+            self.assertEqual(list(original.parent.iterdir()), [occupied])
+
     def test_separator_releases_its_placeholder_when_audio_encoding_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
