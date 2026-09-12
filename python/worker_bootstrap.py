@@ -348,7 +348,9 @@ def _state_matches_backend(backend: str, state: dict[str, Any]) -> bool:
     return recorded == ("cpu" if backend == "mlx" else backend)
 
 
-def _repaired_env_state(backend: str, state: dict[str, Any], *, persist: bool = True) -> dict[str, Any]:
+def _repaired_env_state(
+    backend: str, state: dict[str, Any], *, persist: bool = True, probed: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Re-derive an environment's torch facts from its own interpreter.
 
     Installs used to record whatever the *active* runtime reported, so a CPU environment
@@ -357,7 +359,8 @@ def _repaired_env_state(backend: str, state: dict[str, Any], *, persist: bool = 
     has to be corrected on read."""
     repaired = dict(state)
     try:
-        probed = _probe_python_runtime(_env_python_path(backend), _backend_extra_names(_manifest(), backend))
+        if probed is None:
+            probed = _probe_python_runtime(_env_python_path(backend), _backend_extra_names(_manifest(), backend))
         repaired.update({
             "pythonVersion": probed.get("pythonVersion") or repaired.get("pythonVersion"),
             "torchVersion": probed.get("torchVersion"),
@@ -384,7 +387,9 @@ def _repaired_env_state(backend: str, state: dict[str, Any], *, persist: bool = 
     return repaired
 
 
-def _read_installed_env_state(backend: str, *, repair: bool = True) -> dict[str, Any] | None:
+def _read_installed_env_state(
+    backend: str, *, repair: bool = True, probed: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     path = _env_state_path(backend)
     try:
         state = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
@@ -393,36 +398,21 @@ def _read_installed_env_state(backend: str, *, repair: bool = True) -> dict[str,
     if not isinstance(state, dict):
         return None
     if int(state.get("stateVersion") or 1) < ENV_STATE_VERSION and not _state_matches_backend(backend, state):
-        state = _repaired_env_state(backend, state, persist=repair)
+        state = _repaired_env_state(backend, state, persist=repair, probed=probed)
     state.pop("source", None)
     return state
 
 
-def _discover_runtime_state(
-    backend: str,
-    python_path: Path,
-    manifest: dict[str, Any],
-    *,
-    persist: bool,
-) -> dict[str, Any] | None:
-    """Rebuild the per-environment record from the interpreter when its cache is absent.
-
-    The directory and interpreter are the durable installation.  ``pymss-runtime-state.json``
-    is a cache written after a successful install, so losing it during an overwrite must not
-    make an otherwise runnable environment disappear from the environment list.
-    """
-    try:
-        probed = _probe_python_runtime(python_path, _backend_extra_names(manifest, backend))
-    except Exception:
-        return None
-    if not _runtime_probe_is_ready(backend, probed, manifest):
-        return None
+def _fresh_runtime_state_from_probe(
+    backend: str, manifest: dict[str, Any], probed: dict[str, Any],
+) -> dict[str, Any]:
+    """Project a validated probe into a new cache record, without merging or writing state."""
     manifest_version = manifest.get("manifestVersion")
     if not _manifest_versions_are_satisfied(probed, manifest, backend)[0]:
         # A directory can be runnable while still carrying an older or incomplete dependency
         # set. Do not stamp a newly discovered cache as current in that case.
         manifest_version = None
-    state = {
+    return {
         "backend": backend,
         "manifestVersion": manifest_version,
         "stateVersion": ENV_STATE_VERSION,
@@ -436,6 +426,30 @@ def _discover_runtime_state(
         "pymssCoreVersion": probed.get("pymssCoreVersion"),
         "pymssGraphAvailable": bool(probed.get("pymssGraphAvailable")),
     }
+
+
+def _discover_runtime_state(
+    backend: str,
+    python_path: Path,
+    manifest: dict[str, Any],
+    *,
+    persist: bool,
+    probed: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Rebuild the per-environment record from the interpreter when its cache is absent.
+
+    The directory and interpreter are the durable installation.  ``pymss-runtime-state.json``
+    is a cache written after a successful install, so losing it during an overwrite must not
+    make an otherwise runnable environment disappear from the environment list.
+    """
+    try:
+        if probed is None:
+            probed = _probe_python_runtime(python_path, _backend_extra_names(manifest, backend))
+    except Exception:
+        return None
+    if not _runtime_probe_is_ready(backend, probed, manifest):
+        return None
+    state = _fresh_runtime_state_from_probe(backend, manifest, probed)
     if persist:
         try:
             _atomic_write_json(_env_state_path(backend), state)
@@ -573,6 +587,7 @@ def _env_size_targets(manifest: dict[str, Any]) -> dict[str, Path]:
 
 def _probe_python_runtime(python_path: Path, extras: list[str] | None = None) -> dict[str, Any]:
     extras = extras or []
+    package_names = list(_manifest()["common"].keys()) + extras
     script = """
 import importlib.util, json, platform
 from importlib import metadata
@@ -600,10 +615,29 @@ if importlib.util.find_spec('torch') is not None:
     except Exception as exc:
         result['torchBackend'] = f'error:{exc}'
 print(json.dumps(result, ensure_ascii=False))
-""".replace("%PACKAGES%", repr(json.dumps(list(_manifest()["common"].keys()) + extras))) \
+""".replace("%PACKAGES%", repr(json.dumps(package_names))) \
    .replace("%MAPPING%", repr(json.dumps(PACKAGE_IMPORT_NAMES)))
-    output = subprocess.check_output([str(python_path), "-c", script], text=True, encoding="utf-8", errors="replace")
-    return json.loads(output.strip() or "{}")
+    output = subprocess.check_output(
+        [str(python_path), "-c", script], text=True, encoding="utf-8", errors="replace", stderr=subprocess.PIPE,
+    )
+    result = json.loads(output)
+    if (
+        not isinstance(result, dict)
+        or not isinstance(result.get("pythonVersion"), str)
+        or not isinstance(result.get("packages"), dict)
+        or not isinstance(result.get("packageVersions"), dict)
+        or not isinstance(result.get("torchBackend"), str)
+        or not isinstance(result.get("acceleratorAvailable"), bool)
+        or not isinstance(result.get("pymssGraphAvailable"), bool)
+        or any(not isinstance(result["packages"].get(name), bool) for name in package_names)
+        or any(
+            name not in result["packageVersions"]
+            or not isinstance(result["packageVersions"][name], (str, type(None)))
+            for name in package_names
+        )
+    ):
+        raise ValueError("Python runtime probe returned an incomplete response")
+    return result
 
 
 def _probe_python_package_versions(python_path: Path, package_names: list[str]) -> dict[str, str | None]:
@@ -677,7 +711,34 @@ print(json.dumps(result, ensure_ascii=False))
         return {}
 
 
-def _installed_envs(manifest: dict[str, Any], *, repair: bool = True) -> list[dict[str, Any]]:
+def _installed_envs(
+    manifest: dict[str, Any], *, repair: bool = True,
+    active_python: Path | None = None, active_probe: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    def live_probe_for(python_path: Path, names: list[str]) -> dict[str, Any] | None:
+        # A request may ask about a different backend than the active one. Reuse only
+        # facts from this interpreter that cover every package required by the caller.
+        if active_python and active_probe and _same_path(python_path, active_python):
+            packages = active_probe.get("packages") or {}
+            versions = active_probe.get("packageVersions") or {}
+            if all(name in packages and name in versions for name in names):
+                # Match the caller's own probe shape, so unrelated extras are not
+                # added to a discovered or repaired environment's persisted cache.
+                return {
+                    **active_probe,
+                    "packages": {name: packages[name] for name in names},
+                    "packageVersions": {name: versions[name] for name in names},
+                }
+        return None
+
+    def core_versions(python_path: Path) -> dict[str, str | None]:
+        names = ["pymss", "pymss-core"]
+        probed = live_probe_for(python_path, names)
+        if probed is not None:
+            versions = probed["packageVersions"]
+            return {name: str(versions[name]) if versions[name] else None for name in names}
+        return _probe_python_package_versions(python_path, names)
+
     items: list[dict[str, Any]] = []
     seen_backends: set[str] = set()
     # User-managed environments (highest priority)
@@ -685,18 +746,23 @@ def _installed_envs(manifest: dict[str, Any], *, repair: bool = True) -> list[di
         env_dir = _env_dir(backend)
         if repair and env_dir.is_dir() and not _is_bundled_runtime_env(env_dir):
             try:
-                _repair_runtime_venv_config(env_dir)
-                _make_posix_venv_relocatable(env_dir)
+                configuration_changed = _repair_runtime_venv_config(env_dir)
+                configuration_changed = _make_posix_venv_relocatable(env_dir) or configuration_changed
             except OSError:
-                pass
-        state = _read_installed_env_state(backend, repair=repair)
+                configuration_changed = True
+            if configuration_changed and active_python and _same_path(_env_python_path(backend), active_python):
+                # Repair may replace the base interpreter or its configuration. A
+                # probe from before that change is not valid for subsequent reads.
+                active_probe = None
         python_path = _env_python_path(backend)
+        probed = live_probe_for(python_path, _manifest_requirement_names(manifest, backend))
+        state = _read_installed_env_state(backend, repair=repair, probed=probed)
         if state and str(state.get("backend") or "").strip().lower() not in {"", backend}:
             state = None
         if python_path.is_file() and state is None:
-            state = _discover_runtime_state(backend, python_path, manifest, persist=repair)
+            state = _discover_runtime_state(backend, python_path, manifest, persist=repair, probed=probed)
         if state and python_path.is_file():
-            package_versions = _probe_python_package_versions(python_path, ["pymss", "pymss-core"])
+            package_versions = core_versions(python_path)
             items.append({
                 **state,
                 "backend": backend,
@@ -722,7 +788,9 @@ def _installed_envs(manifest: dict[str, Any], *, repair: bool = True) -> list[di
         and bundled_backend not in seen_backends
     ):
         try:
-            probed = _probe_python_runtime(bundled_python, _backend_extra_names(manifest, bundled_backend))
+            probed = live_probe_for(bundled_python, _manifest_requirement_names(manifest, bundled_backend))
+            if probed is None:
+                probed = _probe_python_runtime(bundled_python, _backend_extra_names(manifest, bundled_backend))
             if _runtime_probe_is_ready(bundled_backend, probed, manifest):
                 bundled_live_state = {
                     **bundled_state,
@@ -761,10 +829,11 @@ def _installed_envs(manifest: dict[str, Any], *, repair: bool = True) -> list[di
             if isinstance(state, dict) and str(state.get("backend") or "").strip().lower() not in {"", backend}:
                 state = None
             if not isinstance(state, dict):
-                state = _discover_runtime_state(backend, bundled_python, manifest, persist=False)
+                probed = live_probe_for(bundled_python, _manifest_requirement_names(manifest, backend))
+                state = _discover_runtime_state(backend, bundled_python, manifest, persist=False, probed=probed)
             if not state:
                 continue
-            package_versions = _probe_python_package_versions(bundled_python, ["pymss", "pymss-core"])
+            package_versions = core_versions(bundled_python)
             items.append({
                 **state,
                 "backend": backend,
@@ -804,7 +873,7 @@ def _envs_with_live_active(
     environment was just probed for real, so prefer that answer over the recording. Idle
     environments keep their recorded state — probing each one would spawn an interpreter per
     environment on every refresh."""
-    environments = _installed_envs(manifest, repair=repair)
+    environments = _installed_envs(manifest, repair=repair, active_python=active_python, active_probe=active_probe)
     if not active_probe or not active_python:
         return environments
     for entry in environments:
@@ -1091,6 +1160,37 @@ def _manifest_versions_are_satisfied(
     return not failures, failures
 
 
+def _runtime_probe_failure(error: Exception) -> dict[str, str]:
+    # Exception strings can contain the entire probe command, subprocess output
+    # or credential-bearing paths. Report only the failure category and codes.
+    if isinstance(error, ValueError):
+        code, reason = "PYTHON_PROBE_INVALID_RESPONSE", "Python runtime probe returned an invalid response"
+    elif isinstance(error, OSError):
+        code, reason = "PYTHON_START_FAILED", "Python interpreter could not be started"
+    else:
+        code, reason = "PYTHON_PROBE_FAILED", "Python runtime probe did not complete"
+    details = type(error).__name__
+    if isinstance(error, subprocess.CalledProcessError):
+        details += f", exit code {error.returncode}"
+    elif isinstance(error, OSError):
+        winerror = getattr(error, "winerror", None)
+        if isinstance(winerror, int):
+            details += f", WinError {winerror}"
+        elif isinstance(error.errno, int):
+            details += f", errno {error.errno}"
+    return {"code": code, "message": f"{reason} ({details})."[:240]}
+
+
+def _torch_probe_failure(torch_backend: str) -> dict[str, str]:
+    details = re.search(r"\b(?:ImportError|ModuleNotFoundError|OSError|RuntimeError)\b", torch_backend)
+    winerror = re.search(r"\bwinerror\s+(\d{1,8})\b", torch_backend, re.IGNORECASE)
+    parts = [details.group(0)] if details else []
+    if winerror:
+        parts.append(f"WinError {winerror.group(1)}")
+    suffix = f" ({', '.join(parts)})" if parts else ""
+    return {"code": "TORCH_IMPORT_FAILED", "message": f"Torch import failed{suffix}."}
+
+
 def _runtime_info_payload(payload: dict[str, Any], *, repair: bool = True) -> dict[str, Any]:
     manifest = _manifest()
     backend = str(payload.get("backend") or "").strip() or None
@@ -1110,6 +1210,7 @@ def _runtime_info_payload(payload: dict[str, Any], *, repair: bool = True) -> di
     torch_version = None
     torch_backend = "missing"
     accelerator_available = False
+    live_probe_error: dict[str, str] | None = None
     active_probe: dict[str, Any] | None = None
     active_python = _runtime_command_path(Path(str(install_state.get("pythonPath")))) if install_state and install_state.get("pythonPath") else None
     if active_python and active_python.is_file():
@@ -1124,15 +1225,12 @@ def _runtime_info_payload(payload: dict[str, Any], *, repair: bool = True) -> di
             torch_version = probed.get("torchVersion")
             torch_backend = str(probed.get("torchBackend") or torch_backend)
             accelerator_available = bool(probed.get("acceleratorAvailable"))
-        except Exception:
-            packages = dict(install_state.get("packages") or packages)
+        except Exception as exc:
+            live_probe_error = _runtime_probe_failure(exc)
             package_versions = install_state.get("packageVersions")
             pymss_version = install_state.get("pymssVersion")
             pymss_core_version = install_state.get("pymssCoreVersion")
-            pymss_graph_available = install_state.get("pymssGraphAvailable")
             torch_version = install_state.get("torchVersion")
-            torch_backend = str(install_state.get("torchBackend") or torch_backend)
-            accelerator_available = bool(install_state.get("acceleratorAvailable"))
     elif _module_available("torch"):
         try:
             probed = _probe_python_runtime(Path(sys.executable), extra_names)
@@ -1142,17 +1240,34 @@ def _runtime_info_payload(payload: dict[str, Any], *, repair: bool = True) -> di
             pymss_version = probed.get("pymssVersion")
             pymss_core_version = probed.get("pymssCoreVersion")
             pymss_graph_available = probed.get("pymssGraphAvailable")
-            import torch
-            torch_version = torch.__version__
-            torch_backend = "rocm" if getattr(torch.version, "hip", None) else "cuda" if getattr(torch.version, "cuda", None) else "cpu"
-            accelerator_available = bool(torch.cuda.is_available())
+            torch_version = probed.get("torchVersion")
+            torch_backend = str(probed.get("torchBackend") or torch_backend)
+            accelerator_available = bool(probed.get("acceleratorAvailable"))
         except Exception as exc:
-            packages["torch"] = False
-            torch_backend = f"error:{exc}"
+            live_probe_error = _runtime_probe_failure(exc)
+    if live_probe_error is None and torch_backend.startswith("error:"):
+        live_probe_error = _torch_probe_failure(torch_backend)
+    if live_probe_error:
+        # Cached versions remain useful for display, but not as evidence that
+        # dependencies, devices or graph execution are currently available.
+        packages = {name: False for name in packages}
+        torch_backend = f"error:{live_probe_error['code']}"
+        accelerator_available = False
+        pymss_graph_available = None
+        active_probe = None
     if not pymss_version and package_versions:
         pymss_version = package_versions.get("pymss")
     if not pymss_core_version and package_versions:
         pymss_core_version = package_versions.get("pymss-core")
+    environments = _envs_with_live_active(manifest, active_python, active_probe, repair=repair)
+    if live_probe_error and active_python:
+        for entry in environments:
+            if _same_path(entry.get("pythonPath"), active_python):
+                entry.update({
+                    "health": "broken", "torchBackend": torch_backend,
+                    "acceleratorAvailable": False, "pymssGraphAvailable": None,
+                    "packages": {name: False for name in (entry.get("packages") or {})},
+                })
     return {
         "manifestVersion": manifest["manifestVersion"],
         "pythonVersion": platform.python_version(),
@@ -1166,7 +1281,7 @@ def _runtime_info_payload(payload: dict[str, Any], *, repair: bool = True) -> di
         "installState": install_state,
         "statePath": str(ACTIVE_RUNTIME_FILE),
         "logPath": str(install_state.get("logPath")) if install_state and install_state.get("logPath") else None,
-        "installedEnvironments": _envs_with_live_active(manifest, active_python, active_probe, repair=repair),
+        "installedEnvironments": environments,
         "gpuVendors": _detect_gpu_vendors(),
         "torchVersion": torch_version,
         "torchBackend": torch_backend,
@@ -1176,9 +1291,10 @@ def _runtime_info_payload(payload: dict[str, Any], *, repair: bool = True) -> di
         "pymssVersion": pymss_version,
         "pymssCoreVersion": pymss_core_version,
         "pymssGraphAvailable": pymss_graph_available,
+        "liveProbeError": live_probe_error,
         # mlx is an optional extra: it must not drag readiness down when it was probed
         # speculatively (no backend requested). An explicit mlx backend still requires it below.
-        "ready": all(v for k, v in packages.items() if k != "mlx" or backend == "mlx") and torch_backend != "missing" and not torch_backend.startswith("error:") and (
+        "ready": live_probe_error is None and all(v for k, v in packages.items() if k != "mlx" or backend == "mlx") and torch_backend != "missing" and not torch_backend.startswith("error:") and (
             not backend or backend == "cpu" and torch_backend == "cpu"
             or backend == "cuda" and torch_backend == "cuda" and accelerator_available
             or backend == "rocm" and torch_backend == "rocm" and accelerator_available
@@ -1334,23 +1450,7 @@ def cmd_activate_runtime(payload: dict[str, Any]) -> int:
             recoverable=True,
         )
     if not state:
-        manifest_version = manifest.get("manifestVersion")
-        if not _manifest_versions_are_satisfied(probed, manifest, backend)[0]:
-            manifest_version = None
-        state = {
-            "backend": backend,
-            "manifestVersion": manifest_version,
-            "stateVersion": ENV_STATE_VERSION,
-            "pythonVersion": probed.get("pythonVersion"),
-            "torchVersion": probed.get("torchVersion"),
-            "torchBackend": probed.get("torchBackend"),
-            "acceleratorAvailable": bool(probed.get("acceleratorAvailable")),
-            "packages": probed.get("packages"),
-            "packageVersions": probed.get("packageVersions"),
-            "pymssVersion": probed.get("pymssVersion"),
-            "pymssCoreVersion": probed.get("pymssCoreVersion"),
-            "pymssGraphAvailable": bool(probed.get("pymssGraphAvailable")),
-        }
+        state = _fresh_runtime_state_from_probe(backend, manifest, probed)
     else:
         state = {
             **state,
@@ -1520,11 +1620,11 @@ def _ensure_runtime_pip(
         raise RuntimeError("pip bootstrap completed but pip is still unavailable")
 
 
-def _repair_runtime_venv_config(env_dir: Path) -> None:
+def _repair_runtime_venv_config(env_dir: Path) -> bool:
     cfg = env_dir / "pyvenv.cfg"
     bootstrap = _bootstrap_python_path()
     if not cfg.is_file() or not bootstrap.is_file():
-        return
+        return False
     content = "\n".join([
         f"home = {_normal_runtime_path(bootstrap.parent)}",
         "include-system-site-packages = false",
@@ -1534,17 +1634,20 @@ def _repair_runtime_venv_config(env_dir: Path) -> None:
     ])
     if cfg.read_text(encoding="utf-8", errors="replace") != content:
         _atomic_write_text(cfg, content)
+        return True
+    return False
 
 
-def _make_posix_venv_relocatable(env_dir: Path) -> None:
+def _make_posix_venv_relocatable(env_dir: Path) -> bool:
     if os.name == "nt":
-        return
+        return False
     bin_dir = env_dir / "bin"
     bootstrap = _bootstrap_python_path().resolve()
     if not bin_dir.is_dir() or not bootstrap.is_file():
-        return
+        return False
     relative = os.path.relpath(bootstrap, bin_dir)
     names = {"python", "python3", f"python{sys.version_info.major}.{sys.version_info.minor}"}
+    changed = False
     for name in names:
         path = bin_dir / name
         try:
@@ -1557,8 +1660,10 @@ def _make_posix_venv_relocatable(env_dir: Path) -> None:
             temporary.unlink(missing_ok=True)
             temporary.symlink_to(relative)
             os.replace(temporary, path)
+            changed = True
         finally:
             temporary.unlink(missing_ok=True)
+    return changed
 
 
 @_serialized_runtime_command

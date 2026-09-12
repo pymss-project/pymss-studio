@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Lock
+from threading import Barrier, Lock
+from types import SimpleNamespace
 from unittest import mock
 
 if __package__:
@@ -15,177 +18,247 @@ import worker_infer
 from worker_infer import (
     _claim_output_path,
     _studio_separator_type,
-    apply_output_naming,
-    collect_changed_files,
-    collect_outputs,
-    snapshot_output_files,
 )
 
 
-class OutputNamingTests(unittest.TestCase):
-    def test_collect_outputs_excludes_unchanged_stale_files(self) -> None:
+class _OutputSeparatorBase:
+    def __init__(self, instruments: list[str]) -> None:
+        self.config = SimpleNamespace(training=SimpleNamespace(instruments=instruments))
+        self.logger = mock.Mock()
+
+    def _stems_to_save(self):
+        return self.config.training.instruments
+
+    def _stem_batches_to_save(self):
+        return [self.config.training.instruments]
+
+    def process_folder(self, input_folder):
+        raise AssertionError("The upstream separation boundary must be stubbed")
+
+
+class StudioOutputNamingTests(unittest.TestCase):
+    def _new_separator(self, *, naming=None, stems=None, model="model-a"):
+        with mock.patch.dict(sys.modules, {"pymss": SimpleNamespace(MSSeparator=_OutputSeparatorBase)}):
+            separator_type = _studio_separator_type()
+        separator = separator_type(
+            instruments=stems or ["vocals"], output_naming=naming, output_model=model,
+        )
+        separator.output_format = "wav"
+
+        def save_audio(audio, _sr, file_name, store_dir):
+            Path(store_dir, f"{file_name}.wav").write_bytes(audio)
+
+        separator.save_audio = mock.Mock(side_effect=save_audio)
+        return separator
+
+    def test_capture_excludes_stale_files_and_preserves_stem_underscores(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             stale = root / "song_instrument.wav"
+            unrelated = root / "unrelated.txt"
             stale.write_bytes(b"stale")
-            baseline = snapshot_output_files(str(root), "wav")
-
-            vocals = root / "song_vocals.wav"
-            instrumental = root / "song_Instrumental.wav"
-            vocals.write_bytes(b"vocals")
-            instrumental.write_bytes(b"instrumental")
-
-            outputs = collect_outputs(str(root), ["song.wav"], "wav", baseline)
-
-            self.assertEqual([Path(item["path"]).name for item in outputs], [
-                "song_Instrumental.wav",
-                "song_vocals.wav",
-            ])
-
-    def test_collect_changed_files_excludes_unchanged_stale_files(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            stale = root / "stale.wav"
-            stale.write_bytes(b"stale")
-            baseline = snapshot_output_files(str(root), "wav")
-            fresh = root / "fresh.wav"
-            fresh.write_bytes(b"fresh")
-
-            self.assertEqual(collect_changed_files(str(root), baseline), [str(fresh)])
-
-    def test_template_renames_outputs_in_configured_stem_order(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            vocals = root / "song_vocals.wav"
-            drums = root / "song_drums.wav"
-            vocals.write_bytes(b"vocals")
-            drums.write_bytes(b"drums")
-
-            outputs = apply_output_naming(
-                [
-                    {"stem": "vocals", "path": str(vocals)},
-                    {"stem": "drums", "path": str(drums)},
-                ],
-                {
-                    "enabled": True,
-                    "template": "%index%_%filename%_%stem%",
-                    "stemOrder": ["drums", "vocals"],
-                },
-                input_path=str(root / "song.mp3"),
-                input_index=1,
-                model="model-a",
-                output_format="wav",
-            )
-
-            self.assertEqual([Path(item["path"]).name for item in outputs], [
-                "01_song_drums.wav",
-                "02_song_vocals.wav",
-            ])
-            self.assertTrue((root / "01_song_drums.wav").is_file())
-            self.assertTrue((root / "02_song_vocals.wav").is_file())
-            self.assertFalse(drums.exists())
-            self.assertFalse(vocals.exists())
-
-    def test_collect_outputs_preserves_stem_underscores(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            unrelated.write_bytes(b"keep")
+            separator = self._new_separator(stems=["lead_vocals"])
+            separator._save_output("lead_vocals", b"vocals", 44100, "song", str(root))
             output = root / "song_lead_vocals.wav"
-            output.write_bytes(b"vocals")
+            self.assertEqual(separator.studio_outputs(), [{"stem": "lead_vocals", "path": str(output)}])
+            self.assertEqual(output.read_bytes(), b"vocals")
+            self.assertEqual(stale.read_bytes(), b"stale")
+            self.assertEqual(unrelated.read_bytes(), b"keep")
 
-            outputs = collect_outputs(str(root), ["song.wav"], "wav")
-
-            self.assertEqual(outputs[0]["stem"], "lead_vocals")
-
-    def test_input_number_and_invalid_filename_chars_are_supported(self) -> None:
+    def test_template_numbers_and_reports_stems_in_configured_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            source = root / "song_vocals.wav"
-            source.write_bytes(b"vocals")
-
-            outputs = apply_output_naming(
-                [{"stem": "lead/vocal", "path": str(source)}],
-                {
-                    "enabled": True,
-                    "template": "%input_number%_%filename%_%stem%_%model%",
-                    "stemOrder": [],
-                },
-                input_path=str(root / "demo:mix.flac"),
-                input_index=12,
-                model="model:bad",
-                output_format="wav",
+            separator = self._new_separator(
+                stems=["vocals", "drums"],
+                naming={"enabled": True, "template": "%index%_%filename%_%stem%", "stemOrder": ["DRUMS", "vocals"]},
             )
+            for stem in ["vocals", "drums"]:
+                separator._save_output(stem, stem.encode(), 44100, "song", str(root))
+            outputs = separator.studio_outputs()
+            self.assertEqual([Path(item["path"]).name for item in outputs], [
+                "01_song_drums.wav", "02_song_vocals.wav",
+            ])
+            self.assertEqual([Path(item["path"]).read_bytes() for item in outputs], [b"drums", b"vocals"])
+            self.assertFalse((root / "song_drums.wav").exists())
+            self.assertFalse((root / "song_vocals.wav").exists())
 
-            self.assertEqual(Path(outputs[0]["path"]).name, "12_demo_mix_lead_vocal_model_bad.wav")
-            self.assertTrue((root / "12_demo_mix_lead_vocal_model_bad.wav").is_file())
-
-    def test_cross_platform_filename_rules_are_enforced(self) -> None:
+    def test_input_number_and_invalid_token_characters_are_sanitized(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            source = root / "song_vocals.wav"
-            source.write_bytes(b"vocals")
-
-            outputs = apply_output_naming(
-                [{"stem": "CON", "path": str(source)}],
-                {
-                    "enabled": True,
-                    "template": "bad:name<>|?* %stem% .",
-                    "stemOrder": [],
-                },
-                input_path=str(root / "demo.wav"),
-                output_format="wav",
+            separator = self._new_separator(
+                model="model:bad", stems=["lead/vocal"],
+                naming={"enabled": True, "template": "%input_number%_%filename%_%stem%_%model%"},
             )
+            with mock.patch.object(separator, "_input_paths_for_context", return_value=[(Path("demo:mix.flac"), 12)]):
+                separator._prepare_output_contexts("unused", 12)
+            separator._save_output("lead/vocal", b"vocals", 44100, "demo:mix", str(root))
+            output = root / "12_demo_mix_lead_vocal_model_bad.wav"
+            self.assertEqual(separator.studio_outputs(), [{"stem": "lead/vocal", "path": str(output)}])
+            self.assertEqual(output.read_bytes(), b"vocals")
 
-            self.assertEqual(Path(outputs[0]["path"]).name, "bad_name_CON.wav")
-            self.assertTrue((root / "bad_name_CON.wav").is_file())
+    def test_cross_platform_and_reserved_filename_rules(self) -> None:
+        cases = [
+            ("bad:name<>|?* %stem% .", "CON", "bad_name_CON.wav"),
+            ("CON", "vocals", "CON_.wav"),
+            ("CON.txt", "vocals", "CON.txt_.wav"),
+            ("nul", "vocals", "nul_.wav"),
+            ("LPT9", "vocals", "LPT9_.wav"),
+            ("../dir\\name\x01 .", "vocals", "dir_name.wav"),
+        ]
+        for template, stem, expected in cases:
+            with self.subTest(template=template), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                separator = self._new_separator(naming={"enabled": True, "template": template}, stems=[stem])
+                separator._save_output(stem, b"audio", 44100, "song", str(root))
+                output = root / expected
+                self.assertEqual(separator.studio_outputs(), [{"stem": stem, "path": str(output)}])
+                self.assertEqual(output.read_bytes(), b"audio")
+                self.assertEqual(list(root.iterdir()), [output])
 
-    def test_windows_reserved_filename_is_avoided(self) -> None:
+    def test_disabled_or_empty_template_uses_default_safe_names(self) -> None:
+        for naming in [None, {}, {"enabled": False, "template": "%index%_%stem%"}, {"enabled": True, "template": "  "}]:
+            with self.subTest(naming=naming), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                separator = self._new_separator(naming=naming)
+                separator._save_output("vocals", b"audio", 44100, "song", str(root))
+                output = root / "song_vocals.wav"
+                self.assertEqual(separator.studio_outputs(), [{"stem": "vocals", "path": str(output)}])
+                self.assertEqual(output.read_bytes(), b"audio")
+
+    def test_unicode_names_remain_intact_and_long_names_are_utf8_bounded(self) -> None:
+        for name in ["音轨🎵_cafe\u0301", "音🎵e\u0301" * 40]:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                separator = self._new_separator(naming={"enabled": True, "template": name})
+                separator._save_output("vocals", b"audio", 44100, "song", str(root))
+                output = Path(separator.studio_outputs()[0]["path"])
+                expected = name.encode("utf-8")[:200].decode("utf-8", errors="ignore")
+                self.assertEqual(output.name, f"{expected}.wav")
+                self.assertLessEqual(len(output.stem.encode("utf-8")), 200)
+                self.assertNotIn("\ufffd", output.name)
+                self.assertEqual(output.read_bytes(), b"audio")
+
+    def test_default_output_collision_preserves_existing_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            source = root / "song_vocals.wav"
-            source.write_bytes(b"vocals")
+            existing = root / "song_vocals.wav"
+            existing.write_bytes(b"keep")
+            separator = self._new_separator()
+            separator._save_output("vocals", b"new", 44100, "song", str(root))
+            self.assertEqual(existing.read_bytes(), b"keep")
+            output = root / "song_vocals_2.wav"
+            self.assertEqual(separator.studio_outputs(), [{"stem": "vocals", "path": str(output)}])
+            self.assertEqual(output.read_bytes(), b"new")
 
-            outputs = apply_output_naming(
-                [{"stem": "vocals", "path": str(source)}],
-                {"enabled": True, "template": "CON", "stemOrder": []},
-                input_path=str(root / "demo.wav"),
-                output_format="wav",
-            )
+    def test_concurrent_output_reservations_do_not_overwrite_audio(self) -> None:
+        for shared_separator in [True, False]:
+            with self.subTest(shared_separator=shared_separator), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                existing = root / "mix.wav"
+                existing.write_bytes(b"keep")
+                count = 6
+                separators = [self._new_separator(naming={"enabled": True, "template": "mix"})
+                              for _ in range(1 if shared_separator else count)]
+                barrier = Barrier(count)
 
-            self.assertEqual(Path(outputs[0]["path"]).name, "CON_.wav")
-            self.assertTrue((root / "CON_.wav").is_file())
+                def save(index):
+                    separator = separators[0] if shared_separator else separators[index]
+                    barrier.wait(timeout=5)
+                    separator._save_output("vocals", str(index).encode(), 44100, "song", str(root))
 
-    def test_windows_reserved_filename_with_extension_is_avoided(self) -> None:
+                with ThreadPoolExecutor(max_workers=count) as executor:
+                    list(executor.map(save, range(count)))
+                outputs = [item for separator in separators for item in separator.studio_outputs()]
+                self.assertEqual(len(outputs), count)
+                self.assertEqual(len({item["path"] for item in outputs}), count)
+                self.assertEqual({Path(item["path"]).read_bytes() for item in outputs}, {str(i).encode() for i in range(count)})
+                self.assertEqual(existing.read_bytes(), b"keep")
+                self.assertEqual(len(list(root.iterdir())), count + 1)
+
+    def test_encoding_failure_removes_partial_file_and_allows_retry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            source = root / "song_vocals.wav"
-            source.write_bytes(b"vocals")
+            existing = root / "mix.wav"
+            existing.write_bytes(b"keep")
+            separator = self._new_separator(naming={"enabled": True, "template": "mix"})
+            save_audio = separator.save_audio.side_effect
 
-            outputs = apply_output_naming(
-                [{"stem": "vocals", "path": str(source)}],
-                {"enabled": True, "template": "CON.txt", "stemOrder": []},
-                input_path=str(root / "demo.wav"),
-                output_format="wav",
-            )
+            def fail_save(audio, sr, file_name, store_dir):
+                save_audio(b"partial", sr, file_name, store_dir)
+                raise RuntimeError("encoder failed")
 
-            self.assertEqual(Path(outputs[0]["path"]).name, "CON.txt_.wav")
-            self.assertTrue((root / "CON.txt_.wav").is_file())
+            separator.save_audio.side_effect = fail_save
+            with self.assertRaisesRegex(RuntimeError, "encoder failed"):
+                separator._save_output("vocals", b"new", 44100, "song", str(root))
+            self.assertEqual(list(root.iterdir()), [existing])
+            self.assertEqual(separator.studio_outputs(), [])
+            self.assertEqual(separator._studio_claimed_paths, set())
+            separator.save_audio.side_effect = save_audio
+            separator._save_output("vocals", b"new", 44100, "song", str(root))
+            self.assertEqual((root / "mix_2.wav").read_bytes(), b"new")
+            self.assertEqual(existing.read_bytes(), b"keep")
 
-    def test_disabled_config_leaves_outputs_unchanged(self) -> None:
+    def test_folder_inputs_with_the_same_stem_keep_distinct_indices_and_audio(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            source = root / "song_vocals.wav"
-            source.write_bytes(b"vocals")
-
-            outputs = [{"stem": "vocals", "path": str(source)}]
-            result = apply_output_naming(
-                outputs,
-                {"enabled": False, "template": "%index%_%stem%", "stemOrder": ["vocals"]},
-                input_path=str(root / "song.wav"),
+            source = root / "inputs"
+            source.mkdir()
+            names = ["song.mp3", "song.wav"]
+            for name in names:
+                (source / name).write_bytes(name.encode())
+            output_dir = root / "outputs"
+            separator = self._new_separator(
+                stems=["vocals", "drums"],
+                naming={"enabled": True, "template": "%input_number%_%filename%_%stem%"},
             )
 
-            self.assertEqual(result, outputs)
-            self.assertTrue(source.is_file())
+            def process(base, input_folder):
+                self.assertEqual(input_folder, str(source))
+                for name in names:
+                    for stem in ["drums", "vocals"]:
+                        base._save_output(stem, f"{name}:{stem}".encode(), 44100, "song", str(output_dir))
+                return names
 
+            with mock.patch.object(_OutputSeparatorBase, "process_folder", autospec=True, side_effect=process), \
+                    mock.patch.object(worker_infer.os, "listdir", return_value=names):
+                self.assertEqual(separator.process_folder(str(source), input_index=7), names)
+            outputs = separator.studio_outputs()
+            self.assertEqual(len(outputs), 4)
+            for index, name in enumerate(names, start=7):
+                for stem in ["vocals", "drums"]:
+                    output = output_dir / f"{index:02d}_song_{stem}.wav"
+                    self.assertEqual(output.read_bytes(), f"{name}:{stem}".encode())
+                    self.assertIn({"stem": stem, "path": str(output)}, outputs)
+            self.assertEqual(separator._studio_input_contexts, {})
+            self.assertIsNone(separator._studio_active_context)
+
+    def test_upstream_failure_discards_only_outputs_created_in_this_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "song.wav"
+            source.write_bytes(b"input")
+            existing = root / "song_vocals.wav"
+            existing.write_bytes(b"keep")
+            separator = self._new_separator()
+
+            def process(base, _input_folder):
+                base._save_output("vocals", b"new", 44100, "song", str(root))
+                raise RuntimeError("separation failed")
+
+            with mock.patch.object(_OutputSeparatorBase, "process_folder", autospec=True, side_effect=process):
+                with self.assertRaisesRegex(RuntimeError, "separation failed"):
+                    separator.process_folder(str(source))
+            self.assertEqual(separator.studio_outputs(), [])
+            self.assertEqual(separator._studio_claimed_paths, set())
+            self.assertEqual(separator._studio_input_contexts, {})
+            self.assertIsNone(separator._studio_active_context)
+            self.assertEqual(existing.read_bytes(), b"keep")
+            self.assertEqual(source.read_bytes(), b"input")
+            self.assertFalse((root / "song_vocals_2.wav").exists())
+
+
+class OutputNamingTests(unittest.TestCase):
     def test_separator_writes_the_template_name_without_touching_the_default_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

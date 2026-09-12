@@ -39,7 +39,6 @@ const {
   fitSimpleEditorViewport,
   hydrateSimpleWorkflow,
   renderSimpleOutputFilename,
-  resolveWorkflowOpenMode,
 } = await vite.ssrLoadModule('/src/utils/workflowSimple.ts')
 const {
   canConnectSimple,
@@ -197,7 +196,6 @@ test('workflow validation follows the detected definition format', () => {
 test('simple editor opens only definitions it can round-trip without data loss', () => {
   const editable = simpleFixture()
   assert.deepEqual(analyzeSimpleWorkflow(editable), { editable: true, reasonCodes: [] })
-  assert.equal(resolveWorkflowOpenMode(editable), 'simple')
 
   const advancedInference = structuredClone(editable)
   advancedInference.steps[0].inference_params = { chunk_size: 4096 }
@@ -205,7 +203,6 @@ test('simple editor opens only definitions it can round-trip without data loss',
     editable: false,
     reasonCodes: ['advanced_parameters'],
   })
-  assert.equal(resolveWorkflowOpenMode(advancedInference), 'advanced')
 
   const customModel = structuredClone(editable)
   customModel.steps[0].model_path = 'D:/Models/custom.ckpt'

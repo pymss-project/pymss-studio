@@ -72,6 +72,7 @@ export type RuntimeInfo = {
   pymssCoreVersion?: string | null
   /** Whether the pymss graph API required by advanced workflows is importable. */
   pymssGraphAvailable?: boolean | null
+  liveProbeError?: { code: string; message: string } | null
   ready?: boolean
 }
 

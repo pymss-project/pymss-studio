@@ -14,8 +14,30 @@ import {
   runtimeCoreSyncAvailable,
   runtimeEnvironmentForBackend,
   runtimeManifestStatus,
+  runtimeLoadError,
   runtimeSizeHint,
 } from '../src/utils/runtime.ts'
+
+test('live probe diagnostics take priority while older runtime responses remain readable', () => {
+  assert.equal(runtimeLoadError({ liveProbeError: { code: 'PYTHON_START_FAILED', message: 'Python could not start.' } }, { torchError: 'error:old failure' }), 'Python could not start.')
+  assert.equal(runtimeLoadError({ torchBackend: 'error: DLL load failed' }, null), 'DLL load failed')
+  assert.equal(runtimeLoadError(undefined, { torchError: '[WinError 1455] page file' }), '[WinError 1455] page file')
+  assert.equal(runtimeLoadError({ torchBackend: 'cpu', liveProbeError: null }, null), '')
+})
+
+test('a failed live probe does not cause replacement of an explicit active environment', () => {
+  const active = { backend: 'cuda', pythonPath: 'C:/runtime/cuda/python.exe', health: 'broken', acceleratorAvailable: false }
+  const info = {
+    ready: false,
+    installedBackend: 'cuda',
+    installState: { backend: 'cuda', pythonPath: active.pythonPath },
+    liveProbeError: { code: 'PYTHON_PROBE_FAILED', message: 'Runtime probe failed.' },
+    installedEnvironments: [active, { backend: 'cpu', pythonPath: 'C:/runtime/cpu/python.exe', health: 'ready' }],
+  }
+  assert.equal(runtimeToActivate(info), undefined)
+  assert.equal(activeRuntimeEnvironment(info), active)
+  assert.equal(runtimeAcceleratorReady(active, 'cuda'), false)
+})
 
 test('platform detection prefers the worker report over navigator', () => {
   // WKWebView pins navigator.platform to "MacIntel" even on Apple Silicon, so the worker's

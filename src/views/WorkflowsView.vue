@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { useDialog, useMessage, type DropdownOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import {
@@ -15,7 +15,6 @@ import {
 } from '@vicons/ionicons5'
 import { useRouter } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
-import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { storeToRefs } from 'pinia'
 import WorkflowCreateChooser from '@/components/workflow/WorkflowCreateChooser.vue'
 import { useModelStore } from '@/stores/model'
@@ -56,8 +55,7 @@ const contextMenuX = ref(0)
 const contextMenuY = ref(0)
 const contextMenuVisible = ref(false)
 const contextWorkflow = ref<WorkflowEntry | null>(null)
-let unlistenNodeEditorClosed: UnlistenFn | undefined
-let unlistenSimpleEditorClosed: UnlistenFn | undefined
+let unmounted = false
 
 const deviceOptions = [
   { label: 'Auto', value: 'auto' },
@@ -240,10 +238,14 @@ function updateSelectedDefaultFormat(value: string | number | null) {
 
 
 // ---- Selection + quick meta edit ----
+function syncWorkflowDetails(item: WorkflowEntry | null) {
+  editingId.value = item?.id || ''
+  name.value = item?.name || ''
+  description.value = item?.description || ''
+}
+
 function editWorkflow(item: WorkflowEntry) {
-  editingId.value = item.id
-  name.value = item.name
-  description.value = item.description
+  syncWorkflowDetails(item)
   workflow.selectWorkflow(item.id)
 }
 
@@ -441,18 +443,11 @@ async function openNodeEditor(options: { forceNew?: boolean; workflowId?: string
   await router.push({ path: '/workflow-node-editor', query: isNewWorkflow ? { new: '1' } : { workflowId } })
 }
 
-async function refreshAfterNodeEditorClosed(kind: 'advanced' | 'simple') {
-  if (kind === 'advanced') workflow.markNodeEditorClosed()
-  else workflow.markSimpleEditorClosed()
-  await workflow.reload()
-  // Standalone editors persist the selected workflow in the shared store. Use
-  // that refreshed selection first so saving a newly-created workflow does not
-  // snap the overview back to the entry that was selected before the window
-  // opened.
-  const target = workflow.selectedWorkflow
+function syncRefreshedWorkflowDetails(selected: WorkflowEntry | null) {
+  const target = selected
     || workflows.value.find(item => item.id === editingId.value)
     || workflows.value[0]
-  if (target) editWorkflow(target)
+  syncWorkflowDetails(target || null)
 }
 
 // ---- Actions ----
@@ -577,36 +572,24 @@ async function exportWorkflowEntry(current: WorkflowEntry) {
   await exportWorkflowDefinition(current.name, current.definition)
 }
 
-onMounted(async () => {
-  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
-  unlistenNodeEditorClosed = await listen('pymss://workflow-node-editor-closed', () => {
-    void refreshAfterNodeEditorClosed('advanced')
-  })
-  unlistenSimpleEditorClosed = await listen('pymss://workflow-simple-editor-closed', () => {
-    void refreshAfterNodeEditorClosed('simple')
+const stopEditorCloseSubscription = workflow.$onAction(({ name: action, after }) => {
+  if (action !== 'handleEditorClosed') return
+  after(() => {
+    if (unmounted) return
+    syncRefreshedWorkflowDetails(workflow.selectedWorkflow)
   })
 })
 
 onUnmounted(() => {
+  unmounted = true
+  stopEditorCloseSubscription()
   closeWorkflowContextMenu()
-  unlistenNodeEditorClosed?.()
-  unlistenSimpleEditorClosed?.()
 })
 
-watch(workflows, (items) => {
-  const current = items.find(item => item.id === editingId.value)
-  if (current) {
-    // keep local meta in sync with store (e.g. after node editor save / reload)
-    name.value = current.name
-    description.value = current.description
-  } else if (items.length) {
-    const preferred = items.find(item => item.id === selectedWorkflowId.value) || items[0]
-    editWorkflow(preferred)
-  } else {
-    editingId.value = ''
-    name.value = ''
-    description.value = ''
-  }
+watch([workflows, selectedWorkflowId], () => {
+  // A reload restores the editor's persisted selection. Hydrate the overview
+  // without selecting (and persisting) an older entry during that refresh.
+  syncRefreshedWorkflowDetails(selectedWorkflow.value)
 }, { immediate: true, deep: true })
 </script>
 

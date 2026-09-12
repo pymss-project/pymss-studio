@@ -151,39 +151,56 @@ pub fn temp_dir(app: &AppHandle) -> AppResult<PathBuf> {
     Ok(data_root_dir(app)?.join("temp"))
 }
 
+// Executable siblings and resource-specific fallbacks stay with their callers.
+pub(crate) fn resource_roots(resource: &Path) -> [PathBuf; 3] {
+    [
+        resource.to_path_buf(),
+        resource.join("_up_"),
+        resource.join("resources"),
+    ]
+}
+
 pub fn runtime_root_dir(app: &AppHandle) -> AppResult<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Ok(resource) = app.path().resource_dir() {
-        candidates.push(resource.join("python-runtime"));
-        candidates.push(resource.join("_up_").join("python-runtime"));
-        candidates.push(resource.join("resources").join("python-runtime"));
-    }
+    let resource = app.path().resource_dir().ok();
     let exe_dir = std::env::current_exe()?
         .parent()
         .map(PathBuf::from)
         .ok_or_else(|| AppError::Worker("failed to resolve executable directory".into()))?;
+    Ok(runtime_root_from(resource.as_deref(), &exe_dir))
+}
+
+fn runtime_root_from(resource: Option<&Path>, exe_dir: &Path) -> PathBuf {
+    let mut candidates: Vec<_> = resource
+        .into_iter()
+        .flat_map(resource_roots)
+        .map(|root| root.join("python-runtime"))
+        .collect();
     candidates.push(exe_dir.join("python-runtime"));
-    Ok(candidates
+    candidates
         .into_iter()
         .find(|path| path.is_dir())
-        .unwrap_or_else(|| exe_dir.join("python-runtime")))
+        .unwrap_or_else(|| exe_dir.join("python-runtime"))
 }
 
 pub fn bundled_runtime_envs_dir(app: &AppHandle) -> AppResult<Option<PathBuf>> {
-    let mut candidates = Vec::new();
-    if let Ok(resource) = app.path().resource_dir() {
-        candidates.push(resource.join("python-runtime").join("runtime-envs"));
-        candidates.push(resource.join("_up_").join("python-runtime").join("runtime-envs"));
-        candidates.push(resource.join("resources").join("python-runtime").join("runtime-envs"));
-    }
+    let resource = app.path().resource_dir().ok();
     let exe_dir = std::env::current_exe()?
         .parent()
         .map(PathBuf::from)
         .ok_or_else(|| AppError::Worker("failed to resolve executable directory".into()))?;
-    candidates.push(exe_dir.join("python-runtime").join("runtime-envs"));
-    Ok(candidates
+    Ok(bundled_runtime_envs_from(resource.as_deref(), &exe_dir))
+}
+
+fn bundled_runtime_envs_from(resource: Option<&Path>, exe_dir: &Path) -> Option<PathBuf> {
+    let mut candidates: Vec<_> = resource
         .into_iter()
-        .find(|path| path.is_dir()))
+        .flat_map(resource_roots)
+        .map(|root| root.join("python-runtime").join("runtime-envs"))
+        .collect();
+    candidates.push(exe_dir.join("python-runtime").join("runtime-envs"));
+    candidates
+        .into_iter()
+        .find(|path| path.is_dir())
 }
 
 pub fn runtime_envs_dir(app: &AppHandle) -> AppResult<PathBuf> {
@@ -365,6 +382,101 @@ mod tests {
 
     fn path(name: &str) -> PathBuf {
         PathBuf::from(name)
+    }
+
+    struct ResourceFixture(PathBuf);
+
+    impl ResourceFixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "pymss-resource-layout-{}-{}",
+                std::process::id(),
+                JSON_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+            ));
+            std::fs::create_dir(&root).unwrap();
+            Self(root)
+        }
+    }
+
+    impl Drop for ResourceFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn runtime_layouts_keep_resource_up_resources_and_exe_priority() {
+        let fixture = ResourceFixture::new();
+        let resource = fixture.0.join("Pymss.app/Contents/Resources");
+        let exe = fixture.0.join("Pymss.app/Contents/MacOS");
+        let candidates = [
+            resource.join("python-runtime"),
+            resource.join("_up_/python-runtime"),
+            resource.join("resources/python-runtime"),
+            exe.join("python-runtime"),
+        ];
+        for candidate in candidates.iter().rev() {
+            std::fs::create_dir_all(candidate).unwrap();
+            assert_eq!(super::runtime_root_from(Some(&resource), &exe), *candidate);
+            let envs = candidate.join("runtime-envs");
+            std::fs::create_dir_all(&envs).unwrap();
+            assert_eq!(super::bundled_runtime_envs_from(Some(&resource), &exe), Some(envs));
+        }
+    }
+
+    #[test]
+    fn bundled_env_discovery_does_not_assume_the_first_runtime_root_contains_envs() {
+        let fixture = ResourceFixture::new();
+        let resource = fixture.0.join("resources");
+        let exe = fixture.0.join("portable");
+        std::fs::create_dir_all(resource.join("python-runtime")).unwrap();
+        let envs = exe.join("python-runtime/runtime-envs");
+        std::fs::create_dir_all(&envs).unwrap();
+        assert_eq!(super::runtime_root_from(Some(&resource), &exe), resource.join("python-runtime"));
+        assert_eq!(super::bundled_runtime_envs_from(Some(&resource), &exe), Some(envs));
+    }
+
+    #[test]
+    fn missing_runtime_root_has_a_fixed_fallback_but_bundled_envs_are_optional() {
+        let fixture = ResourceFixture::new();
+        let resource = fixture.0.join("resources");
+        let exe = fixture.0.join("installer");
+        for resource in [Some(resource.as_path()), None] {
+            assert_eq!(super::runtime_root_from(resource, &exe), exe.join("python-runtime"));
+            assert_eq!(super::bundled_runtime_envs_from(resource, &exe), None);
+        }
+        assert!(!exe.exists());
+    }
+
+    #[test]
+    fn runtime_directory_selection_ignores_files_and_accepts_missing_resource_api() {
+        let fixture = ResourceFixture::new();
+        let resource = fixture.0.join("resources");
+        let exe = fixture.0.join("portable");
+        std::fs::create_dir_all(&resource).unwrap();
+        std::fs::write(resource.join("python-runtime"), b"not a directory").unwrap();
+        let envs = exe.join("python-runtime/runtime-envs");
+        std::fs::create_dir_all(&envs).unwrap();
+        for resource in [Some(resource.as_path()), None, Some(exe.as_path())] {
+            assert_eq!(super::runtime_root_from(resource, &exe), exe.join("python-runtime"));
+            assert_eq!(super::bundled_runtime_envs_from(resource, &exe), Some(envs.clone()));
+        }
+    }
+
+    #[test]
+    fn development_detection_does_not_treat_packaged_bundle_paths_as_a_checkout() {
+        let target = path("workspace/src-tauri/target");
+        for relative in ["debug/pymss.exe", "release/pymss.exe", "aarch64-apple-darwin/release/pymss"] {
+            assert!(super::is_cargo_profile_executable(&target.join(relative), &target));
+        }
+        for relative in [
+            "release/bundle/Pymss.app/Contents/MacOS/pymss",
+            "release/bundle/portable/pymss.exe",
+            "debug/deps/pymss.exe",
+            "unrelated/pymss.exe",
+        ] {
+            assert!(!super::is_cargo_profile_executable(&target.join(relative), &target));
+        }
     }
 
     #[test]

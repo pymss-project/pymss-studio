@@ -563,51 +563,65 @@ fn spawn_helper(args: &[std::ffi::OsString], elevated: bool) -> AppResult<()> {
 fn recover_interrupted_update(pid: u32, root: PathBuf, backup: PathBuf, elevated: bool) -> AppResult<()> {
     wait_for_process_exit(pid, &root.join("Pymss Studio.exe"))?;
     let _update_mutex = acquire_update_mutex()?;
-    if distribution_at(&root).is_none() {
+    recover_interrupted_update_with(&root, &backup, || relaunch_application_if_needed(&root, elevated))
+}
+
+fn recover_interrupted_update_with(
+    root: &Path, backup: &Path, relaunch: impl FnOnce() -> AppResult<()>,
+) -> AppResult<()> {
+    if distribution_at(root).is_none() {
         return Err(AppError::Worker("The recovery target is not a managed Pymss Studio installation".into()));
     }
-    let transaction = read_update_transaction(&root)?
+    let transaction = read_update_transaction(root)?
         .ok_or_else(|| AppError::Worker("Interrupted update transaction is missing".into()))?;
-    if PathBuf::from(&transaction.backup_dir) != backup {
+    if PathBuf::from(&transaction.backup_dir).as_path() != backup {
         return Err(AppError::Worker("Interrupted update backup does not match its transaction".into()));
     }
-    validate_backup_path(&root, &backup)?;
-    if !backup.is_dir() {
-        if transaction.phase == UpdatePhase::Prepared {
-            quarantine_update_transaction(&root)?;
-            relaunch_application_if_needed(&root, elevated)?;
-            return Ok(());
-        }
-        return Err(AppError::Worker("Interrupted update backup is missing; the transaction marker was retained for recovery".into()));
-    }
-    restore_portable_backup(&root, &backup)?;
-    clear_recovered_transaction(&root)?;
-    let _ = fs::remove_dir_all(&backup);
-    relaunch_application_if_needed(&root, elevated)?;
+    recover_transaction_files(
+        root,
+        backup,
+        transaction.phase,
+        "Interrupted update backup is missing; the transaction marker was retained for recovery",
+    )?;
+    relaunch()?;
     Ok(())
 }
 
 fn recover_or_relaunch(root: &Path, elevated: bool) -> AppResult<()> {
     let _update_mutex = acquire_update_mutex()?;
+    recover_or_relaunch_with(root, || relaunch_application_if_needed(root, elevated))
+}
+
+fn recover_or_relaunch_with(root: &Path, relaunch: impl FnOnce() -> AppResult<()>) -> AppResult<()> {
     if distribution_at(root).is_none() {
         return Err(AppError::Worker("The recovery target is not a managed Pymss Studio installation".into()));
     }
     if let Some(transaction) = read_update_transaction(root)? {
         let backup = PathBuf::from(transaction.backup_dir);
-        validate_backup_path(root, &backup)?;
-        if !backup.is_dir() {
-            if transaction.phase == UpdatePhase::Prepared {
-                quarantine_update_transaction(root)?;
-                relaunch_application_if_needed(root, elevated)?;
-                return Ok(());
-            }
-            return Err(AppError::Worker("Update backup is missing; the transaction marker was retained for recovery".into()));
-        }
-        restore_portable_backup(root, &backup)?;
-        clear_recovered_transaction(root)?;
-        let _ = fs::remove_dir_all(&backup);
+        recover_transaction_files(
+            root,
+            &backup,
+            transaction.phase,
+            "Update backup is missing; the transaction marker was retained for recovery",
+        )?;
     }
-    relaunch_application_if_needed(root, elevated)?;
+    relaunch()?;
+    Ok(())
+}
+
+fn recover_transaction_files(
+    root: &Path, backup: &Path, phase: UpdatePhase, missing_backup_error: &'static str,
+) -> AppResult<()> {
+    validate_backup_path(root, backup)?;
+    if !backup.is_dir() {
+        if phase == UpdatePhase::Prepared {
+            return quarantine_update_transaction(root);
+        }
+        return Err(AppError::Worker(missing_backup_error.into()));
+    }
+    restore_portable_backup(root, backup)?;
+    clear_recovered_transaction(root)?;
+    let _ = fs::remove_dir_all(backup);
     Ok(())
 }
 
@@ -1389,6 +1403,10 @@ fn rollback_managed_update(
     let _ = fs::remove_dir_all(backup);
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "update_recovery_tests.rs"]
+mod recovery_tests;
 
 #[cfg(test)]
 mod tests {

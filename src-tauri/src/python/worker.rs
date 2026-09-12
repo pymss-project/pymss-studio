@@ -43,16 +43,8 @@ fn worker_path(app: &AppHandle) -> AppResult<PathBuf> {
     }
 
     if let Ok(resource) = app.path().resource_dir() {
-        let candidates = [
-            resource.join("python").join("worker.py"),
-            resource.join("_up_").join("python").join("worker.py"),
-            resource.join("resources").join("python").join("worker.py"),
-            resource.join("worker.py"),
-        ];
-        for path in candidates {
-            if path.exists() {
-                return Ok(path);
-            }
+        if let Some(path) = resource_worker_path(&resource) {
+            return Ok(path);
         }
     }
 
@@ -74,6 +66,14 @@ fn worker_path(app: &AppHandle) -> AppResult<PathBuf> {
     }
 }
 
+fn resource_worker_path(resource: &Path) -> Option<PathBuf> {
+    storage::resource_roots(resource)
+        .into_iter()
+        .map(|root| root.join("python").join("worker.py"))
+        .chain(std::iter::once(resource.join("worker.py")))
+        .find(|path| path.exists())
+}
+
 fn dev_workspace_root() -> PathBuf {
     // CARGO_MANIFEST_DIR is set at compile time to pymss-desktop/src-tauri.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -87,20 +87,24 @@ fn dev_worker_path() -> PathBuf {
 }
 
 fn embedded_python_path(app: &AppHandle) -> AppResult<Option<PathBuf>> {
-    let mut runtime_dirs = Vec::new();
-    if let Ok(resource) = app.path().resource_dir() {
-        runtime_dirs.push(resource.join("python-runtime"));
-        runtime_dirs.push(resource.join("_up_").join("python-runtime"));
-        runtime_dirs.push(resource.join("resources").join("python-runtime"));
-    }
+    let resource = app.path().resource_dir().ok();
     let exe_dir = std::env::current_exe()?
         .parent()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
+    Ok(embedded_python_from(resource.as_deref(), &exe_dir, cfg!(windows)))
+}
+
+fn embedded_python_from(resource: Option<&Path>, exe_dir: &Path, windows: bool) -> Option<PathBuf> {
+    let mut runtime_dirs: Vec<_> = resource
+        .into_iter()
+        .flat_map(storage::resource_roots)
+        .map(|root| root.join("python-runtime"))
+        .collect();
     runtime_dirs.push(exe_dir.join("python-runtime"));
 
     for runtime in runtime_dirs {
-        let candidates = if cfg!(windows) {
+        let candidates = if windows {
             vec![
                 runtime.join("python.exe"),
                 runtime.join("Scripts").join("python.exe"),
@@ -112,10 +116,10 @@ fn embedded_python_path(app: &AppHandle) -> AppResult<Option<PathBuf>> {
             ]
         };
         if let Some(path) = candidates.into_iter().find(|candidate| candidate.is_file()) {
-            return Ok(Some(path));
+            return Some(path);
         }
     }
-    Ok(None)
+    None
 }
 
 fn bootstrap_python_path(app: &AppHandle) -> AppResult<String> {
@@ -146,10 +150,6 @@ fn bootstrap_python_path(app: &AppHandle) -> AppResult<String> {
     }
 }
 
-fn try_resolve_active_runtime(file: &PathBuf) -> Option<String> {
-    resolve_active_runtime_record(file).map(|(python, _source)| python)
-}
-
 fn resolve_active_runtime_record(file: &PathBuf) -> Option<(String, Option<String>)> {
     if !file.is_file() {
         return None;
@@ -175,28 +175,33 @@ fn resolve_active_runtime_record(file: &PathBuf) -> Option<(String, Option<Strin
         .map(|path| (path.to_string_lossy().to_string(), record.source))
 }
 
-fn bundled_runtime_envs_dirs(app: &AppHandle) -> AppResult<Vec<PathBuf>> {
+fn bundled_runtime_envs_dir(app: &AppHandle) -> AppResult<Option<PathBuf>> {
     let user_runtime = storage::runtime_envs_dir(app)?.canonicalize().ok();
-    Ok(storage::bundled_runtime_envs_dir(app)?
-        .into_iter()
-        .filter(|path| path.canonicalize().ok() != user_runtime)
-        .collect())
+    Ok(distinct_bundled_runtime_env(
+        user_runtime,
+        storage::bundled_runtime_envs_dir(app)?,
+    ))
+}
+
+fn distinct_bundled_runtime_env(
+    user_runtime: Option<PathBuf>, bundled: Option<PathBuf>,
+) -> Option<PathBuf> {
+    bundled.filter(|path| path.canonicalize().ok() != user_runtime)
 }
 
 fn active_runtime_python_path(app: &AppHandle) -> AppResult<Option<String>> {
     let user_file = storage::active_runtime_file(app)?;
-    if let Some(path) = try_resolve_active_runtime(&user_file) {
+    if let Some((path, _source)) = resolve_active_runtime_record(&user_file) {
         if is_user_runtime_python_path(app, &path)? && active_path_backend_matches(&user_file, &path) {
             return Ok(Some(path));
         }
     };
-    for envs_dir in bundled_runtime_envs_dirs(app)? {
+    if let Some(envs_dir) = bundled_runtime_envs_dir(app)? {
         let bundled_file = envs_dir.join("active-runtime.json");
-        if let Some(path) = try_resolve_active_runtime(&bundled_file) {
-            if !is_bundled_runtime_python_path(&bundled_file, &path)? {
-                continue;
+        if let Some((path, _source)) = resolve_active_runtime_record(&bundled_file) {
+            if is_bundled_runtime_python_path(&bundled_file, &path)? {
+                return Ok(Some(path));
             }
-            return Ok(Some(path));
         }
     }
     Ok(None)
@@ -271,24 +276,30 @@ fn is_user_runtime_python_path(app: &AppHandle, path: &str) -> AppResult<bool> {
 }
 
 fn bundled_bin_dirs(app: &AppHandle) -> AppResult<Vec<PathBuf>> {
-    let mut dirs = Vec::new();
-    if let Ok(resource) = app.path().resource_dir() {
-        dirs.push(resource.join("bin"));
-        dirs.push(resource.join("_up_").join("bin"));
-        dirs.push(resource.join("resources").join("bin"));
-    }
+    let resource = app.path().resource_dir().ok();
     let exe_dir = std::env::current_exe()?
         .parent()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
+    Ok(bundled_bin_candidates(resource.as_deref(), &exe_dir, cfg!(target_os = "macos"))
+        .into_iter()
+        .filter(|dir| dir.is_dir())
+        .collect())
+}
+
+fn bundled_bin_candidates(resource: Option<&Path>, exe_dir: &Path, macos: bool) -> Vec<PathBuf> {
+    let mut dirs: Vec<_> = resource
+        .into_iter()
+        .flat_map(storage::resource_roots)
+        .map(|root| root.join("bin"))
+        .collect();
     dirs.push(exe_dir.join("bin"));
-    #[cfg(target_os = "macos")]
-    {
+    if macos {
         dirs.push(PathBuf::from("/opt/homebrew/bin"));
         dirs.push(PathBuf::from("/usr/local/bin"));
     }
 
-    Ok(dirs.into_iter().filter(|dir| dir.is_dir()).collect())
+    dirs
 }
 
 #[cfg(windows)]
@@ -310,7 +321,12 @@ fn rocm_native_tool_dir(runtime_envs_dir: &Path) -> Option<PathBuf> {
 #[cfg(windows)]
 fn rocm_native_tool_dirs(app: &AppHandle) -> AppResult<Vec<PathBuf>> {
     let mut runtime_envs_dirs = vec![storage::runtime_envs_dir(app)?];
-    runtime_envs_dirs.extend(bundled_runtime_envs_dirs(app)?);
+    runtime_envs_dirs.extend(bundled_runtime_envs_dir(app)?);
+    Ok(rocm_native_tool_dirs_from(runtime_envs_dirs))
+}
+
+#[cfg(windows)]
+fn rocm_native_tool_dirs_from(runtime_envs_dirs: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut result = Vec::new();
     for runtime_envs in runtime_envs_dirs {
         let Some(tool_dir) = rocm_native_tool_dir(&runtime_envs) else {
@@ -326,7 +342,7 @@ fn rocm_native_tool_dirs(app: &AppHandle) -> AppResult<Vec<PathBuf>> {
             result.push(sdk_bin);
         }
     }
-    Ok(result)
+    result
 }
 
 #[cfg(not(windows))]
@@ -459,7 +475,7 @@ fn build_worker_command(
     if let Ok(file) = storage::active_runtime_file(app) {
         cmd.env("PYMSS_STUDIO_ACTIVE_RUNTIME_FILE", file.to_string_lossy().to_string());
     }
-    if let Some(dir) = bundled_runtime_envs_dirs(app)?.first() {
+    if let Some(dir) = bundled_runtime_envs_dir(app)? {
         cmd.env("PYMSS_STUDIO_BUNDLED_RUNTIME_ENVS_DIR", dir.to_string_lossy().to_string());
     }
     apply_proxy_env(app, &mut cmd);
@@ -1183,6 +1199,172 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    struct ResourceFixture(std::path::PathBuf);
+
+    impl ResourceFixture {
+        fn new(label: &str) -> Self {
+            let root = temp_root(label);
+            fs::create_dir(&root).unwrap();
+            Self(root)
+        }
+
+        fn file(&self, path: &Path) {
+            assert!(path.starts_with(&self.0));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"resource").unwrap();
+        }
+    }
+
+    impl Drop for ResourceFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn worker_resource_layouts_keep_the_flat_fallback_last() {
+        let fixture = ResourceFixture::new("worker-layout");
+        let resource = fixture.0.join("resources");
+        assert_eq!(super::resource_worker_path(&resource), None);
+        let candidates = [
+            resource.join("python/worker.py"),
+            resource.join("_up_/python/worker.py"),
+            resource.join("resources/python/worker.py"),
+            resource.join("worker.py"),
+        ];
+        for candidate in candidates.iter().rev() {
+            fixture.file(candidate);
+            assert_eq!(super::resource_worker_path(&resource), Some(candidate.clone()));
+        }
+    }
+
+    #[test]
+    fn worker_lookup_retains_its_existing_exists_check() {
+        let fixture = ResourceFixture::new("worker-exists");
+        let worker = fixture.0.join("python/worker.py");
+        fs::create_dir_all(&worker).unwrap();
+        assert_eq!(super::resource_worker_path(&fixture.0), Some(worker));
+    }
+
+    #[test]
+    fn embedded_python_preserves_root_and_platform_specific_filename_priority() {
+        for windows in [true, false] {
+            let fixture = ResourceFixture::new("embedded-layout");
+            let resource = fixture.0.join("Pymss.app/Contents/Resources");
+            let exe = fixture.0.join("Pymss.app/Contents/MacOS");
+            let roots = [
+                resource.join("python-runtime"),
+                resource.join("_up_/python-runtime"),
+                resource.join("resources/python-runtime"),
+                exe.join("python-runtime"),
+            ];
+            let names = if windows { ["python.exe", "Scripts/python.exe"] } else { ["bin/python3", "bin/python"] };
+            assert_eq!(super::embedded_python_from(Some(&resource), &exe, windows), None);
+            for root in roots.iter().rev() {
+                for name in names.iter().rev() {
+                    let candidate = root.join(name);
+                    fixture.file(&candidate);
+                    assert_eq!(super::embedded_python_from(Some(&resource), &exe, windows), Some(candidate));
+                }
+            }
+            assert_eq!(super::embedded_python_from(None, &exe, windows), Some(roots[3].join(names[0])));
+        }
+    }
+
+    #[test]
+    fn embedded_python_skips_directories_named_like_interpreters() {
+        let fixture = ResourceFixture::new("embedded-file-type");
+        let resource = fixture.0.join("resources");
+        let exe = fixture.0.join("portable");
+        fs::create_dir_all(resource.join("python-runtime/python.exe")).unwrap();
+        let python = exe.join("python-runtime/python.exe");
+        fixture.file(&python);
+        assert_eq!(super::embedded_python_from(Some(&resource), &exe, true), Some(python));
+    }
+
+    #[test]
+    fn bin_candidates_keep_all_hits_and_platform_tail_in_order() {
+        let fixture = ResourceFixture::new("bin-layout");
+        let resource = fixture.0.join("resources");
+        let exe = fixture.0.join("portable");
+        let expected = vec![resource.join("bin"), resource.join("_up_/bin"), resource.join("resources/bin"), exe.join("bin")];
+        assert_eq!(super::bundled_bin_candidates(Some(&resource), &exe, false), expected);
+        let mut mac = expected.clone();
+        mac.extend([std::path::PathBuf::from("/opt/homebrew/bin"), std::path::PathBuf::from("/usr/local/bin")]);
+        assert_eq!(super::bundled_bin_candidates(Some(&resource), &exe, true), mac);
+        fs::create_dir_all(&expected[1]).unwrap();
+        fs::create_dir_all(&expected[3]).unwrap();
+        fixture.file(&expected[2]);
+        let hits = super::bundled_bin_candidates(Some(&resource), &exe, false)
+            .into_iter().filter(|dir| dir.is_dir()).collect::<Vec<_>>();
+        assert_eq!(hits, vec![expected[1].clone(), expected[3].clone()]);
+        assert_eq!(super::bundled_bin_candidates(None, &exe, false), vec![exe.join("bin")]);
+        let duplicate = super::bundled_bin_candidates(Some(&exe), &exe, false);
+        assert_eq!(duplicate[0], duplicate[3]);
+    }
+
+    #[test]
+    fn bundled_env_selection_preserves_canonical_path_overlap_and_missing_path_behavior() {
+        let fixture = ResourceFixture::new("env-overlap");
+        let user = fixture.0.join("user");
+        let bundled = fixture.0.join("bundled");
+        fs::create_dir_all(&user).unwrap();
+        fs::create_dir_all(&bundled).unwrap();
+        let canonical_user = user.canonicalize().ok();
+        assert_eq!(super::distinct_bundled_runtime_env(canonical_user.clone(), Some(user.join("."))), None);
+        assert_eq!(super::distinct_bundled_runtime_env(canonical_user.clone(), Some(bundled.clone())), Some(bundled.clone()));
+        assert_eq!(super::distinct_bundled_runtime_env(canonical_user.clone(), None), None);
+        assert_eq!(super::distinct_bundled_runtime_env(None, Some(bundled.clone())), Some(bundled));
+        let missing = fixture.0.join("missing");
+        assert_eq!(super::distinct_bundled_runtime_env(None, Some(missing.clone())), None);
+        assert_eq!(super::distinct_bundled_runtime_env(canonical_user, Some(missing.clone())), Some(missing));
+    }
+
+    #[test]
+    fn active_pointer_resolution_accepts_existing_relative_and_absolute_paths_without_rewriting() {
+        let fixture = ResourceFixture::new("pointer-resolution");
+        let python = fixture.0.join("cpu/bin/python");
+        fixture.file(&python);
+        let pointer = fixture.0.join("active-runtime.json");
+        for path in ["cpu/bin/python".to_string(), python.to_string_lossy().to_string()] {
+            let bytes = serde_json::to_vec(&json!({"pythonPath": path, "backend": "cpu", "source": "bundled", "custom": true})).unwrap();
+            fs::write(&pointer, &bytes).unwrap();
+            assert_eq!(super::resolve_active_runtime_record(&pointer), Some((python.canonicalize().unwrap().to_string_lossy().to_string(), Some("bundled".into()))));
+            assert_eq!(fs::read(&pointer).unwrap(), bytes);
+        }
+        for bytes in [b"{}".as_slice(), b"not json", br#"{"pythonPath":"missing/python"}"#, br#"{"pythonPath":"cpu"}"#] {
+            fs::write(&pointer, bytes).unwrap();
+            assert_eq!(super::resolve_active_runtime_record(&pointer), None);
+            assert_eq!(fs::read(&pointer).unwrap(), bytes);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rocm_tools_keep_user_before_bundled_then_regular_bins_and_existing_path() {
+        let fixture = ResourceFixture::new("rocm-path-order");
+        let user = fixture.0.join("user");
+        let bundled = fixture.0.join("bundled");
+        let mut expected = Vec::new();
+        for root in [&user, &bundled] {
+            let package = root.join("rocm").join("Lib").join("site-packages").join("_rocm_sdk_core_1");
+            let tool = package.join("lib").join("llvm").join("bin");
+            fixture.file(&tool.join("offload-arch.exe"));
+            let sdk_bin = package.join("bin");
+            fs::create_dir_all(&sdk_bin).unwrap();
+            expected.extend([tool, sdk_bin]);
+            fixture.file(&root.join("rocm/Lib/site-packages/unrelated/lib/llvm/bin/offload-arch.exe"));
+        }
+        let mut dirs = super::rocm_native_tool_dirs_from(vec![user, fixture.0.join("absent"), bundled]);
+        assert_eq!(dirs, expected);
+        let bin = fixture.0.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        dirs.extend(super::bundled_bin_candidates(None, &fixture.0, false));
+        expected.push(bin);
+        let joined = expected.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>().join(";");
+        assert_eq!(super::prepend_path(Some("existing-path".into()), dirs), Some(format!("{joined};existing-path")));
     }
 
     #[test]

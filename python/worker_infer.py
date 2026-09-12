@@ -50,66 +50,6 @@ class JsonLogHandler:
         return True
 
 
-def snapshot_output_files(output_dir: str, output_format: str) -> dict[Path, int]:
-    base = Path(output_dir)
-    if not base.exists():
-        return {}
-    snapshot: dict[Path, int] = {}
-    for path in base.rglob(f"*.{output_format.lower()}"):
-        try:
-            snapshot[path.resolve()] = path.stat().st_mtime_ns
-        except OSError:
-            continue
-    return snapshot
-
-
-def collect_outputs(
-    output_dir: str,
-    success_files: list[str],
-    output_format: str,
-    baseline: dict[Path, int] | None = None,
-) -> list[dict[str, str]]:
-    base = Path(output_dir)
-    outputs: list[dict[str, str]] = []
-    if not base.exists():
-        return outputs
-    success_stems = {Path(name).stem for name in success_files}
-    for path in sorted(base.rglob(f"*.{output_format.lower()}")):
-        if baseline is not None:
-            try:
-                resolved = path.resolve()
-                if baseline.get(resolved) == path.stat().st_mtime_ns:
-                    continue
-            except OSError:
-                continue
-        if success_stems and not any(path.stem.startswith(stem + "_") or path.stem == stem for stem in success_stems):
-            continue
-        stem = path.stem
-        for source_stem in sorted(success_stems, key=len, reverse=True):
-            prefix = f"{source_stem}_"
-            if stem.startswith(prefix):
-                stem = stem[len(prefix):] or stem
-                break
-        outputs.append({"stem": stem, "path": str(path)})
-    return outputs
-
-
-def collect_changed_files(output_dir: str, baseline: dict[Path, int] | None = None) -> list[str]:
-    base = Path(output_dir)
-    if not base.exists():
-        return []
-    changed: list[str] = []
-    for path in sorted(item for item in base.rglob("*") if item.is_file()):
-        try:
-            resolved = path.resolve()
-            if baseline is not None and baseline.get(resolved) == path.stat().st_mtime_ns:
-                continue
-        except OSError:
-            continue
-        changed.append(str(path))
-    return changed
-
-
 def _normalize_output_naming(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {"enabled": False, "template": "", "stem_order": []}
@@ -187,17 +127,6 @@ def _replace_output_tokens(
     return _safe_filename_part(name)
 
 
-def _unique_output_path(path: Path, reserved: set[Path] | None = None) -> Path:
-    reserved = reserved or set()
-    if not path.exists() and path not in reserved:
-        return path
-    for index in range(2, 1000):
-        candidate = path.with_name(f"{path.stem}_{index}{path.suffix}")
-        if not candidate.exists() and candidate not in reserved:
-            return candidate
-    return path.with_name(f"{path.stem}_{int(datetime.now().timestamp())}{path.suffix}")
-
-
 def _claim_output_path(path: Path, reserved: set[Path] | None = None) -> Path:
     """Reserve an unused output path so concurrent workers cannot overwrite it."""
     reserved = reserved or set()
@@ -214,51 +143,6 @@ def _claim_output_path(path: Path, reserved: set[Path] | None = None) -> Path:
     fallback = path.with_name(f"{path.stem}_{int(datetime.now().timestamp_ns())}{path.suffix}")
     fallback.touch(exist_ok=False)
     return fallback
-
-
-def apply_output_naming(
-    outputs: list[dict[str, str]],
-    naming: Any,
-    *,
-    input_path: str,
-    input_index: int = 1,
-    model: str = "",
-    output_format: str = "wav",
-) -> list[dict[str, str]]:
-    config = _normalize_output_naming(naming)
-    if not config["enabled"]:
-        return outputs
-    order = config["stem_order"]
-    sorted_outputs = [item for _, item in sorted(
-        enumerate(outputs),
-        key=lambda pair: (_stem_rank(str(pair[1].get("stem") or ""), order), pair[0]),
-    )]
-    now = datetime.now()
-    renamed: list[dict[str, str]] = []
-    claimed_paths: set[Path] = set()
-    for index, output in enumerate(sorted_outputs):
-        source = Path(str(output.get("path") or ""))
-        if not source.is_file():
-            renamed.append(output)
-            continue
-        stem = str(output.get("stem") or source.stem).strip() or source.stem
-        suffix = source.suffix or f".{output_format}"
-        target_name = _replace_output_tokens(
-            config["template"],
-            input_path=input_path,
-            stem=stem,
-            stem_index=index,
-            input_index=input_index,
-            model=model,
-            now=now,
-        )
-        target = source.with_name(f"{target_name}{suffix}")
-        target = _unique_output_path(target, claimed_paths) if target != source else target
-        if target != source:
-            source.rename(target)
-        claimed_paths.add(target)
-        renamed.append({"stem": stem, "path": str(target)})
-    return renamed
 
 
 def _studio_separator_type() -> type[Any]:
@@ -312,11 +196,6 @@ def _studio_separator_type() -> type[Any]:
                     for offset, name in enumerate(os.listdir(source))
                 ]
             raise ValueError(f"Input path '{input_folder}' does not exist.")
-
-        def _start_output_capture(self, input_path: str, input_index: int) -> None:
-            self._studio_input_path = input_path
-            self._studio_input_index = max(1, input_index)
-            self._studio_now = datetime.now()
 
         def _prepare_output_contexts(self, input_folder: str, input_index: int) -> None:
             contexts: dict[str, deque[dict[str, Any]]] = {}
@@ -821,7 +700,7 @@ def normalize_audio_params(payload_audio_params: Any) -> dict[str, Any]:
         **defaults,
         **payload_audio_params,
     }
-    normalized["m4a_codec"] = "aac" if str(normalized.get("m4a_codec") or "").strip().lower() == "aac" else "aac"
+    normalized["m4a_codec"] = "aac"
     return normalized
 
 
@@ -1038,38 +917,11 @@ def cmd_infer(payload: dict[str, Any]) -> int:
     except ModelDownloadError as exc:
         return emit_error("MODEL_DOWNLOAD_FAILED", str(exc), traceback.format_exc(), task_id=task_id)
     except Exception as exc:
-        message = str(exc)
-        lowered = message.lower()
-        if "no audio stream found" in lowered:
-            return emit_error(
-                "INPUT_AUDIO_STREAM_MISSING",
-                message,
-                traceback.format_exc(),
-                task_id=task_id,
-            )
-        if "invalid data found" in lowered or "could not open input" in lowered:
-            return emit_error(
-                "INPUT_MEDIA_UNSUPPORTED",
-                message,
-                traceback.format_exc(),
-                task_id=task_id,
-            )
-        return emit_error("INFERENCE_FAILED", message, traceback.format_exc(), task_id=task_id)
+        return _emit_inference_error(exc, task_id)
     finally:
         if logger is not None and log_handler is not None:
             try:
                 logger.removeHandler(log_handler)
             except Exception:
                 pass
-        if separator is not None:
-            close = getattr(separator, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
-            else:
-                try:
-                    separator.del_cache()
-                except Exception:
-                    pass
+        _close_separator(separator)

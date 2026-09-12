@@ -149,8 +149,6 @@ def _resolve_device(payload: dict[str, Any]) -> str | None:
 
 def _emit_progress(task_id: str) -> Any:
     """Build a progress_callback(i, total, message) that emits task events."""
-    last_stage = {"sep": None}
-
     def cb(index: int, total: int, message: str | None) -> None:
         if total <= 0:
             total = 1

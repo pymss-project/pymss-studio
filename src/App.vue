@@ -11,7 +11,7 @@ import { useAppStore } from '@/stores/app'
 import { useUpdateStore } from '@/stores/update'
 import { getResolvedThemeTokens, getThemeOverrides, themeIsDark } from '@/utils/theme'
 import { useI18n } from 'vue-i18n'
-import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { listen, type EventCallback, type UnlistenFn } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-shell'
 import { useWorkflowStore } from '@/stores/workflow'
 import { activeRuntimeEnvironment, runtimeBackendLabel, runtimeCoreSyncAvailable, runtimeCoreUpdateAvailable as hasRuntimeCoreUpdate } from '@/utils/runtime'
@@ -35,9 +35,8 @@ const manualUpdateModalVisible = ref(false)
 const manualUpdateError = ref('')
 const runtimeCorePromptVisible = ref(false)
 const runtimeCorePromptShown = ref(false)
-let unlistenNodeEditorClosed: UnlistenFn | undefined
-let unlistenSimpleEditorClosed: UnlistenFn | undefined
-let unlistenSimpleEditorAction: UnlistenFn | undefined
+const workflowEventUnlisteners: UnlistenFn[] = []
+let unmounted = false
 
 const isDark = computed(() => themeIsDark.value)
 const isStandaloneRoute = computed(() => route.path === '/editor' || route.path === '/workflow-node-editor' || route.path === '/workflow-simple-editor')
@@ -210,25 +209,37 @@ async function keepDeferredUpdateForNextLaunch() {
   }
 }
 
+async function listenForMainWorkflowEvent<T>(event: string, handler: EventCallback<T>) {
+  if (unmounted || isStandaloneRoute.value) return
+  const unlisten = await listen<T>(event, (payload) => {
+    if (!unmounted && !isStandaloneRoute.value) handler(payload)
+  })
+  if (unmounted) unlisten()
+  else workflowEventUnlisteners.push(unlisten)
+}
+
+function handleWorkflowEditorClosed(kind: 'advanced' | 'simple') {
+  void workflow.handleEditorClosed(kind).catch((error) => {
+    console.warn('Failed to refresh workflows after editor closed', error)
+  })
+}
+
 onMounted(async () => {
   window.setTimeout(() => {
     bootReady.value = true
   }, 120)
   if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
-    unlistenNodeEditorClosed = await listen('pymss://workflow-node-editor-closed', () => {
-      workflow.markNodeEditorClosed()
-      void workflow.reload()
+    await listenForMainWorkflowEvent('pymss://workflow-node-editor-closed', () => {
+      handleWorkflowEditorClosed('advanced')
     })
-    unlistenSimpleEditorClosed = await listen('pymss://workflow-simple-editor-closed', () => {
-      workflow.markSimpleEditorClosed()
-      void workflow.reload()
+    await listenForMainWorkflowEvent('pymss://workflow-simple-editor-closed', () => {
+      handleWorkflowEditorClosed('simple')
     })
-    unlistenSimpleEditorAction = await listen<{ action?: string; workflowId?: string }>('pymss://workflow-simple-editor-action', async (event) => {
+    await listenForMainWorkflowEvent<{ action?: string; workflowId?: string }>('pymss://workflow-simple-editor-action', async (event) => {
       // `WebviewWindow.emit` broadcasts to every webview.  Only the main
       // window should react to an editor action; handling it inside the
       // standalone editor would replace that window with the main route just
       // before it is closed.
-      if (isStandaloneRoute.value) return
       const payload = event.payload || {}
       if (payload.action === 'run') {
         // The editor has its own Pinia instance, so a newly-created workflow
@@ -242,9 +253,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  unlistenNodeEditorClosed?.()
-  unlistenSimpleEditorClosed?.()
-  unlistenSimpleEditorAction?.()
+  unmounted = true
+  workflowEventUnlisteners.splice(0).forEach(unlisten => unlisten())
 })
 
 watch([bootReady, showStartupOnboarding], () => {

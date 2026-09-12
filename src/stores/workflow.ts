@@ -49,6 +49,11 @@ type StoredWorkflowState = {
   selectedWorkflowId?: string
 }
 
+type LoadedWorkflowState = {
+  workflows: WorkflowEntry[]
+  selectedWorkflowId: string
+}
+
 function createId(prefix = 'workflow') {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
 }
@@ -100,6 +105,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
   // same time. Share one in-flight load so a slower second read cannot race
   // the first one and leave the editor with an empty/stale workflow list.
   let initializationPromise: Promise<void> | null = null
+  let editorCloseRefreshPromise: Promise<WorkflowEntry | null> | null = null
+  let editorCloseRefreshGeneration = 0
 
   function persist() {
     const snapshot = JSON.parse(JSON.stringify({
@@ -116,17 +123,30 @@ export const useWorkflowStore = defineStore('workflow', () => {
     })
   }
 
-  async function loadStoredState() {
-    const stored = await loadAppStore<StoredWorkflowState>('workflow-state').catch(() => null)
-    workflows.value = (stored?.workflows || [])
+  async function readStoredState(throwOnError = false): Promise<LoadedWorkflowState> {
+    const stored = await loadAppStore<StoredWorkflowState>('workflow-state').catch((error) => {
+      if (throwOnError) throw error
+      return null
+    })
+    const loadedWorkflows = (stored?.workflows || [])
       .map(item => normalizeWorkflow(item))
       .filter((item): item is WorkflowEntry => Boolean(item))
       .sort((a, b) => b.updatedAt - a.updatedAt)
-    selectedWorkflowId.value = String(stored?.selectedWorkflowId || '')
-    if (!workflows.value.some(item => item.id === selectedWorkflowId.value)) {
-      selectedWorkflowId.value = workflows.value[0]?.id || ''
-    }
+    const storedSelectedId = String(stored?.selectedWorkflowId || '')
+    const loadedSelectedId = loadedWorkflows.some(item => item.id === storedSelectedId)
+      ? storedSelectedId
+      : loadedWorkflows[0]?.id || ''
+    return { workflows: loadedWorkflows, selectedWorkflowId: loadedSelectedId }
+  }
+
+  function applyStoredState(state: LoadedWorkflowState) {
+    workflows.value = state.workflows
+    selectedWorkflowId.value = state.selectedWorkflowId
     initialized.value = true
+  }
+
+  async function loadStoredState(throwOnError = false) {
+    applyStoredState(await readStoredState(throwOnError))
   }
 
   async function initialize() {
@@ -139,8 +159,34 @@ export const useWorkflowStore = defineStore('workflow', () => {
     await initializationPromise
   }
 
-  async function reload() {
-    await loadStoredState()
+  async function reload(options: { throwOnError?: boolean } = {}) {
+    await loadStoredState(options.throwOnError)
+  }
+
+  async function refreshAfterEditorClosed() {
+    try {
+      while (true) {
+        const generation = editorCloseRefreshGeneration
+        const state = await readStoredState(true)
+        // Another editor may have saved after this read captured its snapshot.
+        // Read again without publishing obsolete state to the overview.
+        if (generation !== editorCloseRefreshGeneration) continue
+        applyStoredState(state)
+        return selectedWorkflow.value
+      }
+    } finally {
+      editorCloseRefreshPromise = null
+    }
+  }
+
+  function handleEditorClosed(kind: 'advanced' | 'simple') {
+    if (kind === 'advanced') markNodeEditorClosed()
+    else markSimpleEditorClosed()
+    editorCloseRefreshGeneration += 1
+    if (!editorCloseRefreshPromise) {
+      editorCloseRefreshPromise = refreshAfterEditorClosed()
+    }
+    return editorCloseRefreshPromise
   }
 
   async function saveWorkflow(input: SaveWorkflowInput) {
@@ -234,6 +280,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     isSaving,
     initialize,
     reload,
+    handleEditorClosed,
     saveWorkflow,
     deleteWorkflow,
     duplicateWorkflow,

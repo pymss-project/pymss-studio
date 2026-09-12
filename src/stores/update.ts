@@ -53,7 +53,6 @@ export const useUpdateStore = defineStore('update', () => {
   const error = ref('')
   const lastCheckedAt = ref('')
   const availableUpdate = ref<ManagedUpdate | null>(null)
-  const lastCheckResult = ref<'idle' | 'checking' | 'available' | 'none' | 'failed'>('idle')
   const deferredVersion = ref('')
   const deferredAt = ref('')
   const lastAcceptedVersion = ref('')
@@ -84,7 +83,6 @@ export const useUpdateStore = defineStore('update', () => {
     const remaining = Math.max(0, downloadTotalBytes.value - downloadDownloadedBytes.value)
     return Math.ceil(remaining / downloadSpeedBytesPerSecond.value)
   })
-  const hasDeferredUpdate = computed(() => Boolean(deferredVersion.value))
   const updateIsPrerelease = computed(() => {
     return availableUpdate.value?.prerelease === true || isPrereleaseVersion(availableUpdate.value?.version || latestVersion.value)
   })
@@ -105,10 +103,6 @@ export const useUpdateStore = defineStore('update', () => {
       deferredAt: deferredAt.value || undefined,
       lastAcceptedVersion: lastAcceptedVersion.value || undefined,
     }
-    if (!isTauriRuntime()) {
-      localStorage.setItem('pymss-studio:update-state', JSON.stringify(payload))
-      return
-    }
     await saveAppStore('update-state', payload)
   }
 
@@ -118,22 +112,13 @@ export const useUpdateStore = defineStore('update', () => {
       initializeInFlight = (async () => {
         autoCheckCompleted.value = false
         let payload: UpdateStorePayload | null = null
-        if (!isTauriRuntime()) {
-          try {
-            const raw = localStorage.getItem('pymss-studio:update-state')
-            payload = raw ? JSON.parse(raw) as UpdateStorePayload : null
-          } catch {
-            payload = null
-          }
-        } else {
-          try {
-            payload = await loadAppStore<UpdateStorePayload>('update-state')
-          } catch (error) {
-            // Update state is optional; keep the progress listener alive even
-            // when a damaged or older store backend cannot read it.
-            console.warn('Failed to load update state', error)
-            payload = null
-          }
+        try {
+          payload = await loadAppStore<UpdateStorePayload>('update-state')
+        } catch (error) {
+          // Update state is optional; keep the progress listener alive even
+          // when a damaged or older store backend cannot read it.
+          console.warn('Failed to load update state', error)
+          payload = null
         }
         deferredVersion.value = String(payload?.deferredVersion || '')
         deferredAt.value = String(payload?.deferredAt || '')
@@ -188,18 +173,6 @@ export const useUpdateStore = defineStore('update', () => {
     return Boolean(version && deferredVersion.value === version && version !== lastAcceptedVersion.value)
   }
 
-  async function resolveDeferredVersion(version: string) {
-    if (!version) return false
-    if (deferredVersion.value === version) {
-      deferredVersion.value = ''
-      deferredAt.value = ''
-      lastAcceptedVersion.value = version
-      await persistState()
-      return true
-    }
-    return false
-  }
-
   function resetResult() {
     availableUpdate.value = null
     latestVersion.value = ''
@@ -247,7 +220,6 @@ export const useUpdateStore = defineStore('update', () => {
           if (!app.buildInfoUpdateSupported) {
             resetResult()
             status.value = 'idle'
-            lastCheckResult.value = 'none'
             error.value = ''
             currentVersion.value = app.buildInfoVersion || ''
             return null
@@ -265,7 +237,6 @@ export const useUpdateStore = defineStore('update', () => {
           if (!update) {
             resetResult()
             status.value = 'idle'
-            lastCheckResult.value = 'none'
             return null
           }
           availableUpdate.value = update
@@ -274,18 +245,11 @@ export const useUpdateStore = defineStore('update', () => {
           releaseDate.value = update.date || ''
           updateMessage.value = update.updateMessage || ''
           manualInstallUrl.value = update.manualInstallUrl || ''
-          if (deferredVersion.value === update.version) {
-            status.value = 'ready'
-            lastCheckResult.value = 'available'
-          } else {
-            status.value = 'available'
-            lastCheckResult.value = 'available'
-          }
+          status.value = deferredVersion.value === update.version ? 'ready' : 'available'
           return update
         } catch (err) {
           error.value = err instanceof Error ? err.message : String(err)
           status.value = 'failed'
-          lastCheckResult.value = 'failed'
           throw err
         } finally {
           updateCheckInFlight = null
@@ -359,12 +323,6 @@ export const useUpdateStore = defineStore('update', () => {
     return true
   }
 
-  async function clearDeferredUpdate() {
-    deferredVersion.value = ''
-    deferredAt.value = ''
-    await persistState()
-  }
-
   watch(currentVersion, (version) => {
     if (!version) return
     if (version === deferredVersion.value) {
@@ -405,16 +363,13 @@ export const useUpdateStore = defineStore('update', () => {
     installErrorVisible,
     installFailed,
     availableUpdate,
-    lastCheckResult,
     deferredVersion,
     deferredAt,
     lastAcceptedVersion,
     updateIsPrerelease,
     requiresManualInstall,
-    hasDeferredUpdate,
     shouldShowDeferred,
     hasPendingDeferredVersion,
-    resolveDeferredVersion,
     hasUpdate,
     isBusy,
     isInstallingUpdate,
@@ -424,7 +379,6 @@ export const useUpdateStore = defineStore('update', () => {
     downloadAndInstall,
     dismissInstallError,
     deferUntilNextLaunch,
-    clearDeferredUpdate,
     dismiss,
   }
 })

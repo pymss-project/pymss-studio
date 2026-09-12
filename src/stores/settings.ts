@@ -19,6 +19,11 @@ import {
 } from '@/utils/appZoom'
 import { normalizeLocaleSetting, setLocale, type LocaleSetting } from '@/i18n'
 import { isTauriRuntime, loadAppStore, saveAppStore } from '@/utils/appStore'
+import {
+  DEFAULT_CONCURRENT_SEPARATIONS,
+  MAX_CONCURRENT_SEPARATIONS,
+  normalizeConcurrentSeparations,
+} from '@/features/tasks/concurrency'
 import type { EnvInfo } from '@/stores/app'
 
 type AppPathsPayload = {
@@ -114,9 +119,7 @@ const DEFAULT_DOWNLOAD_SOURCE = 'modelscope'
 const DEFAULT_DOWNLOAD_METHOD: DownloadMethod = 'aria2c'
 const DEFAULT_DEFAULT_DEVICE = 'auto'
 const DEFAULT_DEFAULT_FORMAT = 'wav'
-const DEFAULT_CONCURRENT_SEPARATIONS = 1
 const DEFAULT_CLEAR_INPUT_AFTER_SUBMIT = true
-const MAX_CONCURRENT_SEPARATIONS = 16
 const DEFAULT_PROXY_MODE: ProxyMode = 'system'
 const DEFAULT_PROXY_URL = ''
 const DEFAULT_UPDATE_CHANNEL: UpdateChannel = 'stable'
@@ -322,9 +325,7 @@ export const useSettingsStore = defineStore('settings', () => {
     defaultFormat.value = stored?.defaultFormat || DEFAULT_DEFAULT_FORMAT
     downloadSource.value = stored?.downloadSource || DEFAULT_DOWNLOAD_SOURCE
     downloadMethod.value = normalizeDownloadMethod(stored?.downloadMethod)
-    maxConcurrentSeparations.value = Number.isFinite(Number(stored?.maxConcurrentSeparations))
-      ? Math.min(MAX_CONCURRENT_SEPARATIONS, Math.max(1, Math.trunc(Number(stored?.maxConcurrentSeparations))))
-      : DEFAULT_CONCURRENT_SEPARATIONS
+    maxConcurrentSeparations.value = normalizeConcurrentSeparations(stored?.maxConcurrentSeparations)
     clearInputAfterSubmit.value = stored?.clearInputAfterSubmit ?? DEFAULT_CLEAR_INPUT_AFTER_SUBMIT
     wavBitDepth.value = stored?.wavBitDepth || DEFAULT_WAV_BIT_DEPTH
     flacBitDepth.value = stored?.flacBitDepth || DEFAULT_FLAC_BIT_DEPTH

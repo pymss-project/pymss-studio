@@ -20,12 +20,14 @@ import {
   runtimeCoreSyncAvailable,
   runtimeEnvironmentForBackend,
   runtimeManifestStatus,
+  runtimeLoadError,
   runtimeBackendLabel as runtimeBackendName,
   runtimeSizeHint,
   isKnownRuntimeBackend,
 } from '@/utils/runtime'
 import { useModelStore } from '@/stores/model'
 import { useTaskStore } from '@/stores/task'
+import { normalizeConcurrentSeparations } from '@/features/tasks/concurrency'
 import { formatBytes } from '@/utils/format'
 import { formatDateTime } from '@/utils/time'
 import { DEFAULT_SCALE_FACTOR, normalizeScaleFactor } from '@/utils/appZoom'
@@ -165,10 +167,8 @@ const runtimeCoreUpdating = computed(() => app.runtimeCoreUpdateStatus === 'upda
 // Runtime detection and install/switch/delete all access the runtime state, so only one may run at a time.
 const runtimeBusy = computed(() => runtimeDetecting.value || runtimeInstalling.value || runtimeCoreUpdating.value || runtimeActivating.value !== null || runtimeDeleting.value !== null)
 const runtimeCurrentError = computed(() => {
-  const raw = String(app.runtimeInfo?.torchBackend || app.envInfo?.torchError || '')
-  if (!raw.toLowerCase().startsWith('error:') && !raw.toLowerCase().includes('winerror 1455')) return ''
-  if (raw.toLowerCase().includes('winerror 1455')) return t('settings.runtimePageFileError')
-  return raw.replace(/^error:\s*/i, '')
+  const error = runtimeLoadError(app.runtimeInfo, app.envInfo)
+  return error.toLowerCase().includes('winerror 1455') ? t('settings.runtimePageFileError') : error
 })
 const runtimeCurrentBackend = computed<RuntimeBackend | null>(() => {
   const detected = String(app.runtimeInfo?.torchBackend || app.envInfo?.torchBackend || '')
@@ -885,15 +885,9 @@ const scaleSliderMarks = computed<Record<number, string>>(() =>
 )
 const isDefaultScaleFactor = computed(() => isSameScaleFactor(scaleFactor.value, DEFAULT_SCALE_FACTOR))
 const maxConcurrentSeparationsInput = computed({
-  get: () => {
-    const value = Number(maxConcurrentSeparations.value || 1)
-    return Number.isFinite(value) ? Math.max(1, Math.trunc(value)) : 1
-  },
+  get: () => normalizeConcurrentSeparations(maxConcurrentSeparations.value),
   set: (value) => {
-    const normalized = Number(value)
-    maxConcurrentSeparations.value = Number.isFinite(normalized)
-      ? Math.min(settings.MAX_CONCURRENT_SEPARATIONS, Math.max(1, Math.trunc(normalized)))
-      : 1
+    maxConcurrentSeparations.value = normalizeConcurrentSeparations(value)
   },
 })
 const dataDirEntries = computed(() => [

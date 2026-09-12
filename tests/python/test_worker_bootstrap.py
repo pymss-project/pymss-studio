@@ -693,7 +693,7 @@ class PackageImportNameTests(unittest.TestCase):
         def fake_check_output(command, **kwargs):
             del kwargs
             captured["script"] = command[2]
-            return "{}"
+            return json.dumps(probe_result())
 
         with mock.patch.object(worker_bootstrap, "_manifest", return_value=MANIFEST), \
              mock.patch.object(worker_bootstrap.subprocess, "check_output", fake_check_output):

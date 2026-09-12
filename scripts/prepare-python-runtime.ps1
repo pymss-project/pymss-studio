@@ -262,8 +262,8 @@ if ($InitialBackend) {
         $probeScript = @'
 import importlib.util, json, platform
 from importlib import metadata
-names = json.loads(%NAMES%)
-mapping = json.loads(%MAPPING%)
+names = %NAMES%
+mapping = %MAPPING%
 result = {'pythonVersion': platform.python_version(), 'torchVersion': None, 'torchBackend': 'missing', 'acceleratorAvailable': False, 'packages': {}, 'packageVersions': {}, 'pymssVersion': None, 'pymssCoreVersion': None, 'pymssGraphAvailable': False}
 for name in names:
     result['packages'][name] = importlib.util.find_spec(mapping.get(name, name)) is not None

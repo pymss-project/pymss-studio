@@ -21,14 +21,6 @@ import { analyzeWorkflowInputs } from '@/utils/workflowInputs'
  * contract while ``output_names`` is consumed by the Studio worker to wire
  * user-facing filename hints into each save node.
  */
-export type SimpleWorkflowSavePayload = {
-  id?: string
-  name: string
-  description: string
-  definition: Record<string, unknown>
-  expectedUpdatedAt?: number
-}
-
 export type SimpleWorkflowReasonCode =
   | 'graph_workflow'
   | 'advanced_parameters'
@@ -441,8 +433,4 @@ export function analyzeSimpleWorkflow(definition: unknown): { editable: boolean;
     return { editable: false, reasonCodes: ['advanced_parameters'] }
   }
   return { editable: true, reasonCodes: [] }
-}
-
-export function resolveWorkflowOpenMode(definition: unknown): 'simple' | 'advanced' {
-  return analyzeSimpleWorkflow(definition).editable ? 'simple' : 'advanced'
 }

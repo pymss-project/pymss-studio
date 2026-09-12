@@ -23,6 +23,7 @@ import {
   type TaskStatus,
 } from '@/features/tasks/lifecycle'
 import { normalizeStemOutputs, stemFromOutputPath, type StemOutput } from '@/utils/stemOutputs'
+import { normalizeConcurrentSeparations } from '@/features/tasks/concurrency'
 
 export type { TaskStatus } from '@/features/tasks/lifecycle'
 export type { StemOutput } from '@/utils/stemOutputs'
@@ -179,8 +180,6 @@ function isSupportedInputPath(path: string) {
   const ext = path.split('.').pop()?.toLowerCase() || ''
   return AUDIO_EXTENSIONS.includes(ext) || VIDEO_EXTENSIONS.includes(ext)
 }
-
-const MAX_CONCURRENT_SEPARATIONS = 16
 
 function normalizeStatus(status: unknown): TaskStatus {
   if (typeof status !== 'string') return 'queued'
@@ -919,9 +918,7 @@ export const useTaskStore = defineStore('task', () => {
 
   function maxConcurrentSeparations() {
     const settings = useSettingsStore()
-    const value = Number(settings.maxConcurrentSeparations || 1)
-    if (!Number.isFinite(value)) return 1
-    return Math.min(MAX_CONCURRENT_SEPARATIONS, Math.max(1, Math.trunc(value)))
+    return normalizeConcurrentSeparations(settings.maxConcurrentSeparations)
   }
 
   function buildRunConfig(inferenceParams: Record<string, unknown>, modelType?: string | null, outputLayout: OutputLayout = 'folders', outputNaming?: OutputNamingConfig): SeparationRunConfig {

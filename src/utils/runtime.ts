@@ -1,4 +1,11 @@
-import type { InstalledRuntime, RuntimeBackend, RuntimeInfo } from '@/stores/app'
+import type { EnvInfo, InstalledRuntime, RuntimeBackend, RuntimeInfo } from '@/stores/app'
+
+export function runtimeLoadError(info: RuntimeInfo | null | undefined, env: EnvInfo | null | undefined): string {
+  if (info?.liveProbeError?.message) return info.liveProbeError.message
+  const raw = String(info?.torchBackend || env?.torchError || '')
+  if (!raw.toLowerCase().startsWith('error:') && !raw.toLowerCase().includes('winerror 1455')) return ''
+  return raw.replace(/^error:\s*/i, '')
+}
 
 /** Approximate download size of each backend's dependency set, shown before installing. */
 const RUNTIME_SIZE_HINTS: Record<RuntimeBackend, string> = {
