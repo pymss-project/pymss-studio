@@ -59,6 +59,7 @@ const runtimeVersionUpdateAvailable = computed(() => hasRuntimeCoreUpdate(
   activeRuntime.value,
   app.runtimeCoreVersions?.packages?.pymss?.latestVersion,
   app.runtimeCoreVersions?.packages?.['pymss-core']?.latestVersion,
+  app.runtimeInfo?.manifestVersion,
 ))
 const runtimeManifestSyncRequired = computed(() => runtimeCoreSyncAvailable(
   activeRuntime.value,

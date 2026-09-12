@@ -98,6 +98,20 @@ class RuntimeReadinessTests(unittest.TestCase):
 
 
 class ManifestRequirementTests(unittest.TestCase):
+    def test_manifest_status_requires_complete_numeric_markers(self):
+        for actual, expected, status in (
+            ("2026.09.1", "2026.09.1", "current"),
+            (" 2026.9.1.0 ", "2026.09.1", "current"),
+            ("2026.08.1", "2026.09.1", "older"),
+            ("2026.10.1", "2026.09.1", "newer"),
+            (None, "2026.09.1", "unknown"),
+            ("2026.09.1", None, "unknown"),
+            ("2026.09.1-invalid", "2026.09.1", "unknown"),
+            ("legacy", "legacy", "unknown"),
+        ):
+            with self.subTest(actual=actual, expected=expected):
+                self.assertEqual(worker_bootstrap._runtime_manifest_status(actual, expected), status)
+
     def test_pin_manifest_requirement_preserves_extras(self):
         self.assertEqual(
             worker_bootstrap._pin_manifest_requirement("pymss[proxy]>=2.1.3", "2.2.0"),
@@ -237,6 +251,42 @@ class MultipleEnvironmentTests(unittest.TestCase):
         # Switching back and forth must not damage either environment.
         with self._runtime():
             self.assertEqual(len(worker_bootstrap._installed_envs(MANIFEST)), 2)
+
+    def test_missing_active_interpreter_is_cleared_before_startup_selection(self):
+        self._make_env("cpu", "2.7.1")
+        self.active_file.write_text(json.dumps({
+            "backend": "cuda",
+            "pythonPath": str(self.envs_dir / "cuda" / "Scripts" / "python.exe"),
+        }), encoding="utf-8")
+        with self._runtime(), \
+             mock.patch.object(worker_bootstrap, "_module_available", return_value=False), \
+             mock.patch.object(worker_bootstrap, "_detect_gpu_vendors", return_value=[]):
+            info = worker_bootstrap._runtime_info_payload({})
+            self.assertIsNone(info["installedBackend"])
+            self.assertIsNone(info["installState"])
+            self.assertFalse(info["ready"])
+            candidates = [env for env in info["installedEnvironments"] if env["health"] != "broken"]
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(worker_bootstrap.cmd_activate_runtime({
+                "backend": candidates[0]["backend"],
+                "pythonPath": candidates[0]["pythonPath"],
+                "onlyIfNoActive": True,
+            }), 0)
+        self.assertEqual(self._active()["backend"], "cpu")
+
+    def test_pointer_reader_ignores_invalid_shapes_and_non_file_paths(self):
+        self._make_env("cpu", "2.7.1")
+        records = (
+            [],
+            {"backend": "cpu", "pythonPath": ["cpu", "Scripts", "python.exe"]},
+            {"backend": "cpu", "pythonPath": "cpu/Scripts"},
+            {"backend": "cpu", "pythonPath": "cpu/Scripts/missing.exe"},
+            {"backend": "cpu", "pythonPath": str(self.envs_dir / "cpu" / "Scripts")},
+        )
+        for record in records:
+            with self.subTest(record=record):
+                self.active_file.write_text(json.dumps(record), encoding="utf-8")
+                self.assertIsNone(worker_bootstrap._resolve_runtime_state_from(self.active_file))
 
     def test_startup_managed_activation_preserves_a_pointer_created_during_probe(self):
         self._make_env("cpu", "2.7.1")

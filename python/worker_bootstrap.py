@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import importlib.util
 import json
 import os
@@ -10,8 +11,11 @@ import subprocess
 import sys
 import time
 import urllib.request
+from functools import partial, wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+from worker_runtime_lock import RuntimeLockBusy, runtime_lock
 
 MANIFEST_PATH = Path(__file__).with_name("runtime-manifest.json")
 
@@ -69,6 +73,36 @@ def _emit(event_type: str, payload: dict[str, Any], task_id: str | None = None) 
     emit(event_type, payload, task_id=task_id)
 
 
+def _serialized_runtime_command(command: Callable[..., int], *, query: bool = False) -> Callable[[dict[str, Any]], int]:
+    @wraps(command)
+    def run(payload: dict[str, Any]) -> int:
+        try:
+            # Repairing queries hold the same lock as writers for their entire operation.
+            # Read-only installations may only be observed, never repaired or recovered.
+            with runtime_lock(RUNTIME_ENVS_DIR / ".runtime-management.lock", allow_read_only=query) as writable:
+                return command(payload, repair=writable) if query else command(payload)
+        except RuntimeLockBusy:
+            from worker_protocol import emit_error
+            return emit_error(
+                "RUNTIME_BUSY",
+                "Another runtime operation is in progress. Wait for it to finish and retry.",
+                task_id=payload.get("taskId"),
+                recoverable=True,
+            )
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EPERM, errno.EROFS}:
+                raise
+            from worker_protocol import emit_error
+            return emit_error(
+                "RUNTIME_PERMISSION_DENIED",
+                "The runtime directory does not allow this operation.",
+                detail=str(exc),
+                task_id=payload.get("taskId"),
+                recoverable=True,
+            )
+    return run
+
+
 def _module_available(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
 
@@ -79,8 +113,12 @@ def _resolve_runtime_state_from(file: Path) -> dict[str, Any] | None:
         state = json.loads(file.read_text(encoding="utf-8"))
     except Exception:
         return None
+    if not isinstance(state, dict):
+        return None
     python_path = state.get("pythonPath")
     if python_path:
+        if not isinstance(python_path, str):
+            return None
         p = Path(python_path)
         if not p.is_absolute():
             resolved = file.parent / p
@@ -88,6 +126,8 @@ def _resolve_runtime_state_from(file: Path) -> dict[str, Any] | None:
                 state["pythonPath"] = str(resolved.resolve())
             else:
                 return None
+        elif not p.is_file():
+            return None
     state.pop("source", None)
     return state
 
@@ -308,7 +348,7 @@ def _state_matches_backend(backend: str, state: dict[str, Any]) -> bool:
     return recorded == ("cpu" if backend == "mlx" else backend)
 
 
-def _repaired_env_state(backend: str, state: dict[str, Any]) -> dict[str, Any]:
+def _repaired_env_state(backend: str, state: dict[str, Any], *, persist: bool = True) -> dict[str, Any]:
     """Re-derive an environment's torch facts from its own interpreter.
 
     Installs used to record whatever the *active* runtime reported, so a CPU environment
@@ -336,14 +376,15 @@ def _repaired_env_state(backend: str, state: dict[str, Any]) -> dict[str, Any]:
         # repeat a false one, and leave the file untouched so the next read tries again.
         repaired.update({"torchVersion": None, "torchBackend": None, "acceleratorAvailable": False})
         return repaired
-    try:
-        _atomic_write_json(_env_state_path(backend), repaired)
-    except Exception:
-        pass
+    if persist:
+        try:
+            _atomic_write_json(_env_state_path(backend), repaired)
+        except Exception:
+            pass
     return repaired
 
 
-def _read_installed_env_state(backend: str) -> dict[str, Any] | None:
+def _read_installed_env_state(backend: str, *, repair: bool = True) -> dict[str, Any] | None:
     path = _env_state_path(backend)
     try:
         state = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
@@ -352,7 +393,7 @@ def _read_installed_env_state(backend: str) -> dict[str, Any] | None:
     if not isinstance(state, dict):
         return None
     if int(state.get("stateVersion") or 1) < ENV_STATE_VERSION and not _state_matches_backend(backend, state):
-        state = _repaired_env_state(backend, state)
+        state = _repaired_env_state(backend, state, persist=repair)
     state.pop("source", None)
     return state
 
@@ -492,7 +533,7 @@ def _dir_size_bytes(path: Path) -> int:
     return total
 
 
-def _incomplete_env_backends(manifest: dict[str, Any]) -> list[str]:
+def _incomplete_env_backends(manifest: dict[str, Any], *, repair: bool = True) -> list[str]:
     """Backends whose venv exists but never recorded an install state.
 
     An interrupted or failed install leaves the venv behind (state is only written on
@@ -503,10 +544,10 @@ def _incomplete_env_backends(manifest: dict[str, Any]) -> list[str]:
         python_path = _env_python_path(backend)
         if not python_path.is_file():
             continue
-        state = _read_installed_env_state(backend)
+        state = _read_installed_env_state(backend, repair=repair)
         if state and str(state.get("backend") or "").strip().lower() in {"", backend}:
             continue
-        if _discover_runtime_state(backend, python_path, manifest, persist=True) is None:
+        if _discover_runtime_state(backend, python_path, manifest, persist=repair) is None:
             incomplete.append(backend)
     return incomplete
 
@@ -636,24 +677,24 @@ print(json.dumps(result, ensure_ascii=False))
         return {}
 
 
-def _installed_envs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+def _installed_envs(manifest: dict[str, Any], *, repair: bool = True) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     seen_backends: set[str] = set()
     # User-managed environments (highest priority)
     for backend in manifest.get("backends", {}):
         env_dir = _env_dir(backend)
-        if env_dir.is_dir() and not _is_bundled_runtime_env(env_dir):
+        if repair and env_dir.is_dir() and not _is_bundled_runtime_env(env_dir):
             try:
                 _repair_runtime_venv_config(env_dir)
                 _make_posix_venv_relocatable(env_dir)
             except OSError:
                 pass
-        state = _read_installed_env_state(backend)
+        state = _read_installed_env_state(backend, repair=repair)
         python_path = _env_python_path(backend)
         if state and str(state.get("backend") or "").strip().lower() not in {"", backend}:
             state = None
         if python_path.is_file() and state is None:
-            state = _discover_runtime_state(backend, python_path, manifest, persist=True)
+            state = _discover_runtime_state(backend, python_path, manifest, persist=repair)
         if state and python_path.is_file():
             package_versions = _probe_python_package_versions(python_path, ["pymss", "pymss-core"])
             items.append({
@@ -662,7 +703,7 @@ def _installed_envs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
                 "pythonPath": str(python_path),
                 "logPath": str(_env_log_path(backend)),
                 "health": _runtime_health(backend, state, manifest),
-                "coreUpdateSupported": True,
+                "coreUpdateSupported": repair,
                 "packageVersions": {**(state.get("packageVersions") or {}), **package_versions},
                 "pymssVersion": (package_versions.get("pymss") or state.get("pymssVersion")),
                 "pymssCoreVersion": (package_versions.get("pymss-core") or state.get("pymssCoreVersion")),
@@ -753,6 +794,8 @@ def _envs_with_live_active(
     manifest: dict[str, Any],
     active_python: Path | None,
     active_probe: dict[str, Any] | None,
+    *,
+    repair: bool = True,
 ) -> list[dict[str, Any]]:
     """Installed environments, with the active one's torch facts taken from the live probe.
 
@@ -761,7 +804,7 @@ def _envs_with_live_active(
     environment was just probed for real, so prefer that answer over the recording. Idle
     environments keep their recorded state — probing each one would spawn an interpreter per
     environment on every refresh."""
-    environments = _installed_envs(manifest)
+    environments = _installed_envs(manifest, repair=repair)
     if not active_probe or not active_python:
         return environments
     for entry in environments:
@@ -988,6 +1031,22 @@ def _manifest_requirement_names(manifest: dict[str, Any], backend: str) -> list[
     return [*manifest.get("common", {}), *_backend_extra_names(manifest, backend)]
 
 
+def _runtime_manifest_status(actual: Any, expected: Any) -> str:
+    """Compare numeric manifest markers without treating malformed prefixes as versions."""
+    actual_text = str(actual or "").strip()
+    expected_text = str(expected or "").strip()
+    if not all(re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", value) for value in (actual_text, expected_text)):
+        return "unknown"
+    actual_parts = [int(part) for part in actual_text.split(".")]
+    expected_parts = [int(part) for part in expected_text.split(".")]
+    length = max(len(actual_parts), len(expected_parts))
+    actual_parts.extend([0] * (length - len(actual_parts)))
+    expected_parts.extend([0] * (length - len(expected_parts)))
+    if actual_parts == expected_parts:
+        return "current"
+    return "older" if actual_parts < expected_parts else "newer"
+
+
 def _manifest_versions_are_satisfied(
     probed: dict[str, Any],
     manifest: dict[str, Any],
@@ -1032,7 +1091,7 @@ def _manifest_versions_are_satisfied(
     return not failures, failures
 
 
-def _runtime_info_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def _runtime_info_payload(payload: dict[str, Any], *, repair: bool = True) -> dict[str, Any]:
     manifest = _manifest()
     backend = str(payload.get("backend") or "").strip() or None
     install_state = _read_runtime_state()
@@ -1107,7 +1166,7 @@ def _runtime_info_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "installState": install_state,
         "statePath": str(ACTIVE_RUNTIME_FILE),
         "logPath": str(install_state.get("logPath")) if install_state and install_state.get("logPath") else None,
-        "installedEnvironments": _envs_with_live_active(manifest, active_python, active_probe),
+        "installedEnvironments": _envs_with_live_active(manifest, active_python, active_probe, repair=repair),
         "gpuVendors": _detect_gpu_vendors(),
         "torchVersion": torch_version,
         "torchBackend": torch_backend,
@@ -1128,9 +1187,11 @@ def _runtime_info_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def cmd_runtime_info(payload: dict[str, Any]) -> int:
-    _recover_runtime_transactions()
-    _emit("runtime_info", _runtime_info_payload(payload))
+@partial(_serialized_runtime_command, query=True)
+def cmd_runtime_info(payload: dict[str, Any], *, repair: bool = True) -> int:
+    if repair:
+        _recover_runtime_transactions()
+    _emit("runtime_info", _runtime_info_payload(payload, repair=repair))
     return 0
 
 
@@ -1146,17 +1207,19 @@ def cmd_runtime_core_versions(payload: dict[str, Any]) -> int:
     return 0
 
 
-def cmd_runtime_env_sizes(payload: dict[str, Any]) -> int:
+@partial(_serialized_runtime_command, query=True)
+def cmd_runtime_env_sizes(payload: dict[str, Any], *, repair: bool = True) -> int:
     """Disk usage per installed environment. Split out of runtime_info on purpose: walking a
     multi-GB venv takes long enough that it would slow down every startup and every refresh."""
     del payload
     sizes: dict[str, int] = {}
     incomplete: list[str] = []
-    _recover_runtime_transactions()
+    if repair:
+        _recover_runtime_transactions()
     manifest = _manifest()
     try:
         targets = _env_size_targets(manifest)
-        incomplete = _incomplete_env_backends(manifest)
+        incomplete = _incomplete_env_backends(manifest, repair=repair)
     except Exception:
         # Probing the directories can fail outright (permissions, a vanished data root).
         # Sizes are supplementary, so degrade to "unknown" instead of failing the command.
@@ -1174,6 +1237,7 @@ def cmd_runtime_env_sizes(payload: dict[str, Any]) -> int:
     return 0
 
 
+@_serialized_runtime_command
 def cmd_activate_runtime(payload: dict[str, Any]) -> int:
     backend = str(payload.get("backend") or "").strip().lower()
     supported = _supported_backend(backend)
@@ -1324,6 +1388,7 @@ def cmd_activate_runtime(payload: dict[str, Any]) -> int:
     return 0
 
 
+@_serialized_runtime_command
 def cmd_delete_runtime(payload: dict[str, Any]) -> int:
     backend = str(payload.get("backend") or "").strip().lower()
     supported = _supported_backend(backend)
@@ -1496,6 +1561,7 @@ def _make_posix_venv_relocatable(env_dir: Path) -> None:
             temporary.unlink(missing_ok=True)
 
 
+@_serialized_runtime_command
 def cmd_install_runtime(payload: dict[str, Any]) -> int:
     """Build and activate an environment for `backend`.
 
@@ -1703,6 +1769,7 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
         )
 
 
+@_serialized_runtime_command
 def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
     task_id = str(payload.get("taskId") or f"runtime_core_update_{int(time.time() * 1000)}")
     backend = str(payload.get("backend") or "").strip().lower()
@@ -1716,17 +1783,6 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
         return emit_error("RUNTIME_BACKEND_UNSUPPORTED", f"Unsupported runtime backend: {backend or 'missing'}", task_id=task_id)
     backend, _spec = supported
 
-    mirror, index_url = ("pypi", PYPI_MIRROR_URLS["pypi"]) if mirror == "auto" else _resolve_pypi_mirror(mirror, locale)
-    try:
-        target_pymss_version = _latest_pypi_version("pymss")
-    except Exception as exc:
-        from worker_protocol import emit_error
-        return emit_error("RUNTIME_CORE_UPDATE_FAILED", f"Failed to resolve latest pymss version from PyPI: {exc}", task_id=task_id, recoverable=True)
-    try:
-        target_pymss_core_version = _latest_pypi_version("pymss-core")
-    except Exception as exc:
-        from worker_protocol import emit_error
-        return emit_error("RUNTIME_CORE_UPDATE_FAILED", f"Failed to resolve latest pymss-core version from PyPI: {exc}", task_id=task_id, recoverable=True)
     target = _target_runtime_from_payload(payload, backend)
     if not target:
         from worker_protocol import emit_error
@@ -1755,6 +1811,27 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
     if not active_python or not _same_path(active_python, python_path):
         from worker_protocol import emit_error
         return emit_error("RUNTIME_CORE_UPDATE_INACTIVE", "Core update is only available for the currently active runtime. Please switch to this environment first.", task_id=task_id, recoverable=True)
+    manifest_status = _runtime_manifest_status(state.get("manifestVersion"), manifest.get("manifestVersion"))
+    if manifest_status not in {"current", "older"}:
+        from worker_protocol import emit_error
+        return emit_error(
+            "RUNTIME_MANIFEST_INCOMPATIBLE",
+            "The runtime manifest is newer than this application or has an unknown version. "
+            "Use a compatible application version or reinstall the runtime before updating core packages.",
+            task_id=task_id,
+            recoverable=True,
+        )
+    mirror, index_url = ("pypi", PYPI_MIRROR_URLS["pypi"]) if mirror == "auto" else _resolve_pypi_mirror(mirror, locale)
+    try:
+        target_pymss_version = _latest_pypi_version("pymss")
+    except Exception as exc:
+        from worker_protocol import emit_error
+        return emit_error("RUNTIME_CORE_UPDATE_FAILED", f"Failed to resolve latest pymss version from PyPI: {exc}", task_id=task_id, recoverable=True)
+    try:
+        target_pymss_core_version = _latest_pypi_version("pymss-core")
+    except Exception as exc:
+        from worker_protocol import emit_error
+        return emit_error("RUNTIME_CORE_UPDATE_FAILED", f"Failed to resolve latest pymss-core version from PyPI: {exc}", task_id=task_id, recoverable=True)
     log_path = env_dir / "pymss-core-update.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] update pymss core mirror={mirror}\n", encoding="utf-8")

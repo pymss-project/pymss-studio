@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { createFreshRunner } from '@/utils/async'
+import { createRuntimeQueryQueue } from '@/utils/runtimeQueries'
 import { isTauriRuntime } from '@/utils/appStore'
 import { registerWindowCloseGuard } from '@/utils/windowCloseGuards'
 
@@ -131,10 +131,6 @@ export const useAppStore = defineStore('app', () => {
   const workerEventConnectionError = ref('')
   const lastError = ref<string | null>(null)
   const runtimeInfo = ref<RuntimeInfo | null>(null)
-  // Runtime probes can overlap during startup (the shell and onboarding both check the
-  // environment). Keep a monotonic generation so an older response cannot overwrite newer
-  // activation state in the store.
-  let runtimeInfoRequestVersion = 0
   const runtimeInstallTaskId = ref<string | null>(null)
   const runtimeInstallStatus = ref<'idle' | 'installing' | 'success' | 'error' | 'cancelled'>('idle')
   const runtimeInstallBackend = ref<string | null>(null)
@@ -309,20 +305,106 @@ export const useAppStore = defineStore('app', () => {
   // runtime_info, which runs on startup and after every runtime operation.
   // Callers refresh right after an install or a delete, so a caller must never be handed the
   // result of a walk that started before the change it is refreshing for.
-  const measureRuntimeEnvSizes = createFreshRunner(async () => {
-    if (!isTauriRuntime()) {
-      runtimeEnvSizes.value = {}
-      runtimeIncompleteBackends.value = []
-      return runtimeEnvSizes.value
+  // Queries and writes take the same worker-side lock. Each enqueue supplies a fresh
+  // callback, and background writes keep their queue slot until a terminal event.
+  const runRuntimeQuery = createRuntimeQueryQueue()
+
+  type RuntimeBackgroundOperation = {
+    dispatched: boolean
+    cancelled: boolean
+    completed: boolean
+    finishedEvent: string
+    started: Promise<void>
+    resolveStarted: () => void
+    complete: () => void
+  }
+  const runtimeBackgroundOperations = new Map<string, RuntimeBackgroundOperation>()
+
+  function startRuntimeBackground(command: string, taskId: string, payload: Record<string, unknown>, finishedEvent: string) {
+    let resolveStarted!: () => void
+    let rejectStarted!: (error: unknown) => void
+    let resolveCompleted!: () => void
+    const started = new Promise<void>((resolve, reject) => {
+      resolveStarted = resolve
+      rejectStarted = reject
+    })
+    const completed = new Promise<void>(resolve => { resolveCompleted = resolve })
+    const operation: RuntimeBackgroundOperation = {
+      dispatched: false,
+      cancelled: false,
+      completed: false,
+      finishedEvent,
+      started,
+      resolveStarted,
+      complete() {
+        operation.completed = true
+        resolveCompleted()
+      },
     }
-    const result = await invoke<{
-      sizes?: Record<string, number>
-      incompleteBackends?: string[]
-    }>('runtime_env_sizes')
-    runtimeEnvSizes.value = result?.sizes || {}
-    runtimeIncompleteBackends.value = result?.incompleteBackends || []
-    return runtimeEnvSizes.value
-  })
+    runtimeBackgroundOperations.set(taskId, operation)
+    void runRuntimeQuery(async () => {
+      try {
+        if (operation.cancelled) return
+        // Onboarding can start before bootstrap has registered the event listener.
+        // Subscribe before dispatch so even an immediate terminal event releases the queue.
+        await import('@/utils/events').then(({ registerWorkerEvents }) => registerWorkerEvents())
+        if (operation.cancelled) return
+        operation.dispatched = true
+        await invoke(command, { payload })
+        resolveStarted()
+        await completed
+      } catch (error) {
+        rejectStarted(error)
+        throw error
+      } finally {
+        runtimeBackgroundOperations.delete(taskId)
+      }
+    }, { retryBusy: false }).catch(rejectStarted)
+    // Preserve the public contract: acknowledge dispatch without waiting for installation.
+    return started
+  }
+
+  async function cancelRuntimeBackground(command: string, taskId: string) {
+    const operation = runtimeBackgroundOperations.get(taskId)
+    if (operation && !operation.dispatched) {
+      operation.cancelled = true
+      handleRuntimeEvent({ type: 'task_cancelled', taskId })
+      operation.resolveStarted()
+      return true
+    }
+    if (operation) {
+      // Cancellation must not race ahead of the start IPC registering its worker in Rust.
+      try {
+        await operation.started
+      } catch {
+        return false
+      }
+      if (operation.completed) return false
+    }
+    const cancelled = await invoke<boolean>(command, { taskId })
+    if (cancelled && operation && !operation.completed) {
+      // The acknowledged cancellation also releases the queue if its event was missed.
+      handleRuntimeEvent({ type: 'task_cancelled', taskId })
+    }
+    return cancelled
+  }
+
+  async function measureRuntimeEnvSizes() {
+    return runRuntimeQuery(async () => {
+      if (!isTauriRuntime()) {
+        runtimeEnvSizes.value = {}
+        runtimeIncompleteBackends.value = []
+        return runtimeEnvSizes.value
+      }
+      const result = await invoke<{
+        sizes?: Record<string, number>
+        incompleteBackends?: string[]
+      }>('runtime_env_sizes')
+      runtimeEnvSizes.value = result?.sizes || {}
+      runtimeIncompleteBackends.value = result?.incompleteBackends || []
+      return runtimeEnvSizes.value
+    })
+  }
 
   let runtimeEnvSizesWaiting = 0
 
@@ -342,15 +424,16 @@ export const useAppStore = defineStore('app', () => {
   }
 
   async function checkRuntimeInfo(backend?: RuntimeBackend) {
-    const requestVersion = ++runtimeInfoRequestVersion
-    if (!isTauriRuntime()) {
-      const result: RuntimeInfo = { ready: false, backend: backend || null, platform: navigator.platform }
-      if (requestVersion === runtimeInfoRequestVersion) runtimeInfo.value = result
+    return runRuntimeQuery(async () => {
+      if (!isTauriRuntime()) {
+        const result: RuntimeInfo = { ready: false, backend: backend || null, platform: navigator.platform }
+        runtimeInfo.value = result
+        return result
+      }
+      const result = await invoke<RuntimeInfo>('runtime_info', { payload: backend ? { backend } : {} })
+      runtimeInfo.value = result
       return result
-    }
-    const result = await invoke<RuntimeInfo>('runtime_info', { payload: backend ? { backend } : {} })
-    if (requestVersion === runtimeInfoRequestVersion) runtimeInfo.value = result
-    return result
+    })
   }
 
   async function loadRuntimeCoreVersions() {
@@ -375,7 +458,7 @@ export const useAppStore = defineStore('app', () => {
     runtimeInstallMessage.value = ''
     runtimeInstallLogs.value = []
     try {
-      await invoke('start_runtime_install', { payload: { taskId, backend, mirror, locale } })
+      await startRuntimeBackground('start_runtime_install', taskId, { taskId, backend, mirror, locale }, 'runtime_install_finished')
     } catch (error) {
       runtimeInstallStatus.value = 'error'
       runtimeInstallMessage.value = error instanceof Error ? error.message : String(error)
@@ -395,7 +478,7 @@ export const useAppStore = defineStore('app', () => {
     runtimeCoreUpdateStatus.value = 'updating'
     runtimeCoreUpdateMessage.value = ''
     try {
-      await invoke('start_runtime_core_update', { payload: { taskId, backend, mirror, locale, ...target } })
+      await startRuntimeBackground('start_runtime_core_update', taskId, { taskId, backend, mirror, locale, ...target }, 'runtime_core_update_finished')
     } catch (error) {
       runtimeCoreUpdateStatus.value = 'error'
       runtimeCoreUpdateMessage.value = error instanceof Error ? error.message : String(error)
@@ -414,7 +497,7 @@ export const useAppStore = defineStore('app', () => {
       ...target,
       ...(options.onlyIfNoActive ? { onlyIfNoActive: true } : {}),
     }
-    await invoke('activate_runtime', { payload })
+    await runRuntimeQuery(() => invoke('activate_runtime', { payload }), { retryBusy: false })
     const checks: Promise<unknown>[] = [checkRuntimeInfo(), checkEnv()]
     if (options.refreshCoreVersions !== false) checks.push(loadRuntimeCoreVersions())
     await Promise.all(checks)
@@ -422,12 +505,12 @@ export const useAppStore = defineStore('app', () => {
 
   async function cancelRuntimeInstall() {
     if (!runtimeInstallTaskId.value) return false
-    return invoke<boolean>('cancel_runtime_install', { taskId: runtimeInstallTaskId.value })
+    return cancelRuntimeBackground('cancel_runtime_install', runtimeInstallTaskId.value)
   }
 
   async function cancelRuntimeCoreUpdate() {
     if (!runtimeCoreUpdateTaskId.value) return false
-    return invoke<boolean>('cancel_runtime_core_update', { taskId: runtimeCoreUpdateTaskId.value })
+    return cancelRuntimeBackground('cancel_runtime_core_update', runtimeCoreUpdateTaskId.value)
   }
 
   // Runtime installation is a background worker, not a separation task, so the
@@ -453,12 +536,20 @@ export const useAppStore = defineStore('app', () => {
   }
 
   async function deleteRuntime(backend: RuntimeBackend, target: { pythonPath?: string } = {}) {
-    await invoke('delete_runtime', { payload: { backend, ...target } })
+    await runRuntimeQuery(() => invoke('delete_runtime', { payload: { backend, ...target } }), { retryBusy: false })
     await checkRuntimeInfo()
   }
 
   function handleRuntimeEvent(event: any) {
     const taskId = event?.taskId
+    const operation = runtimeBackgroundOperations.get(taskId)
+    if (operation && (
+      event?.type === operation.finishedEvent || event?.type === 'error'
+      || event?.type === 'task_cancelled' || event?.type === 'runtime_install_failed'
+    )) {
+      // Release before terminal handlers enqueue their post-write refreshes.
+      operation.complete()
+    }
     if (runtimeCoreUpdateTaskId.value && taskId === runtimeCoreUpdateTaskId.value) {
       if (event?.type === 'runtime_core_update_finished') {
         runtimeCoreUpdateStatus.value = 'success'

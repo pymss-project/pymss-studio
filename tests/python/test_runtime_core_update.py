@@ -7,9 +7,11 @@ import tempfile
 import sys
 import unittest
 from pathlib import Path
+from functools import partial
 from unittest import mock
 
 import worker_bootstrap
+from worker_runtime_lock import runtime_lock
 
 
 COMMON_PACKAGES = ("av", "librosa", "numpy", "pymss", "pymss-core")
@@ -17,7 +19,7 @@ COMMON_PACKAGES = ("av", "librosa", "numpy", "pymss", "pymss-core")
 
 def _manifest():
     return {
-        "manifestVersion": "test-1",
+        "manifestVersion": "2026.09.1",
         "common": {
             "av": "av",
             "librosa": "librosa",
@@ -68,14 +70,14 @@ class RuntimeCoreUpdateTests(unittest.TestCase):
         self.active_file = self.envs_dir / "active-runtime.json"
         self.addCleanup(lambda: __import__("shutil").rmtree(self.root, True))
 
-    def _make_env(self, backend: str, *, state_version: int = worker_bootstrap.ENV_STATE_VERSION):
+    def _make_env(self, backend: str, *, state_version: int = worker_bootstrap.ENV_STATE_VERSION, manifest_version: str = "2026.08.1"):
         env_dir = self.envs_dir / backend
         (env_dir / "Scripts").mkdir(parents=True)
         python_path = env_dir / "Scripts" / "python.exe"
         python_path.write_text("stub", encoding="utf-8")
         (env_dir / "pymss-runtime-state.json").write_text(json.dumps({
             "backend": backend,
-            "manifestVersion": "old-1",
+            "manifestVersion": manifest_version,
             "stateVersion": state_version,
             "torchVersion": _probe_result(backend)["torchVersion"],
             "torchBackend": _probe_result(backend)["torchBackend"],
@@ -89,19 +91,21 @@ class RuntimeCoreUpdateTests(unittest.TestCase):
         self.active_file.write_text(json.dumps({
             "backend": backend,
             "pythonPath": str(python_path),
-            "manifestVersion": "old-1",
+            "manifestVersion": manifest_version,
             "stateVersion": state_version,
         }), encoding="utf-8")
         return env_dir, python_path
 
-    def _run_update(self, backend: str, *, missing_records: dict[str, str] | None, popen_outputs: list[str] | None = None):
-        env_dir, python_path = self._make_env(backend)
+    def _run_update(self, backend: str, *, missing_records: dict[str, str] | None, popen_outputs: list[str] | None = None, manifest_version: str = "2026.08.1", on_pip=None):
+        env_dir, python_path = self._make_env(backend, manifest_version=manifest_version)
         outputs = popen_outputs or ["metadata repaired\n", "upgrade complete\n"]
         popen_calls: list[list[str]] = []
         missing_probe = iter([missing_records or {}, {}])
 
         def popen(command, **kwargs):
             popen_calls.append(command)
+            if on_pip:
+                on_pip()
             del kwargs
             return mock.Mock(
                 stdout=iter(outputs.pop(0) for _ in range(1)),
@@ -153,6 +157,61 @@ class RuntimeCoreUpdateTests(unittest.TestCase):
         self.assertEqual(len(popen_calls), 1)
         self.assertNotIn("--ignore-installed", popen_calls[0])
         self.assertIn("--upgrade", popen_calls[0])
+
+    def test_incompatible_manifest_is_rejected_before_network_or_install(self):
+        env_dir, python_path = self._make_env("cpu")
+        state_file = env_dir / "pymss-runtime-state.json"
+        for version in ("2026.10.1", None, "", "2026.09.1-invalid", "legacy"):
+            with self.subTest(manifest_version=version):
+                state = json.loads(state_file.read_text(encoding="utf-8"))
+                state["manifestVersion"] = version
+                state_file.write_text(json.dumps(state), encoding="utf-8")
+                before_state = state_file.read_bytes()
+                before_active = self.active_file.read_bytes()
+                with mock.patch.object(worker_bootstrap, "RUNTIME_ENVS_DIR", self.envs_dir), \
+                     mock.patch.object(worker_bootstrap, "ACTIVE_RUNTIME_FILE", self.active_file), \
+                     mock.patch.object(worker_bootstrap, "_manifest", return_value=_manifest()), \
+                     mock.patch.object(worker_bootstrap, "_latest_pypi_version", return_value="2.1.4") as latest, \
+                     mock.patch.object(worker_bootstrap.shutil, "copytree") as copytree, \
+                     mock.patch.object(worker_bootstrap.subprocess, "Popen") as popen, \
+                     mock.patch.object(sys, "platform", "win32"), \
+                     contextlib.redirect_stdout(io.StringIO()) as output:
+                    result = worker_bootstrap.cmd_update_runtime_core({"backend": "cpu", "pythonPath": str(python_path)})
+                self.assertNotEqual(result, 0)
+                self.assertIn("RUNTIME_MANIFEST_INCOMPATIBLE", output.getvalue())
+                latest.assert_not_called()
+                copytree.assert_not_called()
+                popen.assert_not_called()
+                self.assertEqual(state_file.read_bytes(), before_state)
+                self.assertEqual(self.active_file.read_bytes(), before_active)
+                self.assertFalse((env_dir / "pymss-core-update.log").exists())
+
+    def test_current_manifest_allows_core_package_update(self):
+        result, commands, env_dir, _python_path = self._run_update(
+            "cpu", missing_records={}, manifest_version="2026.09.1",
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(len(commands), 1)
+        state = json.loads((env_dir / "pymss-runtime-state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["pymssVersion"], "2.1.4")
+        self.assertEqual(state["manifestVersion"], "2026.09.1")
+
+    def test_queries_during_core_update_do_not_remove_staging(self):
+        def query_while_pip_runs():
+            staging = self.envs_dir / ".cpu.core-updating"
+            self.assertTrue(staging.is_dir())
+            for query in (worker_bootstrap.cmd_runtime_info, worker_bootstrap.cmd_runtime_env_sizes):
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertNotEqual(query({}), 0)
+                self.assertIn("RUNTIME_BUSY", output.getvalue())
+                self.assertTrue(staging.is_dir())
+
+        with mock.patch.object(worker_bootstrap, "runtime_lock", partial(runtime_lock, timeout=0)):
+            result, commands, env_dir, _python_path = self._run_update("cpu", missing_records={}, on_pip=query_while_pip_runs)
+        self.assertEqual(result, 0)
+        self.assertEqual(len(commands), 1)
+        state = json.loads((env_dir / "pymss-runtime-state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["pymssVersion"], "2.1.4")
 
     def test_update_core_does_not_continue_when_repair_remains_incomplete(self):
         env_dir, python_path = self._make_env("rocm")
@@ -248,8 +307,8 @@ class RuntimeCoreUpdateTests(unittest.TestCase):
         self.assertFalse(backup.exists())
         recovered_state = json.loads((env_dir / "pymss-runtime-state.json").read_text(encoding="utf-8"))
         active_state = json.loads(self.active_file.read_text(encoding="utf-8"))
-        self.assertEqual(recovered_state["manifestVersion"], "test-1")
-        self.assertEqual(active_state["manifestVersion"], "test-1")
+        self.assertEqual(recovered_state["manifestVersion"], "2026.09.1")
+        self.assertEqual(active_state["manifestVersion"], "2026.09.1")
 
     def test_update_core_preserves_torch_constraints_for_mlx(self):
         with mock.patch.object(worker_bootstrap.Path, "unlink", autospec=True, side_effect=lambda self, missing_ok=False: None):

@@ -281,7 +281,7 @@ const runtimeBackendCards = computed(() => {
       // Offer the no-Torch-reinstall core sync so the environment metadata and
       // any manifest-declared pymss extras are brought up to date.
       const coreUpdateAvailable = isActive && env?.coreUpdateSupported !== false && (
-        runtimeCoreUpdateAvailable(env, latestPymssVersion.value, latestPymssCoreVersion.value)
+        runtimeCoreUpdateAvailable(env, latestPymssVersion.value, latestPymssCoreVersion.value, app.runtimeInfo?.manifestVersion)
         || runtimeCoreSyncAvailable(env, app.runtimeInfo?.manifestVersion)
       )
       const gpuBackend = item.backend === 'cuda' || item.backend === 'rocm' || item.backend === 'mlx'
@@ -522,7 +522,9 @@ async function updateRuntimeCore(card: { backend: RuntimeBackend; env?: Installe
     runtime || undefined,
     latestPymssVersion.value,
     latestPymssCoreVersion.value,
+    app.runtimeInfo?.manifestVersion,
   )
+  if (!versionUpdateAvailable && !runtimeCoreSyncAvailable(runtime || undefined, app.runtimeInfo?.manifestVersion)) return
   const confirmed = await confirmRuntimeAction(
     t('settings.runtimeCoreUpdateTitle'),
     t(versionUpdateAvailable ? 'settings.runtimeCoreUpdateContent' : 'settings.runtimeCoreSyncContent', {

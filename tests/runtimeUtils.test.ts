@@ -143,15 +143,28 @@ test('runtime environment lookup does not guess when the active path is stale', 
 })
 
 test('runtime core update is available when pymss-core alone is behind', () => {
-  assert.equal(runtimeCoreUpdateAvailable({ pymssVersion: '2.0.19', pymssCoreVersion: '0.1.4' }, '2.0.19', '0.1.6'), true)
+  assert.equal(runtimeCoreUpdateAvailable({ manifestVersion: '2026.09.1', pymssVersion: '2.0.19', pymssCoreVersion: '0.1.4' }, '2.0.19', '0.1.6', '2026.09.1'), true)
 })
 
 test('runtime core update is hidden for non-updatable bootstrap runtimes', () => {
-  assert.equal(runtimeCoreUpdateAvailable({ pymssVersion: '2.0.18', pymssCoreVersion: '0.1.4', coreUpdateSupported: false }, '2.0.19', '0.1.6'), false)
+  assert.equal(runtimeCoreUpdateAvailable({ manifestVersion: '2026.09.1', pymssVersion: '2.0.18', pymssCoreVersion: '0.1.4', coreUpdateSupported: false }, '2.0.19', '0.1.6', '2026.09.1'), false)
 })
 
 test('runtime core update is hidden when the installed version is newer than PyPI', () => {
-  assert.equal(runtimeCoreUpdateAvailable({ pymssVersion: '2.0.20', pymssCoreVersion: '0.1.7' }, '2.0.19', '0.1.6'), false)
+  assert.equal(runtimeCoreUpdateAvailable({ manifestVersion: '2026.09.1', pymssVersion: '2.0.20', pymssCoreVersion: '0.1.7' }, '2.0.19', '0.1.6', '2026.09.1'), false)
+})
+
+test('package updates respect manifest compatibility in addition to package versions', () => {
+  const env = { pymssVersion: '2.1.3', pymssCoreVersion: '0.1.6' }
+  for (const manifestVersion of ['2026.09.1', '2026.08.1']) {
+    assert.equal(runtimeCoreUpdateAvailable({ ...env, manifestVersion }, '2.1.4', '0.1.6', '2026.09.1'), true)
+  }
+  for (const manifestVersion of ['2026.10.1', undefined, '', 'legacy', '2026.09.1-invalid']) {
+    const runtime = { ...env, manifestVersion }
+    assert.equal(runtimeCoreUpdateAvailable(runtime, '2.1.4', '0.1.6', '2026.09.1'), false)
+    assert.equal(runtimeCoreSyncAvailable(runtime, '2026.09.1'), false)
+  }
+  assert.equal(runtimeCoreUpdateAvailable({ ...env, manifestVersion: '2026.09.1' }, '2.1.4', '0.1.6', undefined), false)
 })
 
 test('the only bundled runtime is selected for first-launch activation', () => {
@@ -269,6 +282,15 @@ test('manifest status compares the environment against the shipped manifest', ()
 
 test('a newer environment than the app is kept distinct from an older one', () => {
   assert.equal(runtimeManifestStatus({ manifestVersion: '2026.09.1' }, '2026.07.1'), 'newer')
+})
+
+test('manifest comparison validates the entire marker before comparing', () => {
+  for (const manifestVersion of ['legacy', '2026.09.1-invalid', '2026..09.1', '2026.09.1 ']) {
+    const expected = manifestVersion.trim() === '2026.09.1' ? 'current' : 'unknown'
+    assert.equal(runtimeManifestStatus({ manifestVersion }, '2026.09.1'), expected)
+  }
+  assert.equal(runtimeManifestStatus({ manifestVersion: 'legacy' }, 'legacy'), 'unknown')
+  assert.equal(runtimeManifestStatus({ manifestVersion: '2026.9.1.0' }, '2026.09.1'), 'current')
 })
 
 test('manifest status is unknown when either side did not record a version', () => {

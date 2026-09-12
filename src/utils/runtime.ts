@@ -109,8 +109,11 @@ export function runtimeCoreUpdateAvailable(
   env: InstalledRuntime | undefined,
   latestPymssVersion: string | null | undefined,
   latestPymssCoreVersion: string | null | undefined,
+  currentManifestVersion: string | undefined,
 ) {
   if (!env || env.coreUpdateSupported === false) return false
+  const manifestStatus = runtimeManifestStatus(env, currentManifestVersion)
+  if (manifestStatus !== 'current' && manifestStatus !== 'older') return false
   const pymssVersion = env.pymssVersion || env.packageVersions?.pymss || ''
   const pymssCoreVersion = env.pymssCoreVersion || env.packageVersions?.['pymss-core'] || ''
   return Boolean(
@@ -213,9 +216,10 @@ export function runtimeManifestStatus(
   env: InstalledRuntime | undefined,
   currentManifestVersion: string | undefined,
 ): RuntimeManifestStatus {
-  const expected = String(currentManifestVersion || '')
-  const actual = String(env?.manifestVersion || '')
-  if (!expected || !actual) return 'unknown'
+  const expected = String(currentManifestVersion || '').trim()
+  const actual = String(env?.manifestVersion || '').trim()
+  const markerPattern = /^[0-9]+(?:\.[0-9]+)*$/
+  if (!markerPattern.test(expected) || !markerPattern.test(actual)) return 'unknown'
   if (actual === expected) return 'current'
   const expectedParts = parseVersionParts(expected)
   const actualParts = parseVersionParts(actual)
