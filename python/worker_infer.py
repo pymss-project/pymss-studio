@@ -609,8 +609,15 @@ def _sanitize_runtime_inference_params(params: dict[str, Any]) -> dict[str, Any]
             return
         next_params[key] = value
 
-    for numeric_key in ("batch_size", "overlap_size", "num_overlap", "chunk_size", "window_size"):
+    for numeric_key in ("batch_size", "num_overlap", "chunk_size", "window_size"):
         _drop_non_positive_int(numeric_key)
+
+    if "overlap_size" in next_params:
+        overlap_value = _as_int(next_params.get("overlap_size"))
+        if overlap_value is None or overlap_value < 0:
+            next_params.pop("overlap_size", None)
+        else:
+            next_params["overlap_size"] = overlap_value
 
     if "aggression" in next_params:
         aggression_value = _as_int(next_params.get("aggression"))
@@ -719,6 +726,14 @@ def cmd_infer_batch(payload: dict[str, Any]) -> int:
         return emit_error("INPUT_NOT_FOUND", "Missing batch tasks", task_id=payload.get("taskId") or None)
 
     root_task_id = str(payload.get("taskId") or raw_tasks[0].get("taskId") or f"sep_{int(datetime.now().timestamp())}")
+    model_name = payload.get("model")
+    if not model_name:
+        return emit_error("MODEL_NOT_FOUND", "Missing model name", task_id=root_task_id)
+    try:
+        _resolve_separator_device(payload.get("device"), payload.get("deviceIds"))
+    except Exception as exc:
+        return emit_error("DEVICE_CONFIG_INVALID", str(exc), task_id=root_task_id)
+
     output_root = _normalize_output_dir(payload.get("output"))
     output_format = payload.get("outputFormat") or "wav"
     output_layout = _normalize_output_layout(payload.get("outputLayout"))
