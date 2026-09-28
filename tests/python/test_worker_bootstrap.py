@@ -166,7 +166,7 @@ class MultipleEnvironmentTests(unittest.TestCase):
     active one is just a pointer. These tests use stub interpreters — nothing is downloaded."""
 
     def setUp(self):
-        self.root = Path(tempfile.mkdtemp())
+        self.root = Path(tempfile.mkdtemp()).resolve()
         self.envs_dir = self.root / "runtime-envs"
         self.envs_dir.mkdir()
         self.active_file = self.envs_dir / "active-runtime.json"
