@@ -570,7 +570,9 @@ export const useAppStore = defineStore('app', () => {
         void checkEnv()
         void checkRuntimeInfo()
         void loadRuntimeCoreVersions()
-        void import('@/stores/model').then(({ useModelStore }) => useModelStore().loadModels())
+        void import('@/stores/model').then(({ useModelStore }) => useModelStore().loadModels()).catch((error) => {
+          console.warn('Failed to refresh models after a runtime change', error)
+        })
       } else if (event?.type === 'runtime_core_update_started') {
         runtimeCoreUpdateStatus.value = 'updating'
         runtimeCoreUpdateMode.value = event.payload?.mode === 'repair' ? 'repair' : 'update'

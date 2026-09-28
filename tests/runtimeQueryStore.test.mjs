@@ -6,7 +6,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 const vite = await createServer({
   configFile: false,
-  server: { middlewareMode: true, hmr: false },
+  server: { watch: null, middlewareMode: true, hmr: false },
   appType: 'custom',
   optimizeDeps: { noDiscovery: true },
   resolve: { alias: { '@': fileURLToPath(new URL('../src', import.meta.url)) } },
