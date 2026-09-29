@@ -112,6 +112,7 @@ jobs:
           PYMSS_BUILD_TARGET: macos-arm64
           PYMSS_BUILD_VARIANT: macos-arm64-mlx
           PYMSS_BUILD_OFFICIAL: ${{ github.repository == 'pymss-project/pymss-studio' && github.repository_owner == 'pymss-project' && 'true' || 'false' }}
+          MACOSX_DEPLOYMENT_TARGET: "14.0.0"
         run: |
           python3 - <<'PY' > src-tauri/tauri.bundle.resources.json
           import json

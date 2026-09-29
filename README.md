@@ -56,7 +56,7 @@ Choose the package variant that matches your machine:
 | No discrete GPU, integrated graphics only, or you prefer CPU inference | Windows CPU |
 | Stable network, and you want the smallest download | Windows Online |
 | Windows AMD GPU | Windows ROCm |
-| Apple Silicon Mac, including M1/M2/M3/M4 | macOS MLX |
+| Apple Silicon Mac, including M1/M2/M3/M4, macOS 14 or later | macOS MLX |
 | Intel Mac | No dedicated release package currently |
 
 On macOS, clear the quarantine attribute after installing the app:

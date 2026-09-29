@@ -56,7 +56,7 @@ Pymss Studio 将 [`pymss`](https://github.com/pymss-project/pymss) 音乐源分�
 | 没有独立显卡、只有核显，或希望直接使用 CPU 推理 | Windows CPU |
 | 网络稳定且希望下载体积尽可能小 | Windows Online |
 | Windows AMD 显卡 | Windows ROCm |
-| Apple Silicon Mac，即 M1/M2/M3/M4 等 | macOS MLX |
+| Apple Silicon Mac，即 M1/M2/M3/M4 等，系统为 macOS 14 或更高 | macOS MLX |
 | Intel Mac | 当前没有对应发布版本 |
 
 macOS 版本安装完成后，需要执行：
