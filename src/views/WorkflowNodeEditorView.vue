@@ -522,6 +522,7 @@ onBeforeUnmount(() => {
 
 .workflow-window-chrome {
   height: 40px;
+  margin-inline: -12px;
   display: flex;
   align-items: center;
   justify-content: space-between;

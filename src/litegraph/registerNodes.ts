@@ -565,7 +565,7 @@ function makeNodeClass(spec: NodeSpec): any {
       if (spec.isOutput) (this as any).is_output_node = true
       if (spec.type === 'pymss_audio_ensemble') syncEnsembleInputs(this, this.widgets?.[0]?.value)
       localizeNodeWithSpec(this, spec)
-      if (spec.dynamicStems) {
+      if (isWorkflowSeparationNodeType(spec.type)) {
         this.setSize([Math.max(this.size[0], SEPARATE_NODE_MIN_WIDTH), this.size[1]])
       }
     }
@@ -596,7 +596,7 @@ function makeNodeClass(spec: NodeSpec): any {
       }
       localizePymssNode(this)
       this.setSize([
-        spec.dynamicStems ? Math.max(this.size[0], SEPARATE_NODE_MIN_WIDTH) : this.size[0],
+        isWorkflowSeparationNodeType(spec.type) ? Math.max(this.size[0], SEPARATE_NODE_MIN_WIDTH) : this.size[0],
         Math.max(this.size[1], this.computeSize()[1]),
       ])
     }
