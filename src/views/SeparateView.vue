@@ -85,6 +85,7 @@ const {
   post_process_threshold,
   high_end_process,
   selectedStems,
+  selectedStemsCleared: persistedOutputStemSelectionCleared,
   modelListViewMode,
   modelListSortMode,
   modelListPageSize: modelPageSize,
@@ -393,7 +394,9 @@ const checkedOutputStems = computed<string[]>({
   set(value) {
     const allowed = new Set(availableStemNames.value)
     const next = value.filter(stem => allowed.has(stem))
-    outputStemSelectionCleared.value = next.length === 0
+    const cleared = next.length === 0
+    outputStemSelectionCleared.value = cleared
+    persistedOutputStemSelectionCleared.value = cleared
     selectedStems.value = next.length === availableStemNames.value.length ? [] : next
   },
 })
@@ -403,10 +406,12 @@ const hasOutputStemSelection = computed(() => (
 ))
 function selectAllOutputStems() {
   outputStemSelectionCleared.value = false
+  persistedOutputStemSelectionCleared.value = false
   selectedStems.value = []
 }
 function clearOutputStems() {
   outputStemSelectionCleared.value = true
+  persistedOutputStemSelectionCleared.value = true
   selectedStems.value = []
 }
 const selectedStemDetail = computed(() => {
@@ -1392,8 +1397,15 @@ function prefetchSelectedModelAdvancedParams() {
 
 watch(selectedModelName, (name, previousName) => {
   if (previousName && previousName !== name) task.saveCurrentModelState(previousName)
-  if (previousName !== name) outputStemSelectionCleared.value = false
 })
+
+watch(
+  persistedOutputStemSelectionCleared,
+  (cleared) => {
+    outputStemSelectionCleared.value = cleared
+  },
+  { immediate: true },
+)
 
 watch(ensembleModels, (models) => {
   const next = { ...ensembleWeights.value }
@@ -1494,18 +1506,20 @@ watch(
   [selectedModelName, currentModelInfo],
   ([name, info], previous) => {
     if (!info || !name || info.name !== name) return
+    const modelChanged = Boolean(
+      (previous?.[0] && previous[0] !== name)
+      || (previous?.[1]?.name && previous[1].name !== info.name),
+    )
     task.applySelectedModelDefaults(
       model.getModelBaseInferenceDefaults(info.name) || info.defaultInferenceParams,
       info.modelType,
       task.getSavedModelState(info.name),
       model.getModelInferenceOverrides(info.name),
       {
-        force: Boolean(
-          (previous?.[0] && previous[0] !== name)
-          || (previous?.[1]?.name && previous[1].name !== info.name),
-        ),
+        force: modelChanged,
       },
     )
+    if (modelChanged) outputStemSelectionCleared.value = persistedOutputStemSelectionCleared.value
   },
   { immediate: true },
 )

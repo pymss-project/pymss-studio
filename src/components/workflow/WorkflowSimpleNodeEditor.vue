@@ -2,20 +2,38 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useDialog, useMessage, type DropdownOption, type SelectInst } from 'naive-ui'
-import { ArrowUndoOutline, ArrowRedoOutline, CloseOutline, LocateOutline, SaveOutline } from '@vicons/ionicons5'
-import type { ModelEntry } from '@/stores/model'
+import {
+  ArrowRedoOutline,
+  ArrowUndoOutline,
+  CloseOutline,
+  LocateOutline,
+  SaveOutline,
+  SettingsOutline,
+} from '@vicons/ionicons5'
+import type { ModelDefaultInferenceParams, ModelEntry } from '@/stores/model'
+import AlignedInferenceInputNumber from '@/components/AlignedInferenceInputNumber.vue'
+import { resolveInferenceSampleStep } from '@/features/inference/sampleStep'
+import { hasInvalidSimpleInferenceNumbers } from '@/workflows/formats'
 import {
   configuredStemsFor,
   createDefaultSimpleEditorUi,
   createEnsembleDraft,
+  createAudioOperationDraft,
   createStepDraft,
   renderSimpleOutputFilename,
   fitSimpleEditorViewport,
+  normalizeSimpleInferenceParams,
   SIMPLE_ENSEMBLE_ALGORITHMS,
+  SIMPLE_AUDIO_OPERATIONS,
+  isSimpleAudioOperation,
+  simpleProcessingInputLimits,
+  type SimpleAudioOperation,
+  type SimpleEnsembleAlgorithm,
   type SimpleDraft,
   type SimpleEditorPoint,
   type SimpleEnsembleDraft,
   type SimpleStepDraft,
+  type SimpleWorkflowInferenceParams,
 } from '@/utils/workflowSimple'
 import {
   analyzeSimpleModelChangeImpact,
@@ -41,12 +59,14 @@ const description = defineModel<string>('description', { required: true })
 
 const props = withDefaults(defineProps<{
   models: ModelEntry[]
+  modelInferenceOverrides?: Record<string, ModelDefaultInferenceParams>
   saving?: boolean
   formError?: string
   advisory?: string
   canSave?: boolean
   canRun?: boolean
 }>(), {
+  modelInferenceOverrides: () => ({}),
   saving: false,
   formError: '',
   advisory: '',
@@ -79,11 +99,17 @@ type SimpleConnectionHoverTarget = SimpleConnectionTarget | `output:${string}` |
 type PendingConnection =
   | { direction: 'input'; source: string; label: string }
   | { direction: 'output'; target: Exclude<SimpleConnectionTarget, 'save'>; label: string }
-type SimpleNodeType = 'separation' | 'ensemble'
+type SimpleNodeType = 'separation' | 'ensemble' | SimpleAudioOperation
 const pendingConnection = ref<PendingConnection | null>(null)
 const hoverTarget = ref<SimpleConnectionHoverTarget>(null)
 const pointerWorld = ref<SimpleEditorPoint>({ x: 500, y: 300 })
 const showNodeTypeChooser = ref(false)
+const showInferenceEditor = ref(false)
+const inferenceEditorStepId = ref('')
+const inferenceMode = ref<'global' | 'custom'>('global')
+const inferenceDraft = ref<SimpleWorkflowInferenceParams>({})
+const initialInferenceDraft = ref<SimpleWorkflowInferenceParams>({})
+const initialInferenceParams = ref<SimpleWorkflowInferenceParams | undefined>()
 const pendingNodePoint = ref<SimpleEditorPoint | null>(null)
 const contextMenuVisible = ref(false)
 const contextMenuX = ref(0)
@@ -130,8 +156,137 @@ const modelOptions = computed(() => [...props.models]
   .sort((a, b) => a.name.localeCompare(b.name, locale.value === 'zh-CN' ? 'zh-CN' : 'en'))
   .map(item => ({ label: item.name, value: item.name })))
 
+const defaultNormalizeMode = computed({
+  get: () => draft.value.defaultNormalize === null
+    ? 'global'
+    : draft.value.defaultNormalize ? 'enabled' : 'disabled',
+  set: (value: string) => {
+    draft.value.defaultNormalize = value === 'global' ? null : value === 'enabled'
+  },
+})
+
+const defaultNormalizeOptions = computed(() => [
+  { label: t('workflows.inferenceFollowGlobal'), value: 'global' },
+  { label: t('workflows.inferenceEnabled'), value: 'enabled' },
+  { label: t('workflows.inferenceDisabled'), value: 'disabled' },
+])
+
+const inferenceEditorStep = computed(() => (
+  draft.value.steps.find(step => step.id === inferenceEditorStepId.value) || null
+))
+const inferenceEditorModel = computed(() => {
+  const modelName = inferenceEditorStep.value?.model || ''
+  return props.models.find(model => model.name === modelName || model.aliases?.includes(modelName)) || null
+})
+const inferenceEditorModelType = computed(() => String(
+  inferenceEditorStep.value?.modelType?.trim() || inferenceEditorModel.value?.modelType || '',
+).trim().toLowerCase())
+const inferenceEditorIsVr = computed(() => inferenceEditorModelType.value === 'vr')
+const inferenceEditorSampleStep = computed(() => inferenceEditorModel.value?.inferenceParamMeta?.recommendedSampleStep)
+const inferenceEditorOverlapStep = computed(() => resolveInferenceSampleStep(inferenceEditorModel.value?.inferenceParamMeta, 1))
+const inferenceEditorChunkStep = computed(() => resolveInferenceSampleStep(inferenceEditorModel.value?.inferenceParamMeta, 1024))
+
+function inferenceNumber(key: keyof SimpleWorkflowInferenceParams, fallback: number) {
+  const value = inferenceDraft.value[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function inferenceBoolean(key: keyof SimpleWorkflowInferenceParams, fallback = false) {
+  const value = inferenceDraft.value[key]
+  return typeof value === 'boolean' ? value : fallback
+}
+
+function updateInferenceNumber(key: keyof SimpleWorkflowInferenceParams, value: number | null) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return
+  inferenceDraft.value = { ...inferenceDraft.value, [key]: value }
+}
+
+function updateInferenceBoolean(key: keyof SimpleWorkflowInferenceParams, value: boolean) {
+  inferenceDraft.value = { ...inferenceDraft.value, [key]: value }
+}
+
+function modelInferenceDefaults(model: ModelEntry | null): SimpleWorkflowInferenceParams {
+  const step = inferenceEditorStep.value
+  const defaults = {
+    ...(model?.defaultInferenceParams || {}),
+    ...(props.modelInferenceOverrides[model?.name || step?.model || ''] || {}),
+  } as SimpleWorkflowInferenceParams
+  const modelType = inferenceEditorModelType.value
+  for (const key of ['batch_size', 'overlap_size', 'chunk_size', 'window_size'] as const) {
+    const value = defaults[key]
+    if (typeof value === 'number' && value <= 0) delete defaults[key]
+  }
+  if (defaults.batch_size === undefined) defaults.batch_size = 1
+  if (modelType === 'vr') {
+    if (defaults.window_size === undefined) defaults.window_size = 512
+    if (defaults.aggression === undefined) defaults.aggression = 5
+    if (defaults.enable_post_process === undefined) defaults.enable_post_process = false
+    if (defaults.post_process_threshold === undefined) defaults.post_process_threshold = 0.2
+    if (defaults.high_end_process === undefined) defaults.high_end_process = false
+    if (defaults.normalize === undefined) defaults.normalize = false
+  } else {
+    if (defaults.standardize === undefined) defaults.standardize = false
+    if (defaults.normalize === undefined) defaults.normalize = false
+  }
+  if (defaults.enable_tta === undefined) defaults.enable_tta = false
+  if (draft.value.defaultNormalize !== null) defaults.normalize = draft.value.defaultNormalize
+  return defaults
+}
+
+function openInferenceEditor(step: SimpleStepDraft) {
+  inferenceEditorStepId.value = step.id
+  inferenceMode.value = step.inferenceParams ? 'custom' : 'global'
+  initialInferenceParams.value = step.inferenceParams ? { ...step.inferenceParams } : undefined
+  initialInferenceDraft.value = {
+    ...modelInferenceDefaults(inferenceEditorModel.value),
+    ...(step.inferenceParams || {}),
+  }
+  inferenceDraft.value = { ...initialInferenceDraft.value }
+  showInferenceEditor.value = true
+}
+
+function updateInferenceFollowGlobal(value: boolean) {
+  if (value) {
+    inferenceDraft.value = modelInferenceDefaults(inferenceEditorModel.value)
+    initialInferenceDraft.value = { ...inferenceDraft.value }
+    initialInferenceParams.value = undefined
+    inferenceMode.value = 'global'
+    return
+  }
+  inferenceMode.value = 'custom'
+}
+
+function closeInferenceEditor() {
+  showInferenceEditor.value = false
+  inferenceEditorStepId.value = ''
+}
+
+function saveInferenceEditor() {
+  const step = inferenceEditorStep.value
+  if (!step) return
+  if (inferenceMode.value === 'global') {
+    step.inferenceParams = undefined
+  } else {
+    const original = initialInferenceParams.value
+    const params = original
+      ? Object.fromEntries(Object.entries(inferenceDraft.value).filter(([key, value]) => (
+          Object.hasOwn(original, key)
+          || value !== initialInferenceDraft.value[key as keyof SimpleWorkflowInferenceParams]
+        )))
+      : inferenceDraft.value
+    const invalid = Object.entries(params).find(([key, value]) => hasInvalidSimpleInferenceNumbers({ [key]: value }))
+    if (invalid) {
+      message.warning(t('workflows.invalidInferenceNumber', { parameter: invalid[0], value: String(invalid[1]) }))
+      return
+    }
+    step.inferenceParams = normalizeSimpleInferenceParams(params)
+  }
+  recordHistory()
+  closeInferenceEditor()
+}
+
 const ensembleAlgorithmOptions = computed(() => {
-  const labels: Record<SimpleEnsembleDraft['algorithm'], string> = {
+  const labels: Record<SimpleEnsembleAlgorithm, string> = {
     avg_wave: t('workflows.ensembleAlgorithms.avg_wave'),
     median_wave: t('workflows.ensembleAlgorithms.median_wave'),
     min_wave: t('workflows.ensembleAlgorithms.min_wave'),
@@ -144,6 +299,35 @@ const ensembleAlgorithmOptions = computed(() => {
   return SIMPLE_ENSEMBLE_ALGORITHMS.map(value => ({ value, label: labels[value] }))
 })
 
+const audioOperationCopy = computed(() => ({
+  sum: {
+    title: t('workflows.audioOperations.sum.title'),
+    description: t('workflows.audioOperations.sum.description'),
+    hint: t('workflows.audioOperations.sum.hint'),
+  },
+  subtract: {
+    title: t('workflows.audioOperations.subtract.title'),
+    description: t('workflows.audioOperations.subtract.description'),
+    hint: t('workflows.audioOperations.subtract.hint'),
+  },
+  invert: {
+    title: t('workflows.audioOperations.invert.title'),
+    description: t('workflows.audioOperations.invert.description'),
+    hint: t('workflows.audioOperations.invert.hint'),
+  },
+}))
+
+function processingNodeLabel(ensemble: SimpleEnsembleDraft) {
+  return isSimpleAudioOperation(ensemble.algorithm)
+    ? audioOperationCopy.value[ensemble.algorithm].title
+    : t('workflows.ensembleNode')
+}
+
+function processingInputLabel(ensemble: SimpleEnsembleDraft, index: number) {
+  if (ensemble.algorithm === 'subtract') return index === 0 ? 'A' : 'B'
+  return t('workflows.ensembleInput', { index: index + 1 })
+}
+
 const stepOutputOptions = computed(() => draft.value.steps.flatMap(step => step.stems.map(stem => ({
   value: simpleOutputRef(step.id, stem),
   label: `${step.model || step.id} · ${stem}`,
@@ -153,7 +337,7 @@ const ensembleOutputOptions = computed(() => draft.value.ensembles.flatMap(ensem
   const stem = ensemble.outputStem.trim()
   return stem ? [{
     value: simpleOutputRef(ensemble.id, stem),
-    label: `${t('workflows.ensembleNode')} · ${stem}`,
+    label: `${processingNodeLabel(ensemble)} · ${stem}`,
   }] : []
 }))
 
@@ -166,7 +350,7 @@ function ensembleSourceOptionsFor(ensemble: SimpleEnsembleDraft) {
       const stem = source.outputStem.trim()
       return stem ? [{
         value: simpleOutputRef(source.id, stem),
-        label: `${t('workflows.ensembleNode')} · ${stem}`,
+        label: `${processingNodeLabel(source)} · ${stem}`,
       }] : []
     }),
   ]
@@ -184,7 +368,7 @@ function stepInputOptions(step: SimpleStepDraft, index: number) {
       if (!stem) return []
       const value = simpleOutputRef(ensemble.id, stem)
       return canConnectSimple(draft.value, value, simpleStepInputTarget(step.id)).ok
-        ? [{ label: `${t('workflows.ensembleNode')} · ${stem}`, value }]
+        ? [{ label: `${processingNodeLabel(ensemble)} · ${stem}`, value }]
         : []
     }),
   ]
@@ -202,6 +386,7 @@ function ensembleSourceLabel(source: string) {
 const nodeTypeMenuOptions = computed<DropdownOption[]>(() => [
   { key: 'separation', label: t('workflows.separationNode') },
   { key: 'ensemble', label: t('workflows.ensembleNode') },
+  ...SIMPLE_AUDIO_OPERATIONS.map(key => ({ key, label: audioOperationCopy.value[key].title })),
 ])
 
 function preferredEnsembleSources(limit = 2) {
@@ -345,7 +530,7 @@ function stepHeight(step: SimpleStepDraft) {
 }
 
 function ensembleHeight(ensemble: SimpleEnsembleDraft) {
-  return 206 + ensemble.inputs.length * 42
+  return (isSimpleAudioOperation(ensemble.algorithm) ? 174 : 206) + ensemble.inputs.length * 42
 }
 
 type SaveEntry = {
@@ -372,7 +557,7 @@ function saveEntries() {
     .map(ensemble => ({
       source: simpleOutputRef(ensemble.id, ensemble.outputStem.trim()),
       stem: ensemble.outputStem.trim(),
-      sourceLabel: t('workflows.ensembleNode'),
+      sourceLabel: processingNodeLabel(ensemble),
       outputName: ensemble.outputName ?? '%filename%_%stem%_Ensemble',
       ensemble,
     }))
@@ -380,9 +565,14 @@ function saveEntries() {
 }
 
 function saveFilenamePreview(entry: SaveEntry, index: number) {
+  const processingModels: Record<SimpleAudioOperation, string> = {
+    sum: 'AudioSum', subtract: 'AudioSubtract', invert: 'AudioInvert',
+  }
   return renderSimpleOutputFilename(entry.outputName, {
     stem: entry.stem,
-    model: entry.step?.model || (entry.ensemble ? 'Ensemble' : entry.sourceLabel),
+    model: entry.step?.model || (entry.ensemble
+      ? isSimpleAudioOperation(entry.ensemble.algorithm) ? processingModels[entry.ensemble.algorithm] : 'Ensemble'
+      : entry.sourceLabel),
     stepId: entry.step?.id || entry.ensemble?.id,
     index: index + 1,
     inputName: 'input.wav',
@@ -756,7 +946,11 @@ function applyModelUpdate(step: SimpleStepDraft, value: string, stems: string[])
   const oldNamesByStem = new Map(Object.entries(oldNames).map(([key, value]) => [key.toLowerCase(), value]))
   const oldSaveByStem = new Map(Object.entries(step.save || {}).map(([key, value]) => [key.toLowerCase(), value]))
   step.model = value
+  step.modelType = props.models.find(model => model.name === value || model.aliases?.includes(value))?.modelType || undefined
   step.stems = stems
+  // Per-step inference values belong to the previous model. A model change
+  // deliberately returns the step to the global fallback chain.
+  step.inferenceParams = undefined
   step.outputNames = Object.fromEntries(stems.map(stem => [stem, oldNamesByStem.get(stem.toLowerCase()) || '%filename%_%stem%_%model%']))
   const nextSave: Record<string, string> = {}
   stems.forEach((stem) => {
@@ -797,8 +991,9 @@ function updateEnsembleWeight(ensemble: SimpleEnsembleDraft, index: number, valu
 }
 
 function updateEnsembleAlgorithm(ensemble: SimpleEnsembleDraft, value: string) {
-  if (!SIMPLE_ENSEMBLE_ALGORITHMS.includes(value as SimpleEnsembleDraft['algorithm'])) return
-  ensemble.algorithm = value as SimpleEnsembleDraft['algorithm']
+  const algorithm = SIMPLE_ENSEMBLE_ALGORITHMS.find(item => item === value)
+  if (!algorithm) return
+  ensemble.algorithm = algorithm
   recordHistory()
 }
 
@@ -809,15 +1004,19 @@ function updateEnsembleStem(ensemble: SimpleEnsembleDraft, value: string) {
 }
 
 function addEnsembleInput(ensemble: SimpleEnsembleDraft) {
-  if (ensemble.inputs.length >= 10) return
+  if (ensemble.inputs.length >= simpleProcessingInputLimits(ensemble.algorithm).max) return
   const used = new Set(ensemble.inputs.map(input => input.source.toLowerCase()))
-  const source = ensembleSourceOptionsFor(ensemble).find(option => !used.has(option.value.toLowerCase()))?.value || ''
+  const options = ensembleSourceOptionsFor(ensemble)
+  const candidates = ensemble.algorithm === 'sum'
+    ? [...options.filter(option => option.value !== 'input'), ...options.filter(option => option.value === 'input')]
+    : options
+  const source = candidates.find(option => !used.has(option.value.toLowerCase()))?.value || ''
   ensemble.inputs = [...ensemble.inputs, { source, weight: 1 }]
   recordHistory()
 }
 
 function removeEnsembleInput(ensemble: SimpleEnsembleDraft, index: number) {
-  if (ensemble.inputs.length <= 2) return
+  if (ensemble.inputs.length <= simpleProcessingInputLimits(ensemble.algorithm).min) return
   ensemble.inputs = ensemble.inputs.filter((_, inputIndex) => inputIndex !== index)
   cleanupSimpleDraft(draft.value)
   recordHistory()
@@ -855,8 +1054,8 @@ function openNodeTypeChooser(at?: SimpleEditorPoint) {
 
 function addNodeOfType(type: SimpleNodeType) {
   const point = pendingNodePoint.value || undefined
-  if (type === 'ensemble') addEnsemble(point)
-  else addStep(point)
+  if (type === 'separation') addStep(point)
+  else addEnsemble(point, type === 'ensemble' ? undefined : type)
   pendingNodePoint.value = null
   showNodeTypeChooser.value = false
   closeNodeContextMenu()
@@ -879,6 +1078,7 @@ function handleNodeContextMenuSelect(key: string | number) {
   const point = contextMenuPoint.value || undefined
   if (key === 'ensemble') addEnsemble(point)
   else if (key === 'separation') addStep(point)
+  else if (isSimpleAudioOperation(key)) addEnsemble(point, key)
   contextMenuPoint.value = null
   closeNodeContextMenu()
 }
@@ -924,19 +1124,28 @@ function addStep(at?: SimpleEditorPoint) {
   if (!at) void nextTick(() => fitView(false))
 }
 
-function addEnsemble(at?: SimpleEditorPoint) {
-  const ensemble = createEnsembleDraft(draft.value.ensembles.length)
+function addEnsemble(at?: SimpleEditorPoint, operation?: SimpleAudioOperation) {
+  const ensemble = operation
+    ? createAudioOperationDraft(operation, draft.value.ensembles.length)
+    : createEnsembleDraft(draft.value.ensembles.length)
   const usedIds = new Set([
     ...draft.value.steps.map(item => item.id),
     ...draft.value.ensembles.map(item => item.id),
   ])
   let suffix = draft.value.ensembles.length + 1
-  let nextId = `ensemble${suffix}`
-  while (usedIds.has(nextId)) nextId = `ensemble${++suffix}`
+  const prefix = operation || 'ensemble'
+  let nextId = `${prefix}${suffix}`
+  while (usedIds.has(nextId)) nextId = `${prefix}${++suffix}`
   ensemble.id = nextId
-  const preferredSources = preferredEnsembleSources(ensemble.inputs.length)
+  const preferredSources = operation === 'sum'
+    ? stepOutputOptions.value.slice(0, 2).map(option => option.value)
+    : operation === 'subtract'
+      ? ['input', stepOutputOptions.value.find(option => /^vocals?$/i.test(simpleSourceStem(option.value)))?.value || stepOutputOptions.value[0]?.value || '']
+      : operation === 'invert'
+        ? [stepOutputOptions.value[0]?.value || 'input']
+        : preferredEnsembleSources(ensemble.inputs.length)
   const preferredStems = preferredSources.map(simpleSourceStem).filter(Boolean)
-  if (preferredStems.length === ensemble.inputs.length && preferredStems.every(stem => stem.toLowerCase() === preferredStems[0].toLowerCase())) {
+  if (!operation && preferredStems.length === ensemble.inputs.length && preferredStems.every(stem => stem.toLowerCase() === preferredStems[0].toLowerCase())) {
     ensemble.outputStem = preferredStems[0]
   }
   ensemble.inputs = ensemble.inputs.map((input, index) => ({
@@ -1192,7 +1401,7 @@ onBeforeUnmount(() => {
       <n-input v-model:value="description" size="small" :placeholder="t('workflows.descriptionPlaceholder')" />
       <label><span>{{ t('workflows.defaultDevice') }}</span><n-select :ref="(instance: unknown) => setSelectInstance('default-device', instance)" v-model:value="draft.defaultDevice" size="small" :options="[{ label: 'Auto', value: 'auto' }, { label: 'CPU', value: 'cpu' }, { label: 'CUDA', value: 'cuda' }, { label: 'MPS', value: 'mps' }, { label: 'MLX', value: 'mlx' }]" /></label>
       <label><span>{{ t('workflows.defaultFormat') }}</span><n-select :ref="(instance: unknown) => setSelectInstance('default-format', instance)" v-model:value="draft.defaultFormat" size="small" :options="[{ label: 'WAV', value: 'wav' }, { label: 'FLAC', value: 'flac' }, { label: 'MP3', value: 'mp3' }, { label: 'M4A', value: 'm4a' }]" /></label>
-      <label><span>{{ t('workflows.defaultNormalize') }}</span><n-switch v-model:value="draft.defaultNormalize" size="small" /></label>
+      <label><span>{{ t('workflows.defaultNormalize') }}</span><n-select v-model:value="defaultNormalizeMode" size="small" :options="defaultNormalizeOptions" /></label>
     </div>
 
     <div ref="canvasRef" class="simple-node-editor__canvas" @wheel="handleWheel" @pointermove="moveCanvas" @pointerup="endCanvasPointer" @pointercancel="endCanvasPointer" @pointerdown="beginCanvasPan" @dblclick="handleCanvasDoubleClick" @contextmenu.prevent="openCanvasContextMenu">
@@ -1217,6 +1426,17 @@ onBeforeUnmount(() => {
             <span class="simple-node__header-actions">
               <button type="button" class="simple-icon-button" :title="t('workflows.moveStepEarlier')" :disabled="!canMoveSimpleStep(draft, step.id, -1)" @pointerdown.stop @click.stop="moveStep(step, -1)">↑</button>
               <button type="button" class="simple-icon-button" :title="t('workflows.moveStepLater')" :disabled="!canMoveSimpleStep(draft, step.id, 1)" @pointerdown.stop @click.stop="moveStep(step, 1)">↓</button>
+              <button
+                type="button"
+                class="simple-icon-button simple-inference-settings"
+                :class="{ 'simple-inference-settings--custom': Boolean(step.inferenceParams) }"
+                :title="`${t('workflows.stepInferenceParams')} · ${t(step.inferenceParams ? 'workflows.inferenceWorkflowCustom' : 'workflows.inferenceFollowGlobal')}`"
+                @pointerdown.stop
+                @click.stop="openInferenceEditor(step)"
+              >
+                <n-icon :component="SettingsOutline" />
+                <span v-if="step.inferenceParams" class="simple-inference-settings__dot" aria-hidden="true" />
+              </button>
               <button type="button" class="simple-icon-button" :title="t('workflows.removeStep')" :disabled="draft.steps.length <= 1" @pointerdown.stop @click.stop="removeStep(step)"><n-icon :component="CloseOutline" /></button>
             </span>
           </header>
@@ -1236,20 +1456,21 @@ onBeforeUnmount(() => {
           </div>
         </article>
 
-        <article v-for="(ensemble, index) in draft.ensembles" :key="ensemble.id" class="simple-node simple-node--ensemble" :class="{ 'simple-node--selected': selectedNodeId === ensemble.id }" :style="{ ...nodeStyle(ensemble.id), width: `${ENSEMBLE_WIDTH}px`, minHeight: `${ensembleHeight(ensemble)}px` }" :data-simple-node="ensemble.id" @pointerdown.stop="beginNodeDrag(ensemble.id, $event)">
-          <header><div><span>{{ t('workflows.ensembleNode') }} {{ index + 1 }}</span><strong>{{ ensemble.outputStem || t('workflows.ensembleStemPlaceholder') }}</strong></div><button type="button" class="simple-icon-button" :title="t('workflows.removeEnsemble')" @pointerdown.stop @click.stop="removeEnsemble(ensemble)"><n-icon :component="CloseOutline" /></button></header>
+        <article v-for="(ensemble, index) in draft.ensembles" :key="ensemble.id" class="simple-node simple-node--ensemble" :class="{ 'simple-node--selected': selectedNodeId === ensemble.id, 'simple-node--audio-operation': isSimpleAudioOperation(ensemble.algorithm) }" :style="{ ...nodeStyle(ensemble.id), width: `${ENSEMBLE_WIDTH}px`, minHeight: `${ensembleHeight(ensemble)}px` }" :data-simple-node="ensemble.id" :data-audio-operation="isSimpleAudioOperation(ensemble.algorithm) ? ensemble.algorithm : undefined" @pointerdown.stop="beginNodeDrag(ensemble.id, $event)">
+          <header><div><span>{{ processingNodeLabel(ensemble) }} {{ index + 1 }}</span><strong>{{ ensemble.outputStem || t('workflows.ensembleStemPlaceholder') }}</strong></div><button type="button" class="simple-icon-button" :title="isSimpleAudioOperation(ensemble.algorithm) ? t('workflows.removeAudioOperation') : t('workflows.removeEnsemble')" @pointerdown.stop @click.stop="removeEnsemble(ensemble)"><n-icon :component="CloseOutline" /></button></header>
           <div class="simple-node__body" @pointerdown.stop>
-            <label><span>{{ t('workflows.ensembleType') }}</span><n-select :ref="(instance: unknown) => setSelectInstance(`ensemble-algorithm:${ensemble.id}`, instance)" :value="ensemble.algorithm" size="small" :options="ensembleAlgorithmOptions" @update:value="updateEnsembleAlgorithm(ensemble, String($event || ''))" /></label>
+            <p v-if="isSimpleAudioOperation(ensemble.algorithm)" class="simple-audio-operation-hint">{{ audioOperationCopy[ensemble.algorithm].hint }}</p>
+            <label v-else><span>{{ t('workflows.ensembleType') }}</span><n-select :ref="(instance: unknown) => setSelectInstance(`ensemble-algorithm:${ensemble.id}`, instance)" :value="ensemble.algorithm" size="small" :options="ensembleAlgorithmOptions" @update:value="updateEnsembleAlgorithm(ensemble, String($event || ''))" /></label>
             <label><span>{{ t('workflows.ensembleStem') }}</span><n-input :value="ensemble.outputStem" size="small" :placeholder="t('workflows.ensembleStemPlaceholder')" @update:value="updateEnsembleStem(ensemble, $event)" /></label>
           </div>
           <div class="simple-ensemble-inputs" @pointerdown.stop>
-            <div v-for="(input, inputIndex) in ensemble.inputs" :key="inputIndex" class="simple-ensemble-input-row">
-              <button :ref="el => setPortElement(ensembleInputPortKey(ensemble.id, inputIndex), el)" class="simple-port simple-port--input simple-ensemble-input-row__port" :class="{ 'simple-port--target': pendingConnection?.direction === 'input' && hoverTarget === simpleEnsembleInputTarget(ensemble.id, inputIndex) }" type="button" :data-simple-target="simpleEnsembleInputTarget(ensemble.id, inputIndex)" @pointerdown.stop="beginEnsembleInputConnection(ensemble, inputIndex, $event)" @pointerup.stop="finishConnection(simpleEnsembleInputTarget(ensemble.id, inputIndex), $event)"><i /><span>{{ t('workflows.ensembleInput', { index: inputIndex + 1 }) }}</span></button>
+            <div v-for="(input, inputIndex) in ensemble.inputs" :key="inputIndex" class="simple-ensemble-input-row" :class="{ 'simple-ensemble-input-row--audio-operation': isSimpleAudioOperation(ensemble.algorithm) }">
+              <button :ref="el => setPortElement(ensembleInputPortKey(ensemble.id, inputIndex), el)" class="simple-port simple-port--input simple-ensemble-input-row__port" :class="{ 'simple-port--target': pendingConnection?.direction === 'input' && hoverTarget === simpleEnsembleInputTarget(ensemble.id, inputIndex) }" type="button" :data-simple-target="simpleEnsembleInputTarget(ensemble.id, inputIndex)" @pointerdown.stop="beginEnsembleInputConnection(ensemble, inputIndex, $event)" @pointerup.stop="finishConnection(simpleEnsembleInputTarget(ensemble.id, inputIndex), $event)"><i /><span>{{ processingInputLabel(ensemble, inputIndex) }}</span></button>
               <span class="simple-ensemble-input-row__source" :title="ensembleSourceLabel(input.source)">{{ ensembleSourceLabel(input.source) }}</span>
-              <n-input-number :value="input.weight" size="tiny" :min="0.01" :step="0.1" :show-button="false" :placeholder="t('workflows.ensembleWeight')" @update:value="updateEnsembleWeight(ensemble, inputIndex, $event)" />
-              <button type="button" class="simple-icon-button" :title="t('workflows.removeEnsembleInput')" :disabled="ensemble.inputs.length <= 2" @pointerdown.stop @click.stop="removeEnsembleInput(ensemble, inputIndex)"><n-icon :component="CloseOutline" /></button>
+              <n-input-number v-if="!isSimpleAudioOperation(ensemble.algorithm)" :value="input.weight" size="tiny" :min="0.01" :step="0.1" :show-button="false" :placeholder="t('workflows.ensembleWeight')" @update:value="updateEnsembleWeight(ensemble, inputIndex, $event)" />
+              <button v-if="simpleProcessingInputLimits(ensemble.algorithm).max > simpleProcessingInputLimits(ensemble.algorithm).min" type="button" class="simple-icon-button" :title="t('workflows.removeEnsembleInput')" :disabled="ensemble.inputs.length <= simpleProcessingInputLimits(ensemble.algorithm).min" @pointerdown.stop @click.stop="removeEnsembleInput(ensemble, inputIndex)"><n-icon :component="CloseOutline" /></button>
             </div>
-            <n-button size="tiny" secondary :disabled="ensemble.inputs.length >= 10" @click.stop="addEnsembleInput(ensemble)">{{ t('workflows.addEnsembleInput') }}</n-button>
+            <n-button v-if="simpleProcessingInputLimits(ensemble.algorithm).max > simpleProcessingInputLimits(ensemble.algorithm).min" size="tiny" secondary :disabled="ensemble.inputs.length >= simpleProcessingInputLimits(ensemble.algorithm).max" @click.stop="addEnsembleInput(ensemble)">{{ t('workflows.addEnsembleInput') }}</n-button>
           </div>
           <div class="simple-ensemble-output-row">
             <span class="simple-ensemble-output-row__label">{{ ensemble.outputStem || t('workflows.ensembleOutput') }}</span>
@@ -1301,7 +1522,90 @@ onBeforeUnmount(() => {
           <strong>{{ t('workflows.ensembleNode') }}</strong>
           <small>{{ t('workflows.ensembleNodeChoiceDescription') }}</small>
         </button>
+        <button v-for="operation in SIMPLE_AUDIO_OPERATIONS" :key="operation" type="button" :data-add-audio-operation="operation" @click="addNodeOfType(operation)">
+          <span>{{ t('workflows.audioProcessingNode') }}</span>
+          <strong>{{ audioOperationCopy[operation].title }}</strong>
+          <small>{{ audioOperationCopy[operation].description }}</small>
+        </button>
       </div>
+    </n-modal>
+
+    <n-modal :show="showInferenceEditor" @update:show="(value: boolean) => !value && closeInferenceEditor()">
+      <n-card
+        class="simple-inference-modal"
+        :title="t('workflows.stepInferenceTitle')"
+        :bordered="false"
+        closable
+        role="dialog"
+        aria-modal="true"
+        style="width: min(620px, calc(100vw - 32px))"
+        @close="closeInferenceEditor"
+      >
+        <div v-if="inferenceEditorStep" class="simple-inference-modal__body">
+          <div class="simple-inference-modal__top">
+            <p class="simple-inference-modal__model" :title="inferenceEditorStep.model">
+              <span>{{ t('workflows.stepModel') }}</span>
+              <strong>{{ inferenceEditorStep.model }}</strong>
+            </p>
+            <label class="simple-inference-follow">
+              <span>{{ t('workflows.inferenceFollowGlobalShort') }}</span>
+              <n-switch
+                :value="inferenceMode === 'global'"
+                size="small"
+                @update:value="updateInferenceFollowGlobal"
+              />
+            </label>
+          </div>
+
+          <div class="simple-inference-fields" :class="{ 'simple-inference-fields--locked': inferenceMode === 'global' }">
+            <div class="simple-inference-grid">
+              <label>
+                <span>{{ t('inference.batchSize') }}</span>
+                <n-input-number :value="inferenceNumber('batch_size', 1)" :min="1" :max="32" :precision="0" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('batch_size', $event)" />
+              </label>
+              <template v-if="inferenceEditorIsVr">
+                <label>
+                  <span>{{ t('inference.vrWindowSize') }}</span>
+                  <n-input-number :value="inferenceNumber('window_size', 512)" :min="1" :precision="0" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('window_size', $event)" />
+                </label>
+                <label>
+                  <span>{{ t('inference.vrAggression') }}</span>
+                  <n-input-number :value="inferenceNumber('aggression', 5)" :min="0" :precision="0" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('aggression', $event)" />
+                </label>
+                <label>
+                  <span>{{ t('inference.vrPostProcessThreshold') }}</span>
+                  <n-input-number :value="inferenceNumber('post_process_threshold', 0.2)" :min="0" :max="1" :step="0.01" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('post_process_threshold', $event)" />
+                </label>
+              </template>
+              <template v-else>
+                <label>
+                  <span>{{ t('inference.overlapSize') }}</span>
+                  <AlignedInferenceInputNumber :value="inferenceNumber('overlap_size', 0)" :step="inferenceEditorOverlapStep" :alignment-step="inferenceEditorSampleStep" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('overlap_size', $event)" />
+                </label>
+                <label>
+                  <span>{{ t('inference.chunkSize') }}</span>
+                  <AlignedInferenceInputNumber :value="inferenceNumber('chunk_size', 0)" :step="inferenceEditorChunkStep" :alignment-step="inferenceEditorSampleStep" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('chunk_size', $event)" />
+                </label>
+              </template>
+            </div>
+
+            <div class="simple-inference-switches">
+              <label v-if="!inferenceEditorIsVr"><n-switch :value="inferenceBoolean('standardize')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('standardize', $event)" /><span>{{ t('inference.standardize') }}</span></label>
+              <label><n-switch :value="inferenceBoolean('normalize')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('normalize', $event)" /><span>{{ t('inference.normalize') }}</span></label>
+              <label><n-switch :value="inferenceBoolean('enable_tta')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('enable_tta', $event)" /><span>{{ t('workflows.inferenceEnableTta') }}</span></label>
+              <label v-if="inferenceEditorIsVr"><n-switch :value="inferenceBoolean('high_end_process')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('high_end_process', $event)" /><span>{{ t('inference.vrHighEndProcess') }}</span></label>
+              <label v-if="inferenceEditorIsVr"><n-switch :value="inferenceBoolean('enable_post_process')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('enable_post_process', $event)" /><span>{{ t('inference.vrEnablePostProcess') }}</span></label>
+            </div>
+            <div v-if="inferenceMode === 'global'" class="simple-inference-fields__mask" aria-hidden="true" />
+          </div>
+        </div>
+        <template #footer>
+          <div class="simple-inference-modal__footer">
+            <n-button secondary @click="closeInferenceEditor">{{ t('common.cancel') }}</n-button>
+            <n-button type="primary" :disabled="!inferenceEditorStep" @click="saveInferenceEditor">{{ t('common.save') }}</n-button>
+          </div>
+        </template>
+      </n-card>
     </n-modal>
 
     <n-dropdown
@@ -1518,6 +1822,13 @@ onBeforeUnmount(() => {
   background: color-mix(in srgb, #8b5cf6 9%, var(--surface-1));
 }
 
+.simple-node--audio-operation {
+  border-color: color-mix(in srgb, var(--success) 60%, var(--outline));
+  background: color-mix(in srgb, var(--success) 6%, var(--surface-1));
+}
+
+.simple-audio-operation-hint { margin: 0; color: var(--on-surface-muted); font-size: 11px; line-height: 1.5; }
+
 .simple-node--save {
   border-color: color-mix(in srgb, var(--warning) 64%, var(--outline));
   background: color-mix(in srgb, var(--warning) 8%, var(--surface-1));
@@ -1551,6 +1862,7 @@ onBeforeUnmount(() => {
 .simple-node--input header span { color: var(--success); }
 .simple-node--step header span { color: var(--primary-strong); }
 .simple-node--ensemble header span { color: color-mix(in srgb, #8b5cf6 80%, var(--on-surface)); }
+.simple-node--audio-operation header span { color: var(--success); }
 .simple-node--save header span { color: var(--warning); }
 
 .simple-node header strong {
@@ -1602,6 +1914,11 @@ onBeforeUnmount(() => {
 }
 
 .simple-node__body :deep(.n-select) { min-width: 0; }
+
+.simple-inference-settings { position: relative; }
+.simple-inference-settings:hover { background: color-mix(in srgb, var(--primary) 12%, transparent) !important; color: var(--primary-strong) !important; }
+.simple-inference-settings--custom { background: color-mix(in srgb, var(--primary) 10%, transparent); color: var(--primary-strong); }
+.simple-inference-settings__dot { position: absolute; top: 3px; right: 3px; width: 5px; height: 5px; border: 1px solid var(--surface-1); border-radius: 50%; background: var(--primary); box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 28%, transparent); }
 
 .simple-port {
   position: relative;
@@ -1660,6 +1977,7 @@ onBeforeUnmount(() => {
 .simple-output-row :deep(.n-button) { font-size: 11px; }
 .simple-ensemble-inputs { display: grid; gap: 7px; }
 .simple-ensemble-input-row { display: grid; grid-template-columns: 76px minmax(0, 1fr) 54px 24px; gap: 5px; align-items: center; }
+.simple-ensemble-input-row--audio-operation { grid-template-columns: 76px minmax(0, 1fr) auto; }
 .simple-ensemble-input-row__port { left: -13px; width: 89px; font-size: 10px; }
 .simple-ensemble-input-row__source { min-width: 0; overflow: hidden; padding: 3px 6px; border-radius: 6px; background: color-mix(in srgb, var(--surface-2) 56%, transparent); color: var(--on-surface-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .simple-ensemble-input-row :deep(.n-input-number) { width: 54px; }
@@ -1738,6 +2056,36 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
+.simple-inference-modal {
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--outline) 72%, transparent) !important;
+  border-radius: 14px !important;
+  background: var(--surface-1) !important;
+  box-shadow: 0 24px 68px color-mix(in srgb, #000 24%, transparent) !important;
+}
+
+.simple-inference-modal :deep(.n-card-header) { padding: 18px 20px 10px; }
+.simple-inference-modal :deep(.n-card-header__main) { color: var(--on-surface); font-size: 17px; font-weight: 680; letter-spacing: -.02em; }
+.simple-inference-modal :deep(.n-card__content) { padding: 4px 20px 18px; }
+.simple-inference-modal :deep(.n-card__footer) { padding: 12px 20px 16px; border-top: 1px solid color-mix(in srgb, var(--outline) 54%, transparent); }
+.simple-inference-modal__body { display: grid; gap: 14px; }
+.simple-inference-modal__top { min-width: 0; display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.simple-inference-modal__model { min-width: 0; display: flex; align-items: baseline; gap: 8px; margin: 0; }
+.simple-inference-modal__model span { flex: 0 0 auto; color: var(--on-surface-muted); font-size: 10px; }
+.simple-inference-modal__model strong { min-width: 0; overflow: hidden; color: var(--on-surface); text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 650; }
+.simple-inference-follow { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; color: var(--on-surface); font-size: 11px; font-weight: 620; }
+.simple-inference-fields { position: relative; display: grid; gap: 12px; padding-top: 2px; }
+.simple-inference-fields--locked .simple-inference-grid,
+.simple-inference-fields--locked .simple-inference-switches { filter: saturate(.72); }
+.simple-inference-fields__mask { position: absolute; z-index: 2; inset: -4px; border-radius: 10px; background: color-mix(in srgb, var(--surface-1) 32%, transparent); cursor: not-allowed; }
+.simple-inference-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding-top: 2px; }
+.simple-inference-grid label { min-width: 0; display: grid; gap: 5px; color: var(--on-surface-muted); font-size: 10px; font-weight: 600; }
+.simple-inference-grid :deep(.n-input-number),
+.simple-inference-grid :deep(.aligned-inference-input) { width: 100%; }
+.simple-inference-switches { display: flex; flex-wrap: wrap; gap: 8px 16px; padding-top: 2px; }
+.simple-inference-switches label { display: inline-flex; align-items: center; gap: 7px; color: var(--on-surface-muted); font-size: 10px; font-weight: 600; }
+.simple-inference-modal__footer { display: flex; justify-content: flex-end; gap: 8px; }
+
 .simple-node-type-modal__choices {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1791,5 +2139,6 @@ onBeforeUnmount(() => {
   .simple-node-editor__footer > span { width: 100%; }
   .simple-node-editor__footer > div { width: 100%; flex-wrap: wrap; }
   .simple-node-type-modal__choices { grid-template-columns: 1fr; }
+  .simple-inference-grid { grid-template-columns: 1fr; }
 }
 </style>

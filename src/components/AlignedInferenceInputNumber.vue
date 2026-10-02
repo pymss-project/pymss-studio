@@ -8,10 +8,12 @@ const props = withDefaults(defineProps<{
   alignmentStep?: number
   min?: number
   max?: number
+  disabled?: boolean
 }>(), {
   alignmentStep: undefined,
   min: 0,
   max: 1_048_576,
+  disabled: false,
 })
 
 const emit = defineEmits<{
@@ -99,6 +101,8 @@ onBeforeUnmount(() => {
       :min="min"
       :max="max"
       :step="step"
+      :precision="0"
+      :disabled="disabled"
       @update:value="handleUpdate"
       @blur="handleBlur"
     />

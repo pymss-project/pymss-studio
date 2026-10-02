@@ -2,13 +2,49 @@ export type WorkflowFormat = 'simple' | 'graph' | 'unknown'
 
 export const WORKFLOW_FORMAT_VERSION = 1
 
-const SIMPLE_ENSEMBLE_ALGORITHMS = new Set([
+export const SIMPLE_ENSEMBLE_ALGORITHMS = [
   'avg_wave', 'median_wave', 'min_wave', 'max_wave',
   'avg_fft', 'median_fft', 'min_fft', 'max_fft',
+] as const
+export const SIMPLE_AUDIO_OPERATIONS = ['sum', 'subtract', 'invert'] as const
+export const SIMPLE_INFERENCE_NUMBER_FIELDS: ReadonlySet<string> = new Set([
+  'batch_size', 'overlap_size', 'chunk_size', 'window_size', 'aggression', 'post_process_threshold',
 ])
+
+export type SimpleEnsembleAlgorithm = typeof SIMPLE_ENSEMBLE_ALGORITHMS[number]
+export type SimpleAudioOperation = typeof SIMPLE_AUDIO_OPERATIONS[number]
+export type SimpleProcessingAlgorithm = SimpleEnsembleAlgorithm | SimpleAudioOperation
+
+export function isSimpleAudioOperation(value: unknown): value is SimpleAudioOperation {
+  return typeof value === 'string' && SIMPLE_AUDIO_OPERATIONS.includes(value as SimpleAudioOperation)
+}
+
+export function isSimpleProcessingAlgorithm(value: unknown): value is SimpleProcessingAlgorithm {
+  return isSimpleAudioOperation(value)
+    || (typeof value === 'string' && SIMPLE_ENSEMBLE_ALGORITHMS.includes(value as SimpleEnsembleAlgorithm))
+}
+
+export function simpleProcessingInputLimits(algorithm: SimpleProcessingAlgorithm) {
+  if (algorithm === 'invert') return { min: 1, max: 1 }
+  if (algorithm === 'subtract') return { min: 2, max: 2 }
+  return { min: 2, max: 10 }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+export function hasInvalidSimpleInferenceNumbers(params: Record<string, unknown>): boolean {
+  return Object.entries(params).some(([key, value]) => {
+    if (!SIMPLE_INFERENCE_NUMBER_FIELDS.has(key)) return false
+    if (value === null) return false
+    if ((key === 'overlap_size' || key === 'chunk_size')
+      && typeof value === 'string' && value.trim().toLowerCase() === 'default') return false
+    if (typeof value !== 'number' || !Number.isFinite(value)) return true
+    if (key === 'post_process_threshold') return value < 0 || value > 1
+    const minimum = key === 'batch_size' || key === 'window_size' ? 1 : 0
+    return !Number.isInteger(value) || value < minimum
+  })
 }
 
 /**
@@ -53,9 +89,11 @@ export function hasInvalidSimpleStructure(definition: Record<string, unknown>): 
   if (definition.defaults != null && !isRecord(definition.defaults)) return true
   const defaults = isRecord(definition.defaults) ? definition.defaults : {}
   if (defaults.inference_params != null && !isRecord(defaults.inference_params)) return true
+  if (isRecord(defaults.inference_params) && hasInvalidSimpleInferenceNumbers(defaults.inference_params)) return true
   const hasInvalidStep = (definition.steps as unknown[]).some((value) => {
     if (!isRecord(value)) return true
     if (value.inference_params != null && !isRecord(value.inference_params)) return true
+    if (isRecord(value.inference_params) && hasInvalidSimpleInferenceNumbers(value.inference_params)) return true
     if (value.save != null && !isRecord(value.save)) return true
     return false
   })
@@ -64,11 +102,13 @@ export function hasInvalidSimpleStructure(definition: Record<string, unknown>): 
   const hasInvalidEnsemble = ensembles.some((value) => {
     if (!isRecord(value) || !Array.isArray(value.inputs)) return true
     if (typeof value.id !== 'string' || !value.id.trim()) return true
-    if (typeof value.algorithm !== 'string' || !SIMPLE_ENSEMBLE_ALGORITHMS.has(value.algorithm)) return true
+    if (!isSimpleProcessingAlgorithm(value.algorithm)) return true
     if (typeof value.output_stem !== 'string' || !value.output_stem.trim()) return true
     if (value.save != null && value.save !== false && typeof value.save !== 'string') return true
     if (value.output_name != null && typeof value.output_name !== 'string') return true
-    if (value.inputs.length < 2 || value.inputs.length > 10) return true
+    const limits = simpleProcessingInputLimits(value.algorithm)
+    const audioOperation = isSimpleAudioOperation(value.algorithm)
+    if (value.inputs.length < limits.min || value.inputs.length > limits.max) return true
     return value.inputs.some((input) => (
       !isRecord(input)
       || typeof input.source !== 'string'
@@ -76,6 +116,7 @@ export function hasInvalidSimpleStructure(definition: Record<string, unknown>): 
       || typeof input.weight !== 'number'
       || !Number.isFinite(input.weight)
       || input.weight <= 0
+      || (audioOperation && input.weight !== 1)
     ))
   })
   if (hasInvalidEnsemble) return true
@@ -198,7 +239,7 @@ export function hasInvalidSimpleStructure(definition: Record<string, unknown>): 
   // The pymss YAML parser accepts exactly version 1. Rejecting unsupported
   // versions here prevents the simple editor from rewriting a newer schema
   // as version 1 on save and gives the run screen a deterministic error.
-  return definition.steps.length > 0 && definition.version !== WORKFLOW_FORMAT_VERSION
+  return (definition.steps.length > 0 || ensembles.length > 0) && definition.version !== WORKFLOW_FORMAT_VERSION
 }
 
 export function isWorkflowSeparationNodeType(value: unknown): boolean {

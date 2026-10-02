@@ -72,6 +72,450 @@ class WorkflowTemporaryFileTests(unittest.TestCase):
         self.assertTrue(all(not path.exists() for path in paths))
 
 
+class SimpleAudioOperationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        class DAGLink:
+            def __init__(self, **values):
+                self.__dict__.update(values)
+
+        class DAGNode:
+            def __init__(self, *, id, type, inputs, data, title=""):
+                self.id, self.type, self.inputs, self.data, self.title = id, type, inputs, data, title
+
+        self.graph = ModuleType("pymss.graph")
+        self.graph.DAGLink, self.graph.DAGNode = DAGLink, DAGNode
+        self.graph.AUDIO, self.graph.STRING = "AUDIO", "STRING"
+        pymss = ModuleType("pymss")
+        pymss.graph = self.graph
+        modules = patch.dict("sys.modules", {"pymss": pymss, "pymss.graph": self.graph})
+        modules.start()
+        self.addCleanup(modules.stop)
+
+    def compile(self, definition):
+        nodes = [self.graph.DAGNode(id="input", type="input_audio", inputs=[], data={})]
+        nodes.extend(self.graph.DAGNode(
+            id=f"step:{step['id']}", type="mss_separate", inputs=[None, None], data={},
+        ) for step in definition.get("steps", []))
+        dag = SimpleNamespace(nodes=nodes)
+        metadata = _apply_simple_ensembles(
+            dag, definition, input_path="song.wav", output_format="wav",
+        )
+        return dag, metadata
+
+    @staticmethod
+    def operation(algorithm, sources, *, id="process", stem="Audio", save=False):
+        return {
+            "id": id, "algorithm": algorithm, "output_stem": stem, "save": save,
+            "inputs": [{"source": source, "weight": 1} for source in sources],
+        }
+
+    def test_five_stems_sum_chains_native_merge_and_feeds_an_ensemble(self) -> None:
+        stems = ["Vocals", "Drums", "Bass", "Guitar", "Other"]
+        definition = {
+            "steps": [{"id": "split", "stems": stems}],
+            "ensembles": [
+                self.operation("sum", [f"split.{stem}" for stem in stems]),
+                self.operation("avg_wave", ["process.Audio", "input"], id="blend"),
+            ],
+        }
+        dag, metadata = self.compile(definition)
+        merges = [node for node in dag.nodes if node.type == "AudioMerge"]
+        self.assertEqual(len(merges), 4)
+        self.assertTrue(all(node.data["widgets_values"] == ["add", False] for node in merges))
+        self.assertEqual(merges[0].inputs[0].source_slot, 0)
+        self.assertEqual(merges[0].inputs[1].source_slot, 2)
+        for index, node in enumerate(merges[1:], 1):
+            self.assertEqual(node.inputs[0].source_node_id, merges[index - 1].id)
+            self.assertEqual(node.inputs[1].source_slot, (index + 1) * 2)
+        blend = next(node for node in dag.nodes if node.type == "pymss_audio_ensemble")
+        self.assertEqual(blend.inputs[0].source_node_id, "studio:ensemble:process")
+        self.assertEqual(metadata, [])
+        ids = [link.link_id for node in dag.nodes for link in node.inputs if link is not None]
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_subtraction_preserves_input_order_and_feeds_a_separation(self) -> None:
+        definition = {
+            "steps": [
+                {"id": "split", "stems": ["Vocals", "Other"]},
+                {"id": "cleanup", "input": "process.Instrumental", "stems": ["Dry"]},
+            ],
+            "ensembles": [self.operation("subtract", ["input", "split.Vocals"], stem="Instrumental")],
+        }
+        dag, _metadata = self.compile(definition)
+        operation = next(node for node in dag.nodes if node.type == "AudioMerge")
+        self.assertEqual(operation.data["widgets_values"], ["subtract", False])
+        self.assertEqual([link.source_node_id for link in operation.inputs], ["input", "step:split"])
+        cleanup = next(node for node in dag.nodes if node.id == "step:cleanup")
+        self.assertEqual(cleanup.inputs[0].source_node_id, operation.id)
+
+    def test_pure_invert_saves_with_operation_filename_and_keeps_protocol_version(self) -> None:
+        definition = {
+            "version": 1, "studio": {"editor": "simple"}, "steps": [],
+            "ensembles": [self.operation("invert", ["input"], save="Default")],
+        }
+        dag, metadata = self.compile(definition)
+        operation = next(node for node in dag.nodes if node.type == "pymss_audio_invert_phase")
+        save = next(node for node in dag.nodes if node.type == "pymss_save_audio")
+        self.assertEqual(len(operation.inputs), 1)
+        self.assertEqual(save.inputs[0].source_node_id, operation.id)
+        self.assertEqual(metadata, [{"node_id": "studio:ensemble-save:process", "stem": "Audio", "filename": "song_Audio_process.wav"}])
+        runtime = _prepare_simple_runtime_definition(definition)
+        self.assertEqual(runtime["version"], 1)
+        self.assertEqual(runtime["steps"], [])
+        self.assertNotIn("ensembles", runtime)
+        self.assertEqual(len(definition["ensembles"]), 1)
+
+    def test_audio_operation_filename_supports_model_token_and_blank_template_fallback(self) -> None:
+        for template, expected in (("%filename%_%model%", "song_AudioInvert.wav"), ("  ", "song_Audio_process.wav")):
+            with self.subTest(template=template):
+                operation = self.operation("invert", ["input"], save="Default")
+                operation["output_name"] = template
+                _dag, metadata = self.compile({"steps": [], "ensembles": [operation]})
+                self.assertEqual(metadata, [{"node_id": "studio:ensemble-save:process", "stem": "Audio", "filename": expected}])
+
+    def test_audio_operations_reject_wrong_input_counts_and_non_unit_weights(self) -> None:
+        cases = [("sum", 1), ("sum", 11), ("subtract", 1), ("subtract", 3), ("invert", 0), ("invert", 2)]
+        for algorithm, count in cases:
+            with self.subTest(algorithm=algorithm, count=count):
+                operation = self.operation(algorithm, ["input"] * count)
+                with self.assertRaisesRegex(RuntimeError, "requires"):
+                    self.compile({"steps": [], "ensembles": [operation]})
+        for algorithm in ("sum", "subtract", "invert"):
+            for weight in (0.5, 2, float("nan"), float("inf"), 0, -1, "invalid"):
+                with self.subTest(algorithm=algorithm, weight=weight):
+                    sources = ["input"] if algorithm == "invert" else ["input", "split.Vocals"]
+                    operation = self.operation(algorithm, sources)
+                    operation["inputs"][0]["weight"] = weight
+                    with self.assertRaisesRegex(RuntimeError, "weight"):
+                        self.compile({"steps": [{"id": "split", "stems": ["Vocals"]}], "ensembles": [operation]})
+
+    def test_indirect_cycle_through_separation_is_rejected(self) -> None:
+        definition = {
+            "steps": [{"id": "cleanup", "input": "process.Audio", "stems": ["Dry"]}],
+            "ensembles": [self.operation("invert", ["cleanup.Dry"])],
+        }
+        with self.assertRaisesRegex(RuntimeError, "cycle"):
+            self.compile(definition)
+
+    def test_indirect_forward_reference_through_separation_is_rejected(self) -> None:
+        definition = {
+            "steps": [{"id": "cleanup", "input": "later.Audio", "stems": ["Dry"]}],
+            "ensembles": [
+                self.operation("invert", ["cleanup.Dry"]),
+                self.operation("invert", ["input"], id="later"),
+            ],
+        }
+        with self.assertRaisesRegex(RuntimeError, "forward reference"):
+            self.compile(definition)
+
+    def test_earlier_operation_through_separation_can_feed_a_later_ensemble(self) -> None:
+        definition = {
+            "steps": [{"id": "cleanup", "input": "process.Audio", "stems": ["Dry"]}],
+            "ensembles": [
+                self.operation("invert", ["input"]),
+                self.operation("avg_wave", ["cleanup.Dry", "process.Audio"], id="blend"),
+            ],
+        }
+        dag, _metadata = self.compile(definition)
+        blend = next(node for node in dag.nodes if node.id == "studio:ensemble:blend")
+        self.assertEqual([link.source_node_id for link in blend.inputs], ["step:cleanup", "studio:ensemble:process"])
+
+    def test_existing_eight_ensemble_algorithms_keep_native_weight_contract(self) -> None:
+        for algorithm in worker_workflows._SIMPLE_ENSEMBLE_ALGORITHMS:
+            with self.subTest(algorithm=algorithm):
+                operation = self.operation(algorithm, ["input", "split.Vocals"])
+                operation["inputs"][1]["weight"] = 0.25
+                dag, _metadata = self.compile({
+                    "steps": [{"id": "split", "stems": ["Vocals"]}], "ensembles": [operation],
+                })
+                node = next(node for node in dag.nodes if node.id == "studio:ensemble:process")
+                self.assertEqual(node.type, "pymss_audio_ensemble")
+                self.assertEqual(node.data["widgets_values"], [2, algorithm, 1.0, 0.25])
+
+
+class SimpleOutputAssociationTests(unittest.TestCase):
+    def test_completed_records_are_matched_by_save_node_not_position(self) -> None:
+        metadata = [
+            {"node_id": "save:cleanup:Dry", "stem": "Dry", "filename": "dry.wav"},
+            {"node_id": "studio:ensemble-save:first", "stem": "Audio", "filename": "first.wav"},
+        ]
+        records = [SimpleNamespace(node_id=item["node_id"]) for item in reversed(metadata)]
+        self.assertEqual(worker_workflows._match_simple_output_metadata(records, metadata), list(reversed(metadata)))
+
+    def test_missing_unknown_or_incomplete_save_identities_fail_before_publishing(self) -> None:
+        metadata = [{"node_id": "save:split:Vocals", "stem": "Vocals", "filename": "vocals.wav"}]
+        for records, message in (
+            ([None], "save-node identities"),
+            ([SimpleNamespace(node_id="other")], "undeclared save output"),
+            ([], "all requested save outputs"),
+        ):
+            with self.subTest(records=records), self.assertRaisesRegex(RuntimeError, message):
+                worker_workflows._match_simple_output_metadata(records, metadata)
+        with self.assertRaisesRegex(RuntimeError, "Duplicate"):
+            worker_workflows._match_simple_output_metadata([], metadata * 2)
+
+    def test_named_output_outside_task_directory_is_not_moved_or_deleted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_root = root / "task"
+            source_root.mkdir()
+            inside = source_root / "inside.wav"
+            outside = root / "outside.wav"
+            inside.write_bytes(b"inside")
+            outside.write_bytes(b"outside")
+            output_dir = root / "results"
+            with self.assertRaisesRegex(RuntimeError, "outside its task directory"):
+                _finalize_simple_output_paths(
+                    [str(inside), str(outside)],
+                    [{"filename": "one.wav"}, {"filename": "two.wav"}],
+                    output_dir, source_root=source_root,
+                )
+            self.assertEqual(inside.read_bytes(), b"inside")
+            self.assertEqual(outside.read_bytes(), b"outside")
+            self.assertFalse(output_dir.exists())
+
+    def test_missing_output_does_not_partially_publish_other_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "inside.wav"
+            source.write_bytes(b"audio")
+            output_dir = root / "results"
+            with self.assertRaisesRegex(RuntimeError, "output is missing"):
+                _finalize_simple_output_paths(
+                    [str(source), str(root / "missing.wav")],
+                    [{"filename": "one.wav"}, {"filename": "two.wav"}],
+                    output_dir, source_root=root,
+                )
+            self.assertEqual(source.read_bytes(), b"audio")
+            self.assertFalse(output_dir.exists())
+
+    def test_duplicate_source_paths_are_rejected_before_any_file_is_published(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "inside.wav"
+            source.write_bytes(b"audio")
+            output_dir = root / "results"
+            with self.assertRaisesRegex(RuntimeError, "same output file"):
+                _finalize_simple_output_paths(
+                    [str(source), str(source)],
+                    [{"filename": "one.wav"}, {"filename": "two.wav"}],
+                    output_dir, source_root=root,
+                )
+            self.assertEqual(source.read_bytes(), b"audio")
+            self.assertFalse(output_dir.exists())
+
+
+class NativeSimpleAudioOperationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        try:
+            import numpy as np
+            import pymss.graph as graph
+            import pymss.graph.core as core
+            from pymss.audio_io import load_audio, save_audio
+        except (ImportError, ModuleNotFoundError) as exc:
+            raise unittest.SkipTest(f"Native pymss graph runtime is unavailable: {exc}") from exc
+        cls.np, cls.graph, cls.core = np, graph, core
+        cls.load_audio, cls.save_audio = staticmethod(load_audio), staticmethod(save_audio)
+
+    def run_workflow(self, definition, *, factors=None, expected_file_count=1, separation_params=None):
+        np, graph = self.np, self.graph
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        input_path = root / "song.wav"
+        samples = np.array([[0.8, -0.7, 0.2, -0.1] * 64], dtype=np.float32)
+        self.save_audio(str(input_path), samples.T, 44100, "wav", {"wav_bit_depth": "FLOAT"})
+        separation_inputs = []
+        native_lookup = self.core.get_node_type
+
+        def lookup(node_type):
+            native = native_lookup(node_type)
+            if node_type not in {"mss_separate", "vr_separate"}:
+                return native
+
+            def separate(ctx, inputs):
+                audio = inputs["audio"]
+                separation_inputs.append(audio.audio.copy())
+                if separation_params is not None:
+                    separation_params.append(dict(inputs["params"].params))
+                return graph.NodeResult(outputs={
+                    index * 2: graph.AudioArtifact(audio.audio * factor, audio.sample_rate)
+                    for index, factor in enumerate(factors or [0.25])
+                })
+
+            return self.core.NodeTypeInfo(type=node_type, signature=native.signature, execute=separate)
+
+        task_id = "native-simple-audio"
+        self.addCleanup(worker_workflows._cleanup_workflow_file, task_id)
+        with patch.object(self.core, "get_node_type", side_effect=lookup), patch.object(worker_workflows, "emit"):
+            result = worker_workflows._run_pymss(
+                {"workflow": definition, "outputFormat": "wav"}, task_id,
+                input_path=str(input_path), inputs=None, output_dir=str(root / "results"), output_layout="flat",
+            )
+        actual, sample_rate = self.load_audio(result["files"][0], sr=None, mono=False)
+        self.assertEqual(sample_rate, 44100)
+        self.assertEqual(len(result["files"]), expected_file_count)
+        return np.asarray(actual).reshape(samples.shape), samples, separation_inputs, result
+
+    def test_native_five_stem_sum_preserves_gain_before_ensemble(self) -> None:
+        stems = ["Vocals", "Drums", "Bass", "Guitar", "Other"]
+        definition = {
+            "version": 1, "studio": {"editor": "simple"},
+            "steps": [{"id": "split", "model": "fixture", "stems": stems}],
+            "ensembles": [
+                SimpleAudioOperationTests.operation("sum", [f"split.{stem}" for stem in stems]),
+                SimpleAudioOperationTests.operation("avg_wave", ["process.Audio", "input"], id="blend", save="Default"),
+            ],
+        }
+        actual, samples, _inputs, _result = self.run_workflow(definition, factors=[0.5] * 5)
+        self.np.testing.assert_allclose(actual, samples * 1.75, atol=1e-6)
+        self.assertGreater(float(actual.max()), 1)
+
+    def test_native_input_minus_vocals_preserves_order_before_ensemble(self) -> None:
+        definition = {
+            "version": 1, "studio": {"editor": "simple"},
+            "steps": [{"id": "split", "model": "fixture", "stems": ["Vocals"]}],
+            "ensembles": [
+                SimpleAudioOperationTests.operation("subtract", ["input", "split.Vocals"], stem="Instrumental"),
+                SimpleAudioOperationTests.operation("avg_wave", ["process.Instrumental", "input"], id="blend", save="Default"),
+            ],
+        }
+        actual, samples, _inputs, _result = self.run_workflow(definition, factors=[-0.5])
+        self.np.testing.assert_allclose(actual, samples * 1.25, atol=1e-6)
+
+    def test_native_pure_invert_saves_without_separation(self) -> None:
+        definition = {
+            "version": 1, "studio": {"editor": "simple"}, "steps": [],
+            "ensembles": [SimpleAudioOperationTests.operation("invert", ["input"], save="Default")],
+        }
+        actual, samples, inputs, result = self.run_workflow(definition)
+        self.np.testing.assert_array_equal(actual, -samples)
+        self.assertEqual(inputs, [])
+        self.assertEqual(result["outputs"][0]["stem"], "Audio")
+        self.assertEqual(result["outputs"][0]["name"], "song_Audio_process.wav")
+
+    def test_native_invert_can_feed_a_separation(self) -> None:
+        definition = {
+            "version": 1, "studio": {"editor": "simple"},
+            "steps": [{"id": "cleanup", "model": "fixture", "input": "process.Audio", "stems": ["Dry"], "save": {"Dry": "Default"}}],
+            "ensembles": [SimpleAudioOperationTests.operation("invert", ["input"])],
+        }
+        actual, samples, inputs, result = self.run_workflow(definition)
+        self.np.testing.assert_array_equal(inputs[0], -samples)
+        self.np.testing.assert_allclose(actual, -samples * 0.25, atol=1e-6)
+        self.assertEqual(result["outputs"][0]["stem"], "Dry")
+
+    def test_native_multi_save_chain_keeps_audio_stems_and_filenames_associated(self) -> None:
+        for studio in (True, False):
+            with self.subTest(studio=studio):
+                definition = {
+                    "version": 1,
+                    **({"studio": {"editor": "simple"}} if studio else {}),
+                    "steps": [{
+                        "id": "cleanup", "model": "fixture", "input": "second.Audio",
+                        "stems": ["Dry"], "save": {"Dry": "Default"},
+                    }],
+                    "ensembles": [
+                        SimpleAudioOperationTests.operation("invert", ["input"], id="first", save="Default"),
+                        SimpleAudioOperationTests.operation("invert", ["first.Audio"], id="second"),
+                    ],
+                }
+                _actual, samples, _inputs, result = self.run_workflow(definition, expected_file_count=2)
+                expected = {"Dry": samples * 0.25, "Audio": -samples}
+                self.assertEqual({item["stem"] for item in result["outputs"]}, set(expected))
+                for item in result["outputs"]:
+                    audio, sample_rate = self.load_audio(item["path"], sr=None, mono=False)
+                    self.np.testing.assert_allclose(
+                        self.np.asarray(audio).reshape(samples.shape), expected[item["stem"]], atol=1e-6,
+                    )
+                    if studio:
+                        self.assertIn(item["stem"], item["name"])
+                    self.assertEqual(Path(item["path"]).name, item["name"])
+                    self.assertEqual(item["sampleRate"], sample_rate)
+
+    def test_native_vr_zero_values_reach_the_separator_without_changing_other_params(self) -> None:
+        params = {
+            "batch_size": 3, "window_size": 1024, "aggression": 0,
+            "enable_post_process": True, "post_process_threshold": 0,
+            "high_end_process": True, "normalize": False, "enable_tta": True,
+        }
+        captured = []
+        definition = {
+            "version": 1, "studio": {"editor": "simple"},
+            "steps": [{
+                "id": "vr", "model": "fixture", "model_type": "vr", "input": "input",
+                "stems": ["Vocals"], "save": {"Vocals": "Default"}, "inference_params": params,
+            }],
+        }
+        self.run_workflow(definition, separation_params=captured)
+        self.assertEqual(len(captured), 1)
+        for key, expected in params.items():
+            self.assertEqual(captured[0][key], expected, key)
+
+    def test_native_vr_default_zero_can_be_overridden_by_a_nonzero_step_value(self) -> None:
+        captured = []
+        definition = {
+            "version": 1,
+            "defaults": {"inference_params": {"aggression": 0, "post_process_threshold": 0}},
+            "steps": [{
+                "id": "vr", "model": "fixture", "model_type": "vr", "stems": ["Vocals"],
+                "save": {"Vocals": "Default"}, "inference_params": {"aggression": 7},
+            }],
+        }
+        self.run_workflow(definition, separation_params=captured)
+        self.assertEqual(captured[0]["aggression"], 7)
+        self.assertEqual(captured[0]["post_process_threshold"], 0)
+
+    def test_native_mss_zero_sizes_use_model_defaults_and_default_strings_still_run(self) -> None:
+        for sizes in ({"overlap_size": 0, "chunk_size": 0},
+                      {"overlap_size": "Default", "chunk_size": "Default"},
+                      {"overlap_size": None, "chunk_size": None}):
+            with self.subTest(sizes=sizes):
+                captured = []
+                definition = {
+                    "version": 1,
+                    "steps": [{"id": "split", "model": "fixture", "stems": ["Vocals"],
+                               "save": {"Vocals": "Default"}, "inference_params": sizes}],
+                }
+                self.run_workflow(definition, separation_params=captured)
+                self.assertNotIn("overlap_size", captured[0])
+                self.assertNotIn("chunk_size", captured[0])
+
+    def test_native_nullable_vr_numbers_keep_sdk_defaults(self) -> None:
+        captured = []
+        definition = {
+            "version": 1,
+            "steps": [{
+                "id": "vr", "model": "fixture", "model_type": "vr", "stems": ["Vocals"],
+                "save": {"Vocals": "Default"},
+                "inference_params": dict.fromkeys([
+                    "batch_size", "window_size", "aggression", "post_process_threshold",
+                ]),
+            }],
+        }
+        self.run_workflow(definition, separation_params=captured)
+        self.assertEqual(captured[0]["batch_size"], 1)
+        self.assertEqual(captured[0]["window_size"], 512)
+        self.assertEqual(captured[0]["aggression"], 5)
+        self.assertEqual(captured[0]["post_process_threshold"], 0.2)
+
+    def test_invalid_simple_numbers_fail_before_the_separator_is_called(self) -> None:
+        invalid = [
+            {"batch_size": 1.5}, {"window_size": 0}, {"aggression": -1}, {"aggression": 1.5},
+            {"chunk_size": 44100.5}, {"overlap_size": -1}, {"batch_size": float("nan")},
+            {"chunk_size": float("inf")}, {"post_process_threshold": 2}, {"normalize": "false"},
+        ]
+        for params in invalid:
+            with self.subTest(params=params):
+                captured = []
+                definition = {"version": 1, "steps": [{
+                    "id": "vr", "model": "fixture", "model_type": "vr", "stems": ["Vocals"],
+                    "save": {"Vocals": "Default"}, "inference_params": params,
+                }]}
+                with self.assertRaisesRegex(RuntimeError, "Step vr"):
+                    self.run_workflow(definition, separation_params=captured)
+                self.assertEqual(captured, [])
+
+
 class LegacyWorkflowInputTests(unittest.TestCase):
     def test_legacy_placeholder_is_bound_to_global_input_without_mutating_definition(self) -> None:
         definition = {
@@ -306,8 +750,8 @@ class WorkflowOutputMetadataTests(unittest.TestCase):
         self.assertEqual(cleanup.inputs[0].target_slot, 0)
         self.assertEqual(save.inputs[1].source_node_id, filename.id)
         self.assertEqual(filename.data["widgets_values"], ["Vocals_2"])
-        self.assertEqual(step_metadata, [{"stem": "Vocals", "filename": ""}])
-        self.assertEqual(ensemble_metadata, [{"stem": "Vocals", "filename": "Vocals_2.flac"}])
+        self.assertEqual(step_metadata, [{"node_id": "save:modelA:Vocals", "stem": "Vocals", "filename": ""}])
+        self.assertEqual(ensemble_metadata, [{"node_id": "studio:ensemble-save:blend", "stem": "Vocals", "filename": "Vocals_2.flac"}])
 
     def test_unsaved_simple_ensemble_can_feed_a_downstream_step(self) -> None:
         class DAGLink:

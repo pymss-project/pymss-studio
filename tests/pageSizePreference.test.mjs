@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test, { after, afterEach } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { createPinia } from 'pinia'
+import { createPinia, setActivePinia } from 'pinia'
 import { createServer } from 'vite'
 
 const vite = await createServer({
@@ -204,6 +204,60 @@ test('model inference overrides merge hidden fields and persist before resolving
   assert.equal(storage.writes.at(-1)?.value.modelInferenceOverrides['test-model'], undefined)
 })
 
+for (const scenario of [
+  { name: 'uses an explicit VR type without model metadata', stepType: ' VR ', entryType: null, vr: true },
+  { name: 'falls back to model metadata when the step has no type', stepType: undefined, entryType: ' VR ', vr: true },
+  { name: 'prefers an explicit VR type over conflicting model metadata', stepType: 'vr', entryType: 'mel_band_roformer', vr: true },
+  { name: 'prefers an explicit MSS type over conflicting model metadata', stepType: 'mel_band_roformer', entryType: 'vr', vr: false },
+]) {
+  test(`workflow model inference ${scenario.name}`, async () => {
+    const overrides = {
+      batch_size: 2,
+      window_size: 1024,
+      aggression: 0,
+      enable_post_process: false,
+      post_process_threshold: 0,
+      high_end_process: false,
+      normalize: false,
+      overlap_size: 2048,
+      chunk_size: 16384,
+      standardize: true,
+    }
+    browserStorage({
+      'model-state': {
+        models: scenario.entryType ? [{ name: 'workflow-model', aliases: [], modelType: scenario.entryType }] : [],
+        modelInferenceOverrides: { 'workflow-model': overrides },
+      },
+    })
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const modelStore = useModelStore(pinia)
+    const taskStore = useTaskStore(pinia)
+    stores.push(modelStore, taskStore)
+    await Promise.all([modelStore.initialize(), taskStore.initialize()])
+    taskStore.addInputFiles(['D:/Audio/song.wav'])
+    const definition = {
+      version: 1,
+      steps: [{
+        id: 'split',
+        model: 'workflow-model',
+        ...(scenario.stepType === undefined ? {} : { model_type: scenario.stepType }),
+        input: 'input',
+        stems: ['Vocals'],
+        save: { Vocals: 'Default' },
+      }],
+    }
+
+    const submitted = await taskStore.startWorkflowInference({ id: 'workflow-model-types', name: 'Workflow', definition })
+    const params = submitted.tasks[0].runConfig.workflowDefinition.steps[0].inference_params
+    const expectedKeys = scenario.vr
+      ? ['batch_size', 'window_size', 'aggression', 'enable_post_process', 'post_process_threshold', 'high_end_process', 'normalize']
+      : ['batch_size', 'overlap_size', 'chunk_size', 'standardize', 'normalize']
+    assert.deepEqual(params, Object.fromEntries(expectedKeys.map(key => [key, overrides[key]])))
+    assert.equal(definition.steps[0].inference_params, undefined)
+  })
+}
+
 test('legacy per-model inference drafts retain stems without overriding model defaults', async () => {
   browserStorage({
     'separate-state': {
@@ -225,6 +279,51 @@ test('legacy per-model inference drafts retain stems without overriding model de
     { ...store.getSavedModelState('test-model') },
     { selectedStems: ['vocals'] },
   )
+})
+
+test('output stem selections are cached per model', async () => {
+  const storage = browserStorage({
+    'separate-state': {
+      inferenceParamsByModel: {
+        'model-a': {
+          selectedStems: ['vocals'],
+          selectedStemsCleared: false,
+        },
+      },
+    },
+  })
+  const pinia = createPinia()
+  setActivePinia(pinia)
+  const taskStore = useTaskStore(pinia)
+  const modelStore = useModelStore(pinia)
+  stores.push(taskStore, modelStore)
+
+  await Promise.all([taskStore.initialize(), modelStore.initialize()])
+  modelStore.selectedModel = 'model-a'
+  await waitForDebouncedSave()
+  const writesBeforeDraft = storage.writes.length
+  taskStore.selectedStems = ['drums']
+  taskStore.selectedStemsCleared = true
+  await waitForDebouncedSave()
+  assert.ok(storage.writes.length > writesBeforeDraft)
+  assert.deepEqual(taskStore.getSavedModelState('model-a'), {
+    selectedStems: ['drums'],
+    selectedStemsCleared: true,
+  })
+  assert.deepEqual(storage.writes.at(-1)?.value.inferenceParamsByModel['model-a'], {
+    selectedStems: ['drums'],
+    selectedStemsCleared: true,
+  })
+
+  const restoredPinia = createPinia()
+  setActivePinia(restoredPinia)
+  const restoredTaskStore = useTaskStore(restoredPinia)
+  stores.push(restoredTaskStore)
+  await restoredTaskStore.initialize()
+  assert.deepEqual(restoredTaskStore.getSavedModelState('model-a'), {
+    selectedStems: ['drums'],
+    selectedStemsCleared: true,
+  })
 })
 
 test('failed model inference persistence restores the previous overrides', async () => {

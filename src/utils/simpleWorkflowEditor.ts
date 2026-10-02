@@ -1,5 +1,7 @@
 import {
-  SIMPLE_ENSEMBLE_ALGORITHMS,
+  isSimpleAudioOperation,
+  isSimpleProcessingAlgorithm,
+  simpleProcessingInputLimits,
   type SimpleDraft,
   type SimpleEnsembleDraft,
   type SimpleStepDraft,
@@ -365,7 +367,8 @@ export function connectSimple(
   const ensemble = draft.ensembles.find(item => item.id === sourceId)
   if (ensemble && ensemble.outputStem.trim().toLowerCase() === stem.toLowerCase()) {
     ensemble.save = true
-    if (!ensemble.outputName.trim()) ensemble.outputName = '%filename%_%stem%_Ensemble'
+    if (!ensemble.outputName.trim()) ensemble.outputName = isSimpleAudioOperation(ensemble.algorithm)
+      ? '%filename%_%stem%_%step%' : '%filename%_%stem%_Ensemble'
   }
   return check
 }
@@ -403,11 +406,13 @@ export function disconnectSimple(draft: SimpleDraft, target: SimpleConnectionTar
 export function cleanupSimpleDraft(draft: SimpleDraft): void {
   if (!Array.isArray(draft.ensembles)) draft.ensembles = []
   draft.ensembles.forEach((ensemble, ensembleIndex) => {
-    if (!SIMPLE_ENSEMBLE_ALGORITHMS.includes(ensemble.algorithm)) ensemble.algorithm = 'avg_wave'
+    if (!isSimpleProcessingAlgorithm(ensemble.algorithm)) ensemble.algorithm = 'avg_wave'
+    const limits = simpleProcessingInputLimits(ensemble.algorithm)
     ensemble.outputStem = ensemble.outputStem.trim()
-    ensemble.outputName = ensemble.outputName.trim() || '%filename%_%stem%_Ensemble'
+    ensemble.outputName = ensemble.outputName.trim() || (isSimpleAudioOperation(ensemble.algorithm)
+      ? '%filename%_%stem%_%step%' : '%filename%_%stem%_Ensemble')
     const seen = new Set<string>()
-    ensemble.inputs = ensemble.inputs.slice(0, 10).map((input) => {
+    ensemble.inputs = ensemble.inputs.slice(0, limits.max).map((input) => {
       const source = input.source.trim()
       const resolved = resolveSource(draft, source)
       const normalizedSource = normalizeSimpleSource(draft, source)
@@ -422,10 +427,10 @@ export function cleanupSimpleDraft(draft: SimpleDraft): void {
       if (valid) seen.add(sourceKey)
       return {
         source: valid ? normalizedSource : '',
-        weight: Number.isFinite(input.weight) && input.weight > 0 ? input.weight : 1,
+        weight: !isSimpleAudioOperation(ensemble.algorithm) && Number.isFinite(input.weight) && input.weight > 0 ? input.weight : 1,
       }
     })
-    while (ensemble.inputs.length < 2) ensemble.inputs.push({ source: '', weight: 1 })
+    while (ensemble.inputs.length < limits.min) ensemble.inputs.push({ source: '', weight: 1 })
   })
   draft.steps.forEach((step) => {
     const input = normalizeSimpleSource(draft, step.input)

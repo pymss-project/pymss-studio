@@ -62,7 +62,7 @@ export function getWorkflowDefinitionIssue(
   if (format === 'simple') {
     const steps = definition.steps as unknown[]
     if (hasInvalidSimpleStructure(definition)) return 'invalid-definition'
-    if (!steps.length) return 'steps-required'
+    if (!steps.length && !(Array.isArray(definition.ensembles) && definition.ensembles.length)) return 'steps-required'
     return countWorkflowSaveOutputs(definition) ? null : 'no-save-outputs'
   }
 
@@ -109,7 +109,10 @@ export function countWorkflowSaveOutputs(definition: Record<string, unknown>): n
   return 0
 }
 
-function materializeSimpleDefaults(definition: Record<string, unknown>): Record<string, unknown> {
+function materializeSimpleDefaults(
+  definition: Record<string, unknown>,
+  modelInferenceParams: Record<string, Record<string, unknown>> = {},
+): Record<string, unknown> {
   const defaults = isRecord(definition.defaults) ? definition.defaults : {}
   const defaultInference = isRecord(defaults.inference_params) ? defaults.inference_params : {}
   const defaultDevice = typeof defaults.device === 'string' ? defaults.device.trim() : ''
@@ -119,6 +122,11 @@ function materializeSimpleDefaults(definition: Record<string, unknown>): Record<
 
   const steps = (Array.isArray(definition.steps) ? definition.steps : []).map((value) => {
     if (!isRecord(value)) return value
+    const modelName = nonEmptyString(value.model)
+    const globalModelInference = isRecord(modelInferenceParams[modelName])
+      ? modelInferenceParams[modelName]
+      : {}
+    const inheritedInference = { ...globalModelInference, ...defaultInference }
     const stepInference = isRecord(value.inference_params) ? value.inference_params : null
     const inheritInference = value.inference_params == null || stepInference !== null
     const inheritDevice = value.device == null
@@ -129,10 +137,10 @@ function materializeSimpleDefaults(definition: Record<string, unknown>): Record<
       ...value,
       ...(!inheritDevice || !defaultDevice ? {} : { device: defaultDevice }),
       ...(!inheritOutputFormat || !defaultOutputFormat ? {} : { output_format: defaultOutputFormat }),
-      ...(inheritInference && (stepInference || Object.keys(defaultInference).length)
+      ...(inheritInference && (stepInference || Object.keys(inheritedInference).length)
         ? {
             inference_params: mergeSimpleInferenceParams(
-              defaultInference,
+              inheritedInference,
               stepInference || {},
               typeof value.use_tta === 'boolean' ? value.use_tta : undefined,
             ),
@@ -150,7 +158,11 @@ function materializeSimpleDefaults(definition: Record<string, unknown>): Record<
  */
 export function prepareWorkflowDefinitionForRun(
   definition: Record<string, unknown>,
-  runtimeDefaults: { device: string; outputFormat: string },
+  runtimeDefaults: {
+    device: string
+    outputFormat: string
+    modelInferenceParams?: Record<string, Record<string, unknown>>
+  },
 ): Record<string, unknown> {
   const clone = normalizeGraphWorkflowDefinition(
     JSON.parse(JSON.stringify(definition)) as Record<string, unknown>,
@@ -169,7 +181,7 @@ export function prepareWorkflowDefinitionForRun(
           : runtimeDefaults.outputFormat,
       }
     }
-    return materializeSimpleDefaults(clone)
+    return materializeSimpleDefaults(clone, runtimeDefaults.modelInferenceParams)
   }
   if (format !== 'graph') return clone
 

@@ -66,7 +66,7 @@ const contextWorkflow = ref<WorkflowEntry | null>(null)
 type WorkflowDefaultsPatch = {
   defaultDevice?: string
   defaultFormat?: string
-  defaultNormalize?: boolean
+  defaultNormalize?: boolean | null
 }
 const updatingWorkflowDefaults = ref(false)
 const pendingWorkflowDefaults = new Map<string, WorkflowDefaultsPatch>()
@@ -86,6 +86,15 @@ const formatOptions = [
   { label: 'MP3', value: 'mp3' },
   { label: 'M4A', value: 'm4a' },
 ]
+const normalizeOptions = computed(() => [
+  { label: t('workflows.inferenceFollowGlobal'), value: 'global' },
+  { label: t('workflows.inferenceEnabled'), value: 'enabled' },
+  { label: t('workflows.inferenceDisabled'), value: 'disabled' },
+])
+
+function normalizeMode(value: boolean | null) {
+  return value === null ? 'global' : value ? 'enabled' : 'disabled'
+}
 
 function workflowKind(item: WorkflowEntry): WorkflowKind {
   if (isSimpleWorkflowDefinition(item.definition)) return 'simple'
@@ -310,9 +319,14 @@ async function flushWorkflowDefaultsQueue() {
         : {}
       defaults.device = patch.defaultDevice ?? draft.defaultDevice
       defaults.output_format = patch.defaultFormat ?? draft.defaultFormat
-      const inference = (defaults.inference_params as Record<string, unknown>) || {}
-      inference.normalize = patch.defaultNormalize ?? draft.defaultNormalize
-      defaults.inference_params = inference
+      const inference = defaults.inference_params && typeof defaults.inference_params === 'object' && !Array.isArray(defaults.inference_params)
+        ? { ...(defaults.inference_params as Record<string, unknown>) }
+        : {}
+      const normalize = patch.defaultNormalize !== undefined ? patch.defaultNormalize : draft.defaultNormalize
+      if (normalize === null) delete inference.normalize
+      else inference.normalize = normalize
+      if (Object.keys(inference).length) defaults.inference_params = inference
+      else delete defaults.inference_params
       definition.defaults = defaults
       try {
         const entry = await workflow.saveWorkflow({
@@ -356,8 +370,10 @@ function updateSelectedDefaultFormat(value: string | number | null) {
   updateSelectedWorkflowDefaults({ defaultFormat: String(value || 'wav') })
 }
 
-function updateSelectedDefaultNormalize(value: boolean) {
-  updateSelectedWorkflowDefaults({ defaultNormalize: value })
+function updateSelectedDefaultNormalize(value: string | number | boolean | null) {
+  updateSelectedWorkflowDefaults({
+    defaultNormalize: value === 'global' ? null : typeof value === 'boolean' ? value : value === 'enabled',
+  })
 }
 
 
@@ -968,9 +984,10 @@ watch([workflows, selectedWorkflowId], () => {
                 </div>
                 <div class="wf-param">
                   <span>{{ t('workflows.defaultNormalize') }}</span>
-                  <n-switch
-                    :value="selectedDraft.defaultNormalize"
+                  <n-select
+                    :value="normalizeMode(selectedDraft.defaultNormalize)"
                     size="small"
+                    :options="normalizeOptions"
                     :disabled="isNodeEditorOpen || updatingWorkflowDefaults"
                     :loading="updatingWorkflowDefaults"
                     @update:value="updateSelectedDefaultNormalize"

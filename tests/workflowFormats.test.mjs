@@ -36,8 +36,10 @@ const {
   analyzeSimpleWorkflow,
   buildSimpleWorkflowDefinition,
   createDefaultSimpleEditorUi,
+  createAudioOperationDraft,
   fitSimpleEditorViewport,
   hydrateSimpleWorkflow,
+  normalizeSimpleInferenceParams,
   renderSimpleOutputFilename,
 } = await vite.ssrLoadModule('/src/utils/workflowSimple.ts')
 const {
@@ -205,7 +207,18 @@ test('simple editor opens only definitions it can round-trip without data loss',
 
   const advancedInference = structuredClone(editable)
   advancedInference.steps[0].inference_params = { chunk_size: 4096 }
-  assert.deepEqual(analyzeSimpleWorkflow(advancedInference), {
+  assert.deepEqual(analyzeSimpleWorkflow(advancedInference), { editable: true, reasonCodes: [] })
+
+  const unsupportedInference = structuredClone(editable)
+  unsupportedInference.steps[0].inference_params = { future_parameter: 4096 }
+  assert.deepEqual(analyzeSimpleWorkflow(unsupportedInference), {
+    editable: false,
+    reasonCodes: ['advanced_parameters'],
+  })
+
+  const unsupportedWorkflowDefault = structuredClone(editable)
+  unsupportedWorkflowDefault.defaults.inference_params.batch_size = 2
+  assert.deepEqual(analyzeSimpleWorkflow(unsupportedWorkflowDefault), {
     editable: false,
     reasonCodes: ['advanced_parameters'],
   })
@@ -540,6 +553,119 @@ test('simple editor supports forward Ensemble chains and keeps renamed reference
   assert.equal(getWorkflowDefinitionIssue(buildSimpleWorkflowDefinition(draft)), null)
 })
 
+function audioOperationsFixture() {
+  return {
+    version: 1,
+    defaults: { device: 'auto', output_format: 'wav', inference_params: { normalize: false } },
+    steps: [
+      { id: 'sw', model: 'sw.ckpt', input: 'input', stems: ['Vocals', 'Drums', 'Bass', 'Guitar', 'Piano', 'Other'], save: {}, output_names: {} },
+      { id: 'gabox', model: 'gabox.ckpt', input: 'input', stems: ['Instrumental'], save: {}, output_names: {} },
+      { id: 'cleanup', model: 'cleanup.ckpt', input: 'phase.Inverted', stems: ['Clean'], save: {}, output_names: {} },
+    ],
+    ensembles: [
+      {
+        id: 'sum', algorithm: 'sum', output_stem: 'Instrumental', save: false,
+        output_name: '%filename%_%stem%_%step%',
+        inputs: ['Drums', 'Bass', 'Guitar', 'Piano', 'Other'].map(stem => ({ source: `sw.${stem}`, weight: 1 })),
+      },
+      {
+        id: 'difference', algorithm: 'subtract', output_stem: 'Instrumental', save: false,
+        output_name: '%filename%_%stem%_%step%',
+        inputs: [{ source: 'input', weight: 1 }, { source: 'sw.Vocals', weight: 1 }],
+      },
+      {
+        id: 'phase', algorithm: 'invert', output_stem: 'Inverted', save: 'Default',
+        output_name: '%filename%_%stem%_%step%',
+        inputs: [{ source: 'difference.Instrumental', weight: 1 }],
+      },
+      {
+        id: 'blend', algorithm: 'avg_fft', output_stem: 'Instrumental', save: 'Default',
+        output_name: '%filename%_%stem%_Ensemble',
+        inputs: [{ source: 'sum.Instrumental', weight: 1 }, { source: 'gabox.Instrumental', weight: 0.75 }],
+      },
+    ],
+  }
+}
+
+test('simple audio operations round-trip multi-stem sum, original-minus-vocals, and inversion', () => {
+  const definition = audioOperationsFixture()
+  assert.deepEqual(analyzeSimpleWorkflow(definition), { editable: true, reasonCodes: [] })
+  assert.equal(getWorkflowDefinitionIssue(definition), null)
+  assert.equal(countWorkflowSaveOutputs(definition), 2)
+  const draft = hydrateSimpleWorkflow(definition)
+  cleanupSimpleDraft(draft)
+  const rebuilt = buildSimpleWorkflowDefinition(draft)
+  assert.deepEqual(rebuilt.ensembles, definition.ensembles)
+  assert.deepEqual(rebuilt.steps, definition.steps)
+  assert.equal(getWorkflowDefinitionIssue(rebuilt), null)
+  assert.deepEqual(prepareWorkflowDefinitionForRun(rebuilt, { device: 'cpu', outputFormat: 'flac' }).ensembles, definition.ensembles)
+  assert.equal(canConnectSimple(draft, 'sum.Instrumental', simpleEnsembleInputTarget('blend', 0)).ok, true)
+  assert.equal(canConnectSimple(draft, 'difference.Instrumental', simpleEnsembleInputTarget('blend', 0)).ok, true)
+  assert.equal(canConnectSimple(draft, 'phase.Inverted', simpleStepInputTarget('cleanup')).ok, true)
+})
+
+test('audio processing outputs retain rename, save, deletion, and dependency checks', () => {
+  const draft = hydrateSimpleWorkflow(audioOperationsFixture())
+  updateSimpleEnsembleOutputStem(draft, draft.ensembles[1], 'Residual')
+  assert.equal(draft.ensembles[2].inputs[0].source, 'difference.Residual')
+  updateSimpleEnsembleOutputStem(draft, draft.ensembles[2], 'Reversed')
+  assert.equal(draft.steps[2].input, 'phase.Reversed')
+  assert.equal(disconnectSimple(draft, simpleSaveTarget('phase', 'Reversed')), true)
+  assert.equal(connectSimple(draft, 'phase.Reversed', 'save').ok, true)
+  assert.deepEqual(analyzeSimpleNodeRemovalImpact(draft, 'phase'), { connections: 1, savedOutputs: 1 })
+  assert.deepEqual(analyzeSimpleModelChangeImpact(draft, 'sw', ['Vocals']), { connections: 5, savedOutputs: 0 })
+  assert.deepEqual(canConnectSimple(draft, 'sw.Drums', simpleEnsembleInputTarget('sum', 1)), { ok: false, reason: 'duplicate-source' })
+  assert.deepEqual(canConnectSimple(draft, 'phase.Reversed', simpleEnsembleInputTarget('phase', 0)), { ok: false, reason: 'self-link' })
+  assert.deepEqual(canConnectSimple(draft, 'blend.Instrumental', simpleEnsembleInputTarget('sum', 0)), { ok: false, reason: 'forward-link' })
+  assert.deepEqual(canConnectSimple(draft, 'phase.Reversed', simpleStepInputTarget('sw')), { ok: false, reason: 'forward-link' })
+  assert.deepEqual(canConnectSimple(draft, 'cleanup.Clean', simpleEnsembleInputTarget('difference', 0)), { ok: false, reason: 'forward-link' })
+  draft.ensembles = draft.ensembles.filter(node => node.id !== 'phase')
+  cleanupSimpleDraft(draft)
+  assert.equal(draft.steps[2].input, '')
+})
+
+test('audio operation validation rejects invalid arity, weighted inputs, duplicate sources and cycles', () => {
+  const base = audioOperationsFixture()
+  const invalidChanges = [
+    definition => { definition.ensembles[0].inputs = definition.ensembles[0].inputs.slice(0, 1) },
+    definition => { definition.ensembles[1].inputs.pop() },
+    definition => { definition.ensembles[1].inputs.push({ source: 'gabox.Instrumental', weight: 1 }) },
+    definition => { definition.ensembles[2].inputs.push({ source: 'input', weight: 1 }) },
+    definition => { definition.ensembles[2].inputs = [] },
+    definition => { definition.ensembles[0].inputs[0].weight = 0.5 },
+    definition => { definition.ensembles[1].inputs[1].weight = -1 },
+    definition => { definition.ensembles[2].inputs[0].weight = 2 },
+    definition => { definition.ensembles[1].inputs[1].source = 'INPUT' },
+    definition => { definition.ensembles[2].inputs[0].source = 'missing.Audio' },
+    definition => { definition.ensembles[0].inputs[0].source = 'blend.Instrumental' },
+    definition => { definition.steps[0].input = 'phase.Inverted' },
+    definition => { definition.ensembles[1].inputs[0].source = 'cleanup.Clean' },
+  ]
+  for (const change of invalidChanges) {
+    const definition = structuredClone(base)
+    change(definition)
+    assert.equal(getWorkflowDefinitionIssue(definition), 'invalid-definition')
+    assert.deepEqual(analyzeSimpleWorkflow(definition), { editable: false, reasonCodes: ['invalid_definition'] })
+  }
+})
+
+test('audio processing-only workflows save and reopen without inserting a separation model', () => {
+  const invert = createAudioOperationDraft('invert', 0)
+  assert.equal(invert.inputs.length, 1)
+  assert.equal(createAudioOperationDraft('subtract', 1).inputs.length, 2)
+  const draft = hydrateSimpleWorkflow({ steps: [] })
+  draft.ensembles = [invert]
+  assert.equal(connectSimple(draft, 'input', simpleEnsembleInputTarget(invert.id, 0)).ok, true)
+  cleanupSimpleDraft(draft)
+  const definition = buildSimpleWorkflowDefinition(draft)
+  assert.equal(getWorkflowDefinitionIssue(definition), null)
+  assert.equal(countWorkflowSaveOutputs(definition), 1)
+  assert.deepEqual(analyzeSimpleWorkflow(definition), { editable: true, reasonCodes: [] })
+  assert.deepEqual(buildSimpleWorkflowDefinition(hydrateSimpleWorkflow(definition)), definition)
+  assert.equal(getWorkflowDefinitionIssue({ ...definition, version: 2 }), 'invalid-definition')
+  assert.equal(getWorkflowDefinitionIssue({ ...definition, ensembles: [] }), 'steps-required')
+})
+
 test('simple runtime preparation materializes defaults without mutating the stored workflow', () => {
   const source = simpleFixture()
   source.defaults.inference_params.batch_size = 2
@@ -574,6 +700,150 @@ test('simple runtime preparation materializes defaults without mutating the stor
   })
   assert.equal(withRuntimeFallbacks.steps[0].device, 'cpu')
   assert.equal(withRuntimeFallbacks.steps[0].output_format, 'mp3')
+})
+
+test('simple step inference parameters round-trip and absent values keep global inheritance', () => {
+  const source = simpleFixture()
+  source.steps[0].model_type = 'mel_band_roformer'
+  source.steps[0].inference_params = {
+    batch_size: 3,
+    overlap_size: 44100,
+    normalize: false,
+    enable_tta: true,
+  }
+  const draft = hydrateSimpleWorkflow(source)
+
+  assert.deepEqual(draft.steps[0].inferenceParams, source.steps[0].inference_params)
+  assert.equal(draft.steps[0].modelType, 'mel_band_roformer')
+  assert.equal(draft.steps[1].inferenceParams, undefined)
+
+  const rebuilt = buildSimpleWorkflowDefinition(draft)
+  assert.deepEqual(rebuilt.steps[0].inference_params, source.steps[0].inference_params)
+  assert.equal(rebuilt.steps[0].model_type, 'mel_band_roformer')
+  assert.equal(Object.hasOwn(rebuilt.steps[1], 'inference_params'), false)
+})
+
+test('invalid known inference numbers reject editing and running without changing imported values', () => {
+  const invalidValues = {
+    batch_size: [0, -1, 1.5, NaN, Infinity, -Infinity, '2'],
+    window_size: [0, -1, 1024.5, NaN, Infinity, -Infinity, '512'],
+    aggression: [-1, 1.5, NaN, Infinity, -Infinity, '5'],
+    overlap_size: [-1, 44100.5, NaN, Infinity, -Infinity, '44100'],
+    chunk_size: [-1, 352800.5, NaN, Infinity, -Infinity, '352800'],
+    post_process_threshold: [-0.01, 1.01, NaN, Infinity, -Infinity, '0.2'],
+  }
+  for (const [field, values] of Object.entries(invalidValues)) {
+    for (const value of values) {
+      const params = { [field]: value }
+      assert.equal(normalizeSimpleInferenceParams(params), undefined, `${field}: ${value}`)
+      for (const location of ['step', 'defaults']) {
+        const definition = simpleFixture()
+        if (location === 'step') definition.steps[0].inference_params = params
+        else definition.defaults.inference_params = params
+        assert.equal(getWorkflowDefinitionIssue(definition), 'invalid-definition', `${location} ${field}: ${value}`)
+        assert.deepEqual(analyzeSimpleWorkflow(definition), { editable: false, reasonCodes: ['invalid_definition'] })
+        assert.deepEqual(params, { [field]: value })
+      }
+    }
+  }
+})
+
+test('zero sample settings and VR zero values remain explicit and survive a simple workflow round-trip', () => {
+  const definition = simpleFixture()
+  definition.steps[0].inference_params = { batch_size: 1, overlap_size: 0, chunk_size: 0 }
+  definition.steps[1].model_type = 'vr'
+  definition.steps[1].inference_params = { window_size: 1, aggression: 0, post_process_threshold: 0 }
+  assert.equal(getWorkflowDefinitionIssue(definition), null)
+  assert.deepEqual(analyzeSimpleWorkflow(definition), { editable: true, reasonCodes: [] })
+  const rebuilt = buildSimpleWorkflowDefinition(hydrateSimpleWorkflow(definition))
+  assert.deepEqual(rebuilt.steps[0].inference_params, definition.steps[0].inference_params)
+  assert.deepEqual(rebuilt.steps[1].inference_params, definition.steps[1].inference_params)
+  assert.deepEqual(normalizeSimpleInferenceParams({ post_process_threshold: 0.25 }), { post_process_threshold: 0.25 })
+  assert.deepEqual(normalizeSimpleInferenceParams({ post_process_threshold: 1 }), { post_process_threshold: 1 })
+})
+
+test('native Default placeholders and unknown advanced inference fields remain protected without data loss', () => {
+  for (const params of [
+    { overlap_size: 'Default', chunk_size: ' default ' },
+    { batch_size: 2, future_parameter: { mode: 'adaptive' } },
+  ]) {
+    const definition = simpleFixture()
+    definition.steps[0].inference_params = params
+    assert.equal(getWorkflowDefinitionIssue(definition), null)
+    assert.deepEqual(analyzeSimpleWorkflow(definition), { editable: false, reasonCodes: ['advanced_parameters'] })
+    const prepared = prepareWorkflowDefinitionForRun(definition, { device: 'cpu', outputFormat: 'wav' })
+    assert.deepEqual(prepared.steps[0].inference_params, { normalize: true, ...params })
+    assert.deepEqual(definition.steps[0].inference_params, params)
+  }
+})
+
+test('native null number placeholders run while remaining protected from simple editing', () => {
+  for (const key of ['batch_size', 'window_size', 'aggression', 'overlap_size', 'chunk_size', 'post_process_threshold']) {
+    for (const scope of ['step', 'defaults']) {
+      const definition = simpleFixture()
+      const params = scope === 'step'
+        ? (definition.steps[0].inference_params = { [key]: null })
+        : Object.assign(definition.defaults.inference_params, { [key]: null })
+      const original = structuredClone(definition)
+      assert.equal(getWorkflowDefinitionIssue(definition), null, `${scope}.${key}`)
+      assert.deepEqual(analyzeSimpleWorkflow(definition), { editable: false, reasonCodes: ['advanced_parameters'] })
+      const prepared = prepareWorkflowDefinitionForRun(definition, {
+        device: 'cpu', outputFormat: 'wav', modelInferenceParams: { 'first.ckpt': { [key]: 1 } },
+      })
+      assert.equal(prepared.steps[0].inference_params[key], null)
+      assert.equal(params[key], null)
+      assert.deepEqual(definition, original)
+    }
+  }
+})
+
+test('simple workflow normalization can explicitly follow the model global setting', () => {
+  const source = simpleFixture()
+  delete source.defaults.inference_params
+  const draft = hydrateSimpleWorkflow(source)
+
+  assert.equal(draft.defaultNormalize, null)
+  const rebuilt = buildSimpleWorkflowDefinition(draft)
+  assert.equal(Object.hasOwn(rebuilt.defaults, 'inference_params'), false)
+})
+
+test('explicit nullable native normalization is protected from lossy simple editing', () => {
+  const definition = simpleFixture()
+  definition.defaults.inference_params.normalize = null
+  assert.deepEqual(analyzeSimpleWorkflow(definition), { editable: false, reasonCodes: ['advanced_parameters'] })
+  const prepared = prepareWorkflowDefinitionForRun(definition, {
+    device: 'cpu', outputFormat: 'wav', modelInferenceParams: { 'first.ckpt': { normalize: true } },
+  })
+  assert.equal(prepared.steps[0].inference_params.normalize, null)
+  assert.equal(definition.defaults.inference_params.normalize, null)
+})
+
+test('simple runtime inference precedence is model global, workflow default, then step custom', () => {
+  const source = simpleFixture()
+  source.defaults.inference_params = { normalize: true, batch_size: 2 }
+  source.steps[0].inference_params = { batch_size: 5, chunk_size: 8192 }
+
+  const prepared = prepareWorkflowDefinitionForRun(source, {
+    device: 'cpu',
+    outputFormat: 'wav',
+    modelInferenceParams: {
+      'first.ckpt': { batch_size: 3, overlap_size: 44100, normalize: false },
+      'second.pth': { batch_size: 4, chunk_size: 4096 },
+    },
+  })
+
+  assert.deepEqual(prepared.steps[0].inference_params, {
+    batch_size: 5,
+    overlap_size: 44100,
+    normalize: true,
+    chunk_size: 8192,
+  })
+  assert.deepEqual(prepared.steps[1].inference_params, {
+    batch_size: 2,
+    chunk_size: 4096,
+    normalize: true,
+  })
+  assert.equal(source.steps[1].inference_params, undefined)
 })
 
 test('runtime defaults resolve consistently for simple and graph workflows', () => {

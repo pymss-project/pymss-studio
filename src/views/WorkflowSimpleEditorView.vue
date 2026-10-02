@@ -16,6 +16,8 @@ import {
   configuredStemsFor,
   createDefaultSimpleEditorUi,
   createStepDraft,
+  isSimpleAudioOperation,
+  simpleProcessingInputLimits,
   hydrateSimpleWorkflow,
   type SimpleDraft,
   type SimpleWorkflowReasonCode,
@@ -35,7 +37,7 @@ const { t, locale } = useI18n()
 const workflow = useWorkflowStore()
 const model = useModelStore()
 const { workflows } = storeToRefs(workflow)
-const { downloadedModels, selectedModel } = storeToRefs(model)
+const { downloadedModels, selectedModel, modelInferenceOverrides } = storeToRefs(model)
 
 const currentWindow = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window ? getCurrentWindow() : null
 const isMacOS = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform)
@@ -83,7 +85,7 @@ function blockUnsupportedEntry(reasonCodes: SimpleWorkflowReasonCode[]) {
 
 const formError = computed(() => {
   if (!name.value.trim()) return t('workflows.nameRequired')
-  if (!draft.value.steps.length) return t('workflows.stepsRequired')
+  if (!draft.value.steps.length && !draft.value.ensembles.length) return t('workflows.stepsRequired')
   for (const [index, step] of draft.value.steps.entries()) {
     const stepLabel = t('workflows.stepTitle', { index: index + 1 })
     if (!step.model.trim()) return t('workflows.stepModelRequired', { id: stepLabel })
@@ -92,13 +94,21 @@ const formError = computed(() => {
     if (!step.stems.length) return t('workflows.stepStemsRequired', { id: stepLabel })
   }
   for (const [index, ensemble] of draft.value.ensembles.entries()) {
-    const label = t('workflows.ensembleTitle', { index: index + 1 })
+    const audioOperation = isSimpleAudioOperation(ensemble.algorithm)
+    const label = audioOperation
+      ? `${t(`workflows.audioOperations.${ensemble.algorithm}.title`)} ${index + 1}`
+      : t('workflows.ensembleTitle', { index: index + 1 })
+    const limits = simpleProcessingInputLimits(ensemble.algorithm)
+    const inputError = audioOperation
+      ? t('workflows.audioOperationInputsRequired', { id: label, min: limits.min, max: limits.max })
+      : t('workflows.ensembleInputsRequired', { id: label })
     if (!ensemble.outputStem.trim()) return t('workflows.ensembleStemRequired', { id: label })
-    if (ensemble.inputs.length < 2) return t('workflows.ensembleInputsRequired', { id: label })
+    if (ensemble.inputs.length < limits.min || ensemble.inputs.length > limits.max) return inputError
     for (const [inputIndex, input] of ensemble.inputs.entries()) {
       if (!canConnectSimple(draft.value, input.source, simpleEnsembleInputTarget(ensemble.id, inputIndex)).ok) {
-        return t('workflows.ensembleInputsRequired', { id: label })
+        return inputError
       }
+      if (audioOperation && input.weight !== 1) return t('workflows.invalidConnection')
       if (!Number.isFinite(input.weight) || input.weight <= 0) return t('workflows.ensembleWeightInvalid', { id: label })
     }
   }
@@ -117,6 +127,16 @@ const modelAdvisory = computed(() => {
 const canSave = computed(() => !formError.value && !saving.value)
 const canRun = computed(() => !formError.value && !saving.value)
 
+function hydrateStepModelTypes(value: SimpleDraft) {
+  value.steps.forEach((step) => {
+    if (step.modelType?.trim()) return
+    const entry = downloadedModels.value.find(model => (
+      model.name === step.model || model.aliases?.includes(step.model)
+    ))
+    if (entry?.modelType) step.modelType = entry.modelType
+  })
+}
+
 function createExampleDraft(): SimpleDraft {
   const example = hydrateSimpleWorkflow({ steps: [] })
   const step = createStepDraft(0)
@@ -127,6 +147,7 @@ function createExampleDraft(): SimpleDraft {
     ))[0]
   if (modelEntry) {
     step.model = modelEntry.name
+    step.modelType = modelEntry.modelType || undefined
     step.stems = configuredStemsFor(modelEntry)
     step.outputNames = Object.fromEntries(step.stems.map(stem => [stem, '%filename%_%stem%_%model%']))
     step.save = Object.fromEntries(step.stems.map(stem => [stem, 'Default']))
@@ -151,6 +172,7 @@ function loadEntry(entry?: WorkflowEntry | null) {
   const hydrated = entry && isSimpleWorkflowDefinition(entry.definition)
     ? hydrateSimpleWorkflow(entry.definition)
     : hydrateSimpleWorkflow({ steps: [] })
+  hydrateStepModelTypes(hydrated)
   if (!entry) {
     const example = createExampleDraft()
     hydrated.defaultDevice = example.defaultDevice
@@ -158,7 +180,7 @@ function loadEntry(entry?: WorkflowEntry | null) {
     hydrated.defaultNormalize = example.defaultNormalize
     hydrated.steps = example.steps
     hydrated.ui = example.ui
-  } else if (!hydrated.steps.length) {
+  } else if (!hydrated.steps.length && !hydrated.ensembles.length) {
     hydrated.steps = [createStepDraft(0)]
     hydrated.ui = createDefaultSimpleEditorUi(hydrated.steps, hydrated.ensembles)
   } else {
@@ -343,10 +365,11 @@ watch(() => draft.value.steps.length, () => {
 })
 
 watch(downloadedModels, () => {
+  hydrateStepModelTypes(draft.value)
   // A new editor can mount before the model cache finishes loading. Fill the
   // starter step once the first downloaded model becomes available, without
   // replacing edits the user has already made in the blank draft.
-  if (editingId.value || !loaded.value || dirty.value || draft.value.steps.some(step => step.model.trim())) return
+  if (editingId.value || !loaded.value || dirty.value || draft.value.ensembles.length || draft.value.steps.some(step => step.model.trim())) return
   const example = createExampleDraft()
   draft.value.steps = example.steps
   draft.value.ui = example.ui
@@ -394,6 +417,7 @@ onBeforeUnmount(() => {
       v-model:name="name"
       v-model:description="description"
       :models="downloadedModels"
+      :model-inference-overrides="modelInferenceOverrides"
       :saving="saving"
       :form-error="formError"
       :advisory="modelAdvisory"

@@ -383,8 +383,8 @@ function clearTransportPressed() {
 }
 
 .editor-transport {
-  display: grid;
-  grid-template-columns: minmax(180px, 1fr) auto minmax(220px, 1fr);
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   min-height: 50px;
@@ -394,6 +394,7 @@ function clearTransportPressed() {
 }
 
 .editor-offline-banner {
+  flex-basis: 100%;
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr) auto auto;
   align-items: center;
@@ -448,6 +449,7 @@ function clearTransportPressed() {
 
 .editor-transport__brand {
   display: flex;
+  flex: 1 0 180px;
   align-items: center;
   gap: 8px;
   min-width: 0;
@@ -480,11 +482,11 @@ function clearTransportPressed() {
 
 .editor-transport__center {
   display: grid;
-  grid-template-columns: 128px auto 128px;
+  grid-template-columns: 128px auto max-content;
   align-items: center;
   gap: 12px;
   min-width: 0;
-  justify-self: center;
+  flex: 0 0 auto;
 }
 
 .transport-history,
@@ -687,10 +689,11 @@ function clearTransportPressed() {
 
 .editor-transport__actions {
   display: flex;
+  flex: 1 0 auto;
   align-items: center;
   gap: 10px;
-  min-width: 0;
-  justify-self: end;
+  min-width: max-content;
+  justify-content: flex-end;
 }
 
 .master-summary {
@@ -873,20 +876,4 @@ function clearTransportPressed() {
   overflow-wrap: anywhere;
 }
 
-@media (max-width: 1280px) {
-  .editor-transport {
-    grid-template-columns: 1fr;
-    height: auto;
-    padding-block: 8px;
-  }
-
-  .editor-transport__actions {
-    justify-content: flex-start;
-  }
-
-  .editor-transport__center {
-    justify-self: center;
-  }
-
-}
 </style>

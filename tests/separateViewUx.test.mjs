@@ -152,12 +152,20 @@ test('large output stem lists expose compact bulk selection actions', () => {
   assert.ok(scriptSource.includes('&& hasOutputStemSelection.value'))
 })
 
+test('output stem selection is restored from the model cache', () => {
+  assert.ok(scriptSource.includes('persistedOutputStemSelectionCleared'))
+  assert.ok(scriptSource.includes('task.getSavedModelState(info.name)'))
+  assert.ok(!template.includes('saveCurrentModelOutputStems'))
+  assert.ok(!template.includes('resetCurrentModelOutputStems'))
+})
+
 test('output stem bulk actions distinguish all stems from an empty selection', () => {
   const context = {
     computed,
     ref,
     availableStemNames: ref(['vocals', 'instrumental', 'drums', 'bass']),
     selectedStems: ref([]),
+    persistedOutputStemSelectionCleared: ref(false),
   }
   const result = vm.runInNewContext(`${stemSelectionCode}\n({ checkedOutputStems, selectedOutputStemCount, hasOutputStemSelection, selectAllOutputStems, clearOutputStems })`, context)
 
@@ -168,6 +176,7 @@ test('output stem bulk actions distinguish all stems from an empty selection', (
   assert.deepEqual(Array.from(result.checkedOutputStems.value), [])
   assert.equal(result.selectedOutputStemCount.value, 0)
   assert.equal(result.hasOutputStemSelection.value, false)
+  assert.equal(context.persistedOutputStemSelectionCleared.value, true)
 
   result.checkedOutputStems.value = ['vocals']
   assert.deepEqual(Array.from(context.selectedStems.value), ['vocals'])
@@ -176,6 +185,7 @@ test('output stem bulk actions distinguish all stems from an empty selection', (
   result.selectAllOutputStems()
   assert.deepEqual(Array.from(result.checkedOutputStems.value), context.availableStemNames.value)
   assert.deepEqual(Array.from(context.selectedStems.value), [])
+  assert.equal(context.persistedOutputStemSelectionCleared.value, false)
 })
 
 test('advanced inference settings expose model-scoped save and reset actions', async () => {

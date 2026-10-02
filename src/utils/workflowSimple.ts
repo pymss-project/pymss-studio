@@ -1,17 +1,36 @@
 import {
   detectWorkflowFormat,
   hasInvalidSimpleStructure,
+  hasInvalidSimpleInferenceNumbers,
+  SIMPLE_INFERENCE_NUMBER_FIELDS,
   isWorkflowSaveNodeType,
   isWorkflowSeparationNodeType,
+  isSimpleAudioOperation,
+  isSimpleProcessingAlgorithm,
+  simpleProcessingInputLimits,
+  type SimpleAudioOperation,
+  type SimpleProcessingAlgorithm,
 } from '@/workflows/formats'
 import { analyzeWorkflowInputs } from '@/utils/workflowInputs'
+import type { ModelDefaultInferenceParams } from '@/stores/model'
+
+export {
+  SIMPLE_ENSEMBLE_ALGORITHMS,
+  SIMPLE_AUDIO_OPERATIONS,
+  isSimpleAudioOperation,
+  isSimpleProcessingAlgorithm,
+  simpleProcessingInputLimits,
+  type SimpleEnsembleAlgorithm,
+  type SimpleAudioOperation,
+  type SimpleProcessingAlgorithm,
+} from '@/workflows/formats'
 
 /**
  * Simple creator <-> pymss YAML workflow adapter.
  *
  * The simple creator edits a linear list of separation steps plus optional
- * Studio Ensemble nodes. Separation steps are stored directly as a pymss YAML
- * workflow dict:
+ * Studio Ensemble and audio processing nodes. Separation steps are stored
+ * directly as a pymss YAML workflow dict:
  *
  *   { version: 1, defaults: { device, output_format, inference_params },
  *     steps: [ { id, model, input, stems, save, output_names, ... } ] }
@@ -34,7 +53,7 @@ export type PymssYamlStep = {
   save: Record<string, unknown>
   /** Studio-only filename templates keyed by output stem. */
   output_names?: Record<string, string>
-  inference_params?: Record<string, unknown>
+  inference_params?: SimpleWorkflowInferenceParams
   model_type?: string
   model_path?: string
   config_path?: string
@@ -44,23 +63,14 @@ export type PymssYamlStep = {
   use_tta?: boolean
 }
 
-export const SIMPLE_ENSEMBLE_ALGORITHMS = [
-  'avg_wave',
-  'median_wave',
-  'min_wave',
-  'max_wave',
-  'avg_fft',
-  'median_fft',
-  'min_fft',
-  'max_fft',
-] as const
-
-export type SimpleEnsembleAlgorithm = typeof SIMPLE_ENSEMBLE_ALGORITHMS[number]
+export type SimpleWorkflowInferenceParams = ModelDefaultInferenceParams & {
+  enable_tta?: boolean
+}
 
 export type PymssYamlEnsemble = {
   id: string
   inputs: Array<{ source: string; weight: number }>
-  algorithm: SimpleEnsembleAlgorithm
+  algorithm: SimpleProcessingAlgorithm
   output_stem: string
   save?: string | false
   output_name?: string
@@ -84,16 +94,19 @@ export type PymssYamlWorkflow = {
 export type SimpleStepDraft = {
   id: string
   model: string
+  modelType?: string
   input: string
   stems: string[]
   save: Record<string, string>
   outputNames: Record<string, string>
+  /** Absent means this step follows the current model-level global settings. */
+  inferenceParams?: SimpleWorkflowInferenceParams
 }
 
 export type SimpleEnsembleDraft = {
   id: string
   inputs: Array<{ source: string; weight: number }>
-  algorithm: SimpleEnsembleAlgorithm
+  algorithm: SimpleProcessingAlgorithm
   outputStem: string
   save: boolean
   outputName: string
@@ -152,13 +165,44 @@ export function fitSimpleEditorViewport(
 export type SimpleDraft = {
   defaultDevice: string
   defaultFormat: string
-  defaultNormalize: boolean
+  /** Null means normalization follows the model/global fallback chain. */
+  defaultNormalize: boolean | null
   steps: SimpleStepDraft[]
   ensembles: SimpleEnsembleDraft[]
   ui: SimpleEditorUi
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => Boolean(v) && typeof v === 'object' && !Array.isArray(v)
+
+const SIMPLE_INFERENCE_BOOLEAN_FIELDS = new Set<keyof SimpleWorkflowInferenceParams>([
+  'standardize',
+  'normalize',
+  'enable_post_process',
+  'high_end_process',
+  'enable_tta',
+])
+
+export const SIMPLE_INFERENCE_FIELDS = new Set<string>([
+  ...SIMPLE_INFERENCE_NUMBER_FIELDS,
+  ...SIMPLE_INFERENCE_BOOLEAN_FIELDS,
+])
+const SIMPLE_DEFAULT_INFERENCE_FIELDS = new Set(['normalize'])
+
+/** Keep only inference values the simple editor can represent losslessly. */
+export function normalizeSimpleInferenceParams(value: unknown): SimpleWorkflowInferenceParams | undefined {
+  if (!isRecord(value) || hasInvalidSimpleInferenceNumbers(value)) return undefined
+  const normalized: Record<string, number | boolean> = {}
+  for (const [key, raw] of Object.entries(value)) {
+    if (SIMPLE_INFERENCE_NUMBER_FIELDS.has(key as keyof SimpleWorkflowInferenceParams)) {
+      if (typeof raw === 'number') normalized[key] = raw
+      continue
+    }
+    if (SIMPLE_INFERENCE_BOOLEAN_FIELDS.has(key as keyof SimpleWorkflowInferenceParams) && typeof raw === 'boolean') {
+      normalized[key] = raw
+    }
+  }
+  return Object.keys(normalized).length ? normalized as SimpleWorkflowInferenceParams : undefined
+}
 
 export type ComfyOverview = {
   nodeCount: number
@@ -203,7 +247,7 @@ export function analyzeComfyOverview(definition: unknown): ComfyOverview | null 
 export function hydrateSimpleWorkflow(definition: unknown): SimpleDraft {
   if (!isRecord(definition) || !Array.isArray(definition.steps)) {
     return {
-      defaultDevice: 'auto', defaultFormat: 'wav', defaultNormalize: false,
+      defaultDevice: 'auto', defaultFormat: 'wav', defaultNormalize: null,
       steps: [], ensembles: [], ui: createDefaultSimpleEditorUi(),
     }
   }
@@ -214,6 +258,7 @@ export function hydrateSimpleWorkflow(definition: unknown): SimpleDraft {
     .map((raw, index): SimpleStepDraft => ({
       id: String(raw.id || `step${index + 1}`),
       model: String(raw.model || ''),
+      modelType: typeof raw.model_type === 'string' && raw.model_type.trim() ? raw.model_type.trim() : undefined,
       input: String(raw.input || 'input'),
       stems: raw.stems == null
         ? []
@@ -226,6 +271,7 @@ export function hydrateSimpleWorkflow(definition: unknown): SimpleDraft {
       outputNames: isRecord(raw.output_names)
         ? Object.fromEntries(Object.entries(raw.output_names).map(([k, v]) => [k, String(v)]))
         : {},
+      inferenceParams: normalizeSimpleInferenceParams(raw.inference_params),
     }))
   const ensembles = (Array.isArray(definition.ensembles) ? definition.ensembles : [])
     .filter(isRecord)
@@ -241,18 +287,16 @@ export function hydrateSimpleWorkflow(definition: unknown): SimpleDraft {
               ? Number(input.weight)
               : 1,
           })),
-        algorithm: SIMPLE_ENSEMBLE_ALGORITHMS.includes(algorithm as SimpleEnsembleAlgorithm)
-          ? algorithm as SimpleEnsembleAlgorithm
-          : 'avg_wave',
+        algorithm: isSimpleProcessingAlgorithm(algorithm) ? algorithm : 'avg_wave',
         outputStem: String(raw.output_stem || ''),
         save: typeof raw.save === 'string' ? Boolean(raw.save.trim()) : raw.save === true,
-        outputName: String(raw.output_name || '%filename%_%stem%_Ensemble'),
+        outputName: String(raw.output_name || (isSimpleAudioOperation(algorithm) ? '%filename%_%stem%_%step%' : '%filename%_%stem%_Ensemble')),
       }
     })
   return {
     defaultDevice: String(defaults.device || 'auto'),
     defaultFormat: String(defaults.output_format || 'wav'),
-    defaultNormalize: Boolean(inference.normalize),
+    defaultNormalize: typeof inference.normalize === 'boolean' ? inference.normalize : null,
     steps,
     ensembles,
     ui: hydrateSimpleEditorUi(definition.studio, steps, ensembles),
@@ -261,22 +305,30 @@ export function hydrateSimpleWorkflow(definition: unknown): SimpleDraft {
 
 /** Build a pymss YAML workflow dict from the editor draft. */
 export function buildSimpleWorkflowDefinition(draft: SimpleDraft): PymssYamlWorkflow {
+  const defaultInference = draft.defaultNormalize === null
+    ? undefined
+    : { normalize: draft.defaultNormalize }
   return {
     version: 1,
     defaults: {
       device: draft.defaultDevice || 'auto',
       output_format: draft.defaultFormat || 'wav',
-      inference_params: { normalize: Boolean(draft.defaultNormalize) },
+      ...(defaultInference ? { inference_params: defaultInference } : {}),
     },
     studio: normalizeSimpleEditorUi(draft.ui, draft.steps, draft.ensembles),
-    steps: draft.steps.map((step, index) => ({
-      id: step.id || `step${index + 1}`,
-      model: step.model,
-      input: step.input || 'input',
-      stems: [...step.stems],
-      save: { ...step.save },
-      output_names: { ...step.outputNames },
-    })),
+    steps: draft.steps.map((step, index) => {
+      const inferenceParams = normalizeSimpleInferenceParams(step.inferenceParams)
+      return {
+        id: step.id || `step${index + 1}`,
+        model: step.model,
+        ...(step.modelType?.trim() ? { model_type: step.modelType.trim() } : {}),
+        input: step.input || 'input',
+        stems: [...step.stems],
+        save: { ...step.save },
+        output_names: { ...step.outputNames },
+        ...(inferenceParams ? { inference_params: inferenceParams } : {}),
+      }
+    }),
     ...(draft.ensembles.length
       ? {
           ensembles: draft.ensembles.map((ensemble, index) => ({
@@ -288,7 +340,7 @@ export function buildSimpleWorkflowDefinition(draft: SimpleDraft): PymssYamlWork
             algorithm: ensemble.algorithm,
             output_stem: ensemble.outputStem.trim(),
             save: ensemble.save ? 'Default' : false,
-            output_name: ensemble.outputName.trim() || '%filename%_%stem%_Ensemble',
+            output_name: ensemble.outputName.trim() || (isSimpleAudioOperation(ensemble.algorithm) ? '%filename%_%stem%_%step%' : '%filename%_%stem%_Ensemble'),
           })),
         }
       : {}),
@@ -374,10 +426,12 @@ export function createStepDraft(index: number): SimpleStepDraft {
   return {
     id: `step${index + 1}`,
     model: '',
+    modelType: undefined,
     input: index === 0 ? 'input' : '',
     stems: [],
     save: {},
     outputNames: {},
+    inferenceParams: undefined,
   }
 }
 
@@ -389,6 +443,18 @@ export function createEnsembleDraft(index: number): SimpleEnsembleDraft {
     outputStem: 'Ensemble',
     save: true,
     outputName: '%filename%_%stem%_Ensemble',
+  }
+}
+
+export function createAudioOperationDraft(operation: SimpleAudioOperation, index: number): SimpleEnsembleDraft {
+  const stems: Record<SimpleAudioOperation, string> = { sum: 'Sum', subtract: 'Difference', invert: 'Inverted' }
+  return {
+    id: `${operation}${index + 1}`,
+    inputs: Array.from({ length: simpleProcessingInputLimits(operation).min }, () => ({ source: '', weight: 1 })),
+    algorithm: operation,
+    outputStem: stems[operation],
+    save: true,
+    outputName: '%filename%_%stem%_%step%',
   }
 }
 
@@ -484,8 +550,7 @@ type ModelEntryLike = {
 
 const SIMPLE_DEFINITION_FIELDS = new Set(['version', 'defaults', 'steps', 'ensembles', 'studio'])
 const SIMPLE_DEFAULT_FIELDS = new Set(['device', 'output_format', 'inference_params'])
-const SIMPLE_INFERENCE_FIELDS = new Set(['normalize'])
-const SIMPLE_STEP_FIELDS = new Set(['id', 'model', 'input', 'stems', 'save', 'output_names'])
+const SIMPLE_STEP_FIELDS = new Set(['id', 'model', 'model_type', 'input', 'stems', 'save', 'output_names', 'inference_params'])
 const SIMPLE_ENSEMBLE_FIELDS = new Set(['id', 'inputs', 'algorithm', 'output_stem', 'save', 'output_name'])
 const SIMPLE_ENSEMBLE_INPUT_FIELDS = new Set(['source', 'weight'])
 
@@ -515,7 +580,8 @@ function usesAdvancedSimpleParameters(definition: Record<string, unknown>): bool
   if (hasUnsupportedFields(defaults, SIMPLE_DEFAULT_FIELDS)) return true
 
   const inference = isRecord(defaults.inference_params) ? defaults.inference_params : {}
-  if (hasUnsupportedFields(inference, SIMPLE_INFERENCE_FIELDS)) return true
+  if (hasUnsupportedFields(inference, SIMPLE_DEFAULT_INFERENCE_FIELDS)) return true
+  if (Object.hasOwn(inference, 'normalize') && typeof inference.normalize !== 'boolean') return true
 
   if (definition.ensembles != null && !Array.isArray(definition.ensembles)) return true
   if (Array.isArray(definition.ensembles) && definition.ensembles.some((value) => {
@@ -535,6 +601,16 @@ function usesAdvancedSimpleParameters(definition: Record<string, unknown>): bool
 
   return (definition.steps as unknown[]).some((value) => {
     if (!isRecord(value) || hasUnsupportedFields(value, SIMPLE_STEP_FIELDS)) return true
+    if (value.model_type != null && (typeof value.model_type !== 'string' || !value.model_type.trim())) return true
+    if (value.inference_params != null) {
+      if (!isRecord(value.inference_params)) return true
+      if (hasUnsupportedFields(value.inference_params, SIMPLE_INFERENCE_FIELDS)) return true
+      if (Object.entries(value.inference_params).some(([key, fieldValue]) => (
+        SIMPLE_INFERENCE_NUMBER_FIELDS.has(key as keyof SimpleWorkflowInferenceParams)
+          ? typeof fieldValue !== 'number' || !Number.isFinite(fieldValue)
+          : typeof fieldValue !== 'boolean'
+      ))) return true
+    }
     if (value.save != null && !isRecord(value.save)) return true
     if (isRecord(value.save) && Object.values(value.save).some(target => typeof target !== 'string')) return true
     if (value.output_names != null && !isRecord(value.output_names)) return true

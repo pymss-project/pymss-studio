@@ -131,6 +131,7 @@ type PersistedSeparateModelState = {
   post_process_threshold?: number | null
   high_end_process?: boolean
   selectedStems?: string[]
+  selectedStemsCleared?: boolean
 }
 
 type PersistedSeparateState = {
@@ -206,9 +207,12 @@ function normalizePersistedModelState(value: unknown): PersistedSeparateModelSta
   ;['standardize', 'normalize', 'enable_post_process', 'high_end_process'].forEach((key) => {
     if (typeof raw[key] === 'boolean') (next as Record<string, unknown>)[key] = raw[key]
   })
-  next.selectedStems = Array.isArray(raw.selectedStems)
-    ? raw.selectedStems.map(item => String(item || '').trim()).filter(Boolean)
-    : []
+  if (Array.isArray(raw.selectedStems)) {
+    next.selectedStems = raw.selectedStems.map(item => String(item || '').trim()).filter(Boolean)
+  }
+  if (typeof raw.selectedStemsCleared === 'boolean') {
+    next.selectedStemsCleared = raw.selectedStemsCleared
+  }
   return next
 }
 
@@ -573,6 +577,7 @@ export const useTaskStore = defineStore('task', () => {
   const selectedModelUiDefaults = ref<ModelInferenceUiDefaults>({})
   const selectedModelOverrides = ref<ModelDefaultInferenceParams>({})
   const selectedModelType = ref<string | null>(null)
+  const selectedStemsCleared = ref(false)
   const inferenceParamsDirty = ref(false)
   const persistedSeparateModelState = ref<Record<string, PersistedSeparateModelState>>({})
 
@@ -641,6 +646,7 @@ export const useTaskStore = defineStore('task', () => {
     persistedSeparateModelState.value[name] = {
       ...current,
       selectedStems: [...selectedStems.value],
+      selectedStemsCleared: selectedStemsCleared.value,
     }
     queueSeparateStatePersist()
   }
@@ -791,7 +797,10 @@ export const useTaskStore = defineStore('task', () => {
       Object.entries(separateStored?.inferenceParamsByModel || {})
         .map(([name, value]) => {
           const normalized = normalizePersistedModelState(value)
-          return [name, { selectedStems: normalized.selectedStems || [] }]
+          const state: PersistedSeparateModelState = {}
+          if (Array.isArray(normalized.selectedStems)) state.selectedStems = [...normalized.selectedStems]
+          if (typeof normalized.selectedStemsCleared === 'boolean') state.selectedStemsCleared = normalized.selectedStemsCleared
+          return [name, state]
         }),
     )
     initialized.value = true
@@ -819,7 +828,7 @@ export const useTaskStore = defineStore('task', () => {
   )
 
   watch(
-    selectedStems,
+    [selectedStems, selectedStemsCleared],
     () => {
       if (applyingModelDefaults) return
       const modelStore = useModelStore()
@@ -893,7 +902,8 @@ export const useTaskStore = defineStore('task', () => {
     enable_post_process.value = resolvedDefaults.enable_post_process
     post_process_threshold.value = resolvedDefaults.post_process_threshold
     high_end_process.value = resolvedDefaults.high_end_process
-    selectedStems.value = saved?.selectedStems ? [...saved.selectedStems] : []
+    selectedStems.value = Array.isArray(saved?.selectedStems) ? [...saved.selectedStems] : []
+    selectedStemsCleared.value = saved?.selectedStemsCleared === true
     inferenceParamsDirty.value = false
     void nextTick(() => {
       applyingModelDefaults = false
@@ -985,6 +995,42 @@ export const useTaskStore = defineStore('task', () => {
     }
   }
 
+  function workflowModelInferenceParams(definition: Record<string, unknown>) {
+    if (detectWorkflowFormat(definition) !== 'simple' || !Array.isArray(definition.steps)) {
+      return {} as Record<string, Record<string, unknown>>
+    }
+    const modelStore = useModelStore()
+    const result: Record<string, Record<string, unknown>> = {}
+    for (const value of definition.steps) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+      const step = value as Record<string, unknown>
+      const modelName = String(step.model || '').trim()
+      if (!modelName || result[modelName]) continue
+      const entry = modelStore.models.find(item => (
+        item.name.localeCompare(modelName, undefined, { sensitivity: 'accent' }) === 0
+        || item.aliases?.some(alias => alias.localeCompare(modelName, undefined, { sensitivity: 'accent' }) === 0)
+      ))
+      const overrides = modelStore.getModelInferenceOverrides(entry?.name || modelName)
+      if (!overrides) continue
+      const stepModelType = typeof step.model_type === 'string' ? step.model_type.trim() : ''
+      const modelType = String(stepModelType || entry?.modelType || '').trim().toLowerCase()
+      const allowed = new Set<keyof ModelDefaultInferenceParams>(modelType === 'vr'
+        ? ['batch_size', 'window_size', 'aggression', 'enable_post_process', 'post_process_threshold', 'high_end_process', 'normalize']
+        : ['batch_size', 'overlap_size', 'chunk_size', 'standardize', 'normalize'])
+      const compatible = Object.fromEntries(
+        Object.entries(overrides).filter(([key, value]) => {
+          if (!allowed.has(key as keyof ModelDefaultInferenceParams)) return false
+          if (['batch_size', 'overlap_size', 'chunk_size', 'window_size'].includes(key)) {
+            return typeof value === 'number' && Number.isFinite(value) && value > 0
+          }
+          return true
+        }),
+      )
+      if (Object.keys(compatible).length) result[modelName] = compatible
+    }
+    return result
+  }
+
   function buildWorkflowRunConfig(workflow: WorkflowEntry, outputLayout: OutputLayout = 'folders', outputNaming?: OutputNamingConfig): SeparationRunConfig {
     const settings = useSettingsStore()
     const app = useAppStore()
@@ -1003,7 +1049,11 @@ export const useTaskStore = defineStore('task', () => {
       workflowName: workflow.name,
       workflowDefinition: prepareWorkflowDefinitionForRun(
         workflow.definition,
-        { device: defaults.device, outputFormat: defaults.outputFormat },
+        {
+          device: defaults.device,
+          outputFormat: defaults.outputFormat,
+          modelInferenceParams: workflowModelInferenceParams(workflow.definition),
+        },
       ),
       outputLayout,
       outputNaming: normalizeOutputNaming(outputNaming),
@@ -1976,6 +2026,7 @@ export const useTaskStore = defineStore('task', () => {
     standardize,
     normalize,
     selectedStems,
+    selectedStemsCleared,
     window_size,
     aggression,
     enable_post_process,

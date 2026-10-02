@@ -341,6 +341,80 @@ def _reserve_simple_filename(filename: str, output_dir: Path | None,
     return filename
 
 
+def _simple_inference_params(workflow: Any) -> dict[str, dict[str, Any]]:
+    """Validate known parameter domains before the SDK converts numeric values."""
+    integer_minimums = {"batch_size": 1, "window_size": 1, "aggression": 0,
+                        "overlap_size": 0, "chunk_size": 0}
+    boolean_fields = {"standardize", "normalize", "enable_tta", "enable_post_process", "high_end_process"}
+    defaults = workflow.defaults.get("inference_params") or {}
+    result = {}
+    for step in workflow.steps:
+        params = {**defaults, **step.inference_params}
+        for key, minimum in integer_minimums.items():
+            value = params.get(key)
+            if value is None:
+                continue
+            if key in {"overlap_size", "chunk_size"} and isinstance(value, str) and value.strip().lower() == "default":
+                continue
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value < minimum or int(value) != value):
+                raise RuntimeError(f"Step {step.id} {key} must be an integer >= {minimum}")
+        threshold = params.get("post_process_threshold")
+        if threshold is not None and (isinstance(threshold, bool) or not isinstance(threshold, (int, float))
+                                      or not math.isfinite(threshold) or not 0 <= threshold <= 1):
+            raise RuntimeError(f"Step {step.id} post_process_threshold must be between 0 and 1")
+        for key in boolean_fields:
+            if params.get(key) is not None and not isinstance(params[key], bool):
+                raise RuntimeError(f"Step {step.id} {key} must be a boolean")
+        result[step.id] = params
+    return result
+
+
+def _apply_simple_inference_params(dag: Any, params_by_step: dict[str, dict[str, Any]]) -> None:
+    """Adapt unset MSS sizes and preserve explicit VR zeros at the SDK boundary."""
+    import pymss.graph as graph
+
+    nodes = {str(node.id): node for node in dag.nodes}
+    for step_id, params in params_by_step.items():
+        node = nodes.get(f"params:{step_id}")
+        if node is None:
+            continue
+        if node.type == "pymss_mss_params":
+            widgets = node.data["widgets_values"]
+            for key, index in (("overlap_size", 1), ("chunk_size", 2)):
+                if params.get(key) == 0:
+                    widgets[index] = "Default"
+            continue
+        if node.type != "pymss_vr_params":
+            continue
+        zeros = {
+            key: (0 if key == "aggression" else 0.0)
+            for key in ("aggression", "post_process_threshold")
+            if isinstance(params.get(key), (int, float))
+            and not isinstance(params[key], bool)
+            and params[key] == 0
+        }
+        if not zeros:
+            continue
+        node_type = "studio_vr_params"
+        try:
+            graph.get_node_type(node_type)
+        except graph.UnknownNodeError:
+            native = graph.get_node_type("pymss_vr_params")
+
+            def execute(ctx: Any, inputs: dict[str, Any]) -> Any:
+                result = native.execute(ctx, inputs)
+                artifact = result.outputs[0]
+                if not isinstance(artifact, graph.ParamsArtifact) or artifact.params_type != "vr":
+                    raise RuntimeError("VR parameter node returned an incompatible artifact")
+                artifact.params.update(ctx.nodes_by_id[ctx.current_node_id].data["studio_zero_params"])
+                return result
+
+            graph.register_node(node_type, signature=native.signature, execute=execute)
+        node.type = node_type
+        node.data["studio_zero_params"] = zeros
+
+
 def _apply_simple_output_names(dag: Any, definition: dict[str, Any], *, input_path: str,
                                output_format: str, output_dir: Path | None = None,
                                reserved_names: set[str] | None = None,
@@ -348,10 +422,9 @@ def _apply_simple_output_names(dag: Any, definition: dict[str, Any], *, input_pa
                                apply_names: bool = True) -> list[dict[str, str]]:
     """Collect simple saves and optionally wire Studio filename constants.
 
-    Metadata always follows the compiler's save-node insertion order, including
-    native/legacy saves without ``output_names``. This preserves logical stems
-    for mixed separation + Ensemble workflows and reserves native root filenames
-    before Ensemble outputs choose their own collision-free names.
+    Each record carries the save-node ID so execution order cannot change its
+    logical stem or filename. Native/legacy saves without ``output_names`` still
+    reserve their root filenames before processing outputs choose their names.
     """
     import pymss.graph as graph
 
@@ -386,7 +459,7 @@ def _apply_simple_output_names(dag: Any, definition: dict[str, Any], *, input_pa
             save_node = next((node for node in dag.nodes if str(node.id) == node_id), None)
             if save_node is None:
                 continue
-            metadata = {"stem": stem_name, "filename": ""}
+            metadata = {"node_id": node_id, "stem": stem_name, "filename": ""}
             output_metadata.append(metadata)
             output_index += 1
             if not apply_names or not isinstance(names, dict):
@@ -452,13 +525,73 @@ _SIMPLE_ENSEMBLE_ALGORITHMS = {
     "avg_wave", "median_wave", "min_wave", "max_wave",
     "avg_fft", "median_fft", "min_fft", "max_fft",
 }
+_SIMPLE_AUDIO_OPERATIONS = {"sum", "subtract", "invert"}
+
+
+def _validate_simple_audio_dependencies(steps: list[Any], extensions: list[Any]) -> None:
+    """Reject cycles and extension forward references through separation steps."""
+    sources: dict[str, tuple[str, list[str]]] = {"input": ("input", [])}
+    extension_indices: dict[str, int] = {}
+    for step in steps:
+        if not isinstance(step, dict) or not isinstance(step.get("stems"), list):
+            continue
+        step_id = str(step.get("id") or "").strip()
+        for stem in step["stems"]:
+            ref = f"{step_id}.{str(stem or '').strip()}".casefold()
+            sources[ref] = (f"step:{step_id}", [str(step.get("input") or "input").strip().casefold()])
+    for index, extension in enumerate(extensions):
+        if not isinstance(extension, dict):
+            continue
+        extension_id = str(extension.get("id") or f"ensemble{index + 1}").strip()
+        output_stem = str(extension.get("output_stem") or "").strip()
+        key = f"extension:{extension_id.casefold()}"
+        ref = f"{extension_id}.{output_stem}".casefold()
+        if key in extension_indices or ref in sources:
+            raise RuntimeError(f"Duplicate Ensemble id or output: {extension_id}")
+        extension_indices[key] = index
+        inputs = extension.get("inputs")
+        sources[ref] = (key, [
+            str(item.get("source") or "").strip().casefold()
+            for item in (inputs if isinstance(inputs, list) else [])
+            if isinstance(item, dict)
+        ])
+
+    resolved: dict[str, set[int]] = {}
+    visiting: set[str] = set()
+
+    def dependencies(ref: str) -> set[int]:
+        source = sources.get(ref)
+        if source is None:
+            raise RuntimeError(f"Simple workflow references unknown output: {ref}")
+        key, refs = source
+        if key in visiting:
+            raise RuntimeError(f"Simple workflow dependency cycle involving: {ref}")
+        if key in resolved:
+            return resolved[key]
+        visiting.add(key)
+        indices = {extension_indices[key]} if key in extension_indices else set()
+        for upstream in refs:
+            indices.update(dependencies(upstream))
+        visiting.remove(key)
+        resolved[key] = indices
+        return indices
+
+    for index, extension in enumerate(extensions):
+        if not isinstance(extension, dict) or not isinstance(extension.get("inputs"), list):
+            continue
+        for item in extension["inputs"]:
+            if not isinstance(item, dict):
+                continue
+            ref = str(item.get("source") or "").strip().casefold()
+            if any(upstream >= index for upstream in dependencies(ref)):
+                raise RuntimeError(f"Ensemble {extension.get('id') or index + 1} has a forward reference: {ref}")
 
 
 def _apply_simple_ensembles(dag: Any, definition: dict[str, Any], *, input_path: str,
                             output_format: str, output_dir: Path | None = None,
                             reserved_names: set[str] | None = None,
                             start_index: int = 0) -> list[dict[str, str]]:
-    """Compile Studio simple-workflow Ensemble records into pymss DAG nodes."""
+    """Compile simple Ensemble and audio-operation records into native nodes."""
     import pymss.graph as graph
 
     raw_ensembles = definition.get("ensembles")
@@ -467,6 +600,7 @@ def _apply_simple_ensembles(dag: Any, definition: dict[str, Any], *, input_path:
     steps = definition.get("steps")
     if not isinstance(steps, list):
         raise RuntimeError("Simple workflow steps are required for Ensemble")
+    _validate_simple_audio_dependencies(steps, raw_ensembles)
 
     produced: dict[str, tuple[str, int]] = {"input": ("input", 0)}
     for step in steps:
@@ -492,6 +626,19 @@ def _apply_simple_ensembles(dag: Any, definition: dict[str, Any], *, input_path:
     used_ids = {str(node.id) for node in dag.nodes}
     ensemble_outputs: dict[str, tuple[str, int]] = {}
 
+    def audio_links(sources: list[tuple[str, int]], target_id: str) -> list[Any]:
+        nonlocal next_link_id
+        links = [graph.DAGLink(
+            link_id=next_link_id + slot,
+            source_node_id=source_id,
+            source_slot=source_slot,
+            target_node_id=target_id,
+            target_slot=slot,
+            type=graph.AUDIO,
+        ) for slot, (source_id, source_slot) in enumerate(sources)]
+        next_link_id += len(links)
+        return links
+
     for ensemble_index, raw in enumerate(raw_ensembles, 1):
         if not isinstance(raw, dict):
             raise RuntimeError(f"Ensemble {ensemble_index} is invalid")
@@ -501,16 +648,19 @@ def _apply_simple_ensembles(dag: Any, definition: dict[str, Any], *, input_path:
         raw_inputs = raw.get("inputs")
         if not ensemble_id or not output_stem:
             raise RuntimeError(f"Ensemble {ensemble_index} requires an id and output stem")
-        if algorithm not in _SIMPLE_ENSEMBLE_ALGORITHMS:
+        if algorithm not in _SIMPLE_ENSEMBLE_ALGORITHMS | _SIMPLE_AUDIO_OPERATIONS:
             raise RuntimeError(f"Unsupported Ensemble algorithm: {algorithm}")
-        if not isinstance(raw_inputs, list) or not 2 <= len(raw_inputs) <= 10:
+        expected_count = 1 if algorithm == "invert" else 2 if algorithm == "subtract" else None
+        if expected_count is not None and (not isinstance(raw_inputs, list) or len(raw_inputs) != expected_count):
+            raise RuntimeError(f"Audio {algorithm} {ensemble_id} requires exactly {expected_count} inputs")
+        if expected_count is None and (not isinstance(raw_inputs, list) or not 2 <= len(raw_inputs) <= 10):
             raise RuntimeError(f"Ensemble {ensemble_id} requires 2 to 10 inputs")
 
         node_id = f"studio:ensemble:{ensemble_id}"
         if node_id in used_ids:
             raise RuntimeError(f"Duplicate Ensemble id: {ensemble_id}")
         used_ids.add(node_id)
-        links: list[Any] = []
+        sources: list[tuple[str, int]] = []
         weights: list[float] = []
         source_refs: set[str] = set()
         for input_index, value in enumerate(raw_inputs):
@@ -531,25 +681,46 @@ def _apply_simple_ensembles(dag: Any, definition: dict[str, Any], *, input_path:
                 raise RuntimeError(
                     f"Ensemble {ensemble_id} input weight must be finite and greater than zero"
                 )
+            if algorithm in _SIMPLE_AUDIO_OPERATIONS and weight != 1:
+                raise RuntimeError(f"Audio {algorithm} {ensemble_id} input weight must be 1")
             weights.append(weight)
-            source_node_id, source_slot = produced_source
-            links.append(graph.DAGLink(
-                link_id=next_link_id,
-                source_node_id=source_node_id,
-                source_slot=source_slot,
-                target_node_id=node_id,
-                target_slot=input_index,
-                type=graph.AUDIO,
-            ))
-            next_link_id += 1
+            sources.append(produced_source)
 
-        dag.nodes.append(graph.DAGNode(
-            id=node_id,
-            type="pymss_audio_ensemble",
-            inputs=links,
-            data={"widgets_values": [len(links), algorithm, *weights]},
-            title=ensemble_id,
-        ))
+        if algorithm == "invert":
+            dag.nodes.append(graph.DAGNode(
+                id=node_id,
+                type="pymss_audio_invert_phase",
+                inputs=audio_links(sources, node_id),
+                data={},
+                title=ensemble_id,
+            ))
+        elif algorithm in {"sum", "subtract"}:
+            # Native AudioMerge retains A's duration and aligns sample rates and
+            # channels. Disable peak protection on every intermediate merge so
+            # adding stems and subtracting vocals preserve their original gain.
+            previous = sources[0]
+            for merge_index in range(1, len(sources)):
+                merge_id = node_id if merge_index == len(sources) - 1 else f"{node_id}:mix:{merge_index}"
+                if merge_id != node_id:
+                    if merge_id in used_ids:
+                        raise RuntimeError(f"Duplicate audio operation node id: {merge_id}")
+                    used_ids.add(merge_id)
+                dag.nodes.append(graph.DAGNode(
+                    id=merge_id,
+                    type="AudioMerge",
+                    inputs=audio_links([previous, sources[merge_index]], merge_id),
+                    data={"widgets_values": ["subtract" if algorithm == "subtract" else "add", False]},
+                    title=ensemble_id,
+                ))
+                previous = (merge_id, 0)
+        else:
+            dag.nodes.append(graph.DAGNode(
+                id=node_id,
+                type="pymss_audio_ensemble",
+                inputs=audio_links(sources, node_id),
+                data={"widgets_values": [len(sources), algorithm, *weights]},
+                title=ensemble_id,
+            ))
         output_ref = f"{ensemble_id}.{output_stem}".casefold()
         produced[output_ref] = (node_id, 0)
         ensemble_outputs[output_ref] = (node_id, 0)
@@ -570,17 +741,20 @@ def _apply_simple_ensembles(dag: Any, definition: dict[str, Any], *, input_path:
         save_inputs: list[Any] = [audio_link, None, None, None, None, None, None, None]
 
         output_index += 1
+        filename_template = raw.get("output_name")
+        if algorithm in _SIMPLE_AUDIO_OPERATIONS and not str(filename_template or "").strip():
+            filename_template = "%filename%_%stem%_%step%"
         filename = _render_simple_filename(
-            raw.get("output_name"),
+            filename_template,
             input_path=input_path,
             stem=output_stem,
-            model="Ensemble",
+            model={"sum": "AudioSum", "subtract": "AudioSubtract", "invert": "AudioInvert"}.get(algorithm, "Ensemble"),
             step_id=ensemble_id,
             index=output_index,
             output_format=output_format,
         )
         filename = _reserve_simple_filename(filename, output_dir, reserved_names)
-        output_metadata.append({"stem": output_stem, "filename": filename})
+        output_metadata.append({"node_id": save_id, "stem": output_stem, "filename": filename})
         constant_id = f"studio:ensemble-filename:{ensemble_id}"
         save_inputs[1] = graph.DAGLink(
             link_id=next_link_id,
@@ -636,6 +810,30 @@ def _apply_simple_ensembles(dag: Any, definition: dict[str, Any], *, input_path:
     return output_metadata
 
 
+def _match_simple_output_metadata(output_records: list[Any | None],
+                                  output_metadata: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Associate completed files with their declared save nodes before publishing."""
+    by_node: dict[str, dict[str, str]] = {}
+    for metadata in output_metadata:
+        node_id = metadata["node_id"]
+        if node_id in by_node:
+            raise RuntimeError(f"Duplicate workflow save metadata: {node_id}")
+        by_node[node_id] = metadata
+    matched = []
+    completed: set[str] = set()
+    for record in output_records:
+        node_id = str(getattr(record, "node_id", "") or "")
+        if not node_id:
+            raise RuntimeError("Workflow runtime did not provide save-node identities; update the runtime core")
+        if node_id not in by_node:
+            raise RuntimeError(f"Workflow returned an undeclared save output: {node_id}")
+        matched.append(by_node[node_id])
+        completed.add(node_id)
+    if completed != set(by_node):
+        raise RuntimeError("Workflow did not produce all requested save outputs")
+    return matched
+
+
 def _finalize_simple_output_paths(
     saved_paths: list[str],
     output_metadata: list[dict[str, str]],
@@ -688,6 +886,19 @@ def _finalize_simple_output_paths(
             return target
         raise FileExistsError(f"Failed to reserve a unique workflow output filename: {preferred}")
 
+    sources = [Path(value) for value in saved_paths]
+    resolved_root = source_root.resolve() if source_root is not None else None
+    seen_sources: set[Path] = set()
+    for source in sources:
+        resolved_source = source.resolve()
+        if resolved_source in seen_sources:
+            raise RuntimeError("Workflow returned the same output file more than once")
+        seen_sources.add(resolved_source)
+        if not source.is_file():
+            raise RuntimeError(f"Workflow output is missing: {source}")
+        if resolved_root is not None and not resolved_source.is_relative_to(resolved_root):
+            raise RuntimeError("Workflow output is outside its task directory")
+
     finalized: list[str] = []
     for index, source_value in enumerate(saved_paths):
         source = Path(source_value)
@@ -704,8 +915,6 @@ def _finalize_simple_output_paths(
         else:
             finalized.append(source_value)
             continue
-        if not source.is_file():
-            raise RuntimeError(f"Workflow output is missing: {source}")
         finalized.append(str(publish(source, candidate)))
     return finalized
 
@@ -797,8 +1006,21 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
             defaults = data.get("defaults")
             if isinstance(defaults, dict):
                 output_format = str(defaults.get("output_format") or output_format).strip().lower() or output_format
-        wf = pwf.load_workflow_data(data)
+        if data.get("steps") == [] and simple_definition is not None and simple_definition.get("ensembles"):
+            # pymss' YAML loader requires a separation step. Its native DAG
+            # compiler accepts an empty Workflow, allowing pure audio processing
+            # while still applying the compiler's normal defaults validation.
+            if data.get("version") != 1:
+                raise RuntimeError("workflow version must be 1")
+            defaults = data.get("defaults") or {}
+            if not isinstance(defaults, dict):
+                raise RuntimeError("defaults must be a mapping")
+            wf = pwf.Workflow(version=1, defaults=defaults, steps=[])
+        else:
+            wf = pwf.load_workflow_data(data)
+        inference_params = _simple_inference_params(wf)
         dag = graph.compile_workflow_to_dag(wf)
+        _apply_simple_inference_params(dag, inference_params)
         reserved_simple_names: set[str] = set()
         simple_output_metadata = _apply_simple_output_names(
             dag,
@@ -866,6 +1088,8 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
         output_records = [record_map.get(Path(path).resolve()) for path in original_saved_paths]
         saved_paths = original_saved_paths
         if fmt == "yaml" and simple_definition is not None:
+            if simple_output_metadata:
+                simple_output_metadata = _match_simple_output_metadata(output_records, simple_output_metadata)
             saved_paths = _finalize_simple_output_paths(
                 original_saved_paths,
                 simple_output_metadata,
