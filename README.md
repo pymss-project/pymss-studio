@@ -7,7 +7,7 @@
 <h1 align="center">Pymss Studio</h1>
 
 <p align="center">
-  A polished desktop workspace for music source separation, model management, batch jobs, and stem editing.
+  A local workspace for music source separation, workflows, batch processing, stem editing, and mix export.
 </p>
 
 <p align="center">
@@ -32,213 +32,289 @@
 </p>
 
 <p align="center">
-  <img src="./images/en-light-home.webp" alt="Pymss Studio light home screen" width="900" />
+  <img src="./images/screenshots/separate/batch/en-light.webp" alt="Pymss Studio batch audio separation workspace" width="900" />
 </p>
 
-## Why Pymss Studio
+## About
 
-Pymss Studio turns the [`pymss`](https://github.com/pymss-project/pymss) source-separation engine into a complete desktop experience. It gives producers, researchers, and power users a single place to prepare models, import audio, monitor long-running separation tasks, review results, and export edited stems without dropping into command-line workflows.
+Pymss Studio brings the [pymss](https://github.com/pymss-project/pymss) music source-separation engine to a desktop workspace. Download models, import audio, run separation jobs, audition results, and edit stems in one application. Use it for vocal and instrumental extraction, instrument stems, audio cleanup, batch processing, speech transcription, and vocal-to-MIDI conversion.
 
-> The desktop app is a wrapper around the external `pymss` package. Core separation algorithms and model behavior live in `pymss`; this repository focuses on the desktop product, frontend workflow, Tauri orchestration, and release packaging.
+Separation and editing run locally. Preparing runtimes, models, or optional components requires a network connection; downloaded models can then process local audio.
 
-## Install
+[Features](#features) · [Download](#download-and-install) · [Quick start](#quick-start) · [Preview](#preview) · [Troubleshooting](#troubleshooting) · [Development](#development-and-verification)
 
-> [!WARNING]
-> Pymss Studio is still at an early stage of feature development and under active iteration. Please use with caution. **Breaking changes may occur between versions** during this phase.
+## Features
 
-Download the latest Windows, Linux, or macOS package from the [Pymss Studio releases page](https://github.com/pymss-project/pymss-studio/releases).
-
-Choose the package variant that matches your machine:
-
-| Use case | Recommended package |
+| Area | Capabilities |
 | --- | --- |
-| NVIDIA GPU | Windows CUDA |
-| No discrete GPU, integrated graphics only, or you prefer CPU inference | Windows CPU |
-| Stable network, and you want the smallest download | Windows Online |
-| Windows AMD GPU | Windows ROCm |
-| Apple Silicon Mac, including M1/M2/M3/M4, macOS 14 or later | macOS MLX |
-| Intel Mac | No dedicated release package currently |
+| Source separation | Import audio, video, or folders; process batches; select model outputs, device, format, folder layout, and naming rules. |
+| Model ensembles | Select multiple models and output stems, configure an ensemble algorithm and weights, and save the combined output. |
+| Model library | Search by name, purpose, architecture, or source; switch card/list views; manage favorites, notes, resumable downloads, storage, and default inference parameters. |
+| Custom models | Import weights and configurations for supported architectures and use existing models in the separation workflow. |
+| Workflows | Arrange separation, audio processing, ensemble, and save steps in the simple editor; use the advanced node editor for flexible connections, parameters, and import/export. |
+| Task queue | Track queued and running jobs, progress and logs; cancel or retry jobs and organize completed session entries. |
+| Results and projects | Review output stems and processing parameters, audition audio, open output folders, and continue in the editor. |
+| Stem editor | Multitrack waveforms, clip editing, transport, volume/pan, mute/solo, fades, track effects, recording, project persistence, asset relinking, and mix export. |
+| Audio tools | Format conversion, audio inspection, SDR / SI-SDR, ASR, vocal-to-MIDI conversion, silence slicing, and audio merging. |
+| Runtimes and settings | Manage platform-appropriate CPU, CUDA, ROCm, and MLX environments; configure download sources, proxies, concurrency, paths, language, zoom, and themes. |
 
-On macOS, clear the quarantine attribute after installing the app:
+Available stems, parameters, and devices vary by model and runtime. Acceleration depends on the model, hardware, drivers, and task configuration.
+
+## Download and install
+
+Choose a version on [GitHub Releases](https://github.com/pymss-project/pymss-studio/releases), read its release notes, and check **Assets**. If GitHub is inaccessible, use a mirror linked in those release notes.
+
+> [!NOTE]
+> The project is under active development and current releases include prereleases. Read the relevant release notes and back up important projects and settings before upgrading.
+
+### Platforms and runtimes
+
+| Platform / hardware | Runtime or package identifier | Notes |
+| --- | --- | --- |
+| Windows x64, NVIDIA GPU | `windows-x64-cuda` | CUDA requires a compatible GPU and driver. |
+| Windows x64, CPU inference | `windows-x64-cpu` | A starting point when GPU compatibility is uncertain. |
+| Windows x64, supported AMD GPU | `windows-x64-rocm` | Check the selected release's GPU and driver requirements; ROCm has a narrower support range. |
+| Windows x64, smaller initial download | `windows-x64-online` | Includes the bootstrap runtime; install the required inference environment after first launch. |
+| macOS 14+, Apple Silicon | `macos-arm64-mlx` | Uses MLX. Download the DMG and drag the application into `/Applications`. |
+| Linux | Build from source | The current release workflow does not produce Linux installers; see development prerequisites below. |
+| Intel Mac | No dedicated release package | The existing MLX package targets Apple Silicon; source builds still require checking inference dependency compatibility. |
+
+Release packages include a bootstrap Python runtime, so end users do not need to install system Python separately. Open **Settings → Runtime** to inspect, install, or switch environments supported by your platform.
+
+### File types
+
+| File | Purpose |
+| --- | --- |
+| Windows `*-setup.exe` | Installer; application data defaults to the user directory. |
+| Windows `*.7z` | Portable package. Extract the complete directory and run `Pymss Studio.exe`; keep its runtime and tools directories. |
+| macOS `*.dmg` | Apple Silicon installation image. |
+| Windows `*-update.zip` | Update package for an existing installation, rather than a first-time installer. Follow the corresponding release notes. |
+| Split files such as `*.part-000` | Download every part and follow the release's `SPLIT-ASSETS-README.txt` to merge them before extraction. |
+
+If quarantine attributes prevent a macOS application from a trusted source from opening, apply this command to the installed application:
 
 ```bash
 xattr -cr '/Applications/Pymss Studio.app'
 ```
 
-Then open Pymss Studio from `/Applications`.
+## Quick start
 
-## Community and feedback
+1. **Finish onboarding.** Choose language, theme, data directory, and runtime. The Online package needs to finish installing an inference environment.
+2. **Prepare a model.** Open **Models**, download a model for the target source, or import a supported custom model.
+3. **Configure separation.** Open **Separate**, import audio/video files or a folder, then choose the model, output stems, directory, and format. Start with the model's default parameters.
+4. **Run and review.** Select **Start Separation**, monitor progress and logs in the task queue, and audition the finished stems or open **Results**.
+5. **Edit and export.** Open a result in the stem editor, adjust clips, volume, pan, and effects, save the project, and use **Export Mix** to create an audio file.
 
-For Chinese users, a QQ group is available for beta testing, bug reports, and community discussion: [Pymss Studio testing group](https://qm.qq.com/q/YLLou4NucE).
-
-## Advantages
-
-Pymss Studio focuses on practical desktop performance across more machines:
-
-- Faster inference workflows through a packaged desktop runtime around `pymss`.
-- Lower memory pressure for day-to-day source separation and batch jobs.
-- Broader platform coverage across Windows, Linux, and macOS.
+For a repeatable processing chain, create and save a workflow under **Workflows**, then switch **Separate** to **Workflow** mode. A short input can help confirm the model, device, and outputs before a larger batch.
 
 ## Preview
 
-| Light | Dark |
+These previews show the main features in English and Chinese, with light and dark themes at 1920 × 1080. Click an image to view it at full size.
+
+| Feature | Light theme | Dark theme |
+| --- | --- | --- |
+| Batch separation and output configuration | <a href="./images/screenshots/separate/batch/en-light.webp"><img src="./images/screenshots/separate/batch/en-light.webp" alt="Batch separation and output configuration" width="420" /></a> | <a href="./images/screenshots/separate/batch/en-dark.webp"><img src="./images/screenshots/separate/batch/en-dark.webp" alt="Batch separation and output configuration" width="420" /></a> |
+| Model library and categories | <a href="./images/screenshots/models/library/en-light.webp"><img src="./images/screenshots/models/library/en-light.webp" alt="Model library and categories" width="420" /></a> | <a href="./images/screenshots/models/library/en-dark.webp"><img src="./images/screenshots/models/library/en-dark.webp" alt="Model library and categories" width="420" /></a> |
+| Simple workflow editor | <a href="./images/screenshots/workflows/simple/en-light.webp"><img src="./images/screenshots/workflows/simple/en-light.webp" alt="Simple workflow editor" width="420" /></a> | <a href="./images/screenshots/workflows/simple/en-dark.webp"><img src="./images/screenshots/workflows/simple/en-dark.webp" alt="Simple workflow editor" width="420" /></a> |
+| Advanced node workflows | <a href="./images/screenshots/workflows/advanced/en-light.webp"><img src="./images/screenshots/workflows/advanced/en-light.webp" alt="Advanced node workflows" width="420" /></a> | <a href="./images/screenshots/workflows/advanced/en-dark.webp"><img src="./images/screenshots/workflows/advanced/en-dark.webp" alt="Advanced node workflows" width="420" /></a> |
+| Results and audio stems | <a href="./images/screenshots/results/en-light.webp"><img src="./images/screenshots/results/en-light.webp" alt="Results and audio stems" width="420" /></a> | <a href="./images/screenshots/results/en-dark.webp"><img src="./images/screenshots/results/en-dark.webp" alt="Results and audio stems" width="420" /></a> |
+| Stem editing and mixing | <a href="./images/screenshots/editor/workspace/en-light.webp"><img src="./images/screenshots/editor/workspace/en-light.webp" alt="Stem editing and mixing" width="420" /></a> | <a href="./images/screenshots/editor/workspace/en-dark.webp"><img src="./images/screenshots/editor/workspace/en-dark.webp" alt="Stem editing and mixing" width="420" /></a> |
+
+<details>
+<summary>Audio tools, settings, and operation dialogs</summary>
+
+| Feature | Light theme | Dark theme |
+| --- | --- | --- |
+| Multi-model ensemble configuration | <a href="./images/screenshots/separate/ensemble/en-light.webp"><img src="./images/screenshots/separate/ensemble/en-light.webp" alt="Multi-model ensemble configuration" width="420" /></a> | <a href="./images/screenshots/separate/ensemble/en-dark.webp"><img src="./images/screenshots/separate/ensemble/en-dark.webp" alt="Multi-model ensemble configuration" width="420" /></a> |
+| Custom model import | <a href="./images/screenshots/models/import/en-light.webp"><img src="./images/screenshots/models/import/en-light.webp" alt="Custom model import" width="420" /></a> | <a href="./images/screenshots/models/import/en-dark.webp"><img src="./images/screenshots/models/import/en-dark.webp" alt="Custom model import" width="420" /></a> |
+| Mix export | <a href="./images/screenshots/editor/export/en-light.webp"><img src="./images/screenshots/editor/export/en-light.webp" alt="Mix export" width="420" /></a> | <a href="./images/screenshots/editor/export/en-dark.webp"><img src="./images/screenshots/editor/export/en-dark.webp" alt="Mix export" width="420" /></a> |
+| ASR speech recognition | <a href="./images/screenshots/tools/asr/en-light.webp"><img src="./images/screenshots/tools/asr/en-light.webp" alt="ASR speech recognition" width="420" /></a> | <a href="./images/screenshots/tools/asr/en-dark.webp"><img src="./images/screenshots/tools/asr/en-dark.webp" alt="ASR speech recognition" width="420" /></a> |
+| Vocal-to-MIDI conversion | <a href="./images/screenshots/tools/midi/en-light.webp"><img src="./images/screenshots/tools/midi/en-light.webp" alt="Vocal-to-MIDI conversion" width="420" /></a> | <a href="./images/screenshots/tools/midi/en-dark.webp"><img src="./images/screenshots/tools/midi/en-dark.webp" alt="Vocal-to-MIDI conversion" width="420" /></a> |
+| Runtime environment management | <a href="./images/screenshots/settings/runtime/en-light.webp"><img src="./images/screenshots/settings/runtime/en-light.webp" alt="Runtime environment management" width="420" /></a> | <a href="./images/screenshots/settings/runtime/en-dark.webp"><img src="./images/screenshots/settings/runtime/en-dark.webp" alt="Runtime environment management" width="420" /></a> |
+
+</details>
+
+Screenshots render the current Vue pages with isolated presentation data. Task progress, download states, and waveforms illustrate the interface and do not represent performance measurements.
+
+## Audio tools
+
+Open **Tools** to use these utilities independently of the separation workflow.
+
+| Tool | Capabilities and input requirements |
 | --- | --- |
-| <img src="./images/en-light-preview.webp" alt="Light theme interface preview collage" /> | <img src="./images/en-dark-preview.webp" alt="Dark theme interface preview collage" /> |
+| Audio conversion | Batch output to WAV, FLAC, MP3, or OGG, with sample rate, channel, and encoding settings. |
+| Audio inspection | Read containers, audio streams, codec parameters, and metadata tags with FFprobe. |
+| SDR evaluation | Align reference and estimated audio, then calculate per-channel SDR and SI-SDR. Requires corresponding reference audio. |
+| ASR | Use FunASR presets or local models to generate TXT, JSON, and SRT. Supported languages vary by preset. |
+| Vocal to MIDI | Extract pitch and note timing with GAME's native Torch model. Extract a complete GAME model archive, then select its `model.pt`. |
+| Audio slicing | Analyze silence and export clips, with minimum-length, threshold, and boundary-silence settings. |
+| Audio merging | Order a directory's files by name, modification time, or a regular expression, then export a WAV with consistent audio settings. |
 
-## Highlights
+The optional FunASR component installs on demand; ASR models download and cache on first use. Download a model archive from the [GAME release](https://github.com/openvpi/GAME/releases/tag/v1.0.0) linked in the MIDI tool. **Keep the complete extracted directory: `model.pt` requires `config.yaml` beside it, and language-conditioned models also require `lang_map.json`.** Do not move the weights alone. Language, output, and parameter options depend on the selected tool and model.
 
-| Area | What it does |
+## Data, runtimes, and updates
+
+### Data locations
+
+Settings, models, outputs, projects, logs, and temporary files share a data root. Inspect actual paths under **Settings → Data Directory**; model and output directories can be configured separately.
+
+| Distribution | Default data root |
 | --- | --- |
-| Workspace dashboard | Shows runtime health, local model status, running jobs, completed results, and the recommended workflow. |
-| Separation setup | Imports audio/video files or folders, chooses a downloaded model, configures output format, runtime device, TTA, debug logging, and advanced inference parameters. |
-| Task queue | Tracks queued and running jobs with stage-level progress, logs, retry/cancel actions, and history management. |
-| Model library | Browses available models, downloads and resumes model files, deletes local models, and manages storage cleanup. |
-| Results and projects | Keeps generated outputs and editor projects organized for review and later editing. |
-| Stem editor | Provides waveform preview, transport controls, asset panels, mix controls, project persistence, missing-asset relinking, and export. |
-| Desktop packaging | Uses Tauri v2 with a Python worker and release scripts for portable Python runtimes. |
+| `PYMSS_STUDIO_DATA_ROOT` is set | The supplied path takes priority. |
+| Development binary run directly from Cargo `target/debug` or `target/release` | `data/` in the project root. |
+| Windows portable package with a `pymss-studio.portable` marker beside the executable | `data/` beside the executable. |
+| Regular installed / other release packages | `.pymss-studio/` in the user directory, such as `%USERPROFILE%\.pymss-studio` on Windows. |
 
-## Roadmap
+The root defaults to `settings/`, `models/`, `outputs/`, `editor-projects/`, `logs/`, and `temp/`. Inference environments are managed separately: Windows / Linux generally use the installation resources' `python-runtime/runtime-envs/`; user-installed macOS environments use `runtime-envs/` under the data root.
 
-Near-term work:
+**Editor projects reference audio files by path.** Back up the associated audio as well as the project. Relink missing assets in the editor after moving or deleting original outputs. Use the application's migration workflow when changing the model directory.
 
-- Intel GPU and AMD GPU adaptation. Developers with Intel or AMD GPUs are welcome to join `pymss-project` and help with validation, packaging, and performance tuning.
-- iOS and Android GPU inference.
+### Updates and environment management
 
-Long-term work:
+Open **Settings → About** for version and update information. Official Windows builds that support in-app updates can check and install updates there. Use the release page for other platforms or builds without automatic update support.
 
-- iOS and Android NPU inference.
+Application updates and Python inference environment management are separate operations. Use **Settings → Runtime** to switch or maintain CPU / GPU environments. Dependency combinations are defined in [`python/runtime-manifest.json`](./python/runtime-manifest.json); avoid mixing unrelated Torch or backend versions into the bundled environments.
 
-## Tech stack
+## Troubleshooting
 
-| Layer | Stack |
+| Problem | What to check |
 | --- | --- |
-| Frontend | Vue 3, TypeScript, Vite, Pinia, Vue Router, Vue I18n, Naive UI |
-| Desktop shell | Tauri v2, Rust, Tauri dialog/shell/store plugins |
-| Worker | Python worker protocol in `python/worker.py` |
-| Core engine | External [`pymss`](https://github.com/pymss-project/pymss) package |
-| Packaging | pnpm, Tauri CLI, PowerShell runtime staging scripts, GitHub Actions |
+| Model absent from the separation page | Only downloaded models that support inference appear. Check download status, model support, and runtime readiness, then refresh the model list. |
+| GPU missing or inference fails | Confirm the active backend, GPU/driver support, and model compatibility. Compare with CPU inference and inspect task logs. |
+| Insufficient GPU or system memory | Keep task concurrency at 1 initially. Reduce batch or chunk size where supported; parameter meanings vary between architectures. |
+| Runtime or model download fails | Check download source, method, and proxy under **Settings → Defaults**. Runtime installation also offers a PyPI mirror selector. Retry after confirming connectivity. |
+| ASR or MIDI cannot start | Check FunASR installation and ASR model source. For GAME, use the complete extracted directory and check for `config.yaml` and, where needed, `lang_map.json` beside the weights. |
+| Missing project assets | Check whether audio files moved or were deleted, relink them in the editor, and save the project again. |
+| Update fails or a new version behaves unexpectedly | Record version, package type, and errors; read the release notes. Back up projects and settings before manually installing a complete package. |
 
-## Prerequisites
+For unresolved issues, include application version and package type, OS version, GPU model, separation model, reproduction steps, and relevant log excerpts in [GitHub Issues](https://github.com/pymss-project/pymss-studio/issues). Remove personal paths, proxy credentials, and other sensitive information from logs before sharing.
 
-- Node.js with `pnpm@10.33.2`
-- Rust and Cargo for Tauri development
-- Python for worker development
-- The published `pymss` package: `python -m pip install pymss`
-- Platform-specific media/model dependencies required by the `pymss` core package
+## Development and verification
 
-The worker imports `pymss` from the active Python environment. Release bundles
-install it into the embedded Python runtime.
+### Prerequisites
 
-## Development
-
-Install dependencies:
+- Node.js 22, matching CI, and `pnpm@10.33.2`.
+- Rust stable / Cargo and [Tauri's platform prerequisites](https://v2.tauri.app/start/prerequisites/): C++ build tools and WebView2 on Windows, Xcode Command Line Tools on macOS, and the appropriate WebKitGTK/system libraries on Linux.
+- Python 3.12. Audio features use media tools such as FFmpeg / FFprobe; release scripts stage these tools for packaged builds.
 
 ```bash
-pnpm install
+git clone https://github.com/pymss-project/pymss-studio.git
+cd pymss-studio
+pnpm install --frozen-lockfile
 ```
 
-Run the frontend only:
+For a first full desktop development session, prepare bootstrap Python, then install and activate an inference environment through onboarding or **Settings → Runtime**. Initial installation needs network access, and download size depends on the backend. These commands prepare the bootstrap interpreter; the application installs Python inference dependencies according to its runtime manifest. Download model weights separately in the model library.
 
-```bash
-pnpm dev
-```
+Windows PowerShell:
 
-Run the full desktop app with Tauri:
-
-```bash
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install "requests[socks]>=2.32,<3"
+$env:PYMSS_STUDIO_PYTHON = (Resolve-Path .\.venv\Scripts\python.exe).Path
 pnpm tauri dev
 ```
 
-Build the frontend:
+macOS / Linux:
 
 ```bash
-pnpm build
+python3.12 -m venv .venv
+.venv/bin/python -m pip install "requests[socks]>=2.32,<3"
+export PYMSS_STUDIO_PYTHON="$PWD/.venv/bin/python"
+pnpm tauri dev
 ```
 
-Build the production desktop app:
+You can reuse an existing bundled runtime or activated environment. Overriding bootstrap Python does not force replacement of an active inference environment. Media features in development also need FFmpeg / FFprobe on `PATH` or in a prepared tools directory.
+
+### Commands
+
+| Command | Purpose |
+| --- | --- |
+| `pnpm dev` | Frontend server on port `1420` for UI development and browser previews. |
+| `pnpm tauri dev` | Full desktop application with frontend hot reload and Rust / Python orchestration. |
+| `pnpm build` | TypeScript checks and the frontend production build. |
+| `pnpm tauri build` | Desktop build; runs the frontend build first. A complete inference runtime must be prepared separately. |
+| `pnpm test` / `pnpm test:frontend` | Frontend logic tests. |
+| `pnpm test:python` | Python Worker module tests. |
+| `pnpm test:rust` | Rust backend tests. |
+| `pnpm test:all` | Run the three layers sequentially after preparing their dependencies. |
+
+For documentation changes, verify content and links. Frontend changes should run relevant tests and `pnpm build`; Worker/backend changes should run the corresponding layer's tests. CI uses Node.js 22, Python 3.12, and Rust stable, and runs `pnpm test:all` plus the frontend build.
+
+<details>
+<summary>Python Worker debugging and environment variables</summary>
+
+Use a dedicated Python 3.12 environment for standalone Worker debugging. Prepare compatible Torch and `pymss` dependencies for the selected backend first. [`python/requirements.txt`](./python/requirements.txt) describes Worker development dependencies; [`python/requirements-ci.txt`](./python/requirements-ci.txt) describes CI test dependencies. Managed application environments follow the runtime manifest.
 
 ```bash
-pnpm tauri build
+python python/worker.py --help
+python python/worker.py env_info
+python python/worker.py list_models --payload '{}'
 ```
 
-## Configuration
+These commands use the terminal's current Python interpreter, rather than automatically selecting the desktop application's active environment. Use the bundled or active environment's Python path when verifying a release package.
 
-Runtime data is stored under a single data root. The app derives `settings/`, `models/`,
-`outputs/`, `editor-projects/`, `logs/`, and `temp/` from that root.
+| Variable | Purpose |
+| --- | --- |
+| `PYMSS_STUDIO_DATA_ROOT` | Override the application data root. |
+| `PYMSS_STUDIO_PYTHON` | Override bootstrap Python. Without an override, the backend tries the bundled runtime, then system `python` on Windows or `python3` elsewhere. Inference may still use an activated environment. |
+| `PYMSS_STUDIO_DEFAULT_OUTPUT_DIR` | Worker output fallback when none is specified; the desktop application passes its configured output directory to the Worker. |
 
-Data root selection order:
+</details>
 
-1. `PYMSS_STUDIO_DATA_ROOT`, when set.
-2. `./data` in development builds.
-3. `data` next to the executable for Windows release builds that include a
-   `pymss-studio.portable` marker file next to the executable.
-4. `~/.pymss-studio` for regular installed release builds.
+<details>
+<summary>Architecture, repository layout, and releases</summary>
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `PYMSS_STUDIO_DATA_ROOT` | see above | Explicit root directory for settings, models, outputs, projects, logs, and temp files. |
-| `PYMSS_STUDIO_PYTHON` | `python` | Python interpreter used by the Tauri backend to launch the worker. |
-| `PYMSS_STUDIO_DEFAULT_OUTPUT_DIR` | app default | Default directory for separation outputs. |
-
-## Project layout
-
-```text
-.
-├── src/                  # Vue frontend: views, components, stores, i18n, editor UI
-├── src-tauri/            # Tauri v2 app, Rust commands, bundle configuration
-├── python/               # JSON-based worker protocol and runtime dependency notes
-├── scripts/              # Runtime preparation, staging, and cleanup scripts
-├── installer/            # Windows installer assets
-├── images/               # README screenshots
-└── package.json          # Frontend and Tauri commands
-```
-
-## Architecture
+| Layer | Stack and responsibilities |
+| --- | --- |
+| Frontend | Vue 3, TypeScript, Vite, Pinia, Vue Router, Vue I18n, and Naive UI; workflow node editing uses LiteGraph. |
+| Desktop backend | Tauri v2 and Rust for dialogs, process orchestration, persistence, updates, and windows. |
+| Worker | Python JSON protocol for models, inference, workflows, and audio processing. |
+| Separation engine | External `pymss` / `pymss-core` packages. This repository integrates the desktop application rather than implementing core separation algorithms. |
 
 ```mermaid
 flowchart LR
-  UI[Vue + Naive UI frontend] --> API[Tauri commands]
-  API --> Worker[python/worker.py]
-  Worker --> Core[pymss core package]
-  Core --> Models[Separation models]
-  Core --> Output[Separated stems]
-  UI --> Store[Pinia stores]
-  Store --> UI
+  UI[Vue / Naive UI] --> API[Tauri / Rust]
+  API --> Worker[Python Worker]
+  Worker --> Core[pymss / pymss-core]
+  Core --> Audio[Separated stems]
+  Audio --> Editor
+  UI --> Editor[Stem editing and mix export]
 ```
 
-The UI owns interaction design and state. Tauri owns desktop integration, process orchestration, file dialogs, and packaged resources. The Python worker exposes model, environment, audio, and inference operations through a JSON protocol while delegating separation logic to `pymss`.
+```text
+.
+├── src/                   # Views, components, stores, workflows, tools, and i18n
+├── src-tauri/             # Rust backend, desktop configuration, and bundled resources
+├── python/                # Worker, audio modules, and runtime manifest
+├── tests/                 # Frontend/Python tests, manual checks, and fixtures
+├── scripts/               # Runtime preparation and release checks
+├── .github/workflows/     # CI and Windows/macOS release pipelines
+├── installer/             # Windows installer resources
+└── images/screenshots/    # English/Chinese light/dark screenshots
+```
 
-## Release packaging
-
-Windows releases are built in CUDA and CPU variants. The release flow prepares an embedded Python runtime, builds the Tauri executable, stages the portable directory with worker/core assets and tools, then produces archives or installers.
+Windows releases prepare bootstrap Python and a backend environment, build the Tauri executable, stage the Worker/runtime/media tools, and create installers and portable archives. macOS releases prepare arm64 MLX and media tools before creating a DMG.
 
 ```powershell
-./scripts/prepare-python-runtime.ps1 -Variant cuda
-./scripts/prepare-python-runtime.ps1 -Variant default
+./scripts/prepare-python-runtime.ps1 -Variant cuda -InitialBackend cuda
+./scripts/prepare-python-runtime.ps1 -Variant default -InitialBackend cpu
 ```
 
-Staged builds are smoke-tested with worker commands such as `env_info` and `list_models`.
+These are alternative runtime preparation examples; select one rather than running them sequentially. Preparation writes `python-runtime/`, requires network access, and involves large downloads. See the [Windows](./.github/workflows/release-windows.yml) and [macOS](./.github/workflows/release-macos.yml) workflows for complete staging, signing, validation, and asset splitting.
 
-## Verification
+</details>
 
-This repository currently has no dedicated automated test suite. Use the existing build and smoke checks before shipping changes:
+## Future directions
 
-```bash
-pnpm build
-pnpm tauri build
-```
+- Continue improving Intel / AMD model compatibility, runtime validation, and packaging.
+- Explore iOS / Android GPU and NPU inference. Mobile support is a future research direction; no mobile application release is currently provided.
 
-For packaged Python environments, verify:
+## Community and contributing
 
-```bash
-python python/worker.py env_info
-python python/worker.py list_models
-```
+Use [GitHub Issues](https://github.com/pymss-project/pymss-studio/issues) for bug reports and [GitHub Discussions](https://github.com/pymss-project/pymss-studio/discussions) for features and usage discussions. Chinese-speaking users can also join the [Pymss Studio community group](https://qm.qq.com/q/YLLou4NucE).
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution options and the current policy on external pull requests. Reproduction reports, compatibility checks, documentation, and shared usage experience help improve the project.
 
 ## License
 
-Pymss Studio is licensed under the GNU Affero General Public License v3.0. See [LICENSE](./LICENSE).
-
-## Contributing
-
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for details on how to contribute to Pymss Studio.
+Pymss Studio is licensed under the GNU Affero General Public License v3.0. See [LICENSE](./LICENSE). Dependencies, model weights, and third-party tools retain their own licenses and usage terms.
