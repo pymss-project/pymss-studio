@@ -163,21 +163,18 @@ def _resolve_device(payload: dict[str, Any]) -> str | None:
 
 
 def _emit_progress(task_id: str) -> Any:
-    """Build a progress_callback(i, total, message) that emits task events."""
-    def cb(index: int, total: int, message: str | None) -> None:
-        if total <= 0:
-            total = 1
-        # Map node index (1-based feel) onto the 35..92 progress band used by
-        # the UI's STAGE_META, leaving room for validate(12) and write(92).
-        progress = 35 + int((index / max(1, total)) * 55)
-        stage = "separating"
-        emit("task_progress", {
-            "stage": stage,
-            "done": index,
-            "total": total,
-            "message": message or "Running workflow",
-            "progress": min(92, progress),
-        }, task_id=task_id)
+    """Forward native overall progress and display only audio-second counters."""
+    def cb(event: dict[str, Any]) -> None:
+        fraction = float(event.get("overall_fraction") or 0)
+        if not math.isfinite(fraction):
+            fraction = 0
+        payload: dict[str, Any] = {
+            "stage": "separating", "message": event.get("message") or "Running workflow",
+            "progress": 35 + int(min(1, max(0, fraction)) * 55),
+        }
+        if event.get("unit") == "seconds" and event.get("done") is not None and event.get("total") is not None:
+            payload.update(done=event["done"], total=event["total"])
+        emit("task_progress", payload, task_id=task_id)
 
     return cb
 
@@ -976,6 +973,8 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
         raise RuntimeError(
             "Advanced workflows require pymss.graph. Update the runtime core from Settings and retry."
         ) from exc
+    if getattr(graph, "PROGRESS_EVENT_VERSION", 0) < 1:
+        raise RuntimeError("This pymss runtime does not support structured workflow progress. Update the runtime core in Settings and retry.")
 
     runtime_payload, runtime_inputs = _prepare_legacy_global_input(payload, input_path, inputs)
     primary = input_path or (list(runtime_inputs.values())[0] if runtime_inputs else "")
@@ -1067,7 +1066,7 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
             output_dir=graph_output_dir,
             input_path=input_path,
             inputs=runtime_inputs or None,
-            progress_callback=_emit_progress(task_id),
+            progress_event_callback=_emit_progress(task_id),
             device=_resolve_device(payload),
             model_dir=payload.get("modelDir") or None,
             download=bool(payload.get("downloadMethod") and payload.get("downloadMethod") != "never"),

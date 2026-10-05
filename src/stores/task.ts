@@ -1391,7 +1391,10 @@ export const useTaskStore = defineStore('task', () => {
       task.progressCurrent = Number.isFinite(done) ? done : undefined
       task.progressTotal = Number.isFinite(total) ? total : undefined
       task.progressDetail = detail
-      const resolvedProgress = Math.min(99, resolveStageProgress(stage, task.progressCurrent, task.progressTotal))
+      const explicitProgress = event.payload?.progress
+      const resolvedProgress = typeof explicitProgress === 'number' && Number.isFinite(explicitProgress)
+        ? clamp(explicitProgress, 0, 99)
+        : Math.min(99, resolveStageProgress(stage, task.progressCurrent, task.progressTotal))
       task.progress = stage === 'separating'
         ? resolvedProgress
         : Math.max(task.progress || 0, resolvedProgress)
