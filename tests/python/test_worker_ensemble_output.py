@@ -27,6 +27,7 @@ class EnsembleOutputTests(unittest.TestCase):
             "outputNaming": {"enabled": True, "template": "%index%*%filename%*%stem%"},
         }
         self.graph = types.ModuleType("pymss.graph")
+        self.graph.PROGRESS_EVENT_VERSION = 1
         self.graph.load_comfy_file = mock.Mock(return_value=object())
         self.graph.run_dag = mock.Mock(side_effect=self.save_audio)
         package = types.ModuleType("pymss")
