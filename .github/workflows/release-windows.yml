@@ -204,13 +204,19 @@ jobs:
           output-artifact: Pymss-Studio-${{ needs.windows-cuda-prepare.outputs.version }}-windows-x64-cuda-setup
           output-file: Pymss-Studio-${{ needs.windows-cuda-prepare.outputs.version }}-windows-x64-cuda-setup.exe
 
-  windows-cpu-prepare:
-    name: Windows x64 CPU prepare
+  windows-standard-prepare:
+    name: Windows x64 ${{ matrix.backend }} prepare
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: cpu
+            variant: default
+          - backend: dml
+            variant: dml
     outputs:
       version: ${{ steps.meta.outputs.version }}
-      stage_name: ${{ steps.meta.outputs.stage_name }}
-      stage_artifact: ${{ steps.meta.outputs.stage_artifact }}
     env:
       PYMSS_VERSION_INPUT: ${{ inputs.version }}
     steps:
@@ -224,15 +230,15 @@ jobs:
         run: |
           $version = $env:PYMSS_VERSION_INPUT.TrimStart('v')
           if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z][0-9A-Za-z.-]*)?$') { throw "Invalid semantic version: $env:PYMSS_VERSION_INPUT" }
-          $stageName = "Pymss-Studio-$version-windows-x64-cpu"
+          $stageName = "Pymss-Studio-$version-windows-x64-${{ matrix.backend }}"
           $artifactName = "$stageName-stage"
           echo "version=$version" >> $env:GITHUB_OUTPUT
           echo "stage_name=$stageName" >> $env:GITHUB_OUTPUT
           echo "stage_artifact=$artifactName" >> $env:GITHUB_OUTPUT
 
-      - name: Prepare bootstrap runtime + CPU environment seed
+      - name: Prepare bootstrap runtime + ${{ matrix.backend }} environment seed
         shell: pwsh
-        run: ./scripts/prepare-python-runtime.ps1 -Variant default -InitialBackend cpu
+        run: ./scripts/prepare-python-runtime.ps1 -Variant ${{ matrix.variant }} -InitialBackend ${{ matrix.backend }}
 
       - name: Sync build version metadata
         shell: pwsh
@@ -250,7 +256,7 @@ jobs:
           PYMSS_BUILD_REPOSITORY: ${{ github.repository }}
           PYMSS_BUILD_REPOSITORY_OWNER: ${{ github.repository_owner }}
           PYMSS_BUILD_TARGET: windows-x64
-          PYMSS_BUILD_VARIANT: windows-x64-cpu
+          PYMSS_BUILD_VARIANT: windows-x64-${{ matrix.backend }}
           PYMSS_BUILD_UPDATE_SUPPORTED: 'true'
           PYMSS_BUILD_OFFICIAL: ${{ github.repository == 'pymss-project/pymss-studio' && github.repository_owner == 'pymss-project' && 'true' || 'false' }}
         run: pnpm tauri build --no-bundle
@@ -308,88 +314,96 @@ jobs:
           Copy-Item "release/bin" "$stage/bin" -Recurse
            ./scripts/prepare-python-runtime.ps1 -RewriteRuntimeEnvConfigs -RuntimeEnvsDir "$stage/python-runtime/runtime-envs" -RuntimeDir "$stage/python-runtime"
           @"
-          Pymss Studio $version Windows x64 CPU
+          Pymss Studio $version Windows x64 ${{ matrix.backend }}
           Author: TheSmallHanCat
 
-          This package includes a base Python runtime and a CPU environment.
-          It is intended for users without NVIDIA CUDA GPUs.
+          This package includes a base Python runtime and a ${{ matrix.backend }} environment.
+          DirectML supports DX12-capable AMD, Intel, and NVIDIA GPUs on Windows.
           Users can switch backends or install additional environments in Settings.
           "@ | Set-Content "$stage/README.txt" -Encoding UTF8
           $env:PYMSS_STUDIO_RUNTIME_ENVS_DIR = (Resolve-Path "$stage/python-runtime/runtime-envs").Path
           $env:PYMSS_STUDIO_ACTIVE_RUNTIME_FILE = (Join-Path $env:PYMSS_STUDIO_RUNTIME_ENVS_DIR "active-runtime.json")
           $activeStatePath = Join-Path $stage "python-runtime/runtime-envs/active-runtime.json"
-          if (!(Test-Path $activeStatePath)) { throw "Staged CPU active runtime state is missing" }
+          if (!(Test-Path $activeStatePath)) { throw "Staged ${{ matrix.backend }} active runtime state is missing" }
           $activeState = Get-Content -Raw $activeStatePath | ConvertFrom-Json
-          if ($activeState.backend -ne "cpu") { throw "Staged CPU active runtime backend is '$($activeState.backend)'" }
+          if ($activeState.backend -ne "${{ matrix.backend }}") { throw "Staged ${{ matrix.backend }} active runtime backend is '$($activeState.backend)'" }
           $activePython = Join-Path (Join-Path $stage "python-runtime/runtime-envs") $activeState.pythonPath
-          if (!(Test-Path $activePython)) { throw "Staged CPU active runtime Python is missing: $activePython" }
-          if (!(Test-Path "$stage\python-runtime\runtime-envs\cpu\Scripts\python.exe")) { throw "Staged CPU Python executable is missing" }
-          & "$stage\python-runtime\runtime-envs\cpu\Scripts\python.exe" "$stage\python\worker.py" env_info
-          if ($LASTEXITCODE -ne 0) { throw "Staged CPU env_info failed with exit code $LASTEXITCODE" }
-          & "$stage\python-runtime\runtime-envs\cpu\Scripts\python.exe" -c "import pymss.graph; print('pymss.graph ok')"
-          if ($LASTEXITCODE -ne 0) { throw "Staged CPU pymss.graph import failed" }
-          & "$stage\python-runtime\runtime-envs\cpu\Scripts\python.exe" "$stage\python\worker.py" list_models --payload "{}"
-          if ($LASTEXITCODE -ne 0) { throw "Staged CPU list_models failed with exit code $LASTEXITCODE" }
+          if (!(Test-Path $activePython)) { throw "Staged ${{ matrix.backend }} active runtime Python is missing: $activePython" }
+          if (!(Test-Path "$stage\python-runtime\runtime-envs\${{ matrix.backend }}\Scripts\python.exe")) { throw "Staged ${{ matrix.backend }} Python executable is missing" }
+          & "$stage\python-runtime\runtime-envs\${{ matrix.backend }}\Scripts\python.exe" "$stage\python\worker.py" env_info
+          if ($LASTEXITCODE -ne 0) { throw "Staged ${{ matrix.backend }} env_info failed with exit code $LASTEXITCODE" }
+          & "$stage\python-runtime\runtime-envs\${{ matrix.backend }}\Scripts\python.exe" -c "import pymss.graph; print('pymss.graph ok')"
+          if ($LASTEXITCODE -ne 0) { throw "Staged ${{ matrix.backend }} pymss.graph import failed" }
+          & "$stage\python-runtime\runtime-envs\${{ matrix.backend }}\Scripts\python.exe" "$stage\python\worker.py" list_models --payload "{}"
+          if ($LASTEXITCODE -ne 0) { throw "Staged ${{ matrix.backend }} list_models failed with exit code $LASTEXITCODE" }
            ./scripts/prepare-python-runtime.ps1 -RewriteRuntimeEnvConfigs -TemplateRuntimeEnvConfigs -RuntimeEnvsDir "$stage/python-runtime/runtime-envs" -RuntimeDir "$stage/python-runtime"
           $workspacePattern = [regex]::Escape((Resolve-Path ".").Path)
            $leakedConfig = Get-ChildItem "$stage/python-runtime/runtime-envs" -Recurse -File |
             Where-Object { $_.Extension -in @('.cfg', '.json', '.txt', '.ini') } |
             Select-String -Pattern $workspacePattern -List
-          if ($leakedConfig) { throw "CI workspace path leaked into staged CPU runtime env config" }
+          if ($leakedConfig) { throw "CI workspace path leaked into staged ${{ matrix.backend }} runtime env config" }
 
-      - name: Upload CPU stage artifact
+      - name: Upload ${{ matrix.backend }} stage artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.meta.outputs.stage_artifact }}
           path: release/${{ steps.meta.outputs.stage_name }}
           compression-level: 0
 
-  windows-cpu-7z:
-    name: Windows x64 CPU portable 7z
+  windows-standard-7z:
+    name: Windows x64 ${{ matrix.backend }} portable 7z
     runs-on: windows-latest
-    needs: windows-cpu-prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [cpu, dml]
+    needs: windows-standard-prepare
     steps:
-      - name: Download CPU stage artifact
+      - name: Download ${{ matrix.backend }} stage artifact
         uses: actions/download-artifact@v4
         with:
-          name: ${{ needs.windows-cpu-prepare.outputs.stage_artifact }}
-          path: release/${{ needs.windows-cpu-prepare.outputs.stage_name }}
+          name: Pymss-Studio-${{ needs.windows-standard-prepare.outputs.version }}-windows-x64-${{ matrix.backend }}-stage
+          path: release/Pymss-Studio-${{ needs.windows-standard-prepare.outputs.version }}-windows-x64-${{ matrix.backend }}
 
-      - name: Build Windows CPU portable 7z archive
+      - name: Build Windows ${{ matrix.backend }} portable 7z archive
         shell: pwsh
         run: |
-          $stageName = '${{ needs.windows-cpu-prepare.outputs.stage_name }}'
+          $stageName = 'Pymss-Studio-${{ needs.windows-standard-prepare.outputs.version }}-windows-x64-${{ matrix.backend }}'
           if (Test-Path "release/$stageName.7z") { Remove-Item "release/$stageName.7z" -Force }
           Set-Content "release/$stageName/pymss-studio.portable" -Value "portable" -Encoding ASCII
            Push-Location "release"
            & "C:\Program Files\7-Zip\7z.exe" a -t7z -m0=lzma2 -mx=5 -mfb=128 -md=768m -ms=on -mf=BCJ2 -mmt=on "$stageName.7z" "$stageName"
-           if ($LASTEXITCODE -ne 0) { throw "Unable to create the CPU portable archive" }
+           if ($LASTEXITCODE -ne 0) { throw "Unable to create the ${{ matrix.backend }} portable archive" }
            Pop-Location
 
-      - name: Upload Windows CPU portable archive artifact
+      - name: Upload Windows ${{ matrix.backend }} portable archive artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Pymss-Studio-${{ needs.windows-cpu-prepare.outputs.version }}-windows-x64-cpu-portable
-          path: release/${{ needs.windows-cpu-prepare.outputs.stage_name }}.7z
+          name: Pymss-Studio-${{ needs.windows-standard-prepare.outputs.version }}-windows-x64-${{ matrix.backend }}-portable
+          path: release/Pymss-Studio-${{ needs.windows-standard-prepare.outputs.version }}-windows-x64-${{ matrix.backend }}.7z
 
-  windows-cpu-exe:
-    name: Windows x64 CPU setup exe
+  windows-standard-exe:
+    name: Windows x64 ${{ matrix.backend }} setup exe
     runs-on: windows-latest
-    needs: windows-cpu-prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [cpu, dml]
+    needs: windows-standard-prepare
     env:
-      PYMSS_VERSION: ${{ needs.windows-cpu-prepare.outputs.version }}
-      PYMSS_PACKAGE_SUFFIX: windows-x64-cpu
+      PYMSS_VERSION: ${{ needs.windows-standard-prepare.outputs.version }}
+      PYMSS_PACKAGE_SUFFIX: windows-x64-${{ matrix.backend }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/build-windows-installer
         with:
-          version: ${{ needs.windows-cpu-prepare.outputs.version }}
-          package-suffix: windows-x64-cpu
-          stage-name: ${{ needs.windows-cpu-prepare.outputs.stage_name }}
-          stage-artifact: ${{ needs.windows-cpu-prepare.outputs.stage_artifact }}
-          output-artifact: Pymss-Studio-${{ needs.windows-cpu-prepare.outputs.version }}-windows-x64-cpu-setup
-          output-file: Pymss-Studio-${{ needs.windows-cpu-prepare.outputs.version }}-windows-x64-cpu-setup.exe
+          version: ${{ needs.windows-standard-prepare.outputs.version }}
+          package-suffix: windows-x64-${{ matrix.backend }}
+          stage-name: Pymss-Studio-${{ needs.windows-standard-prepare.outputs.version }}-windows-x64-${{ matrix.backend }}
+          stage-artifact: Pymss-Studio-${{ needs.windows-standard-prepare.outputs.version }}-windows-x64-${{ matrix.backend }}-stage
+          output-artifact: Pymss-Studio-${{ needs.windows-standard-prepare.outputs.version }}-windows-x64-${{ matrix.backend }}-setup
+          output-file: Pymss-Studio-${{ needs.windows-standard-prepare.outputs.version }}-windows-x64-${{ matrix.backend }}-setup.exe
 
 
   windows-online-prepare:
@@ -473,7 +487,7 @@ jobs:
           Copy-Item "release/bin" "$stage/bin" -Recurse
           @"
           Pymss Studio ${{ steps.meta.outputs.version }} Windows x64 Online
-          This package installs the selected CPU, CUDA, or ROCm environment on first start.
+          This package installs the selected CPU, CUDA, ROCm, or DirectML environment on first start.
           "@ | Set-Content "$stage/README.txt" -Encoding UTF8
           $env:PYTHONDONTWRITEBYTECODE = "1"
           $probeVenv = Join-Path $stage "python-runtime\runtime-envs\_pip-smoke"

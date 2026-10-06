@@ -74,6 +74,19 @@ class RuntimeUpdateCompatibilityTests(unittest.TestCase):
         current["python"] = "3.13"
         self.assertFalse(MODULE.runtime_base_compatibility(previous, current)[0])
 
+    def test_dml_addition_and_core_updates_preserve_the_existing_base(self):
+        previous = manifest(common={"pymss": "pymss[proxy]==2.1.7", "pymss-core": "pymss-core==0.1.10"})
+        current = manifest(common={"pymss": "pymss[proxy]==2.1.8", "pymss-core": "pymss-core==0.1.11"})
+        current["backends"]["dml"] = {
+            "platforms": ["win32"], "python": "3.12",
+            "torch": {"requirement": "torch==2.4.1", "indexUrl": "cpu"},
+            "extras": ["torch-directml==0.2.5.dev240914", "numpy>=1.26,<2"],
+        }
+        self.assertTrue(MODULE.runtime_base_compatibility(previous, current)[0])
+        self.assertFalse(MODULE.runtime_base_compatibility(previous, current, base_layout_changed=True)[0])
+        current["python"] = "3.13"
+        self.assertFalse(MODULE.runtime_base_compatibility(previous, current)[0])
+
 
 if __name__ == "__main__":
     unittest.main()

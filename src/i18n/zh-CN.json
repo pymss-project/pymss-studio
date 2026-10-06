@@ -1500,6 +1500,7 @@
     "runtimeCpu": "兼容性最广，不需要显卡驱动。",
     "runtimeCuda": "适用于安装了兼容 CUDA 驱动的 NVIDIA 显卡。",
     "runtimeRocm": "适用于 Windows 11、匹配驱动和受支持的 AMD 显卡。",
+    "runtimeDml": "适用于 Windows 的 DX12 显卡，支持 AMD、Intel 和 NVIDIA。",
     "runtimeMlx": "适用于 Apple Silicon 设备的 MLX 加速。",
     "runtimeMirrorAuto": "PyPI：自动",
     "runtimeMirrorUstc": "PyPI：中科大镜像",

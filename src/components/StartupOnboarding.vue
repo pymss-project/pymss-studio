@@ -64,7 +64,7 @@ function backendInstalled(backend: RuntimeBackend) {
 }
 
 const runtimeBackendChoices = computed(() => {
-  const { isMac, isAppleSilicon } = runtimePlatform.value
+  const { isMac, isWindows, isAppleSilicon } = runtimePlatform.value
   const items: Array<{ value: RuntimeBackend; label: string; hint: string }> = [
     { value: 'cpu', label: runtimeBackendName('cpu'), hint: t('onboarding.runtimeCpu') },
   ]
@@ -73,6 +73,9 @@ const runtimeBackendChoices = computed(() => {
       { value: 'cuda', label: runtimeBackendName('cuda'), hint: t('onboarding.runtimeCuda') },
       { value: 'rocm', label: runtimeBackendName('rocm'), hint: t('onboarding.runtimeRocm') },
     )
+  }
+  if (isWindows) {
+    items.push({ value: 'dml', label: runtimeBackendName('dml'), hint: t('onboarding.runtimeDml') })
   }
   if (isAppleSilicon) {
     items.push({ value: 'mlx', label: runtimeBackendName('mlx'), hint: t('onboarding.runtimeMlx') })

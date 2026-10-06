@@ -1399,7 +1399,7 @@ onBeforeUnmount(() => {
 
     <div class="simple-node-editor__meta">
       <n-input v-model:value="description" size="small" :placeholder="t('workflows.descriptionPlaceholder')" />
-      <label><span>{{ t('workflows.defaultDevice') }}</span><n-select :ref="(instance: unknown) => setSelectInstance('default-device', instance)" v-model:value="draft.defaultDevice" size="small" :options="[{ label: 'Auto', value: 'auto' }, { label: 'CPU', value: 'cpu' }, { label: 'CUDA', value: 'cuda' }, { label: 'MPS', value: 'mps' }, { label: 'MLX', value: 'mlx' }]" /></label>
+      <label><span>{{ t('workflows.defaultDevice') }}</span><n-select :ref="(instance: unknown) => setSelectInstance('default-device', instance)" v-model:value="draft.defaultDevice" size="small" :options="[{ label: 'Auto', value: 'auto' }, { label: 'CPU', value: 'cpu' }, { label: 'CUDA', value: 'cuda' }, { label: 'MPS', value: 'mps' }, { label: 'MLX', value: 'mlx' }, { label: 'DirectML', value: 'dml' }]" /></label>
       <label><span>{{ t('workflows.defaultFormat') }}</span><n-select :ref="(instance: unknown) => setSelectInstance('default-format', instance)" v-model:value="draft.defaultFormat" size="small" :options="[{ label: 'WAV', value: 'wav' }, { label: 'FLAC', value: 'flac' }, { label: 'MP3', value: 'mp3' }, { label: 'M4A', value: 'm4a' }]" /></label>
       <label><span>{{ t('workflows.defaultNormalize') }}</span><n-select v-model:value="defaultNormalizeMode" size="small" :options="defaultNormalizeOptions" /></label>
     </div>

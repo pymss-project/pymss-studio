@@ -44,15 +44,15 @@ test('platform detection prefers the worker report over navigator', () => {
   // platform.machine() is the only thing that can identify an arm64 Mac.
   assert.deepEqual(
     detectRuntimePlatform({ platform: 'darwin', machine: 'arm64' }),
-    { isMac: true, isAppleSilicon: true },
+    { isMac: true, isWindows: false, isAppleSilicon: true },
   )
   assert.deepEqual(
     detectRuntimePlatform({ platform: 'darwin', machine: 'x86_64' }),
-    { isMac: true, isAppleSilicon: false },
+    { isMac: true, isWindows: false, isAppleSilicon: false },
   )
   assert.deepEqual(
     detectRuntimePlatform({ platform: 'win32', machine: 'AMD64' }),
-    { isMac: false, isAppleSilicon: false },
+    { isMac: false, isWindows: true, isAppleSilicon: false },
   )
 })
 
@@ -64,8 +64,8 @@ test('platform detection falls back to navigator before the worker has reported'
   const original = globalThis.navigator
   Object.defineProperty(globalThis, 'navigator', { value: { platform: 'Win32' }, configurable: true })
   try {
-    assert.deepEqual(detectRuntimePlatform(null), { isMac: false, isAppleSilicon: false })
-    assert.deepEqual(detectRuntimePlatform({}), { isMac: false, isAppleSilicon: false })
+    assert.deepEqual(detectRuntimePlatform(null), { isMac: false, isWindows: true, isAppleSilicon: false })
+    assert.deepEqual(detectRuntimePlatform({}), { isMac: false, isWindows: true, isAppleSilicon: false })
   } finally {
     if (original === undefined) delete (globalThis as { navigator?: unknown }).navigator
     else Object.defineProperty(globalThis, 'navigator', { value: original, configurable: true })
@@ -258,6 +258,7 @@ test('backend labels stay readable for unknown backends', () => {
   assert.equal(runtimeBackendLabel('cuda'), 'NVIDIA CUDA')
   assert.equal(runtimeBackendLabel('rocm'), 'AMD ROCm')
   assert.equal(runtimeBackendLabel('cpu'), 'CPU')
+  assert.equal(runtimeBackendLabel('dml'), 'Windows DirectML')
   assert.equal(runtimeBackendLabel('something-else'), 'SOMETHING-ELSE')
   assert.equal(runtimeBackendLabel(null), '')
 })
@@ -270,8 +271,8 @@ test('backend recognition does not leak Object.prototype keys', () => {
 
 test('GPU vendor decides the recommended backend', () => {
   assert.equal(recommendedRuntimeBackend({ platform: 'win32', gpuVendors: ['nvidia'] }), 'cuda')
-  assert.equal(recommendedRuntimeBackend({ platform: 'win32', gpuVendors: ['amd'] }), 'rocm')
-  assert.equal(recommendedRuntimeBackend({ platform: 'win32', gpuVendors: ['intel'] }), 'cpu')
+  assert.equal(recommendedRuntimeBackend({ platform: 'win32', gpuVendors: ['amd'] }), 'dml')
+  assert.equal(recommendedRuntimeBackend({ platform: 'win32', gpuVendors: ['intel'] }), 'dml')
 })
 
 test('a discrete NVIDIA card outranks an integrated AMD one', () => {
@@ -324,7 +325,7 @@ test('manifest status is unknown when either side did not record a version', () 
 })
 
 test('every shipped backend has its own download size hint', () => {
-  const hints = ['cpu', 'cuda', 'rocm', 'mlx'].map(runtimeSizeHint)
+  const hints = ['cpu', 'cuda', 'rocm', 'mlx', 'dml'].map(runtimeSizeHint)
   assert.equal(new Set(hints).size, hints.length)
   assert.equal(runtimeSizeHint('unknown-backend'), '~1 GB')
 })

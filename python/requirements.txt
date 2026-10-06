@@ -11,6 +11,6 @@ numpy>=1.26
 pysocks>=1.7.1
 requests[socks]>=2.32
 pyyaml>=6.0.1
-torch>=2.7.1
+torch>=2.4.1
 tqdm>=4.60
 pymss

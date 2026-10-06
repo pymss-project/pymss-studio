@@ -101,6 +101,8 @@ begin
     Result := 'cuda'
   else if Pos('rocm', LowerCase('{#PackageSuffix}')) > 0 then
     Result := 'rocm'
+  else if Pos('dml', LowerCase('{#PackageSuffix}')) > 0 then
+    Result := 'dml'
   else
     Result := '';
 end;
@@ -193,6 +195,7 @@ begin
   RepairVenvConfig('cpu');
   RepairVenvConfig('cuda');
   RepairVenvConfig('rocm');
+  RepairVenvConfig('dml');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

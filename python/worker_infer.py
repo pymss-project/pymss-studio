@@ -412,6 +412,12 @@ def _normalize_device_ids(value: Any) -> list[int]:
 
 def _resolve_separator_device(device: Any, device_ids: Any) -> tuple[str, list[int], str]:
     requested_device = str(device or "auto").strip().lower() or "auto"
+    if requested_device == "dml":
+        from pymss.devices import directml_device
+
+        ids = device_ids if device_ids is not None else [0]
+        directml_device(ids)
+        return "dml", ids, f"dml:{ids[0]}"
     normalized_ids = _normalize_device_ids(device_ids)
     if requested_device != "cuda":
         return requested_device, normalized_ids, requested_device

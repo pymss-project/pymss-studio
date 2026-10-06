@@ -10,6 +10,7 @@ export function runtimeLoadError(info: RuntimeInfo | null | undefined, env: EnvI
 /** Approximate download size of each backend's dependency set, shown before installing. */
 const RUNTIME_SIZE_HINTS: Record<RuntimeBackend, string> = {
   cpu: '~800 MB',
+  dml: '~500 MB',
   cuda: '~3 GB',
   rocm: '~5 GB',
   mlx: '~600 MB',
@@ -21,6 +22,7 @@ export function runtimeSizeHint(backend: RuntimeBackend | string) {
 
 const RUNTIME_BACKEND_LABELS: Record<RuntimeBackend, string> = {
   cpu: 'CPU',
+  dml: 'Windows DirectML',
   cuda: 'NVIDIA CUDA',
   rocm: 'AMD ROCm',
   mlx: 'Apple MLX',
@@ -185,10 +187,10 @@ export function detectRuntimePlatform(info: RuntimeInfo | null | undefined) {
   if (reported) {
     const machine = String(info?.machine || '').toLowerCase()
     const isMac = reported === 'darwin'
-    return { isMac, isAppleSilicon: isMac && (machine.includes('arm') || machine.includes('aarch64')) }
+    return { isMac, isWindows: reported === 'win32', isAppleSilicon: isMac && (machine.includes('arm') || machine.includes('aarch64')) }
   }
   const isMac = /Mac/i.test(navigator.platform)
-  return { isMac, isAppleSilicon: isMac && /arm/i.test(navigator.platform) }
+  return { isMac, isWindows: /Win/i.test(navigator.platform), isAppleSilicon: isMac && /arm/i.test(navigator.platform) }
 }
 
 /**
@@ -205,8 +207,8 @@ export function recommendedRuntimeBackend(info: RuntimeInfo | null | undefined):
   if (!vendors?.length) return null
   // A discrete NVIDIA card wins over an AMD integrated one when both are present.
   if (vendors.includes('nvidia')) return 'cuda'
-  // ROCm is Windows-only in the manifest; recommending it elsewhere would fail at install time.
-  if (vendors.includes('amd')) return String(info?.platform || '') === 'win32' ? 'rocm' : 'cpu'
+  // DirectML covers DX12 adapters; ROCm requires a separately supported AMD model and driver.
+  if (String(info?.platform || '') === 'win32' && (vendors.includes('amd') || vendors.includes('intel'))) return 'dml'
   return 'cpu'
 }
 

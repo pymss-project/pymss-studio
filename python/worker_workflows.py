@@ -165,7 +165,7 @@ def _resolve_device(payload: dict[str, Any]) -> str | None:
 def _apply_runtime_device(dag: Any, payload: dict[str, Any], *, simple: bool) -> None:
     """Materialize the selected adapter into nodes that inherit the runtime."""
     requested = _resolve_device(payload)
-    if requested != "auto":
+    if requested not in {"auto", "dml"}:
         return
     targets = []
     for node in dag.nodes:
@@ -176,7 +176,7 @@ def _apply_runtime_device(dag: Any, payload: dict[str, Any], *, simple: bool) ->
         custom = node_type == "custom_mss_separate"
         device_index, ids_index = (2, 3) if custom else (1, 4)
         device = widgets[device_index] if len(widgets) > device_index else "auto"
-        if device in {None, "", "auto"}:
+        if device in {None, "", "auto"} or simple and requested == "dml" and device == "dml":
             node_ids = widgets[ids_index] if len(widgets) > ids_index else None
             # Graph adapter widgets are explicit, including zero. The native
             # graph context already supplies the inherited backend.

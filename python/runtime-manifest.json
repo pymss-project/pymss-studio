@@ -76,6 +76,25 @@
       "extras": [
         "mlx"
       ]
+    },
+    "dml": {
+      "platforms": [
+        "win32"
+      ],
+      "python": "3.12",
+      "torch": {
+        "requirement": "torch==2.4.1",
+        "requirements": [
+          "torch==2.4.1",
+          "torchvision==0.19.1"
+        ],
+        "indexUrl": "https://download.pytorch.org/whl/cpu"
+      },
+      "extras": [
+        "torch-directml==0.2.5.dev240914",
+        "numpy>=1.26,<2",
+        "torchvision==0.19.1"
+      ]
     }
   }
 }

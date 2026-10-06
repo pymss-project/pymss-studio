@@ -205,7 +205,7 @@ export type AudioParams = {
  * fail inside pymss. See getRuntimeDeviceConfig().
  */
 export type RuntimeDeviceConfig = {
-  device: 'auto' | 'cpu' | 'cuda' | 'mps' | 'mlx'
+  device: 'auto' | 'cpu' | 'cuda' | 'mps' | 'mlx' | 'dml'
   deviceIds: number[]
 }
 
@@ -218,9 +218,10 @@ export type DeviceOption = {
 }
 
 function compatibleRuntimeDeviceSelection(selected: string, env?: EnvInfo | null): string {
-  if (env?.torchAvailable !== true || !['cpu', 'cuda', 'rocm'].includes(env.torchBackend || '')) return selected
+  if (env?.torchAvailable !== true || !['cpu', 'cuda', 'rocm', 'dml'].includes(env.torchBackend || '')) return selected
   const kind = selected.split(':')[0]
   if (kind === 'cuda' || kind === 'rocm') return env.torchBackend === 'cuda' || env.torchBackend === 'rocm' ? selected : 'auto'
+  if (kind === 'dml') return env.torchBackend === 'dml' ? selected : 'auto'
   if (kind === 'mps') return env.mpsAvailable ? selected : 'auto'
   if (kind === 'mlx') return env.mlxAvailable || env.mpsAvailable ? selected : 'auto'
   return selected
@@ -464,6 +465,11 @@ export const useSettingsStore = defineStore('settings', () => {
         options.push({ label: `${gpuName} ${id}`, value: `${gpuKind}:${id}`, type: gpuKind, deviceIds: [id] })
       }
     }
+    if (env?.dmlAvailable) {
+      for (const gpu of env.dmlDevices || []) {
+        options.push({ label: `DirectML ${gpu.id}: ${gpu.name}`, value: `dml:${gpu.id}`, type: 'dml', deviceIds: [gpu.id] })
+      }
+    }
     if (env?.mlxAvailable || env?.mpsAvailable) options.push({ label: 'Apple MLX', value: 'mlx', type: 'mlx', deviceIds: [0] })
     if (env?.mpsAvailable) options.push({ label: 'Apple MPS', value: 'mps', type: 'mps', deviceIds: [0] })
     return options
@@ -471,18 +477,18 @@ export const useSettingsStore = defineStore('settings', () => {
 
   function getRuntimeDeviceConfig(env?: EnvInfo | null): RuntimeDeviceConfig {
     const selected = compatibleRuntimeDeviceSelection(defaultDevice.value, env)
-    // Both prefixes resolve to 'cuda' — that is the device API a ROCm torch build speaks.
-    const gpuPrefix = ['cuda:', 'rocm:'].find((prefix) => selected.startsWith(prefix))
+    // CUDA and ROCm use the same indexed torch device API; DirectML retains its own device name.
+    const gpuPrefix = ['cuda:', 'rocm:', 'dml:'].find((prefix) => selected.startsWith(prefix))
     if (gpuPrefix) {
       const id = parseInt(selected.slice(gpuPrefix.length), 10)
-      return { device: 'cuda', deviceIds: Number.isFinite(id) ? [id] : [0] }
+      return { device: gpuPrefix === 'dml:' ? 'dml' : 'cuda', deviceIds: Number.isFinite(id) ? [id] : [0] }
     }
     // Bare 'rocm' is what settings saved before ROCm gained per-device values.
     if (selected === 'cuda' || selected === 'rocm') return { device: 'cuda', deviceIds: [0] }
     if (selected === 'auto' && env?.mlxAvailable) {
       return { device: 'mlx', deviceIds: [0] }
     }
-    if (selected === 'cpu' || selected === 'mps' || selected === 'mlx' || selected === 'auto') {
+    if (selected === 'cpu' || selected === 'mps' || selected === 'mlx' || selected === 'dml' || selected === 'auto') {
       return { device: selected, deviceIds: [0] }
     }
     return { device: 'auto', deviceIds: [0] }

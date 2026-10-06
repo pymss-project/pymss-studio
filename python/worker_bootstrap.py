@@ -46,6 +46,7 @@ PACKAGE_IMPORT_NAMES = {
     "pysocks": "socks",
     "pyyaml": "yaml",
     "pymss-core": "pymss_core",
+    "torch-directml": "torch_directml",
     "typing-extensions": "typing_extensions",
 }
 
@@ -659,6 +660,10 @@ if importlib.util.find_spec('torch') is not None:
         result['torchVersion'] = torch.__version__
         result['torchBackend'] = 'rocm' if getattr(torch.version, 'hip', None) else 'cuda' if getattr(torch.version, 'cuda', None) else 'cpu'
         result['acceleratorAvailable'] = bool(torch.cuda.is_available())
+        if result['torchBackend'] == 'cpu' and importlib.util.find_spec('torch_directml') is not None:
+            import torch_directml
+            result['torchBackend'] = 'dml'
+            result['acceleratorAvailable'] = bool(torch_directml.is_available())
     except Exception as exc:
         result['torchBackend'] = f'error:{exc}'
 print(json.dumps(result, ensure_ascii=False))
@@ -1440,6 +1445,7 @@ def _runtime_info_payload(payload: dict[str, Any], *, repair: bool = True) -> di
             not backend or backend == "cpu" and torch_backend == "cpu"
             or backend == "cuda" and torch_backend == "cuda" and accelerator_available
             or backend == "rocm" and torch_backend == "rocm" and accelerator_available
+            or backend == "dml" and torch_backend == "dml" and accelerator_available
             or backend == "mlx" and packages.get("mlx", False)
         ),
     }

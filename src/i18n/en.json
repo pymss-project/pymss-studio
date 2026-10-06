@@ -1500,6 +1500,7 @@
     "runtimeCpu": "Broadest compatibility and no GPU driver required.",
     "runtimeCuda": "For NVIDIA GPUs with a compatible CUDA driver.",
     "runtimeRocm": "For supported AMD GPUs on Windows 11 with the matching driver.",
+    "runtimeDml": "For DX12 GPUs on Windows, including AMD, Intel, and NVIDIA.",
     "runtimeMlx": "For Apple Silicon devices using MLX acceleration.",
     "runtimeMirrorAuto": "PyPI: Auto",
     "runtimeMirrorUstc": "PyPI: USTC mirror",

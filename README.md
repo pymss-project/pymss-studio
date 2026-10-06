@@ -56,7 +56,7 @@ Separation and editing run locally. Preparing runtimes, models, or optional comp
 | Results and projects | Review output stems and processing parameters, audition audio, open output folders, and continue in the editor. |
 | Stem editor | Multitrack waveforms, clip editing, transport, volume/pan, mute/solo, fades, track effects, recording, project persistence, asset relinking, and mix export. |
 | Audio tools | Format conversion, audio inspection, SDR / SI-SDR, ASR, vocal-to-MIDI conversion, silence slicing, and audio merging. |
-| Runtimes and settings | Manage platform-appropriate CPU, CUDA, ROCm, and MLX environments; configure download sources, proxies, concurrency, paths, language, zoom, and themes. |
+| Runtimes and settings | Manage platform-appropriate CPU, CUDA, ROCm, DirectML, and MLX environments; configure download sources, proxies, concurrency, paths, language, zoom, and themes. |
 
 Available stems, parameters, and devices vary by model and runtime. Acceleration depends on the model, hardware, drivers, and task configuration.
 
@@ -73,6 +73,7 @@ Choose a version on [GitHub Releases](https://github.com/pymss-project/pymss-stu
 | --- | --- | --- |
 | Windows x64, NVIDIA GPU | `windows-x64-cuda` | CUDA requires a compatible GPU and driver. |
 | Windows x64, CPU inference | `windows-x64-cpu` | A starting point when GPU compatibility is uncertain. |
+| Windows x64, AMD / Intel / NVIDIA DX12 GPU | `windows-x64-dml` | DirectML is integrated in the current source and release workflow; check whether the selected release includes this asset. |
 | Windows x64, supported AMD GPU | `windows-x64-rocm` | Check the selected release's GPU and driver requirements; ROCm has a narrower support range. |
 | Windows x64, smaller initial download | `windows-x64-online` | Includes the bootstrap runtime; install the required inference environment after first launch. |
 | macOS 14+, Apple Silicon | `macos-arm64-mlx` | Uses MLX. Download the DMG and drag the application into `/Applications`. |
@@ -130,6 +131,7 @@ These previews show the main features in English and Chinese, with light and dar
 | Mix export | <a href="./images/screenshots/editor/export/en-light.webp"><img src="./images/screenshots/editor/export/en-light.webp" alt="Mix export" width="420" /></a> | <a href="./images/screenshots/editor/export/en-dark.webp"><img src="./images/screenshots/editor/export/en-dark.webp" alt="Mix export" width="420" /></a> |
 | ASR speech recognition | <a href="./images/screenshots/tools/asr/en-light.webp"><img src="./images/screenshots/tools/asr/en-light.webp" alt="ASR speech recognition" width="420" /></a> | <a href="./images/screenshots/tools/asr/en-dark.webp"><img src="./images/screenshots/tools/asr/en-dark.webp" alt="ASR speech recognition" width="420" /></a> |
 | Vocal-to-MIDI conversion | <a href="./images/screenshots/tools/midi/en-light.webp"><img src="./images/screenshots/tools/midi/en-light.webp" alt="Vocal-to-MIDI conversion" width="420" /></a> | <a href="./images/screenshots/tools/midi/en-dark.webp"><img src="./images/screenshots/tools/midi/en-dark.webp" alt="Vocal-to-MIDI conversion" width="420" /></a> |
+| Runtime environment management | <a href="./images/screenshots/settings/runtime/en-light.webp"><img src="./images/screenshots/settings/runtime/en-light.webp" alt="Runtime environment management" width="420" /></a> | <a href="./images/screenshots/settings/runtime/en-dark.webp"><img src="./images/screenshots/settings/runtime/en-dark.webp" alt="Runtime environment management" width="420" /></a> |
 
 </details>
 
@@ -297,6 +299,7 @@ Windows releases prepare bootstrap Python and a backend environment, build the T
 ```powershell
 ./scripts/prepare-python-runtime.ps1 -Variant cuda -InitialBackend cuda
 ./scripts/prepare-python-runtime.ps1 -Variant default -InitialBackend cpu
+./scripts/prepare-python-runtime.ps1 -Variant dml -InitialBackend dml
 ```
 
 These are alternative runtime preparation examples; select one rather than running them sequentially. Preparation writes `python-runtime/`, requires network access, and involves large downloads. See the [Windows](./.github/workflows/release-windows.yml) and [macOS](./.github/workflows/release-macos.yml) workflows for complete staging, signing, validation, and asset splitting.

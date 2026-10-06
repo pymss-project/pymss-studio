@@ -225,6 +225,7 @@ const RUNTIME_BACKEND_DESC_KEYS: Record<RuntimeBackend, string> = {
   cuda: 'onboarding.runtimeCuda',
   rocm: 'onboarding.runtimeRocm',
   mlx: 'onboarding.runtimeMlx',
+  dml: 'onboarding.runtimeDml',
 }
 
 function runtimeBackendDescription(backend: RuntimeBackend | string) {
@@ -235,9 +236,10 @@ function runtimeBackendDescription(backend: RuntimeBackend | string) {
 type BackendCardBase = { backend: RuntimeBackend; label: string; description: string; offCatalog: boolean }
 
 const runtimeBackendCatalog = computed<BackendCardBase[]>(() => {
-  const { isMac, isAppleSilicon } = runtimePlatform.value
+  const { isMac, isWindows, isAppleSilicon } = runtimePlatform.value
   const backends: RuntimeBackend[] = ['cpu']
   if (!isMac) backends.push('cuda', 'rocm')
+  if (isWindows) backends.push('dml')
   if (isAppleSilicon) backends.push('mlx')
   return backends.map((backend) => ({
     backend,
@@ -289,7 +291,8 @@ const runtimeBackendCards = computed(() => {
         runtimeCoreUpdateAvailable(env, latestPymssVersion.value, latestPymssCoreVersion.value, app.runtimeInfo?.manifestVersion)
         || runtimeCoreSyncAvailable(env, app.runtimeInfo?.manifestVersion)
       )
-      const gpuBackend = item.backend === 'cuda' || item.backend === 'rocm' || item.backend === 'mlx'
+      const requiredVendor = item.backend === 'cuda' ? 'nvidia' : item.backend === 'rocm' ? 'amd' : null
+      const detectedVendors = app.runtimeInfo?.gpuVendors || []
       // A cancelled or failed install leaves its venv behind without an install state, so the
       // backend reads as not installed while still holding gigabytes. Surface it so the space
       // can be reclaimed instead of being stranded.
@@ -310,10 +313,10 @@ const runtimeBackendCards = computed(() => {
         // detection missing a card must never stop someone installing what they need.
         // Off-catalog cards already carry their own "not for this platform" line; a second,
         // near-identical explanation on top of it is just noise.
-        vendorMissing: gpuBackend
+        vendorMissing: requiredVendor !== null
           && !item.offCatalog
-          && runtimeRecommendedBackend.value !== null
-          && runtimeRecommendedBackend.value !== item.backend,
+          && detectedVendors.length > 0
+          && !detectedVendors.includes(requiredVendor),
         sizeHint: runtimeSizeHint(item.backend),
         // Absent means "not measured", and zero means the walk
         // could not read anything. Neither is a usable number, and formatBytes renders both as

@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("cuda", "default", "rocm", "mps", "mlx")]
+    [ValidateSet("cuda", "default", "rocm", "mps", "mlx", "dml")]
     [string]$Variant = "cuda",
     [string]$Python = "python",
     [string]$RuntimeDir = "python-runtime",
@@ -62,6 +62,7 @@ function Resolve-ManifestBackend {
     if ($InitialBackend) { return $InitialBackend }
     if ($Variant -in @("mps", "mlx")) { return "mlx" }
     if ($Variant -eq "rocm") { return "rocm" }
+    if ($Variant -eq "dml") { return "dml" }
     if ($Variant -eq "cuda") { return "cuda" }
     return "cpu"
 }
@@ -290,7 +291,7 @@ if ($InitialBackend) {
             })
         $manifestPackageNames = @($runtimeManifest.common.PSObject.Properties | ForEach-Object { $_.Name }) + $manifestBackendExtraNames
         $manifestPackageJson = $manifestPackageNames | ConvertTo-Json -Compress
-        $manifestMappingJson = '{"pysocks":"socks","pyyaml":"yaml","pymss-core":"pymss_core","typing-extensions":"typing_extensions"}'
+        $manifestMappingJson = '{"pysocks":"socks","pyyaml":"yaml","pymss-core":"pymss_core","torch-directml":"torch_directml","typing-extensions":"typing_extensions"}'
         $probeScript = @'
 import importlib.util, json, platform
 from importlib import metadata
@@ -314,6 +315,10 @@ try:
     result['torchVersion'] = torch.__version__
     result['torchBackend'] = 'rocm' if getattr(torch.version, 'hip', None) else 'cuda' if getattr(torch.version, 'cuda', None) else 'cpu'
     result['acceleratorAvailable'] = torch.cuda.is_available()
+    if result['torchBackend'] == 'cpu' and importlib.util.find_spec('torch_directml') is not None:
+        import torch_directml
+        result['torchBackend'] = 'dml'
+        result['acceleratorAvailable'] = bool(torch_directml.is_available())
 except Exception as exc:
     result['torchBackend'] = 'error:' + str(exc)
 print(json.dumps(result))

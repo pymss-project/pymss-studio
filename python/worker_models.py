@@ -891,6 +891,9 @@ def cmd_env_info() -> int:
         "cudaAvailableError": None,
         "cudaDeviceCount": 0,
         "cudaDevices": [],
+        "dmlAvailable": False,
+        "dmlDevices": [],
+        "dmlError": None,
         "cudaDeviceCountError": None,
         "cudaDeviceNamesError": None,
         "mpsAvailable": False,
@@ -942,6 +945,16 @@ def cmd_env_info() -> int:
         if device_name_errors:
             payload["cudaDeviceNamesError"] = "; ".join(device_name_errors)
         payload["cudaDevices"] = cuda_devices
+        if payload["torchBackend"] == "cpu" and import_available("torch_directml"):
+            payload["torchBackend"] = "dml"
+            try:
+                from pymss.devices import directml_available, directml_devices
+                payload["dmlAvailable"] = directml_available()
+                payload["dmlDevices"] = [
+                    {"id": item["index"], "name": item["name"]} for item in directml_devices()
+                ]
+            except Exception as exc:
+                payload["dmlError"] = str(exc)
         mps = getattr(torch.backends, "mps", None)
         payload["mpsAvailable"] = bool(mps and mps.is_available())
     except Exception as exc:

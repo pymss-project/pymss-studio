@@ -56,7 +56,7 @@ Pymss Studio 将 [pymss](https://github.com/pymss-project/pymss) 音乐源分离
 | 结果与工程 | 查看输出音轨和处理参数，试听结果、打开输出目录，并进入编辑器继续处理。 |
 | 音轨编辑器 | 多轨波形、片段编辑、播放控制、音量与声像、静音与独奏、淡入淡出、音轨效果、录音、工程保存、素材重连和混音导出。 |
 | 音频工具 | 格式转换、音频信息、SDR / SI-SDR、ASR、歌声转 MIDI、静音切片和音频合并。 |
-| 运行环境与设置 | 管理 CPU、CUDA、ROCm 和 MLX 等平台适用环境；配置下载源、代理、并发数、存储目录、语言、缩放及主题。 |
+| 运行环境与设置 | 管理 CPU、CUDA、ROCm、DirectML 和 MLX 等平台适用环境；配置下载源、代理、并发数、存储目录、语言、缩放及主题。 |
 
 不同模型的可用音轨、参数和运行设备可能不同，请以模型详情和当前运行环境为准。显卡加速效果取决于模型、硬件、驱动和任务配置。
 
@@ -73,6 +73,7 @@ Pymss Studio 将 [pymss](https://github.com/pymss-project/pymss) 音乐源分离
 | --- | --- | --- |
 | Windows x64，NVIDIA 显卡 | `windows-x64-cuda` | 使用 CUDA；需要兼容的显卡和驱动。 |
 | Windows x64，CPU 推理 | `windows-x64-cpu` | 不确定显卡兼容性时，可先选择此版本。 |
+| Windows x64，AMD / Intel / NVIDIA 的 DX12 显卡 | `windows-x64-dml` | DirectML 已接入当前源码与发布流程；所选 Release 是否含此包，以 Assets 为准。 |
 | Windows x64，受支持的 AMD 显卡 | `windows-x64-rocm` | ROCm 支持范围更具体，请核对所选版本的显卡及驱动要求。 |
 | Windows x64，希望减小首次下载体积 | `windows-x64-online` | 包含基础运行时，首次启动后安装需要的推理环境。 |
 | macOS 14+，Apple Silicon | `macos-arm64-mlx` | 使用 MLX，下载 `.dmg` 后将应用拖入 `/Applications`。 |
@@ -130,6 +131,7 @@ xattr -cr '/Applications/Pymss Studio.app'
 | 混音导出 | <a href="./images/screenshots/editor/export/zh-CN-light.webp"><img src="./images/screenshots/editor/export/zh-CN-light.webp" alt="混音导出" width="420" /></a> | <a href="./images/screenshots/editor/export/zh-CN-dark.webp"><img src="./images/screenshots/editor/export/zh-CN-dark.webp" alt="混音导出" width="420" /></a> |
 | ASR 语音识别 | <a href="./images/screenshots/tools/asr/zh-CN-light.webp"><img src="./images/screenshots/tools/asr/zh-CN-light.webp" alt="ASR 语音识别" width="420" /></a> | <a href="./images/screenshots/tools/asr/zh-CN-dark.webp"><img src="./images/screenshots/tools/asr/zh-CN-dark.webp" alt="ASR 语音识别" width="420" /></a> |
 | 人声转 MIDI | <a href="./images/screenshots/tools/midi/zh-CN-light.webp"><img src="./images/screenshots/tools/midi/zh-CN-light.webp" alt="人声转 MIDI" width="420" /></a> | <a href="./images/screenshots/tools/midi/zh-CN-dark.webp"><img src="./images/screenshots/tools/midi/zh-CN-dark.webp" alt="人声转 MIDI" width="420" /></a> |
+| 运行环境管理 | <a href="./images/screenshots/settings/runtime/zh-CN-light.webp"><img src="./images/screenshots/settings/runtime/zh-CN-light.webp" alt="运行环境管理" width="420" /></a> | <a href="./images/screenshots/settings/runtime/zh-CN-dark.webp"><img src="./images/screenshots/settings/runtime/zh-CN-dark.webp" alt="运行环境管理" width="420" /></a> |
 
 </details>
 
@@ -297,6 +299,7 @@ Windows 发布流程准备基础 Python 和指定后端环境，构建 Tauri 可
 ```powershell
 ./scripts/prepare-python-runtime.ps1 -Variant cuda -InitialBackend cuda
 ./scripts/prepare-python-runtime.ps1 -Variant default -InitialBackend cpu
+./scripts/prepare-python-runtime.ps1 -Variant dml -InitialBackend dml
 ```
 
 以上是独立的环境准备示例，应选择其中一项，而非依次执行。准备脚本会写入 `python-runtime/`，需要联网且下载量较大。完整暂存、签名、校验和分卷逻辑以 [Windows 工作流](./.github/workflows/release-windows.yml) 和 [macOS 工作流](./.github/workflows/release-macos.yml) 为准。

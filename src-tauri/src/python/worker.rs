@@ -361,7 +361,7 @@ fn is_bundled_runtime_python_path(file: &Path, python_path: &str) -> AppResult<b
     let content = std::fs::read_to_string(file)?;
     let record: ActiveRuntimeRecord = serde_json::from_str(&content)?;
     let backend = record.backend.unwrap_or_default().trim().to_ascii_lowercase();
-    if !matches!(backend.as_str(), "cpu" | "cuda" | "rocm" | "mlx") {
+    if !matches!(backend.as_str(), "cpu" | "cuda" | "rocm" | "mlx" | "dml") {
         return Ok(false);
     }
     let Some(envs_dir) = file.parent() else {
@@ -400,7 +400,7 @@ fn active_path_backend_matches(file: &Path, python_path: &str) -> bool {
     let Some(backend) = record.backend.filter(|value| !value.trim().is_empty()) else {
         return false;
     };
-    if !matches!(backend.trim().to_ascii_lowercase().as_str(), "cpu" | "cuda" | "rocm" | "mlx") {
+    if !matches!(backend.trim().to_ascii_lowercase().as_str(), "cpu" | "cuda" | "rocm" | "mlx" | "dml") {
         return false;
     }
     let path = PathBuf::from(python_path);
@@ -1870,6 +1870,20 @@ mod tests {
         )
         .unwrap());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn accepts_directml_environment_and_rejects_cross_backend_pointer() {
+        let fixture = ResourceFixture::new("bundled-directml");
+        let python = fixture.0.join("python-runtime/runtime-envs/dml/Scripts/python.exe");
+        fixture.file(&python);
+        let active = write_bundled_pointer(&fixture.0, "dml", "dml/Scripts/python.exe");
+        let path = fs::canonicalize(&python).unwrap().to_string_lossy().to_string();
+        assert!(super::active_path_backend_matches(&active, &path));
+        assert!(super::is_bundled_runtime_python_path(&active, &path).unwrap());
+        let active = write_bundled_pointer(&fixture.0, "cpu", "dml/Scripts/python.exe");
+        assert!(!super::active_path_backend_matches(&active, &path));
+        assert!(!super::is_bundled_runtime_python_path(&active, &path).unwrap());
     }
 
     #[test]

@@ -794,7 +794,7 @@ pub async fn debug_runtime_restore_file(app: AppHandle, payload: DebugRuntimeRes
 
 fn validate_debug_runtime_override(backend: &str, python_path: &str) -> AppResult<(String, String)> {
     let backend = backend.trim().to_lowercase();
-    if !matches!(backend.as_str(), "cpu" | "cuda" | "rocm" | "mlx") {
+    if !matches!(backend.as_str(), "cpu" | "cuda" | "rocm" | "mlx" | "dml") {
         return Err(AppError::Worker("runtime debug backend is unsupported".into()));
     }
     let python_path = python_path.trim();

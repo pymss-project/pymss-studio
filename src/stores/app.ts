@@ -24,6 +24,9 @@ export type EnvInfo = {
   cudaAvailableError?: string | null
   cudaDeviceCount?: number
   cudaDevices?: CudaDeviceInfo[]
+  dmlAvailable?: boolean
+  dmlDevices?: Array<{ id: number; name: string }>
+  dmlError?: string | null
   cudaDeviceCountError?: string | null
   cudaDeviceNamesError?: string | null
   mpsAvailable?: boolean
@@ -32,7 +35,7 @@ export type EnvInfo = {
   librosaAvailable?: boolean
 }
 
-export type RuntimeBackend = 'cpu' | 'cuda' | 'rocm' | 'mlx'
+export type RuntimeBackend = 'cpu' | 'cuda' | 'rocm' | 'mlx' | 'dml'
 type RuntimeDebugCommand = 'debug_runtime_override_active' | 'debug_runtime_write_file' | 'debug_runtime_restore_file'
 export type RuntimeInfo = {
   manifestVersion?: string
@@ -183,18 +186,20 @@ export const useAppStore = defineStore('app', () => {
       },
       {
         key: 'accelerator',
-        level: env.cudaAvailable || env.mpsAvailable || env.mlxAvailable ? 'ok' : 'warn',
+        level: env.cudaAvailable || env.dmlAvailable || env.mpsAvailable || env.mlxAvailable ? 'ok' : 'warn',
         label: 'Accelerator',
         value: env.cudaAvailable
           ? `${env.torchBackend === 'rocm' ? 'ROCm' : 'CUDA'} (${env.cudaDeviceCount || 0})`
-          : env.mlxAvailable
+          : env.dmlAvailable
+              ? `DirectML (${env.dmlDevices?.length || 0})`
+              : env.mlxAvailable
               ? 'MLX'
               : env.mpsAvailable
                 ? 'MPS'
               : 'CPU only',
-        detail: env.cudaAvailable || env.mpsAvailable || env.mlxAvailable
+        detail: env.cudaAvailable || env.dmlAvailable || env.mpsAvailable || env.mlxAvailable
           ? undefined
-          : 'No hardware accelerator detected. Separation still works, but can be slower.',
+          : env.dmlError || 'No hardware accelerator detected. Separation still works, but can be slower.',
       },
       {
         key: 'av',
@@ -228,7 +233,7 @@ export const useAppStore = defineStore('app', () => {
     if (!info?.ready) return false
     if (backend === 'mlx') return Boolean(info.packages?.mlx)
     if (info.torchBackend !== backend) return false
-    if (backend === 'cuda' || backend === 'rocm') return Boolean(info.acceleratorAvailable)
+    if (backend === 'cuda' || backend === 'rocm' || backend === 'dml') return Boolean(info.acceleratorAvailable)
     return true
   }
 
