@@ -28,7 +28,7 @@ runs:
       uses: Swatinem/rust-cache@v2
       with:
         workspaces: installer/moinstaller
-    - name: Build mo CLI (two-pass: template embeds mo-setup.exe on the 2nd pass)
+    - name: "Build mo CLI (two-pass, template embeds mo-setup.exe on the 2nd pass)"
       shell: pwsh
       run: |
         cargo build --release --manifest-path installer/moinstaller/Cargo.toml
