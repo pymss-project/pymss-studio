@@ -1,0 +1,19 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Cargo lock: 库 crate 通常不提交，但这是 workspace 应用项目，提交以保证可复现构建
+# （本仓库为应用，Cargo.lock 需要提交）
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+Thumbs.db
+.DS_Store
+
+# 构建产物
+*.setup.exe
+dist-out/

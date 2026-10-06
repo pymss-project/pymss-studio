@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mo-core",
+    "crates/mo-engine",
+    "crates/mo-script",
+    "crates/mo-setup",
+    "crates/mo-build",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/moinstaller/moinstaller"
+rust-version = "1.85"
+
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[workspace.dependencies]
+mo-core = { path = "crates/mo-core" }
+mo-build = { path = "crates/mo-build" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+zstd = "0.13"
+crc32fast = "1"
+thiserror = "2"
+glob = "0.3"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"

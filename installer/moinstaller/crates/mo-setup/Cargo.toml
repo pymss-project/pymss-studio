@@ -1,0 +1,33 @@
+[package]
+name = "mo-setup"
+description = "MoInstaller 安装器运行时：解析自身 overlay 并执行安装/卸载"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "mo-setup"
+path = "src/main.rs"
+
+[dependencies]
+mo-core = { workspace = true }
+mo-engine = { path = "../mo-engine" }
+mo-script = { path = "../mo-script" }
+eframe = "0.31"
+egui = "0.31"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+]
+
+[dev-dependencies]
+mo-build = { workspace = true }
+tempfile = { workspace = true }
+
+[build-dependencies]
+winresource = "0.1"
