@@ -535,7 +535,7 @@ impl Executor {
         if !created_dirs.is_empty() {
             let rm = created_dirs
                 .iter()
-                .map(|d| format!("rmdir \"{d}\""))
+                .map(|d| format!("rmdir \"{d}\" || (ping -n 3 127.0.0.1 >nul & rmdir \"{d}\")"))
                 .collect::<Vec<_>>()
                 .join(" & ");
             let cmd = format!("/c ping -n 3 127.0.0.1 >nul & {rm}");
