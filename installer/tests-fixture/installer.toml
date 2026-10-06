@@ -1,0 +1,48 @@
+[app]
+id = "CI-Smoke-Pymss-Studio"
+name = "Pymss Studio CI"
+version = "9.9.9"
+publisher = "TheSmallHanCat"
+
+[options]
+require_admin = false
+default_dir = "{localappdata}\\PymssSmokeCI"
+compression = "zstd19"
+
+[theme]
+pages = ["welcome", "dir", "components", "install", "finish"]
+
+[[components]]
+id = "desktopicon"
+name = "Create desktop icon"
+required = false
+default = false
+
+[[files]]
+src = "stage/Pymss-Studio-9.9.9-windows-x64-cuda/**/*"
+dst = "{app}"
+
+[[shortcuts]]
+name = "Pymss Studio CI"
+target = "{app}/Pymss Studio.exe"
+dest = "start-menu"
+
+[[shortcuts]]
+name = "Pymss Studio CI"
+target = "{app}/Pymss Studio.exe"
+dest = "desktop"
+component = "desktopicon"
+
+[uninstall]
+display_icon = "{app}\\Pymss Studio.exe"
+remove_app_dir = true
+
+[script]
+file = "../setup.rhai"
+timeout_ms = 600000
+
+[[hooks]]
+event = "after_install"
+run = "icacls"
+args = ["{app}\\python-runtime\\runtime-envs", "/grant", "*S-1-5-32-545:(OI)(CI)M"]
+on_error = "ignore"

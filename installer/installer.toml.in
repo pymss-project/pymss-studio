@@ -1,0 +1,62 @@
+# Pymss Studio Windows installer manifest (MoInstaller).
+# Generated from installer.toml.in by CI: __PYMSS_VERSION__ / __STAGE_NAME__ are replaced.
+
+[app]
+# Same GUID as the legacy Inno Setup AppId -> upgrades update the same control-panel entry.
+id = "{6A208087-F154-4C62-8916-E3D40B7C0F24}"
+name = "Pymss Studio"
+version = "__PYMSS_VERSION__"
+publisher = "TheSmallHanCat"
+
+[options]
+require_admin = true
+default_dir = "{pf}\\Pymss Studio"
+compression = "zstd19"
+
+[theme]
+pages = ["welcome", "dir", "components", "install", "finish"]
+
+# Desktop icon is opt-in, matching the legacy Inno task (Flags: unchecked).
+[[components]]
+id = "desktopicon"
+name = "Create desktop icon"
+required = false
+default = false
+
+# Single rule over the staged portable tree; setup.rhai decides per-file
+# whether bundled python-runtime/runtime-envs entries are installed on upgrade.
+[[files]]
+src = "stage/__STAGE_NAME__/**/*"
+dst = "{app}"
+overwrite = "overwrite"
+
+[[shortcuts]]
+name = "Pymss Studio"
+target = "{app}/Pymss Studio.exe"
+dest = "start-menu"
+
+[[shortcuts]]
+name = "Pymss Studio"
+target = "{app}/Pymss Studio.exe"
+dest = "desktop"
+component = "desktopicon"
+
+[uninstall]
+display_icon = "{app}\\Pymss Studio.exe"
+
+[run]
+after = "{app}/Pymss Studio.exe"
+
+# Port of the legacy Inno [Code] section: runtime-envs conditional install,
+# pyvenv.cfg repair, VC++ runtime bootstrap, cleanup, install marker.
+[script]
+file = "setup.rhai"
+timeout_ms = 600000
+
+# Users must be able to write managed runtime environments
+# (bootstrap interpreter stays read-only; SID = BUILTIN\Users).
+[[hooks]]
+event = "after_install"
+run = "icacls"
+args = ["{app}\\python-runtime\\runtime-envs", "/grant", "*S-1-5-32-545:(OI)(CI)M"]
+on_error = "ignore"
