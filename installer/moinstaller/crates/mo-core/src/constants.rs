@@ -84,15 +84,15 @@ impl ConstEnv {
     }
 
     /// 注入 {app} 与 {group}（开始菜单组名默认取应用名）。
+    /// userprograms 不可用时**不注入** {group}：展开处会明确报错，
+    /// 避免退化为相对路径把快捷方式写进安装器工作目录。
     pub fn with_app(mut self, app_dir: &Path, group_name: &str) -> Self {
         self.values
             .insert("app".into(), app_dir.to_string_lossy().into_owned());
-        let group_dir = self
-            .values
-            .get("userprograms")
-            .map(|p| p.clone() + "\\" + group_name)
-            .unwrap_or_else(|| group_name.to_string());
-        self.values.insert("group".into(), group_dir);
+        if let Some(p) = self.values.get("userprograms") {
+            let group_dir = p.clone() + "\\" + group_name;
+            self.values.insert("group".into(), group_dir);
+        }
         self
     }
 

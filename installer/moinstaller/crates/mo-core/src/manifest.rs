@@ -311,6 +311,10 @@ pub struct Uninstall {
     /// 控制面板卸载条目的 DisplayIcon（支持常量，如 "{app}\app.exe"）。
     #[serde(default)]
     pub display_icon: Option<String>,
+    /// 卸载时递归删除整个 {app} 目录（含安装后生成的文件，keep 除外）。
+    /// 对齐 Inno Setup 卸载语义；默认 false 仅回放 install.log 动作。
+    #[serde(default)]
+    pub remove_app_dir: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

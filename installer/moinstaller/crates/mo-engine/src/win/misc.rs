@@ -127,8 +127,12 @@ pub fn message_box(text: &str, kind: &str) -> bool {
 /// del 失败（exe 尚未完全退出/杀软短暂锁定）再重试一次。
 pub fn self_delete(exe: &Path) {
     let p = exe.to_string_lossy();
+    let parent = exe
+        .parent()
+        .map(|d| d.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let cmd = format!(
-        "/c ping -n 2 127.0.0.1 >nul & del /f /q \"{p}\" || (ping -n 2 127.0.0.1 >nul & del /f /q \"{p}\")"
+        "/c ping -n 2 127.0.0.1 >nul & (del /f /q \"{p}\" || (ping -n 2 127.0.0.1 >nul & del /f /q \"{p}\")) & rmdir \"{parent}\""
     );
     use std::os::windows::process::CommandExt;
     let _ = std::process::Command::new("cmd").raw_arg(cmd).spawn();

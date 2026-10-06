@@ -492,15 +492,56 @@ impl Executor {
 
         // 删除 install.log 自身（keep 集合中排除自己）
         let _ = std::fs::remove_file(&self.log_path);
-        // 尝试删除 {app} 目录（空才删）
-        if let Some(dir) = self.ctx.app_dir.parent() {
+        if manifest.uninstall.remove_app_dir {
+            // Inno 语义：递归删除整个 {app}（keep 除外；{app} 本身在 keep 中则不动）。
+            // 卸载程序自身正在运行会被锁：跳过自身逐项删除，收尾 self_delete
+            // 延迟删自身后再 rmdir 清目录。
+            let app_norm = norm_path(&self.ctx.app_dir.to_string_lossy());
+            let keep_root = keep.contains(&app_norm);
+            if !keep_root {
+                if let Ok(entries) = std::fs::read_dir(&self.ctx.app_dir) {
+                    for e in entries.flatten() {
+                        let p = e.path();
+                        if p == self_exe {
+                            continue;
+                        }
+                        if p.is_dir() {
+                            let _ = std::fs::remove_dir_all(&p);
+                        } else {
+                            let _ = std::fs::remove_file(&p);
+                        }
+                    }
+                }
+            }
+        } else {
+            // 保守语义：仅删除已空目录
             let _ = std::fs::remove_dir(&self.ctx.app_dir);
-            let _ = dir;
         }
 
         self.bus
             .emit(&Event::AfterUninstall, &self.ctx)
             .map_err(EngineError::HookAborted)?;
+
+        // Shell 目录（开始菜单组等）可能被 explorer 瞬时句柄占用：
+        // 对安装期创建的目录做延迟 rmdir（仅删空目录，安全）。
+        let created_dirs: Vec<String> = self
+            .log
+            .iter_rollback()
+            .filter_map(|r| match r {
+                ActionRecord::CreatedDir { path } => Some(path.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect();
+        if !created_dirs.is_empty() {
+            let rm = created_dirs
+                .iter()
+                .map(|d| format!("rmdir \"{d}\""))
+                .collect::<Vec<_>>()
+                .join(" & ");
+            let cmd = format!("/c ping -n 3 127.0.0.1 >nul & {rm}");
+            use std::os::windows::process::CommandExt;
+            let _ = std::process::Command::new("cmd").raw_arg(cmd).spawn();
+        }
 
         // 自删（延迟）
         misc::self_delete(self_exe);
@@ -528,7 +569,15 @@ impl Executor {
                     }
                 }
                 ActionRecord::CreatedDir { path } => {
-                    let _ = std::fs::remove_dir(&path); // 非空则失败忽略
+                    // 非空则失败忽略；瞬时句柄（索引/杀软）短暂重试
+                    for attempt in 0..3 {
+                        if std::fs::remove_dir(&path).is_ok() {
+                            break;
+                        }
+                        if attempt < 2 {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                    }
                 }
                 ActionRecord::SetReg {
                     root,
