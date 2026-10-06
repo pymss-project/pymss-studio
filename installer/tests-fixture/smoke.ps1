@@ -83,3 +83,4 @@ Assert "uninstall registry key removed" ($LASTEXITCODE -ne 0)
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 if ($failures -gt 0) { throw "$failures smoke assertion(s) failed" }
 Write-Host "ALL SMOKE ASSERTIONS PASSED"
+exit 0
