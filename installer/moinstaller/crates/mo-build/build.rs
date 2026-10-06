@@ -20,12 +20,15 @@ fn main() {
         println!("cargo:rerun-if-changed={}", template.display());
         std::fs::copy(&template, &dest).expect("复制模板失败");
     } else {
+        // 跟踪尚不存在的模板文件：mo-setup.exe 产出后本脚本自动重跑并固化。
+        // （若不声明，cargo 默认只在 build.rs 自身变化时重跑，全新环境两次构建
+        //   不足以固化模板。）
+        println!("cargo:rerun-if-changed={}", template.display());
         println!(
             "cargo:warning=mo-setup.exe 模板尚未构建（{}/mo-setup.exe 不存在）；mo-build 将使用占位模板。请再运行一次 cargo build --workspace。",
             target_profile_dir.display()
         );
         let _ = profile; // profile 仅用于定位
         std::fs::write(&dest, b"MO-PLACEHOLDER-TEMPLATE").expect("写占位模板失败");
-        // 不设置 rerun-if-changed：保持默认（任何变化重跑），下次构建自动刷新
     }
 }
