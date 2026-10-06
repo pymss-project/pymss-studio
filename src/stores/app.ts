@@ -33,6 +33,7 @@ export type EnvInfo = {
 }
 
 export type RuntimeBackend = 'cpu' | 'cuda' | 'rocm' | 'mlx'
+type RuntimeDebugCommand = 'debug_runtime_override_active' | 'debug_runtime_write_file' | 'debug_runtime_restore_file'
 export type RuntimeInfo = {
   manifestVersion?: string
   pythonVersion?: string
@@ -129,6 +130,7 @@ export const useAppStore = defineStore('app', () => {
   const envInfo = ref<EnvInfo | null>(null)
   const envLoading = ref(false)
   const envCheckedOnce = ref(false)
+  let envRequestId: string | null = null
   const workerEvents = ref<any[]>([])
   const workerEventConnectionStatus = ref<WorkerEventConnectionStatus>('idle')
   const workerEventConnectionError = ref('')
@@ -236,10 +238,13 @@ export const useAppStore = defineStore('app', () => {
   }
 
   function handleWorkerEvent(event: any) {
+    const envCheckFailed = event?.type === 'error' && event?.payload?.code === 'ENV_CHECK_FAILED'
+    if ((event?.type === 'env_info' || envCheckFailed) && (!envRequestId || event.requestId !== envRequestId)) return
     if (event?.type === 'env_info') {
       envInfo.value = event.payload
       envLoading.value = false
       envCheckedOnce.value = true
+      envRequestId = null
     }
     if (event?.type === 'error') {
       lastError.value = event.payload?.message || 'Unknown error'
@@ -250,9 +255,10 @@ export const useAppStore = defineStore('app', () => {
         runtimeInstallMessage.value = event.payload.message || runtimeInstallMessage.value
       }
     }
-    if (event?.type === 'error' && event?.payload?.code === 'ENV_CHECK_FAILED') {
+    if (envCheckFailed) {
       envLoading.value = false
       envCheckedOnce.value = true
+      envRequestId = null
     }
   }
 
@@ -266,25 +272,27 @@ export const useAppStore = defineStore('app', () => {
   }
 
   async function checkEnv() {
+    const requestId = crypto.randomUUID()
+    envRequestId = requestId
     envLoading.value = true
     lastError.value = null
-    if (!isTauriRuntime()) {
-      const result: EnvInfo = { platform: navigator.platform }
-      envInfo.value = result
-      envCheckedOnce.value = true
-      envLoading.value = false
-      return result
-    }
     try {
-      const result = await invoke<EnvInfo>('get_env_info')
-      envInfo.value = result
-      envCheckedOnce.value = true
+      const result: EnvInfo = isTauriRuntime()
+        ? await runRuntimeQuery(() => invoke<EnvInfo>('get_env_info'))
+        : { platform: navigator.platform }
+      if (envRequestId === requestId) {
+        envInfo.value = result
+        envCheckedOnce.value = true
+      }
       return result
     } catch (error) {
-      lastError.value = error instanceof Error ? error.message : String(error)
+      if (envRequestId === requestId) lastError.value = error instanceof Error ? error.message : String(error)
       throw error
     } finally {
-      envLoading.value = false
+      if (envRequestId === requestId) {
+        envRequestId = null
+        envLoading.value = false
+      }
     }
   }
 
@@ -294,13 +302,20 @@ export const useAppStore = defineStore('app', () => {
       envCheckedOnce.value = true
       return
     }
+    const requestId = crypto.randomUUID()
+    envRequestId = requestId
     envLoading.value = true
     lastError.value = null
     try {
-      await invoke('start_env_check')
+      await import('@/utils/events').then(({ registerWorkerEvents }) => registerWorkerEvents())
+      if (envRequestId !== requestId) return
+      await invoke('start_env_check', { requestId })
     } catch (error) {
-      envLoading.value = false
-      lastError.value = error instanceof Error ? error.message : String(error)
+      if (envRequestId === requestId) {
+        envRequestId = null
+        envLoading.value = false
+        lastError.value = error instanceof Error ? error.message : String(error)
+      }
       throw error
     }
   }
@@ -353,10 +368,12 @@ export const useAppStore = defineStore('app', () => {
         // Subscribe before dispatch so even an immediate terminal event releases the queue.
         await import('@/utils/events').then(({ registerWorkerEvents }) => registerWorkerEvents())
         if (operation.cancelled) return
-        operation.dispatched = true
-        await invoke(command, { payload })
-        resolveStarted()
-        await completed
+        await withRuntimeMutation(async () => {
+          operation.dispatched = true
+          await invoke(command, { payload })
+          resolveStarted()
+          await completed
+        })
       } catch (error) {
         rejectStarted(error)
         throw error
@@ -502,10 +519,33 @@ export const useAppStore = defineStore('app', () => {
       ...target,
       ...(options.onlyIfNoActive ? { onlyIfNoActive: true } : {}),
     }
-    await runRuntimeQuery(() => invoke('activate_runtime', { payload }), { retryBusy: false })
+    await mutateRuntime(() => invoke('activate_runtime', { payload }))
     const checks: Promise<unknown>[] = [checkRuntimeInfo(), checkEnv()]
     if (options.refreshCoreVersions !== false) checks.push(loadRuntimeCoreVersions())
     await Promise.all(checks)
+  }
+
+  function mutateRuntime<T>(mutation: () => Promise<T>): Promise<T> {
+    return runRuntimeQuery(() => withRuntimeMutation(mutation), { retryBusy: false })
+  }
+
+  async function withRuntimeMutation<T>(mutation: () => Promise<T>): Promise<T> {
+    // Invalidate probes before changing the interpreter or its configuration.
+    envRequestId = null
+    envLoading.value = true
+    try {
+      return await mutation()
+    } finally {
+      if (envRequestId === null) envLoading.value = false
+    }
+  }
+
+  async function updateDebugRuntime<T>(command: RuntimeDebugCommand, payload: Record<string, unknown>): Promise<T> {
+    const result = await mutateRuntime(() => invoke<T>(command, { payload }))
+    // A debug write may deliberately leave the interpreter unusable. Preserve the
+    // successful file-write result while recording probe failures in diagnostics.
+    await Promise.allSettled([checkRuntimeInfo(), checkEnv()])
+    return result
   }
 
   async function cancelRuntimeInstall() {
@@ -667,6 +707,7 @@ export const useAppStore = defineStore('app', () => {
     cancelRuntimeCoreUpdate,
     updateRuntimeCore,
     activateRuntime,
+    updateDebugRuntime,
     cancelRuntimeInstall,
     waitForRuntimeInstall,
     deleteRuntime,

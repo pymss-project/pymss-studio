@@ -1109,7 +1109,11 @@ pub fn run_worker_with_payload(
             Ok(envelope) => {
                 last_payload = envelope.payload.clone();
                 log_worker_event(app, command, &envelope);
-                let _ = app.emit("pymss://worker-event", &envelope);
+                // Environment probes return through IPC or a correlated background event.
+                // An untagged broadcast would bypass the caller's request ordering.
+                if command != "env_info" {
+                    let _ = app.emit("pymss://worker-event", &envelope);
+                }
                 if envelope.event_type == "error" {
                     worker_error = Some(AppError::Worker(
                         envelope

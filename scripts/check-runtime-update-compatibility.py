@@ -18,13 +18,16 @@ def runtime_base_compatibility(
     *,
     base_layout_changed: bool = False,
 ) -> tuple[bool, str]:
-    """Return whether an installed base runtime can be reused with a new core overlay."""
+    """Compare the base contract; layout/ABI changes must increment baseGeneration.
+
+    Preparation scripts can add dependencies or probe backends without changing
+    that contract. Pruning changes still require a complete base replacement.
+    """
     previous_generation = int(previous.get("baseGeneration", 1))
     current_generation = int(current.get("baseGeneration", 1))
     if previous_generation != current_generation:
         return False, f"base generation changed: {previous_generation} -> {current_generation}"
-    # Releases predating baseGeneration form the one-time bridge into generation 1. After that
-    # marker is published, a base build-script change must be made explicit by incrementing it.
+    # Releases predating baseGeneration form the one-time bridge into generation 1.
     if base_layout_changed and "baseGeneration" in previous:
         return False, "base runtime build scripts changed without increasing baseGeneration"
     if previous.get("python") != current.get("python"):

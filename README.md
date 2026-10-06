@@ -130,7 +130,6 @@ These previews show the main features in English and Chinese, with light and dar
 | Mix export | <a href="./images/screenshots/editor/export/en-light.webp"><img src="./images/screenshots/editor/export/en-light.webp" alt="Mix export" width="420" /></a> | <a href="./images/screenshots/editor/export/en-dark.webp"><img src="./images/screenshots/editor/export/en-dark.webp" alt="Mix export" width="420" /></a> |
 | ASR speech recognition | <a href="./images/screenshots/tools/asr/en-light.webp"><img src="./images/screenshots/tools/asr/en-light.webp" alt="ASR speech recognition" width="420" /></a> | <a href="./images/screenshots/tools/asr/en-dark.webp"><img src="./images/screenshots/tools/asr/en-dark.webp" alt="ASR speech recognition" width="420" /></a> |
 | Vocal-to-MIDI conversion | <a href="./images/screenshots/tools/midi/en-light.webp"><img src="./images/screenshots/tools/midi/en-light.webp" alt="Vocal-to-MIDI conversion" width="420" /></a> | <a href="./images/screenshots/tools/midi/en-dark.webp"><img src="./images/screenshots/tools/midi/en-dark.webp" alt="Vocal-to-MIDI conversion" width="420" /></a> |
-| Runtime environment management | <a href="./images/screenshots/settings/runtime/en-light.webp"><img src="./images/screenshots/settings/runtime/en-light.webp" alt="Runtime environment management" width="420" /></a> | <a href="./images/screenshots/settings/runtime/en-dark.webp"><img src="./images/screenshots/settings/runtime/en-dark.webp" alt="Runtime environment management" width="420" /></a> |
 
 </details>
 

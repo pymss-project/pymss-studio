@@ -18,6 +18,7 @@ $runtime = Join-Path $root $RuntimeDir
 $effectiveRuntimeEnvsDir = if ($RuntimeEnvsDir) { $RuntimeEnvsDir } else { Join-Path $runtime "runtime-envs" }
 $manifestPath = Join-Path $root "python\runtime-manifest.json"
 $runtimeManifest = Get-Content -Raw $manifestPath | ConvertFrom-Json
+# Changes to the embedded Python or venv layout require a new manifest baseGeneration.
 if ($InitialBackend -eq "mps") {
     # MPS is the historical name; the runtime directory and manifest backend are both mlx.
     $InitialBackend = "mlx"
@@ -248,16 +249,16 @@ if ($InitialBackend) {
     Invoke-NativeChecked -FilePath $envPython -Arguments @('-m', 'pip', 'install', '--upgrade', 'pip', 'setuptools', 'wheel')
 
     # Step 3: Install packages for the backend
-    $torchRequirement = $effectiveTorchRequirement
+    $torchRequirements = if ($manifestTorch.requirements -and !$torchVersionOverride) { @($manifestTorch.requirements) } else { @($effectiveTorchRequirement) }
     if ($InitialBackend -eq "rocm") {
         $rocmSdkWheels = @($manifestTorch.rocmRequirements | ForEach-Object { [string]$_ })
         Invoke-NativeChecked -FilePath $envPython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir') + $rocmSdkWheels)
         $rocmWheels = @($manifestTorch.requirements | ForEach-Object { [string]$_ })
         Invoke-NativeChecked -FilePath $envPython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir', '--no-deps') + $rocmWheels)
     } elseif ([string]::IsNullOrWhiteSpace($effectiveTorchIndexUrl)) {
-        Invoke-NativeChecked -FilePath $envPython -Arguments @('-m', 'pip', 'install', '--no-cache-dir', $torchRequirement)
+        Invoke-NativeChecked -FilePath $envPython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir') + $torchRequirements)
     } else {
-        Invoke-NativeChecked -FilePath $envPython -Arguments @('-m', 'pip', 'install', '--no-cache-dir', $torchRequirement, '--index-url', $effectiveTorchIndexUrl)
+        Invoke-NativeChecked -FilePath $envPython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir', '--index-url', $effectiveTorchIndexUrl) + $torchRequirements)
     }
     Invoke-NativeChecked -FilePath $envPython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir', '--only-binary=:all:', '--prefer-binary') + $manifestCommonRequirements)
     if ($manifestBackendExtras.Count -gt 0) {
@@ -289,7 +290,7 @@ if ($InitialBackend) {
             })
         $manifestPackageNames = @($runtimeManifest.common.PSObject.Properties | ForEach-Object { $_.Name }) + $manifestBackendExtraNames
         $manifestPackageJson = $manifestPackageNames | ConvertTo-Json -Compress
-        $manifestMappingJson = '{"pyyaml":"yaml","pymss-core":"pymss_core","typing-extensions":"typing_extensions"}'
+        $manifestMappingJson = '{"pysocks":"socks","pyyaml":"yaml","pymss-core":"pymss_core","typing-extensions":"typing_extensions"}'
         $probeScript = @'
 import importlib.util, json, platform
 from importlib import metadata
@@ -418,16 +419,16 @@ if ($Minimal) {
     exit 0
 }
 Install-BootstrapRequirements -PythonPath $runtimePython
-$torchRequirement = $effectiveTorchRequirement
+$torchRequirements = if ($manifestTorch.requirements -and !$torchVersionOverride) { @($manifestTorch.requirements) } else { @($effectiveTorchRequirement) }
 if ($Variant -eq "rocm") {
     $rocmSdkWheels = @($manifestTorch.rocmRequirements | ForEach-Object { [string]$_ })
     Invoke-NativeChecked -FilePath $runtimePython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir') + $rocmSdkWheels)
     $rocmWheels = @($manifestTorch.requirements | ForEach-Object { [string]$_ })
     Invoke-NativeChecked -FilePath $runtimePython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir', '--no-deps') + $rocmWheels)
 } elseif ([string]::IsNullOrWhiteSpace($effectiveTorchIndexUrl)) {
-    Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-m', 'pip', 'install', '--no-cache-dir', $torchRequirement)
+    Invoke-NativeChecked -FilePath $runtimePython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir') + $torchRequirements)
 } else {
-    Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-m', 'pip', 'install', '--no-cache-dir', $torchRequirement, '--index-url', $effectiveTorchIndexUrl)
+    Invoke-NativeChecked -FilePath $runtimePython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir', '--index-url', $effectiveTorchIndexUrl) + $torchRequirements)
 }
 Invoke-NativeChecked -FilePath $runtimePython -Arguments (@('-m', 'pip', 'install', '--no-cache-dir', '--only-binary=:all:', '--prefer-binary') + $manifestCommonRequirements)
 if ($manifestBackendExtras.Count -gt 0) {

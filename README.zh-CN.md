@@ -130,7 +130,6 @@ xattr -cr '/Applications/Pymss Studio.app'
 | 混音导出 | <a href="./images/screenshots/editor/export/zh-CN-light.webp"><img src="./images/screenshots/editor/export/zh-CN-light.webp" alt="混音导出" width="420" /></a> | <a href="./images/screenshots/editor/export/zh-CN-dark.webp"><img src="./images/screenshots/editor/export/zh-CN-dark.webp" alt="混音导出" width="420" /></a> |
 | ASR 语音识别 | <a href="./images/screenshots/tools/asr/zh-CN-light.webp"><img src="./images/screenshots/tools/asr/zh-CN-light.webp" alt="ASR 语音识别" width="420" /></a> | <a href="./images/screenshots/tools/asr/zh-CN-dark.webp"><img src="./images/screenshots/tools/asr/zh-CN-dark.webp" alt="ASR 语音识别" width="420" /></a> |
 | 人声转 MIDI | <a href="./images/screenshots/tools/midi/zh-CN-light.webp"><img src="./images/screenshots/tools/midi/zh-CN-light.webp" alt="人声转 MIDI" width="420" /></a> | <a href="./images/screenshots/tools/midi/zh-CN-dark.webp"><img src="./images/screenshots/tools/midi/zh-CN-dark.webp" alt="人声转 MIDI" width="420" /></a> |
-| 运行环境管理 | <a href="./images/screenshots/settings/runtime/zh-CN-light.webp"><img src="./images/screenshots/settings/runtime/zh-CN-light.webp" alt="运行环境管理" width="420" /></a> | <a href="./images/screenshots/settings/runtime/zh-CN-dark.webp"><img src="./images/screenshots/settings/runtime/zh-CN-dark.webp" alt="运行环境管理" width="420" /></a> |
 
 </details>
 

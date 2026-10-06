@@ -115,9 +115,10 @@ jobs:
             previous_manifest="$(mktemp)"
             git show "$previous_tag:python/runtime-manifest.json" > "$previous_manifest"
             base_layout_args=()
+            # Python ABI, accelerator packages and layout revisions are compared in the
+            # manifest. Dependency installation/probe changes in prepare scripts do not
+            # replace an installed base; pruning changes can remove runtime files.
             if ! git diff --quiet "$previous_tag" "$GITHUB_SHA" -- \
-                scripts/prepare-python-runtime.ps1 \
-                scripts/prepare-python-runtime.sh \
                 scripts/prune-python-runtime.ps1 \
                 scripts/prune-python-runtime.sh; then
               base_layout_args+=(--base-layout-changed)

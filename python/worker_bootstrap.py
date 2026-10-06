@@ -1269,9 +1269,9 @@ def _manifest_versions_are_satisfied(
     versions = probed.get("packageVersions") or {}
     requirements: dict[str, Any] = dict(manifest.get("common", {}))
     for extra in manifest.get("backends", {}).get(backend, {}).get("extras", []) or []:
-        name = str(extra).split("[", 1)[0].split("=", 1)[0].strip()
+        name = Requirement(str(extra)).name
         if name:
-            requirements.setdefault(name, extra)
+            requirements[name] = extra
     torch_requirement = manifest.get("backends", {}).get(backend, {}).get("torch", {}).get("requirement")
     if torch_requirement:
         requirements["torch"] = torch_requirement
@@ -1337,7 +1337,7 @@ def _runtime_info_payload(payload: dict[str, Any], *, repair: bool = True) -> di
     if not backend and sys.platform == "darwin" and "mlx" not in extra_names:
         extra_names = [*extra_names, "mlx"]
     for name in extra_names:
-        packages[name] = _module_available(name)
+        packages[name] = _module_available(PACKAGE_IMPORT_NAMES.get(name, name))
     torch_version = None
     torch_backend = "missing"
     accelerator_available = False

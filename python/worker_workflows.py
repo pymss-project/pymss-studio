@@ -162,6 +162,41 @@ def _resolve_device(payload: dict[str, Any]) -> str | None:
     return device or None
 
 
+def _apply_runtime_device(dag: Any, payload: dict[str, Any], *, simple: bool) -> None:
+    """Materialize the selected adapter into nodes that inherit the runtime."""
+    requested = _resolve_device(payload)
+    if requested != "auto":
+        return
+    targets = []
+    for node in dag.nodes:
+        node_type = node.type.removeprefix("pymss_").removesuffix("_list")
+        if node_type not in {"mss_separate", "vr_separate", "custom_mss_separate"}:
+            continue
+        widgets = node.data["widgets_values"]
+        custom = node_type == "custom_mss_separate"
+        device_index, ids_index = (2, 3) if custom else (1, 4)
+        device = widgets[device_index] if len(widgets) > device_index else "auto"
+        if device in {None, "", "auto"}:
+            node_ids = widgets[ids_index] if len(widgets) > ids_index else None
+            # Graph adapter widgets are explicit, including zero. The native
+            # graph context already supplies the inherited backend.
+            if not simple and node_ids not in (None, "", []) and str(node_ids).strip():
+                continue
+            targets.append((widgets, custom))
+    if not targets:
+        return
+    from worker_infer import _resolve_separator_device
+
+    _, ids, _ = _resolve_separator_device(requested, payload.get("deviceIds"))
+    for widgets, custom in targets:
+        defaults = ["", "mel_band_roformer", "auto", "0"] if custom else ["", "auto", True, "modelscope", "0"]
+        device_index, ids_index = (2, 3) if custom else (1, 4)
+        while len(widgets) <= ids_index:
+            widgets.append(defaults[len(widgets)])
+        widgets[device_index] = requested
+        widgets[ids_index] = ",".join(str(index) for index in ids)
+
+
 def _emit_progress(task_id: str) -> Any:
     """Forward native overall progress and display only audio-second counters."""
     def cb(event: dict[str, Any]) -> None:
@@ -1043,6 +1078,7 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
     else:
         dag = graph.load_comfy_file(workflow_path)
 
+    _apply_runtime_device(dag, payload, simple=simple_definition is not None)
     task_output_dir.mkdir(parents=True, exist_ok=True)
     saved_paths: list[str] = []
     output_records: list[Any | None] = []

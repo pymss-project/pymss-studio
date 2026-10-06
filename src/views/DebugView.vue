@@ -975,14 +975,13 @@ async function saveRuntimeDebugEditor() {
   if (!path) return
   runtimeDebugSaving.value = path
   try {
-    const info = await invoke<DebugRuntimePointers>('debug_runtime_write_file', {
-      payload: { path, content: runtimeDebugEditingContent.value || '', backup: true },
+    const info = await app.updateDebugRuntime<DebugRuntimePointers>('debug_runtime_write_file', {
+      path, content: runtimeDebugEditingContent.value || '', backup: true,
     })
     setRuntimeDebugInfo(info)
     runtimeDebugEditorVisible.value = false
     runtimeDebugEditingPath.value = ''
     runtimeDebugEditingContent.value = ''
-    await app.checkRuntimeInfo().catch(() => {})
     message.success(t('debug.runtimeDebugSaved'))
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error))
@@ -995,9 +994,8 @@ async function restoreRuntimeDebugFile(file: DebugRuntimeFileInfo) {
   if (!developerMode.value || !file.backupExists) return
   runtimeDebugSaving.value = file.path
   try {
-    const info = await invoke<DebugRuntimePointers>('debug_runtime_restore_file', { payload: { path: file.path } })
+    const info = await app.updateDebugRuntime<DebugRuntimePointers>('debug_runtime_restore_file', { path: file.path })
     setRuntimeDebugInfo(info)
-    await app.checkRuntimeInfo().catch(() => {})
     message.success(t('debug.runtimeDebugRestored'))
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error))
@@ -1271,11 +1269,10 @@ async function overrideActiveRuntimePointer() {
   if (!developerMode.value || !runtimeOverrideBackend.value || !runtimeOverridePythonPath.value.trim()) return
   runtimeDebugSaving.value = 'active-runtime'
   try {
-    const info = await invoke<DebugRuntimePointers>('debug_runtime_override_active', {
-      payload: { backend: runtimeOverrideBackend.value, pythonPath: runtimeOverridePythonPath.value.trim() },
+    const info = await app.updateDebugRuntime<DebugRuntimePointers>('debug_runtime_override_active', {
+      backend: runtimeOverrideBackend.value, pythonPath: runtimeOverridePythonPath.value.trim(),
     })
     setRuntimeDebugInfo(info)
-    await app.checkRuntimeInfo().catch(() => {})
     runtimeOverrideDirty.value = false
     syncRuntimeOverrideFromCurrent(true)
     message.success(t('debug.runtimeDebugOverrideSaved'))

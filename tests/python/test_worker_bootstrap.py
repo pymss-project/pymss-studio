@@ -730,7 +730,8 @@ class PackageImportNameTests(unittest.TestCase):
     def _manifest_packages(self):
         # The real manifest, not the test stub: this is a guard on the shipped dependency list.
         manifest = json.loads(worker_bootstrap.MANIFEST_PATH.read_text(encoding="utf-8"))
-        extras = [name for spec in manifest["backends"].values() for name in spec.get("extras", [])]
+        extras = [worker_bootstrap.Requirement(spec).name
+                  for backend in manifest["backends"].values() for spec in backend.get("extras", [])]
         return [*manifest["common"], *extras]
 
     def test_every_manifest_package_resolves_to_an_importable_name(self):

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "baseGeneration": 1,
-  "manifestVersion": "2026.09.3",
+  "manifestVersion": "2026.10.1",
   "python": "3.12",
   "bootstrap": {
     "requests": "requests[socks]>=2.32,<3"
@@ -20,8 +20,8 @@
     "requests": "requests>=2.32,<3",
     "pyyaml": "pyyaml>=6.0.1,<7",
     "tqdm": "tqdm>=4.60,<5",
-    "pymss": "pymss[proxy]==2.1.7",
-    "pymss-core": "pymss-core==0.1.10"
+    "pymss": "pymss[proxy]==2.1.8",
+    "pymss-core": "pymss-core==0.1.11"
   },
   "backends": {
     "cpu": {

@@ -66,6 +66,14 @@ class RuntimeUpdateCompatibilityTests(unittest.TestCase):
         }
         self.assertTrue(MODULE.runtime_base_compatibility(manifest(), current)[0])
 
+    def test_core_updates_preserve_the_existing_base(self):
+        previous = manifest(common={"pymss": "pymss[proxy]==2.1.7", "pymss-core": "pymss-core==0.1.10"})
+        current = manifest(common={"pymss": "pymss[proxy]==2.1.8", "pymss-core": "pymss-core==0.1.11"})
+        self.assertTrue(MODULE.runtime_base_compatibility(previous, current)[0])
+        self.assertFalse(MODULE.runtime_base_compatibility(previous, current, base_layout_changed=True)[0])
+        current["python"] = "3.13"
+        self.assertFalse(MODULE.runtime_base_compatibility(previous, current)[0])
+
 
 if __name__ == "__main__":
     unittest.main()

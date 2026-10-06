@@ -20,6 +20,9 @@ import { connectWorkerEvents } from '@/utils/events'
 
 const settings = useSettingsStore()
 const app = useAppStore()
+watch([() => settings.initialized, () => app.envInfo], ([initialized, env]) => {
+  if (initialized && env?.torchAvailable) settings.reconcileRuntimeDevice(env)
+}, { immediate: true })
 const updates = useUpdateStore()
 const workflow = useWorkflowStore()
 const route = useRoute()

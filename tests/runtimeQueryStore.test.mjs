@@ -3,6 +3,12 @@ import test, { after } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
 import { createPinia, setActivePinia } from 'pinia'
+import { nextTick, watch } from 'vue'
+import { Window } from 'happy-dom'
+
+const browser = new Window()
+globalThis.window = browser
+globalThis.document = browser.document
 
 const vite = await createServer({
   configFile: false,
@@ -11,10 +17,14 @@ const vite = await createServer({
   optimizeDeps: { noDiscovery: true },
   resolve: { alias: { '@': fileURLToPath(new URL('../src', import.meta.url)) } },
   plugins: [{
-    name: 'stub-worker-events-registration',
+    name: 'stub-worker-events-and-model-refresh',
     enforce: 'pre',
     transform(_code, id) {
-      if (!id.replaceAll('\\', '/').endsWith('/src/utils/events.ts')) return null
+      const normalized = id.replaceAll('\\', '/')
+      if (normalized.endsWith('/src/stores/model.ts')) {
+        return 'export function useModelStore() { return { loadModels: async () => undefined } }'
+      }
+      if (!normalized.endsWith('/src/utils/events.ts')) return null
       return `
         let register = async () => undefined
         export function __setRegisterWorkerEventsForTest(next) { register = next }
@@ -26,6 +36,7 @@ const vite = await createServer({
 after(() => vite.close())
 
 const { useAppStore } = await vite.ssrLoadModule('/src/stores/app.ts')
+const { useSettingsStore } = await vite.ssrLoadModule('/src/stores/settings.ts')
 const { __setRegisterWorkerEventsForTest } = await vite.ssrLoadModule('/src/utils/events.ts')
 
 function installTauriInvoke(invoke) {
@@ -117,6 +128,414 @@ async function within(promise, label) {
     clearTimeout(timer)
   }
 }
+
+test('runtime changes reconcile incompatible device preferences and retain compatible choices', () => {
+  setActivePinia(createPinia())
+  const settings = useSettingsStore()
+  const cpu = { torchAvailable: true, torchBackend: 'cpu' }
+  settings.defaultDevice = 'cuda:1'
+  assert.deepEqual(settings.getRuntimeDeviceConfig(cpu), { device: 'auto', deviceIds: [0] })
+  settings.reconcileRuntimeDevice(cpu)
+  assert.equal(settings.defaultDevice, 'auto')
+  settings.defaultDevice = 'cpu'
+  settings.reconcileRuntimeDevice(cpu)
+  assert.equal(settings.defaultDevice, 'cpu')
+  settings.defaultDevice = 'cuda:1'
+  settings.reconcileRuntimeDevice({ torchAvailable: true, torchBackend: 'rocm' })
+  assert.deepEqual(settings.getRuntimeDeviceConfig(), { device: 'cuda', deviceIds: [1] })
+  settings.reconcileRuntimeDevice({ torchAvailable: false, torchBackend: 'missing' })
+  assert.equal(settings.defaultDevice, 'cuda:1')
+  settings.defaultDevice = 'mps'
+  settings.reconcileRuntimeDevice({ ...cpu, mpsAvailable: true })
+  assert.equal(settings.defaultDevice, 'mps')
+  settings.reconcileRuntimeDevice(cpu)
+  assert.equal(settings.defaultDevice, 'auto')
+  settings.defaultDevice = 'mlx'
+  settings.reconcileRuntimeDevice({ ...cpu, mlxAvailable: true })
+  assert.equal(settings.defaultDevice, 'mlx')
+  settings.reconcileRuntimeDevice(cpu)
+  assert.equal(settings.defaultDevice, 'auto')
+  settings.$dispose()
+})
+
+for (const action of [
+  {
+    label: 'runtime installation', command: 'start_runtime_install', finished: 'runtime_install_finished',
+    failed: 'runtime_install_failed', start: app => app.installRuntime('cuda'),
+  },
+  {
+    label: 'runtime core repair', command: 'start_runtime_core_update', finished: 'runtime_core_update_finished',
+    failed: 'error', start: app => app.updateRuntimeCore('cuda', 'auto', '', { repairDependencies: true }),
+  },
+]) {
+  test(`${action.label} ignores old environment replies and preserves the selected GPU`, async () => {
+    let requestId
+    const persisted = deferred()
+    const cuda = { torchAvailable: true, torchBackend: 'cuda', cudaAvailable: true, cudaDeviceCount: 2 }
+    const app = appStore(async (command, args) => {
+      if (command === 'start_env_check') { requestId = args.requestId; return { started: true } }
+      if (command === action.command) return true
+      if (command === 'get_env_info') return cuda
+      if (command === 'runtime_info') return { ready: true, installedBackend: 'cuda' }
+      if (command === 'runtime_core_versions') return {}
+      if (command === 'save_app_store') { persisted.resolve(args.data); return }
+      throw new Error(`unexpected ${command}`)
+    })
+    const settings = useSettingsStore()
+    settings.initialized = true
+    settings.defaultDevice = 'cuda:1'
+    const stop = watch(() => app.envInfo, env => {
+      if (env?.torchAvailable) settings.reconcileRuntimeDevice(env)
+    })
+    let taskId
+    try {
+      await app.checkEnvInBackground()
+      taskId = await within(action.start(app), `${action.label} ACK`)
+      app.handleWorkerEvent({ type: 'env_info', requestId, payload: { torchAvailable: true, torchBackend: 'cpu' } })
+      app.handleWorkerEvent({ type: 'error', requestId, payload: { code: 'ENV_CHECK_FAILED', message: 'obsolete probe' } })
+      await nextTick()
+      assert.equal(app.envInfo, null)
+      assert.equal(app.envLoading, true)
+      assert.equal(app.lastError, null)
+      assert.equal(settings.defaultDevice, 'cuda:1')
+
+      app.handleRuntimeEvent({ type: action.finished, taskId, payload: { state: { backend: 'cuda' } } })
+      await within(app.checkEnv(), 'environment after background mutation')
+      await nextTick()
+      assert.equal(settings.defaultDevice, 'cuda:1')
+      assert.deepEqual(settings.getRuntimeDeviceConfig(app.envInfo), { device: 'cuda', deviceIds: [1] })
+      assert.equal(app.envInfo.torchBackend, 'cuda')
+      assert.equal(app.envLoading, false)
+      assert.equal((await within(persisted.promise, 'saved GPU preference')).defaultDevice, 'cuda:1')
+    } finally {
+      if (taskId) app.handleRuntimeEvent({ type: 'task_cancelled', taskId })
+      stop()
+      await within(persisted.promise, 'pending settings persistence')
+      settings.$dispose()
+      app.$dispose()
+    }
+  })
+
+  test(`${action.label} start failures release the queue and invalidated probe state`, async () => {
+    let requestId
+    const failure = new Error('Runtime mutation could not start')
+    const app = appStore(async (command, args) => {
+      if (command === 'start_env_check') { requestId = args.requestId; return { started: true } }
+      if (command === action.command) throw failure
+      if (command === 'get_env_info') return { torchBackend: 'cuda' }
+      throw new Error(`unexpected ${command}`)
+    })
+    await app.checkEnvInBackground()
+    await assert.rejects(action.start(app), error => error === failure)
+    assert.equal(app.envLoading, false)
+    app.handleWorkerEvent({ type: 'env_info', requestId, payload: { torchBackend: 'cpu' } })
+    assert.equal(app.envInfo, null)
+    await within(app.checkEnv(), 'environment after failed background dispatch')
+    assert.equal(app.envInfo.torchBackend, 'cuda')
+  })
+
+  for (const terminal of [action.failed, 'task_cancelled']) {
+    test(`${action.label} ${terminal} restores loading state and permits a fresh probe`, async () => {
+      let requestId
+      const refreshed = deferred()
+      const app = appStore(async (command, args) => {
+        if (command === 'start_env_check') { requestId = args.requestId; return { started: true } }
+        if (command === action.command) return true
+        if (command === 'runtime_info') return { ready: true }
+        if (command === 'get_env_info') return refreshed.promise
+        throw new Error(`unexpected ${command}`)
+      })
+      await app.checkEnvInBackground()
+      const taskId = await within(action.start(app), `${action.label} ACK`)
+      app.handleRuntimeEvent({ type: terminal, taskId, payload: { message: 'Runtime mutation stopped' } })
+      await within(app.checkRuntimeInfo(), 'queue after terminal event')
+      assert.equal(app.envLoading, false)
+
+      const probe = app.checkEnv()
+      app.handleWorkerEvent({ type: 'env_info', requestId, payload: { torchBackend: 'cpu' } })
+      assert.equal(app.envInfo, null)
+      assert.equal(app.envLoading, true)
+      refreshed.resolve({ torchBackend: 'cuda' })
+      await within(probe, 'new probe after terminal event')
+      assert.equal(app.envInfo.torchBackend, 'cuda')
+      assert.equal(app.envLoading, false)
+    })
+  }
+
+  test(`${action.label} cleanup preserves the loading state of a newer queued probe`, async () => {
+    let requestId
+    const probing = deferred()
+    const refreshed = deferred()
+    const app = appStore(async (command, args) => {
+      if (command === 'start_env_check') { requestId = args.requestId; return { started: true } }
+      if (command === action.command) return true
+      if (command === 'get_env_info') { probing.resolve(); return refreshed.promise }
+      throw new Error(`unexpected ${command}`)
+    })
+    await app.checkEnvInBackground()
+    const taskId = await within(action.start(app), `${action.label} ACK`)
+    const probe = app.checkEnv()
+    app.handleRuntimeEvent({ type: 'task_cancelled', taskId })
+    await within(probing.promise, 'probe after mutation cleanup')
+    assert.equal(app.envLoading, true)
+    app.handleWorkerEvent({ type: 'env_info', requestId, payload: { torchBackend: 'cpu' } })
+    assert.equal(app.envInfo, null)
+    refreshed.resolve({ torchBackend: 'cuda' })
+    await within(probe, 'queued environment probe')
+    assert.equal(app.envInfo.torchBackend, 'cuda')
+    assert.equal(app.envLoading, false)
+  })
+}
+
+test('cancellation before dispatch preserves an existing background environment probe', async () => {
+  let requestId
+  const registered = deferred()
+  const calls = []
+  const app = appStore(async (command, args) => {
+    calls.push(command)
+    if (command === 'start_env_check') { requestId = args.requestId; return { started: true } }
+    throw new Error(`unexpected ${command}`)
+  })
+  await app.checkEnvInBackground()
+  __setRegisterWorkerEventsForTest(() => registered.promise)
+  const start = app.installRuntime('cuda')
+  await Promise.resolve()
+  assert.equal(await app.cancelRuntimeInstall(), true)
+  registered.resolve()
+  await within(start, 'cancelled dispatch')
+  assert.equal(app.envLoading, true)
+  app.handleWorkerEvent({ type: 'env_info', requestId, payload: { torchBackend: 'cpu' } })
+  assert.equal(app.envInfo.torchBackend, 'cpu')
+  assert.equal(app.envLoading, false)
+  assert.deepEqual(calls, ['start_env_check'])
+})
+
+test('a late background probe cannot change device preferences after runtime activation', async () => {
+  let backgroundId
+  const persisted = deferred()
+  const cpu = { torchAvailable: true, torchBackend: 'cpu' }
+  const cuda = { torchAvailable: true, torchBackend: 'cuda', cudaAvailable: true }
+  const app = appStore(async (command, args) => {
+    if (command === 'start_env_check') {
+      backgroundId = args?.requestId
+      return { started: true }
+    }
+    if (command === 'activate_runtime') return true
+    if (command === 'get_env_info') return cuda
+    if (command === 'runtime_info') return { ready: true, installedBackend: 'cuda' }
+    if (command === 'save_app_store') {
+      persisted.resolve(args.data)
+      return
+    }
+    throw new Error(`unexpected ${command}`)
+  })
+  const settings = useSettingsStore()
+  settings.initialized = true
+  settings.defaultDevice = 'cpu'
+  app.envInfo = cpu
+  const stop = watch([() => settings.initialized, () => app.envInfo], ([initialized, env]) => {
+    if (initialized && env?.torchAvailable) settings.reconcileRuntimeDevice(env)
+  })
+  try {
+    await app.checkEnvInBackground()
+    await app.activateRuntime('cuda', {}, { refreshCoreVersions: false })
+    await nextTick()
+    settings.defaultDevice = 'cuda:1'
+    app.handleWorkerEvent({ type: 'env_info', requestId: backgroundId, payload: cpu })
+    await nextTick()
+    const saved = await within(persisted.promise, 'saved device preference')
+
+    assert.equal(settings.defaultDevice, 'cuda:1')
+    assert.deepEqual(settings.getRuntimeDeviceConfig(app.envInfo), { device: 'cuda', deviceIds: [1] })
+    assert.equal(app.envInfo.torchBackend, 'cuda')
+    assert.equal(saved.defaultDevice, 'cuda:1')
+    assert.equal(typeof backgroundId, 'string')
+  } finally {
+    stop()
+    settings.$dispose()
+    app.$dispose()
+  }
+})
+
+test('background probes accept only their own pending request and ignore duplicate replies', async () => {
+  let requestId
+  const app = appStore(async (command, args) => {
+    assert.equal(command, 'start_env_check')
+    requestId = args?.requestId
+    return { started: true }
+  })
+  await app.checkEnvInBackground()
+  app.handleWorkerEvent({ type: 'env_info', requestId: 'another-window', payload: { torchBackend: 'cpu' } })
+  assert.equal(app.envInfo, null)
+  assert.equal(app.envLoading, true)
+  app.handleWorkerEvent({ type: 'env_info', requestId, payload: { torchBackend: 'cuda' } })
+  assert.equal(app.envInfo.torchBackend, 'cuda')
+  assert.equal(app.envLoading, false)
+  assert.equal(app.envCheckedOnce, true)
+  app.handleWorkerEvent({ type: 'env_info', requestId, payload: { torchBackend: 'cpu' } })
+  assert.equal(app.envInfo.torchBackend, 'cuda')
+})
+
+test('a stale background failure cannot clear a newer probe or overwrite its error state', async () => {
+  const ids = []
+  const app = appStore(async (command, args) => {
+    if (command === 'start_env_check') { ids.push(args?.requestId); return { started: true } }
+    if (command === 'get_env_info') return { torchBackend: 'cuda' }
+    throw new Error(`unexpected ${command}`)
+  })
+  await app.checkEnvInBackground()
+  await app.checkEnv()
+  await app.checkEnvInBackground()
+  app.handleWorkerEvent({ type: 'error', requestId: ids[0], payload: { code: 'ENV_CHECK_FAILED', message: 'old failure' } })
+  assert.equal(app.envLoading, true)
+  assert.equal(app.lastError, null)
+  app.handleWorkerEvent({ type: 'error', requestId: ids[1], payload: { code: 'ENV_CHECK_FAILED', message: 'current failure' } })
+  assert.equal(app.envLoading, false)
+  assert.equal(app.lastError, 'current failure')
+  assert.equal(app.envInfo.torchBackend, 'cuda')
+})
+
+test('a superseded direct probe cannot finish the loading state of a newer queued probe', async () => {
+  const first = deferred()
+  const second = deferred()
+  let calls = 0
+  const app = appStore(command => {
+    assert.equal(command, 'get_env_info')
+    return ++calls === 1 ? first.promise : second.promise
+  })
+  const oldProbe = app.checkEnv()
+  await Promise.resolve()
+  const newProbe = app.checkEnv()
+  first.resolve({ torchBackend: 'cpu' })
+  await oldProbe
+  assert.equal(app.envInfo, null)
+  assert.equal(app.envLoading, true)
+  second.resolve({ torchBackend: 'cuda' })
+  await newProbe
+  assert.equal(app.envInfo.torchBackend, 'cuda')
+  assert.equal(app.envLoading, false)
+})
+
+test('a superseded direct probe failure leaves the current probe error state unchanged', async () => {
+  const first = deferred()
+  const second = deferred()
+  let calls = 0
+  const app = appStore(command => {
+    assert.equal(command, 'get_env_info')
+    return ++calls === 1 ? first.promise : second.promise
+  })
+  const oldProbe = app.checkEnv()
+  await Promise.resolve()
+  const newProbe = app.checkEnv()
+  first.reject(new Error('old failure'))
+  await assert.rejects(oldProbe, /old failure/)
+  assert.equal(app.envLoading, true)
+  assert.equal(app.lastError, null)
+  second.reject(new Error('current failure'))
+  await assert.rejects(newProbe, /current failure/)
+  assert.equal(app.envLoading, false)
+  assert.equal(app.lastError, 'current failure')
+})
+
+test('direct environment probes wait for runtime activation to finish', async () => {
+  const switching = deferred()
+  const calls = []
+  const app = appStore(command => {
+    calls.push(command)
+    if (command === 'activate_runtime') return switching.promise
+    if (command === 'runtime_info') return { ready: true, installedBackend: 'cuda' }
+    if (command === 'get_env_info') return { torchBackend: 'cuda' }
+    throw new Error(`unexpected ${command}`)
+  })
+  const activation = app.activateRuntime('cuda', {}, { refreshCoreVersions: false })
+  await Promise.resolve()
+  const probe = app.checkEnv()
+  await Promise.resolve()
+  assert.deepEqual(calls, ['activate_runtime'])
+  switching.resolve(true)
+  await within(Promise.all([activation, probe]), 'environment probes after activation')
+  assert.equal(app.envInfo.torchBackend, 'cuda')
+  assert.equal(app.envLoading, false)
+})
+
+for (const command of ['debug_runtime_override_active', 'debug_runtime_write_file', 'debug_runtime_restore_file']) {
+  test(`${command} invalidates old probes before mutating and refreshes the active environment`, async () => {
+    const mutation = deferred()
+    const persisted = deferred()
+    const calls = []
+    let oldRequestId
+    const cuda = { torchAvailable: true, torchBackend: 'cuda', cudaAvailable: true }
+    const app = appStore((operation, args) => {
+      calls.push(operation)
+      if (operation === 'start_env_check') {
+        oldRequestId = args.requestId
+        return Promise.resolve({ started: true })
+      }
+      if (operation === command) return mutation.promise
+      if (operation === 'get_env_info') return Promise.resolve(cuda)
+      if (operation === 'runtime_info') return Promise.resolve({ ready: true, installedBackend: 'cuda' })
+      if (operation === 'save_app_store') { persisted.resolve(args.data); return Promise.resolve() }
+      throw new Error(`unexpected ${operation}`)
+    })
+    const settings = useSettingsStore()
+    settings.initialized = true
+    settings.defaultDevice = 'cuda:1'
+    const stop = watch(() => app.envInfo, env => {
+      if (env?.torchAvailable) settings.reconcileRuntimeDevice(env)
+    })
+    try {
+      await app.checkEnvInBackground()
+      const change = app.updateDebugRuntime(command, { path: 'active-runtime.json' })
+      await Promise.resolve()
+      app.handleWorkerEvent({ type: 'env_info', requestId: oldRequestId, payload: { torchAvailable: true, torchBackend: 'cpu' } })
+      await nextTick()
+      assert.equal(app.envInfo, null)
+      assert.equal(app.envLoading, true)
+      mutation.resolve({ files: [] })
+      assert.deepEqual(await within(change, 'runtime debug mutation'), { files: [] })
+      app.handleWorkerEvent({ type: 'env_info', requestId: oldRequestId, payload: { torchAvailable: true, torchBackend: 'cpu' } })
+      await nextTick()
+
+      assert.equal(settings.defaultDevice, 'cuda:1')
+      assert.equal(app.envInfo.torchBackend, 'cuda')
+      assert.equal(app.envLoading, false)
+      assert.equal((await within(persisted.promise, 'debug device preference')).defaultDevice, 'cuda:1')
+      assert.deepEqual(calls.filter(operation => operation !== 'save_app_store'), ['start_env_check', command, 'runtime_info', 'get_env_info'])
+    } finally {
+      stop()
+      settings.$dispose()
+      app.$dispose()
+    }
+  })
+}
+
+test('debug runtime mutation failures release the queue and pending-probe loading state', async () => {
+  const calls = []
+  const app = appStore(async command => {
+    calls.push(command)
+    if (command === 'debug_runtime_restore_file') throw new Error('restore failed')
+    if (command === 'get_env_info') return { torchBackend: 'cpu' }
+    throw new Error(`unexpected ${command}`)
+  })
+  await assert.rejects(app.updateDebugRuntime('debug_runtime_restore_file', { path: 'active-runtime.json' }), /restore failed/)
+  assert.equal(app.envLoading, false)
+  await within(app.checkEnv(), 'probe after failed debug mutation')
+  assert.equal(app.envInfo.torchBackend, 'cpu')
+  assert.deepEqual(calls, ['debug_runtime_restore_file', 'get_env_info'])
+})
+
+test('debug runtime saves report successful writes and retain a failed environment probe for diagnostics', async () => {
+  const app = appStore(async command => {
+    if (command === 'debug_runtime_write_file') return { files: [{ path: 'pyvenv.cfg' }] }
+    if (command === 'runtime_info') return { ready: false }
+    if (command === 'get_env_info') throw new Error('invalid venv configuration')
+    throw new Error(`unexpected ${command}`)
+  })
+  assert.deepEqual(await app.updateDebugRuntime('debug_runtime_write_file', {}), { files: [{ path: 'pyvenv.cfg' }] })
+  assert.equal(app.runtimeInfo.ready, false)
+  assert.equal(app.lastError, 'invalid venv configuration')
+  assert.equal(app.envLoading, false)
+})
 
 test('all runtime writes wait behind an active probe and retain FIFO order', async () => {
   const probe = deferred()
@@ -343,10 +762,15 @@ test('runtime env-size scan prevents a queued write from starting', async () => 
 
 test('core-update ACK returns before its terminal success, then refreshes without self-locking', async () => {
   const calls = []
+  const refreshed = deferred()
+  let infoCalls = 0
   const app = appStore(async command => {
     calls.push(command)
     if (command === 'start_runtime_core_update') return true
-    if (command === 'runtime_info') return { ready: true }
+    if (command === 'runtime_info') {
+      if (++infoCalls === 2) refreshed.resolve()
+      return { ready: true }
+    }
     if (command === 'runtime_core_versions' || command === 'get_env_info') return {}
     throw new Error(`unexpected ${command}`)
   })
@@ -357,7 +781,7 @@ test('core-update ACK returns before its terminal success, then refreshes withou
   assert.deepEqual(calls, ['start_runtime_core_update'])
   app.handleRuntimeEvent({ type: 'runtime_core_update_finished', taskId, payload: {} })
   await within(blockedQuery, 'query after core update success')
-  await Promise.resolve()
+  await within(refreshed.promise, 'automatic post-update runtime refresh')
   assert.equal(app.runtimeCoreUpdateTaskId, null)
   assert.ok(calls.filter(command => command === 'runtime_info').length >= 2)
   assert.ok(calls.includes('runtime_core_versions'))

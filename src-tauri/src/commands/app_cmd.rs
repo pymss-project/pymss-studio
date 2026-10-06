@@ -185,7 +185,7 @@ pub async fn get_env_info(app: AppHandle) -> AppResult<Value> {
 }
 
 #[tauri::command]
-pub async fn start_env_check(app: AppHandle) -> AppResult<Value> {
+pub async fn start_env_check(app: AppHandle, request_id: String) -> AppResult<Value> {
     let handle = app.clone();
     std::thread::spawn(move || {
         let result = run_worker_once(&handle, "env_info");
@@ -195,7 +195,7 @@ pub async fn start_env_check(app: AppHandle) -> AppResult<Value> {
                     "pymss://worker-event",
                     serde_json::json!({
                         "type": "env_info",
-                        "requestId": Value::Null,
+                        "requestId": request_id,
                         "taskId": Value::Null,
                         "timestamp": Value::Null,
                         "payload": payload,
@@ -207,7 +207,7 @@ pub async fn start_env_check(app: AppHandle) -> AppResult<Value> {
                     "pymss://worker-event",
                     serde_json::json!({
                         "type": "error",
-                        "requestId": Value::Null,
+                        "requestId": request_id,
                         "taskId": Value::Null,
                         "timestamp": Value::Null,
                         "payload": {

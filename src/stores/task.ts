@@ -1058,7 +1058,7 @@ export const useTaskStore = defineStore('task', () => {
       outputLayout,
       outputNaming: normalizeOutputNaming(outputNaming),
       device: defaults.device,
-      deviceIds: defaults.device === runtimeDevice.device ? runtimeDevice.deviceIds : [],
+      deviceIds: defaults.device === runtimeDevice.device || defaults.device === 'auto' ? runtimeDevice.deviceIds : [0],
       outputFormat: defaults.outputFormat,
       selectedStems: [],
       useTta: useTta.value,
