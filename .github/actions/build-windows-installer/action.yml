@@ -22,19 +22,14 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-    - name: Cache mo build
-      uses: Swatinem/rust-cache@v2
-      with:
-        workspaces: installer/moinstaller
-    - name: "Build mo CLI (two-pass, template embeds mo-setup.exe on the 2nd pass)"
+    - name: Download mo CLI from MoInstaller releases
       shell: pwsh
+      env:
+        MO_RELEASE: v0.2.0
       run: |
-        cargo build --release --manifest-path installer/moinstaller/Cargo.toml
-        if ($LASTEXITCODE -ne 0) { throw "first cargo build failed" }
-        cargo build --release --manifest-path installer/moinstaller/Cargo.toml
-        if ($LASTEXITCODE -ne 0) { throw "second cargo build failed" }
+        $url = "https://github.com/HuanLinOTO/MoInstaller/releases/download/$env:MO_RELEASE/mo-x86_64-pc-windows-msvc.exe"
+        curl.exe --location --fail --retry 5 --retry-all-errors --output mo.exe $url
+        if ($LASTEXITCODE -ne 0 -or !(Test-Path mo.exe)) { throw 'mo.exe download failed' }
     - name: Download staged package
       uses: actions/download-artifact@v4
       with:
@@ -52,7 +47,7 @@ runs:
         $tpl = Get-Content installer/installer.toml.in -Raw
         $manifest = $tpl -replace '__PYMSS_VERSION__', '${{ inputs.version }}' -replace '__STAGE_NAME__', $stageName
         Set-Content installer/installer.toml -Value $manifest -NoNewline -Encoding utf8
-        & installer/moinstaller/target/release/mo.exe build installer/installer.toml --out $outFile
+        & (Join-Path $env:GITHUB_WORKSPACE 'mo.exe') build installer/installer.toml --out $outFile
         if ($LASTEXITCODE -ne 0) { throw "mo build failed with exit code $LASTEXITCODE" }
         if (!(Test-Path $outFile)) { throw "installer was not produced at $outFile" }
         Remove-Item installer/installer.toml -Force

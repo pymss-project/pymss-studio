@@ -6,9 +6,15 @@
 #      unins000.exe removed, pyvenv.cfg rewritten)
 #   3. silent uninstall           (app dir fully removed, shortcuts,
 #      registry key gone, uninstaller self-delete)
+param(
+  # Path to the mo CLI (download from MoInstaller releases or built locally:
+  # https://github.com/HuanLinOTO/MoInstaller)
+  [string]$MoPath = (Join-Path $PSScriptRoot "../moinstaller/target/release/mo.exe")
+)
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
-$mo = Join-Path $root "../moinstaller/target/release/mo.exe"
+$mo = $MoPath
+if (!(Test-Path $mo)) { throw "mo CLI not found at $mo - pass -MoPath or see installer/README.md" }
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("pymss-mo-smoke-" + [guid]::NewGuid().ToString("N").Substring(0,8))
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 $setup = Join-Path $work "pymss-smoke-setup.exe"

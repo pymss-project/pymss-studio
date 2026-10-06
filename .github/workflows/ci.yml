@@ -55,23 +55,18 @@ jobs:
   installer-smoke:
     name: Installer migration smoke (MoInstaller)
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
+    env:
+      MO_RELEASE: v0.2.0
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: installer/moinstaller
-
-      - name: "Build mo CLI (two-pass, template embeds mo-setup.exe on the 2nd pass)"
+      - name: Download mo CLI from MoInstaller releases
         shell: pwsh
         run: |
-          cargo build --release --manifest-path installer/moinstaller/Cargo.toml
-          if ($LASTEXITCODE -ne 0) { throw 'first cargo build failed' }
-          cargo build --release --manifest-path installer/moinstaller/Cargo.toml
-          if ($LASTEXITCODE -ne 0) { throw 'second cargo build failed' }
+          $url = "https://github.com/HuanLinOTO/MoInstaller/releases/download/$env:MO_RELEASE/mo-x86_64-pc-windows-msvc.exe"
+          curl.exe --location --fail --retry 5 --retry-all-errors --output mo.exe $url
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path mo.exe)) { throw 'mo.exe download failed' }
 
       - name: Stage smoke fixture tree
         shell: pwsh
@@ -79,4 +74,4 @@ jobs:
 
       - name: Build + install + upgrade + uninstall smoke
         shell: pwsh
-        run: ./installer/tests-fixture/smoke.ps1
+        run: ./installer/tests-fixture/smoke.ps1 -MoPath "${{ github.workspace }}/mo.exe"

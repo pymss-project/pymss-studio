@@ -1,22 +1,21 @@
 # Windows Installer (MoInstaller migration)
 
-The Windows setup.exe is built with [MoInstaller](./moinstaller) (vendored Rust
-toolchain, replacing Inno Setup).
+The Windows setup.exe is built with [MoInstaller](https://github.com/HuanLinOTO/MoInstaller),
+a single-file Rust installer toolchain (Inno Setup alternative). The `mo` CLI is
+consumed as a prebuilt release asset pinned by `MO_RELEASE` (currently `v0.2.0`) in
+the workflows - this repo does not build it.
 
 | File | Purpose |
 | --- | --- |
 | `installer.toml.in` | Installer manifest template. CI replaces `__PYMSS_VERSION__` and `__STAGE_NAME__`, then `mo build` consumes the result. |
 | `setup.rhai` | Install-time logic ported from the legacy `pymss-studio.iss` `[Code]` section. |
-| `moinstaller/` | Vendored MoInstaller source (git subtree of the upstream repo). |
 | `tests-fixture/` | Local/CI smoke test: fake staged package + full install/upgrade/uninstall assertions. |
 
 ## Build (local)
 
 ```pwsh
-# 1. build the mo CLI inside the vendored subtree (two passes: the embedded
-#    setup template is fixed on the second pass)
-cargo build --release --manifest-path installer/moinstaller/Cargo.toml
-cargo build --release --manifest-path installer/moinstaller/Cargo.toml
+# 1. fetch the mo CLI
+curl.exe -L -o mo.exe https://github.com/HuanLinOTO/MoInstaller/releases/download/v0.2.0/mo-x86_64-pc-windows-msvc.exe
 
 # 2. stage a package under installer/stage/<stage-name>/ (release pipeline output)
 #    and render the manifest
@@ -24,14 +23,14 @@ $tpl = Get-Content installer/installer.toml.in -Raw
 Set-Content installer/installer.toml ($tpl -replace '__PYMSS_VERSION__','1.2.3' -replace '__STAGE_NAME__','Pymss-Studio-1.2.3-windows-x64-cuda')
 
 # 3. build
-installer/moinstaller/target/release/mo.exe build installer/installer.toml --out release/setup.exe
+.\mo.exe build installer/installer.toml --out release/setup.exe
 ```
 
 ## Smoke test
 
 ```pwsh
-./installer/tests-fixture/make-fixture.ps1   # fake staged package
-./installer/tests-fixture/smoke.ps1           # build + install + upgrade + uninstall
+./installer/tests-fixture/make-fixture.ps1
+./installer/tests-fixture/smoke.ps1 -MoPath .\mo.exe
 ```
 
 `smoke.ps1` runs without elevation: the fixture manifest installs into a temp
@@ -56,7 +55,7 @@ directory under the current user and uses an HKCU uninstall key.
 ### Known behavior differences
 
 * Shortcuts are created per-user (Inno created them for all users when running
-  elevated); the silent `/TASKS=desktopicon` switch has no equivalent — the
+  elevated); the silent `/TASKS=desktopicon` switch has no equivalent - the
   desktop icon component follows its `default = false` state in silent mode.
 * `CloseApplications` is not supported: files locked by a running app make the
   installer fail (and roll back) instead of prompting to close the app.
