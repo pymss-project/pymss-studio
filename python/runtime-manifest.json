@@ -20,7 +20,7 @@
     "requests": "requests>=2.32,<3",
     "pyyaml": "pyyaml>=6.0.1,<7",
     "tqdm": "tqdm>=4.60,<5",
-    "pymss": "pymss[proxy]==2.1.8",
+    "pymss": "pymss[proxy]==2.1.7",
     "pymss-core": "pymss-core==0.1.11"
   },
   "backends": {
