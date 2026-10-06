@@ -15,6 +15,13 @@ $setup = Join-Path $work "pymss-smoke-setup.exe"
 $app = Join-Path $work "app"
 $failures = 0
 
+# clean slate: stale group dir from a previous run would skip CreatedDir
+# bookkeeping, making the uninstall assertion a false negative
+$grp = Join-Path $env:APPDATA "Microsoft/Windows/Start Menu/Programs/Pymss Studio CI"
+if (Test-Path $grp) { Remove-Item $grp -Recurse -Force }
+$desktopLnk = Join-Path ([Environment]::GetFolderPath('Desktop')) "Pymss Studio CI.lnk"
+if (Test-Path $desktopLnk) { Remove-Item $desktopLnk -Force }
+
 function Assert([string]$Name, [bool]$Cond) {
   if ($Cond) { Write-Host "  PASS $Name" }
   else { Write-Host "  FAIL $Name"; $script:failures++ }
@@ -66,7 +73,10 @@ Write-Host "== silent uninstall =="
 Assert "uninstall exit 0" ($LASTEXITCODE -eq 0)
 Start-Sleep -Seconds 4
 Assert "app dir fully removed" (-not (Test-Path $app))
-Assert "start menu group removed" (-not (Test-Path $grp))
+# explorer may hold the start-menu group briefly; the uninstaller retries rmdir
+$grpGone = -not (Test-Path $grp)
+for ($i = 0; $i -lt 10 -and -not $grpGone; $i++) { Start-Sleep -Seconds 1; $grpGone = -not (Test-Path $grp) }
+Assert "start menu group removed" $grpGone
 reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\CI-Smoke-Pymss-Studio" 2>$null | Out-Null
 Assert "uninstall registry key removed" ($LASTEXITCODE -ne 0)
 
