@@ -133,7 +133,8 @@ impl Executor {
             )
             .map_err(EngineError::HookAborted)?;
 
-        // 目标目录先落地（GetDiskFreeSpaceExW 需要存在的路径；回滚时逆序删除）
+        // 目标目录先落地（GetDiskFreeSpaceExW 需要存在的路径；回滚时逆序删除）。
+        // 升级场景目录已存在，仍要记录：否则按本次 log 回放的卸载不会清理它。
         if !self.ctx.app_dir.exists() {
             std::fs::create_dir_all(&self.ctx.app_dir).map_err(|e| {
                 EngineError::InstallFailed(format!(
@@ -141,10 +142,10 @@ impl Executor {
                     self.ctx.app_dir.display()
                 ))
             })?;
-            self.log.push(ActionRecord::CreatedDir {
-                path: self.ctx.app_dir.clone(),
-            });
         }
+        self.log.push(ActionRecord::CreatedDir {
+            path: self.ctx.app_dir.clone(),
+        });
 
         // 磁盘预检：payload + 卸载程序副本
         let need: u64 = pkg.entries.iter().map(|e| e.orig_size).sum::<u64>()
@@ -272,12 +273,11 @@ impl Executor {
                     .map_err(|e| EngineError::Fatal(e.to_string()))?,
             };
             let lnk = Path::new(&dir).join(format!("{}.lnk", s.name));
-            if let Some(parent) = lnk.parent()
-                && !parent.exists()
-            {
+            if let Some(parent) = lnk.parent() {
                 std::fs::create_dir_all(parent).map_err(|er| {
                     EngineError::InstallFailed(format!("创建目录 {}: {er}", parent.display()))
                 })?;
+                // 升级时组目录已存在也记录，保证卸载回放能清理
                 self.log.push(ActionRecord::CreatedDir {
                     path: parent.to_path_buf(),
                 });
