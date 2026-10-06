@@ -532,14 +532,13 @@ impl Executor {
                 _ => None,
             })
             .collect();
-        if !created_dirs.is_empty() {
-            let rm = created_dirs
-                .iter()
-                .map(|d| format!("rmdir \"{d}\" || (ping -n 3 127.0.0.1 >nul & rmdir \"{d}\")"))
-                .collect::<Vec<_>>()
-                .join(" & ");
-            let cmd = format!("/c ping -n 3 127.0.0.1 >nul & {rm}");
-            use std::os::windows::process::CommandExt;
+        // 每目录一条独立命令：cmd 的 || 右侧会吞掉后续 & 子句，
+        // 链式拼接会在首目录删除成功时短路跳过其余目录。
+        use std::os::windows::process::CommandExt;
+        for d in &created_dirs {
+            let cmd = format!(
+                "/c ping -n 3 127.0.0.1 >nul & rmdir \"{d}\" & ping -n 2 127.0.0.1 >nul & rmdir \"{d}\""
+            );
             let _ = std::process::Command::new("cmd").raw_arg(cmd).spawn();
         }
 
