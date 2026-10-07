@@ -57,7 +57,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     env:
-      MO_RELEASE: v0.2.5
+      MO_RELEASE: v0.2.6
     steps:
       - uses: actions/checkout@v4
 
