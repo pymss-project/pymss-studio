@@ -25,7 +25,7 @@ runs:
     - name: Download mo CLI from MoInstaller releases
       shell: pwsh
       env:
-        MO_RELEASE: v0.2.2
+        MO_RELEASE: v0.2.3
       run: |
         $url = "https://github.com/HuanLinOTO/MoInstaller/releases/download/$env:MO_RELEASE/mo-x86_64-pc-windows-msvc.exe"
         curl.exe --location --fail --retry 5 --retry-all-errors --output mo.exe $url
