@@ -14,7 +14,11 @@ default_dir = "{pf}\\Pymss Studio"
 compression = "zstd19"
 
 [theme]
-pages = ["welcome", "dir", "components", "install", "finish"]
+# One-click install: single Install button with an inline change-directory
+# link on the welcome page, then progress and finish. Components page is
+# dropped; desktopicon keeps its default (unchecked).
+minimal = true
+pages = ["welcome", "install", "finish"]
 
 # Desktop icon is opt-in, matching the legacy Inno task (Flags: unchecked).
 [[components]]
