@@ -134,7 +134,9 @@ jobs:
             fi
             if [[ "$compatibility_status" -eq 0 ]] && git diff --quiet "$previous_tag" "$GITHUB_SHA" -- \
                 src-tauri/tauri.conf.json \
-                installer/pymss-studio.iss; then
+                installer/installer.toml.in \
+                installer/setup.rhai \
+                .github/actions/build-windows-installer/action.yml; then
               runtime_compatible=true
             fi
           fi

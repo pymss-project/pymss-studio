@@ -86,6 +86,11 @@ fn remove_dev_leftovers(ctx) {
 fn after_install(ctx) {
 	let app = ctx.app_dir;
 
+	// The online package bundles no backend files, so nothing creates this
+	// directory during extraction; create it before the icacls hook grants
+	// user write access (icacls cannot create directories).
+	ctx.create_dir(app + "\\python-runtime\\runtime-envs");
+
 	// VC++ 2015-2022 x64 runtime: install quietly only when missing.
 	let vcredist = app + "\\bin\\VC_redist.x64.exe";
 	let installed = ctx.reg_read(

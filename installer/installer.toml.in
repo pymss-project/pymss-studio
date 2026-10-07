@@ -3,7 +3,7 @@
 
 [app]
 # Same GUID as the legacy Inno Setup AppId -> upgrades update the same control-panel entry.
-id = "{6A208087-F154-4C62-8916-E3D40B7C0F24}"
+id = "{6A208087-F154-4C62-8916-E3D40B7C0F24}_is1"
 name = "Pymss Studio"
 version = "__PYMSS_VERSION__"
 publisher = "TheSmallHanCat"
@@ -42,6 +42,9 @@ dest = "desktop"
 component = "desktopicon"
 
 [uninstall]
+# Replay-only uninstall would leave generated envs and upgrade-skipped
+# backend files behind; match the legacy Inno whole-directory semantics.
+remove_app_dir = true
 display_icon = "{app}\\Pymss Studio.exe"
 
 [run]
