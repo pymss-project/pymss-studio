@@ -3,9 +3,7 @@
 # wheel is installed by the workflow before this file so CI does not pull CUDA.
 librosa>=0.10.2,<0.11
 numpy>=1.26,<3
-# Structured workflow progress is pending the upstream release.
-# Pin the reviewed source commits so CI exercises the API used by the worker.
-pymss-core @ git+https://github.com/TheSmallHanCat/pymss-core.git@d0eb6f8b79c61cff972a7c5d0a49c40ca252b431
-pymss[proxy] @ git+https://github.com/TheSmallHanCat/pymss.git@53cf94d91ebaee31129fb91a4a66bf633fc64375
+pymss-core==0.1.11
+pymss[proxy]==2.1.8
 requests[socks]>=2.32,<3
 pyyaml>=6.0.1,<7

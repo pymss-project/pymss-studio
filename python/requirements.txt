@@ -1,6 +1,6 @@
 # Development requirements for the desktop worker wrapper.
 # The core separation engine is distributed as the PyPI package `pymss`.
-# Install it with: python -m pip install pymss
+# Install development dependencies with: python -m pip install -r python/requirements.txt
 #
 # This file documents the runtime modules the worker expects to be available
 # in the Python interpreter selected by PYMSS_STUDIO_PYTHON or by "python".
@@ -13,4 +13,5 @@ requests[socks]>=2.32
 pyyaml>=6.0.1
 torch>=2.7.1
 tqdm>=4.60
-pymss
+pymss[proxy]==2.1.8
+pymss-core==0.1.11

@@ -122,6 +122,52 @@ class InferenceParameterCompatibilityTests(unittest.TestCase):
         self.assertEqual(separator_type.call_args.kwargs["inference_params"], {"overlap_size": 441000})
         self.assertEqual(payload["inferenceParams"], {})
 
+    def test_catalog_target_override_reaches_separator_without_affecting_user_models(self) -> None:
+        name = "model_mel_band_roformer_ep_0_sdr_11.4805.ckpt"
+        weights = self.root / "model.ckpt"
+        weights.touch()
+        self.config["training"] = {
+            "instruments": ["Vocals", "Instrumental"],
+            "target_instrument": "Instrumental",
+        }
+        self.write_config()
+        original_config = self.config_path.read_bytes()
+        catalog = {
+            "name": name, "model_type": "mel_band_roformer", "supported": True,
+            "relpath": weights.name, "config_relpath": self.config_path.name,
+        }
+        user = worker_models.RegisteredUserModelEntry(
+            name=name, model_type="mel_band_roformer",
+            model_path=str(weights), config_path=str(self.config_path),
+        )
+        cases = (
+            (worker_models.ModelEntry.from_dict({**catalog, "target_instrument_override": "Vocals"}), "Vocals"),
+            (worker_models.ModelEntry.from_dict(catalog), None),
+            (user, None),
+        )
+        for entry, expected_override in cases:
+            with self.subTest(source=type(entry).__name__, override=expected_override):
+                separator_type = mock.Mock()
+                with (
+                    mock.patch.object(worker_infer, "get_any_model_entry", return_value=entry),
+                    mock.patch.object(worker_infer, "_resolve_separator_device", return_value=("cpu", [0], "CPU")),
+                    mock.patch.object(worker_infer, "_studio_separator_type", return_value=separator_type),
+                    mock.patch.object(worker_infer, "emit"),
+                ):
+                    worker_infer._prepare_separator(
+                        payload={
+                            "model": name, "modelDir": str(self.root), "download": False,
+                            "output": str(self.root / "output"),
+                            "inferenceParamsVersion": 2, "inferenceParams": {},
+                        },
+                        task_id="separation-1", logger=mock.Mock(), progress_callback=None,
+                    )
+
+                kwargs = separator_type.call_args.kwargs
+                self.assertEqual(kwargs.get("target_instrument_override"), expected_override)
+                self.assertEqual(kwargs["model_path"], str(weights))
+                self.assertEqual(self.config_path.read_bytes(), original_config)
+
     def test_audio_chunk_size_is_used_when_inference_chunk_size_is_missing_or_null(self) -> None:
         for include_null in (False, True):
             with self.subTest(include_null=include_null):

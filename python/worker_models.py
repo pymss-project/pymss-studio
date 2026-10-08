@@ -49,6 +49,7 @@ class ModelEntry:
     classification_confidence: str
     classification_basis: str
     debug_source: str = ""
+    target_instrument_override: str = ""
 
     @property
     def stem(self) -> str:
@@ -79,6 +80,7 @@ class ModelEntry:
             target_stem=data.get("target_stem", ""),
             config_instruments=data.get("config_instruments", ""),
             config_target_instrument=data.get("config_target_instrument", ""),
+            target_instrument_override=data.get("target_instrument_override", ""),
             classification_confidence=data.get("classification_confidence", ""),
             classification_basis=data.get("classification_basis", ""),
             debug_source=data.get("debug_source", ""),
@@ -216,6 +218,7 @@ def _entry_to_catalog_dict(entry: ModelEntry) -> dict[str, Any]:
         "target_stem": entry.target_stem,
         "config_instruments": entry.config_instruments,
         "config_target_instrument": entry.config_target_instrument,
+        "target_instrument_override": entry.target_instrument_override,
         "classification_confidence": entry.classification_confidence,
         "classification_basis": entry.classification_basis,
     }

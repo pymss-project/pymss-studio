@@ -16,6 +16,7 @@ from worker_models import (
     auxiliary_paths_for,
     config_path_for,
     get_any_model_entry,
+    is_user_model_entry,
     model_path_for,
 )
 from worker_protocol import _as_bool, _as_float, _as_int, emit, emit_error
@@ -464,6 +465,9 @@ def _resolve_studio_model(
         "model_path": str(model_path),
         "config_path": str(config_path) if config_path else None,
         "auxiliary_paths": [str(path) for path in auxiliary_paths],
+        "target_instrument_override": (
+            None if is_user_model_entry(entry) else getattr(entry, "target_instrument_override", "") or None
+        ),
     }
 
 
@@ -546,6 +550,7 @@ def _prepare_separator(
         model_type=resolved_model_type,
         model_path=resolved_model_path,
         config_path=resolved.get('config_path'),
+        target_instrument_override=resolved.get('target_instrument_override'),
         device=device,
         device_ids=device_ids,
         output_format=output_format,

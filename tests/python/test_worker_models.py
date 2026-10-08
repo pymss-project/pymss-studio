@@ -64,6 +64,33 @@ CATALOG_ENTRY = worker_models.ModelEntry.from_dict({
 })
 
 
+class CatalogTargetOverrideTests(unittest.TestCase):
+    def test_target_override_survives_catalog_overlay_and_entry_serialization(self):
+        base = {
+            "models": [{
+                "name": "model.ckpt",
+                "relpath": "vocals/model.ckpt",
+                "target_instrument_override": "Vocals",
+            }],
+        }
+        overlay = {
+            "storage_format": "overlay-v1",
+            "overrides": {"model.ckpt": {"primary_category_cn": "人声"}},
+        }
+
+        effective = worker_models._apply_debug_catalog(base, overlay)
+        entry = worker_models.ModelEntry.from_dict(effective["models"][0])
+
+        self.assertEqual(entry.target_instrument_override, "Vocals")
+        self.assertEqual(worker_models._entry_to_catalog_dict(entry)["target_instrument_override"], "Vocals")
+        self.assertEqual(entry.primary_category_cn, "人声")
+
+    def test_catalog_entries_without_a_target_override_keep_the_default(self):
+        entry = worker_models.ModelEntry.from_dict({"name": "model.ckpt", "relpath": "model.ckpt"})
+
+        self.assertEqual(entry.target_instrument_override, "")
+
+
 class LightweightModelDiscoveryTests(unittest.TestCase):
     def setUp(self):
         worker_models._model_catalog_path.cache_clear()
