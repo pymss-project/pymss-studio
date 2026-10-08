@@ -2020,7 +2020,7 @@ async function retryCurrentTask() {
                       <code :title="path">{{ shortenMiddle(path, 60) }}</code>
                     </div>
                   </div>
-                  <n-button quaternary circle size="tiny" class="file-chip__remove" :title="t('separate.remove')" :disabled="isRunModeLocked" @click="task.removeInputFile(path)">
+                  <n-button quaternary circle size="tiny" class="file-chip__remove" :title="t('separate.remove')" :disabled="isRunModeLocked" @click.stop="task.removeInputFile(path)">
                     <template #icon><n-icon :component="CloseOutline" /></template>
                   </n-button>
                 </div>
