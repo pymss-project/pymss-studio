@@ -4,9 +4,12 @@ import { useI18n } from 'vue-i18n'
 import { useMessage } from 'naive-ui'
 import {
   ArrowDownOutline,
-  CloseOutline,
+  AlertCircleOutline,
+  CheckmarkCircleOutline,
+  CloudDownloadOutline,
   CopyOutline,
-  RefreshOutline,
+  PauseCircleOutline,
+  PlayOutline,
   TrashOutline,
 } from '@vicons/ionicons5'
 import type { DownloadLogEntry, DownloadTask } from '@/stores/model'
@@ -37,13 +40,13 @@ const statusType = computed(() => {
   if (props.task.status === 'error') return 'error'
   if (['preparing', 'downloading'].includes(props.task.status)) return 'info'
   if (['paused', 'cancelled', 'interrupted'].includes(props.task.status)) return 'warning'
-  return 'success'
+  return props.task.status === 'done' ? 'success' : 'default'
 })
 
 const statusLabel = computed(() => {
   if (!props.task) return ''
   const map: Record<string, string> = {
-    preparing: t('models.downloadPreparing'),
+    preparing: t('tasks.statusPreparing'),
     downloading: t('models.downloadStatusDownloading'),
     done: t('models.downloaded'),
     error: t('models.downloadStatusError'),
@@ -58,13 +61,27 @@ const statusLabel = computed(() => {
 const progressColor = computed(() => {
   if (!props.task) return 'var(--primary)'
   if (props.task.status === 'error') return 'var(--danger)'
+  if (props.task.status === 'done') return 'var(--success)'
   if (['paused', 'cancelled', 'interrupted'].includes(props.task.status)) return 'var(--warning)'
   return 'var(--primary)'
 })
 
+const statusIcon = computed(() => {
+  if (props.task?.status === 'done') return CheckmarkCircleOutline
+  if (props.task?.status === 'error') return AlertCircleOutline
+  if (['paused', 'cancelled', 'interrupted'].includes(props.task?.status || '')) return PauseCircleOutline
+  return CloudDownloadOutline
+})
+
+const displayProgress = computed(() => {
+  if (props.task?.status === 'done') return 100
+  const progress = props.task?.progress
+  return typeof progress === 'number' && Number.isFinite(progress) ? Math.min(100, Math.max(0, Math.round(progress))) : 0
+})
+
 const filesText = computed(() => {
   if (!props.task) return ''
-  if (props.task.totalFiles > 1) {
+  if (props.task.totalFiles > 0) {
     return t('models.fileProgress', {
       completed: props.task.completedFiles,
       total: props.task.totalFiles,
@@ -73,18 +90,54 @@ const filesText = computed(() => {
   return ''
 })
 
-/** What the worker last reported, or the status itself before it has said anything. */
-const progressMessage = computed(() => props.task?.message?.trim() || statusLabel.value)
+/** Keep the worker detail separate from the status badge. */
+const progressMessage = computed(() => {
+  let detail = props.task?.message?.trim()
+  switch (detail) {
+    case 'Started':
+      detail = t('models.downloadStarted')
+      break
+    case 'resolving_files':
+      detail = t('models.downloadPreparing')
+      break
+    case 'Downloading':
+    case 'downloading_files':
+    case 'Downloading model files':
+      detail = t('models.downloadTransferring')
+      break
+    case 'verifying':
+    case 'Verifying downloaded files':
+      detail = t('models.downloadVerifying')
+      break
+    case 'Done':
+      detail = t('models.downloaded')
+      break
+    case 'Cancelled':
+      detail = t('models.downloadStatusCancelled')
+      break
+    case 'Paused':
+      detail = t('models.downloadStatusPaused')
+      break
+    case 'Failed':
+      detail = t('models.downloadStatusError')
+      break
+  }
+  return detail && detail !== statusLabel.value ? detail : ''
+})
 
 const speedText = computed(() => {
-  if (props.task?.status !== 'downloading') return ''
-  return formatSpeedMBps(props.task?.speedBytesPerSecond)
+  if (props.task?.status !== 'downloading') return '—'
+  return formatSpeedMBps(props.task?.speedBytesPerSecond) || '—'
 })
 
 const bytesText = computed(() => {
   const task = props.task
-  if (!task?.downloadedBytes || !task.totalBytes) return ''
-  return `${formatBytes(task.downloadedBytes)} / ${formatBytes(task.totalBytes)}`
+  if (!task) return '—'
+  const downloaded = typeof task.downloadedBytes === 'number' && Number.isFinite(task.downloadedBytes) && task.downloadedBytes >= 0
+    ? (task.downloadedBytes === 0 ? '0 B' : formatBytes(task.downloadedBytes)) : '—'
+  const total = typeof task.totalBytes === 'number' && Number.isFinite(task.totalBytes) && task.totalBytes > 0
+    ? formatBytes(task.totalBytes) : ''
+  return total ? `${downloaded} / ${total}` : downloaded
 })
 
 const canCancel = computed(() => ['preparing', 'downloading'].includes(props.task?.status || ''))
@@ -114,7 +167,11 @@ async function scrollToBottom() {
   if (el) el.scrollTop = el.scrollHeight
 }
 
-watch(() => logs.value.length, () => void scrollToBottom())
+watch(() => logs.value.at(-1), () => void scrollToBottom())
+watch(() => props.task?.taskId, () => {
+  autoScroll.value = true
+  void scrollToBottom()
+})
 watch(() => props.show, (v) => {
   if (v) void scrollToBottom()
 })
@@ -163,96 +220,117 @@ function handleClose() {
   >
     <n-card
       class="download-detail-modal"
+      :class="`download-detail-modal--${task?.status || 'idle'}`"
       :bordered="false"
       closable
       role="dialog"
       aria-modal="true"
+      :aria-label="t('models.downloadDetailTitle')"
       @close="handleClose"
     >
       <template #header>
         <div class="ddm-header">
-          <span class="ddm-title">{{ t('models.downloadDetailTitle') }}</span>
-          <span class="ddm-model" :title="modelName">{{ modelName }}</span>
-          <n-tag
-            v-if="task"
-            :type="statusType"
-            size="small"
-            round
-            :bordered="false"
-          >
+          <div class="ddm-header-copy">
+            <div class="ddm-title-row">
+              <n-icon class="ddm-header-icon" :component="CloudDownloadOutline" aria-hidden="true" />
+              <span class="ddm-title">{{ t('models.downloadDetailTitle') }}</span>
+            </div>
+            <span class="ddm-model" :title="modelName">{{ modelName }}</span>
+          </div>
+          <n-tag v-if="task" :type="statusType" size="small" :bordered="false" class="ddm-status">
+            <template #icon><n-icon :component="statusIcon" /></template>
             {{ statusLabel }}
           </n-tag>
         </div>
       </template>
 
       <div v-if="task" class="ddm-body">
-        <div class="ddm-progress">
+        <section class="ddm-progress" :aria-label="t('models.downloadProgressLabel')">
           <div class="ddm-progress-info">
-            <span class="ddm-progress-pct">{{ task.progress }}%</span>
-            <span v-if="bytesText" class="ddm-progress-bytes">{{ bytesText }}</span>
-            <span v-if="speedText" class="ddm-progress-speed">{{ speedText }}</span>
-            <span v-if="filesText" class="ddm-progress-files">{{ filesText }}</span>
-            <span class="ddm-progress-msg" :title="progressMessage">{{ progressMessage }}</span>
+            <span class="ddm-progress-msg" :title="progressMessage">{{ progressMessage || t('models.downloadProgressLabel') }}</span>
+            <div class="ddm-progress-pct">{{ displayProgress }}<span>%</span></div>
           </div>
           <n-progress
-            :percentage="task.progress"
+            :percentage="displayProgress"
             :show-indicator="false"
-            :height="12"
-            :border-radius="6"
+            :height="6"
+            :border-radius="3"
+            :processing="canCancel"
             type="line"
             :color="progressColor"
-            rail-color="var(--surface-3)"
+            rail-color="var(--outline)"
           />
-        </div>
+          <dl class="ddm-transfer-stats">
+            <div class="ddm-transfer-stat">
+              <dt>{{ t('models.downloadTransferred') }}</dt>
+              <dd>{{ bytesText }}</dd>
+            </div>
+            <div class="ddm-transfer-stat">
+              <dt>{{ t('models.downloadSpeed') }}</dt>
+              <dd>{{ speedText }}</dd>
+            </div>
+            <div class="ddm-transfer-stat">
+              <dt>{{ t('models.downloadFileCount') }}</dt>
+              <dd>{{ filesText || '—' }}</dd>
+            </div>
+          </dl>
+        </section>
 
         <div v-if="task.errorMessage" class="ddm-error">
           <strong>{{ t('models.downloadErrorLabel') }}</strong>
           <pre class="ddm-error-text">{{ task.errorMessage }}</pre>
         </div>
 
-        <div class="ddm-logs-head">
-          <span class="ddm-logs-title">{{ t('models.downloadLogs') }}</span>
-          <span v-if="logs.length" class="ddm-logs-count">{{ logs.length }}</span>
-          <div class="ddm-logs-actions">
-            <n-button size="tiny" quaternary @click="copyAllLogs">
-              <template #icon><n-icon :component="CopyOutline" /></template>
-              {{ t('models.downloadCopyLogs') }}
-            </n-button>
-          </div>
-        </div>
-        <div
-          ref="logContainerRef"
-          class="ddm-logs"
-          @scroll="onScroll"
-        >
-          <div v-if="!logs.length" class="ddm-logs-empty">
-            {{ t('models.downloadLogsEmpty') }}
+        <section class="ddm-log-section" :aria-label="t('models.downloadLogs')">
+          <div class="ddm-logs-head">
+            <div class="ddm-logs-heading">
+              <span class="ddm-logs-title">{{ t('models.downloadLogs') }}</span>
+              <span v-if="logs.length" class="ddm-logs-count">{{ logs.length }}</span>
+            </div>
+            <div class="ddm-logs-actions">
+              <n-button size="tiny" quaternary :disabled="!logs.length" @click="copyAllLogs">
+                <template #icon><n-icon :component="CopyOutline" /></template>
+                {{ t('models.downloadCopyLogs') }}
+              </n-button>
+            </div>
           </div>
           <div
-            v-for="(log, idx) in logs"
-            :key="idx"
-            :class="['dl-log', levelClass(log.level)]"
+            ref="logContainerRef"
+            class="ddm-logs"
+            :class="{ 'ddm-logs--empty': !logs.length }"
+            @scroll="onScroll"
           >
-            <span class="dl-log-time">{{ formatTime(log.ts) }}</span>
-            <span class="dl-log-level">{{ log.level }}</span>
-            <span class="dl-log-msg">{{ log.message }}</span>
+            <div v-if="!logs.length" class="ddm-logs-empty">
+              {{ t('models.downloadLogsEmpty') }}
+            </div>
+            <div
+              v-for="(log, idx) in logs"
+              :key="idx"
+              :class="['dl-log', levelClass(log.level)]"
+            >
+              <span class="dl-log-time">{{ formatTime(log.ts) }}</span>
+              <span class="dl-log-level">{{ log.level }}</span>
+              <span class="dl-log-msg">{{ log.message }}</span>
+            </div>
           </div>
-        </div>
-        <!-- Scrolling up pauses the follow-along so a line being read does not slide away; this
-             is how to get back to it. -->
-        <button
-          v-if="logs.length && !autoScroll"
-          type="button"
-          class="ddm-logs-resume"
-          @click="resumeAutoScroll"
-        >
-          <n-icon :component="ArrowDownOutline" />
-          {{ t('models.downloadLogsFollow') }}
-        </button>
+          <!-- Scrolling up pauses the follow-along so a line being read does not slide away; this
+               is how to get back to it. -->
+          <button
+            v-if="logs.length && !autoScroll"
+            type="button"
+            class="ddm-logs-resume"
+            @click="resumeAutoScroll"
+          >
+            <n-icon :component="ArrowDownOutline" />
+            {{ t('models.downloadLogsFollow') }}
+          </button>
+        </section>
       </div>
+      <div v-else class="ddm-no-task"><n-empty :description="t('models.downloadTaskEmpty')" /></div>
 
-      <template #footer>
+      <template v-if="canCancel || canResume || canDelete" #footer>
         <div class="ddm-footer">
+          <span v-if="canCancel" class="ddm-footer-hint">{{ t('models.downloadBackgroundHint') }}</span>
           <n-button
             v-if="canCancel"
             type="error"
@@ -260,14 +338,6 @@ function handleClose() {
             @click="handleCancel"
           >
             {{ t('common.cancel') }}
-          </n-button>
-          <n-button
-            v-if="canResume"
-            type="primary"
-            @click="handleResume"
-          >
-            <template #icon><n-icon :component="RefreshOutline" /></template>
-            {{ task?.status === 'interrupted' ? t('models.continueDownload') : t('common.resume') }}
           </n-button>
           <n-button
             v-if="canDelete"
@@ -278,9 +348,13 @@ function handleClose() {
             <template #icon><n-icon :component="TrashOutline" /></template>
             {{ t('models.delete') }}
           </n-button>
-          <n-button quaternary @click="handleClose">
-            <template #icon><n-icon :component="CloseOutline" /></template>
-            {{ t('common.close') }}
+          <n-button
+            v-if="canResume"
+            type="primary"
+            @click="handleResume"
+          >
+            <template #icon><n-icon :component="PlayOutline" /></template>
+            {{ task?.status === 'interrupted' ? t('models.continueDownload') : t('common.resume') }}
           </n-button>
         </div>
       </template>
@@ -290,13 +364,20 @@ function handleClose() {
 
 <style scoped>
 .download-detail-modal {
-  width: min(780px, calc(100vw - 48px));
-  max-height: min(640px, calc(100vh - 96px));
+  --download-tone: var(--primary);
+  width: min(720px, calc(100vw - 48px));
+  max-height: min(640px, calc(100dvh - 64px));
   display: flex;
   flex-direction: column;
   overflow: hidden;
   border-radius: 16px;
 }
+
+.download-detail-modal--done { --download-tone: var(--success); }
+.download-detail-modal--error { --download-tone: var(--danger); }
+.download-detail-modal--paused,
+.download-detail-modal--cancelled,
+.download-detail-modal--interrupted { --download-tone: var(--warning); }
 
 .download-detail-modal :deep(.n-card-header) {
   flex: 0 0 auto;
@@ -304,17 +385,19 @@ function handleClose() {
   border-bottom: 1px solid color-mix(in srgb, var(--outline) 72%, transparent);
 }
 
-.download-detail-modal :deep(.n-card__content) {
+.download-detail-modal :deep(.n-card-content) {
   flex: 1 1 auto;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
   padding: 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--on-surface-muted) transparent;
 }
 
 .download-detail-modal :deep(.n-card-footer),
 .download-detail-modal :deep(.n-card__footer) {
   flex: 0 0 auto;
-  padding: 12px 20px 16px;
+  padding: 12px 20px;
   border-top: 1px solid color-mix(in srgb, var(--outline) 72%, transparent);
   background: color-mix(in srgb, var(--surface-1) 96%, transparent);
 }
@@ -322,80 +405,93 @@ function handleClose() {
 .ddm-header {
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 16px;
 }
 
+.ddm-title-row { display: flex; align-items: center; gap: 7px; }
+
+.ddm-header-icon {
+  color: var(--download-tone);
+  font-size: 19px;
+}
+
+.ddm-header-copy { display: grid; flex: 1 1 auto; gap: 4px; min-width: 0; }
+
 .ddm-title {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
 }
 
 .ddm-model {
-  font-size: 13px;
+  font-size: 11px;
   color: var(--on-surface-muted);
   font-family: var(--font-mono);
-  max-width: 280px;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .ddm-body {
-  height: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  gap: 16px;
   padding: 16px 20px;
   box-sizing: border-box;
-  overflow: hidden;
 }
 
 .ddm-progress {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   flex-shrink: 0;
 }
 
 .ddm-progress-info {
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 16px;
 }
 
 .ddm-progress-pct {
-  font-size: 18px;
-  font-weight: 700;
+  flex: 0 0 auto;
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.035em;
+  color: var(--on-surface-heading);
   font-variant-numeric: tabular-nums;
 }
 
-.ddm-progress-bytes,
-.ddm-progress-speed {
-  font-size: 12px;
-  color: var(--on-surface-muted);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.ddm-progress-files {
-  font-size: 12px;
-  color: var(--on-surface-muted);
-}
+.ddm-progress-pct > span { margin-left: 3px; font-size: 14px; color: var(--on-surface-muted); letter-spacing: 0; }
+.ddm-status { flex-shrink: 0; }
 
 .ddm-progress-msg {
+  flex: 1 1 auto;
   font-size: 12px;
+  line-height: 1.5;
   color: var(--on-surface-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1 1 auto;
   min-width: 0;
 }
 
+.ddm-transfer-stats {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  margin: 0;
+}
+.ddm-transfer-stat { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-width: 0; }
+.ddm-transfer-stat dt { color: var(--on-surface-muted); font-size: 12px; }
+.ddm-transfer-stat dd { margin: 0; font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+
 .ddm-error {
-  margin-top: 12px;
+  margin-top: 0;
   padding: 10px 12px;
   border-radius: 8px;
   background: color-mix(in srgb, var(--danger) 10%, transparent);
@@ -426,10 +522,13 @@ function handleClose() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-top: 14px;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
   flex-shrink: 0;
 }
+
+.ddm-log-section { display: flex; flex-direction: column; min-height: 0; border-top: 1px solid var(--outline); padding-top: 12px; }
+.ddm-logs-heading { display: flex; align-items: center; gap: 8px; }
+.ddm-no-task { padding: 44px 24px; }
 
 .ddm-logs-title {
   font-size: 13px;
@@ -442,16 +541,14 @@ function handleClose() {
 }
 
 .ddm-logs {
-  flex: 1 1 auto;
-  /* Grows with its content instead of reserving a fixed block: a download that has not logged
-     anything yet would otherwise show a large empty panel as the main thing on screen. */
+  flex: 0 1 auto;
   min-height: 0;
-  max-height: 340px;
+  max-height: 280px;
   position: relative;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 12px;
-  border-radius: 12px;
+  padding: 10px;
+  border-radius: 8px;
   /* Same console treatment as the separation log, so both read as machine output rather than
      as two different panels that happen to contain log lines. */
   background: #0b1020;
@@ -459,14 +556,37 @@ function handleClose() {
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.55;
+  scrollbar-width: thin;
+  scrollbar-color: #73839c transparent;
 }
 
+@supports selector(::-webkit-scrollbar) {
+  .ddm-logs { scrollbar-width: auto; scrollbar-color: auto; }
+  .download-detail-modal :deep(.n-card-content) { scrollbar-width: auto; scrollbar-color: auto; }
+}
+.download-detail-modal :deep(.n-card-content::-webkit-scrollbar),
+.ddm-error-text::-webkit-scrollbar { width: 7px; }
+.download-detail-modal :deep(.n-card-content::-webkit-scrollbar-track),
+.ddm-error-text::-webkit-scrollbar-track { background: transparent; }
+.download-detail-modal :deep(.n-card-content::-webkit-scrollbar-thumb),
+.ddm-error-text::-webkit-scrollbar-thumb { border-radius: 999px; background: color-mix(in srgb, var(--on-surface-muted) 40%, transparent); }
+.download-detail-modal :deep(.n-card-content::-webkit-scrollbar-button),
+.ddm-error-text::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+.ddm-logs::-webkit-scrollbar { width: 9px; }
+.ddm-logs::-webkit-scrollbar-track { background: transparent; }
+.ddm-logs::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: rgb(148 163 184 / 45%) padding-box; }
+.ddm-logs::-webkit-scrollbar-thumb:hover { background: rgb(148 163 184 / 65%) padding-box; }
+.ddm-logs::-webkit-scrollbar-button,
+.ddm-logs::-webkit-scrollbar-corner { display: none; width: 0; height: 0; }
+
 .ddm-logs-empty {
-  color: #64748b;
+  color: var(--on-surface-muted);
   text-align: center;
-  padding: 10px 0;
+  padding: 4px 0;
   font-size: 12px;
 }
+
+.ddm-logs--empty { background: var(--surface-2); border: 1px solid var(--outline); font-family: inherit; }
 
 .ddm-logs-count {
   padding: 0 6px;
@@ -478,10 +598,8 @@ function handleClose() {
 }
 
 .ddm-logs-resume {
-  position: sticky;
-  bottom: 8px;
-  left: 50%;
-  transform: translateX(-50%);
+  align-self: center;
+  margin-top: 8px;
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -493,20 +611,25 @@ function handleClose() {
   color: var(--on-primary, #fff);
   background: var(--primary);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.24);
+  transition: background 160ms ease;
 }
+.ddm-logs-resume:hover { background: var(--primary-strong); }
+.ddm-logs-resume:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
 
 .dl-log {
   display: grid;
-  grid-template-columns: 64px 48px 1fr;
+  grid-template-columns: 62px 46px minmax(0, 1fr);
   gap: 8px;
-  align-items: baseline;
-  padding: 1px 0;
+  align-items: start;
+  padding: 3px 6px;
+  border-radius: 4px;
+  color: var(--dl-log-color, #c9d6ec);
 }
 
 .dl-log-time {
   /* Same muted slate as the separation log's line numbers — on the dark console the theme's
      on-surface-muted is too close to the body text to recede. */
-  color: #64748b;
+  color: #73839c;
   font-variant-numeric: tabular-nums;
   user-select: none;
 }
@@ -514,10 +637,13 @@ function handleClose() {
 .dl-log-level {
   text-transform: uppercase;
   font-size: 10px;
-  font-weight: 700;
+  font-weight: 600;
   text-align: center;
-  padding: 0 4px;
-  border-radius: 3px;
+  line-height: 18px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--dl-log-color, #c9d6ec) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--dl-log-color, #c9d6ec) 25%, transparent);
+  user-select: none;
 }
 
 .dl-log-msg {
@@ -526,27 +652,18 @@ function handleClose() {
   white-space: pre-wrap;
 }
 
-.dl-log--info .dl-log-level {
-  color: #94a3b8;
-  background: rgba(148, 163, 184, 0.16);
-}
+.dl-log--info { --dl-log-color: #9dceff; }
 
 .dl-log--warn {
-  color: var(--warning);
-}
-
-.dl-log--warn .dl-log-level {
-  color: var(--warning);
-  background: color-mix(in srgb, var(--warning) 18%, transparent);
+  --dl-log-color: #f4d08b;
+  background: color-mix(in srgb, var(--dl-log-color) 8%, transparent);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--dl-log-color) 65%, transparent);
 }
 
 .dl-log--error {
-  color: var(--danger);
-}
-
-.dl-log--error .dl-log-level {
-  color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  --dl-log-color: #f3aab8;
+  background: color-mix(in srgb, var(--dl-log-color) 9%, transparent);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--dl-log-color) 70%, transparent);
 }
 
 .ddm-footer {
@@ -554,5 +671,21 @@ function handleClose() {
   justify-content: flex-end;
   gap: 8px;
   flex-wrap: wrap;
+}
+.ddm-footer-hint { flex: 1 1 240px; align-self: center; color: var(--on-surface-muted); font-size: 11px; line-height: 1.5; }
+
+@media (max-width: 560px) {
+  .download-detail-modal { width: calc(100vw - 24px); max-height: calc(100dvh - 24px); border-radius: 16px; }
+  .download-detail-modal :deep(.n-card-header) { padding: 16px 16px 12px; }
+  .download-detail-modal :deep(.n-card-footer),
+  .download-detail-modal :deep(.n-card__footer) { padding: 12px 16px 16px; }
+  .ddm-body { padding: 16px; gap: 14px; }
+  .ddm-progress-pct { font-size: 26px; }
+  .ddm-progress-info { gap: 16px; }
+  .ddm-transfer-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+  .ddm-transfer-stat:first-child { grid-column: 1 / -1; }
+  .dl-log { grid-template-columns: 54px 42px minmax(0, 1fr); gap: 6px; padding-inline: 3px; }
+  .dl-log-time, .dl-log-msg { font-size: 11px; }
+  .ddm-footer-hint { flex-basis: 100%; }
 }
 </style>
