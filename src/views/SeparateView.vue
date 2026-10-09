@@ -768,6 +768,7 @@ const currentTask = computed(() => {
   if (focusedBatchTasks.value.length) return activeFocusedBatchTask.value || focusedBatchTasks.value[0] || null
   return null
 })
+const currentLogLevels = computed(() => getLogLineLevels(currentTask.value?.logs || []))
 const completedActionOptions = computed<DropdownOption[]>(() => [
   { key: 'retry', label: t('separate.runAgain') },
   ...(currentTask.value?.logs.length ? [{ key: 'logs', label: t('tasks.logs') }] : []),
@@ -1869,6 +1870,54 @@ function goToResults() {
 function openCurrentLogs() {
   if (!currentTask.value) return
   showLogModal.value = true
+}
+
+function getLogLineLevel(line: string): 'debug' | 'info' | 'warn' | 'error' {
+  const text = line.replace(/\x1b\[[0-9;]*m/g, '').trimStart()
+  const prefix = text.match(/^\[(trace|debug|info|warn|warning|error|fatal|critical)\]\s*/i)
+    || text.match(/^(trace|debug|info|warn|warning|error|fatal|critical):\s*/i)
+  const message = prefix ? text.slice(prefix[0].length).trimStart() : text
+  const embedded = message.match(/^(?:\d{2}:\d{2}:\d{2}\s*\|\s*)?(TRC|TRACE|DBG|DEBUG|INF|INFO|WAR|WRN|WARN|WARNING|ERR|ERROR|FTL|FATAL|CRITICAL)\s*\|/i)
+  if (
+    !embedded
+    && /^traceback(?::|\s+\(most recent call last\):)/i.test(message)
+    && (!prefix || /^(warn|warning)$/i.test(prefix[1]))
+  ) return 'error'
+  const level = (embedded?.[1] || prefix?.[1] || '').toUpperCase()
+  if (['TRC', 'TRACE', 'DBG', 'DEBUG'].includes(level)) return 'debug'
+  if (['WAR', 'WRN', 'WARN', 'WARNING'].includes(level)) return 'warn'
+  if (['ERR', 'ERROR', 'FTL', 'FATAL', 'CRITICAL'].includes(level)) return 'error'
+  if (!level && /^[\w.]*?(?:Error|Exception)\s*:/i.test(message)) return 'error'
+  return 'info'
+}
+
+function getLogLineLevels(lines: readonly string[]): ReturnType<typeof getLogLineLevel>[] {
+  let inTraceback = false
+  let tracebackComplete = false
+  return lines.map(line => {
+    const text = line.replace(/\x1b\[[0-9;]*m/g, '')
+    const prefix = text.match(/^\s*(?:\[(trace|debug|info|warn|warning|error|fatal|critical)\]|(trace|debug|info|warn|warning|error|fatal|critical):)[\t ]?/i)
+    const message = prefix ? text.slice(prefix[0].length) : text
+    const trimmed = message.trimStart()
+    const explicitLevel = (prefix?.[1] || prefix?.[2] || '').toLowerCase()
+    const errorEnvelope = ['', 'warn', 'warning', 'error', 'fatal', 'critical'].includes(explicitLevel)
+    const startsTraceback = errorEnvelope && /^traceback(?::|\s+\(most recent call last\):)/i.test(trimmed)
+    const chainedException = /^(?:During handling of the above exception, another exception occurred:|The above exception was the direct cause of the following exception:)/i.test(trimmed)
+    const frame = /^(?:File\s+["'].*["'],\s+line\s+\d+\b|[~^]+\s*$)/i.test(trimmed)
+    const exceptionSummary = !/^\s/.test(message)
+      && /^(?:[a-z_][\w.]+:|KeyboardInterrupt\b|SystemExit\b)/i.test(trimmed)
+    const wrappedTraceback = inTraceback && errorEnvelope && (
+      chainedException || (!tracebackComplete && (frame || exceptionSummary || /^\s/.test(message)))
+    )
+    const newLog = (Boolean(prefix) && !wrappedTraceback && !startsTraceback)
+      || /^(?:\d{2}:\d{2}:\d{2}\s*\||(?:TRC|TRACE|DBG|DEBUG|INF|INFO|WAR|WRN|WARN|WARNING|ERR|ERROR|FTL|FATAL|CRITICAL)\s*\|)/i.test(trimmed)
+    const continuesTraceback = inTraceback && !newLog && (
+      /^\s/.test(message) || frame || exceptionSummary || chainedException
+    )
+    inTraceback = startsTraceback || continuesTraceback
+    tracebackComplete = inTraceback && !startsTraceback && !chainedException && (tracebackComplete || exceptionSummary)
+    return inTraceback ? 'error' : getLogLineLevel(line)
+  })
 }
 
 function handleCompletedAction(key: string | number) {
@@ -3011,8 +3060,9 @@ async function retryCurrentTask() {
         aria-modal="true"
       >
         <div v-if="currentTask?.logs.length" class="log-console">
-          <div v-for="(line, index) in currentTask.logs" :key="`${index}-${line}`" class="log-line">
+          <div v-for="(line, index) in currentTask.logs" :key="`${index}-${line}`" class="log-line" :class="'log-line--' + currentLogLevels[index]">
             <span class="log-line-number">{{ String(index + 1).padStart(3, '0') }}</span>
+            <span class="log-line-level" aria-hidden="true">{{ currentLogLevels[index].toUpperCase() }}</span>
             <span class="log-line-text">{{ line }}</span>
           </div>
         </div>
@@ -4019,15 +4069,46 @@ async function retryCurrentTask() {
   padding: 2px;
   padding-right: 6px;
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--outline) 120%, transparent) transparent;
+  scrollbar-color: color-mix(in srgb, var(--on-surface-muted) 44%, transparent) transparent;
 }
 .target-list--list {
   grid-template-columns: minmax(0, 1fr);
   gap: 5px;
 }
-.target-list::-webkit-scrollbar { width: 7px; }
-.target-list::-webkit-scrollbar-thumb { border-radius: 999px; background: color-mix(in srgb, var(--outline) 130%, transparent); }
-.target-list::-webkit-scrollbar-track { background: transparent; }
+@supports selector(::-webkit-scrollbar) {
+  .target-list {
+    scrollbar-width: auto;
+    scrollbar-color: auto;
+  }
+}
+
+.target-list::-webkit-scrollbar {
+  width: 9px;
+}
+
+.target-list::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: transparent;
+}
+
+.target-list::-webkit-scrollbar-thumb {
+  min-height: 28px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--on-surface-muted) 44%, transparent) padding-box;
+}
+
+.target-list::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--primary) 64%, transparent) padding-box;
+}
+
+.target-list::-webkit-scrollbar-button,
+.target-list::-webkit-scrollbar-corner {
+  display: none;
+  width: 0;
+  height: 0;
+  background: transparent;
+}
 
 .target-row {
   display: flex;
@@ -4739,13 +4820,49 @@ async function retryCurrentTask() {
 
 .log-line {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: 28px 46px minmax(0, 1fr);
+  gap: 9px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  color: var(--log-level-color, #c9d6ec);
+}
+
+.log-line--debug {
+  --log-level-color: #b8aed3;
+}
+
+.log-line--info {
+  --log-level-color: #9dceff;
+}
+
+.log-line--warn {
+  --log-level-color: #f4d08b;
+  background: color-mix(in srgb, var(--log-level-color) 8%, transparent);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--log-level-color) 65%, transparent);
+}
+
+.log-line--error {
+  --log-level-color: #f3aab8;
+  background: color-mix(in srgb, var(--log-level-color) 9%, transparent);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--log-level-color) 70%, transparent);
 }
 
 .log-line-number {
-  color: #64748b;
+  color: #73839c;
   text-align: right;
+  user-select: none;
+}
+
+.log-line-level {
+  align-self: start;
+  margin-top: 1px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--log-level-color) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--log-level-color) 25%, transparent);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
   user-select: none;
 }
 

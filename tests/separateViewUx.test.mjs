@@ -36,6 +36,13 @@ assert.equal(selected.length, names.size)
 const code = ts.transpileModule(selected.map(statement => statement.getText(script)).join('\n'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText
+const logLevelFunctions = script.statements.filter(statement => (
+  ts.isFunctionDeclaration(statement) && ['getLogLineLevel', 'getLogLineLevels'].includes(statement.name?.text)
+))
+assert.equal(logLevelFunctions.length, 2)
+const logLevelCode = ts.transpileModule(logLevelFunctions.map(statement => statement.getText(script)).join('\n'), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText
 const stemSelectionNames = new Set([
   'outputStemSelectionCleared',
   'checkedOutputStems',
@@ -297,6 +304,134 @@ test('advanced inference settings expose model-scoped save and reset actions', a
   assert.equal(calls[1][4], undefined)
   assert.equal(calls[1][5].force, true)
   assert.deepEqual(calls[2], ['success', 'models.inferenceDefaultsReset'])
+})
+
+test('task log levels recognize structured prefixes and actual embedded pymss levels', () => {
+  const getLogLineLevel = vm.runInNewContext(`${logLevelCode}\ngetLogLineLevel`)
+  const cases = [
+    ['[info] Loading model', 'info'],
+    ['info: Loading model', 'info'],
+    ['[debug] Runtime parameters', 'debug'],
+    ['trace: Device details', 'debug'],
+    ['[warning] No outputs', 'warn'],
+    ['warn: No outputs', 'warn'],
+    ['error: [INFERENCE_FAILED] Separation did not produce outputs', 'error'],
+    ['[critical] Worker exited', 'error'],
+    ['[warning] 00:26:41 | DBG | separator.py:1171 | Runtime parameters', 'debug'],
+    ['warning: 00:26:41 | INF | separator.py:1136 | Loading model completed', 'info'],
+    ['[warning] 00:26:44 | WAR | separator.py:1524 | Cannot separate track', 'warn'],
+    ['[info] 00:26:44 | ERR | separator.py:1524 | Cannot separate track', 'error'],
+    ['00:26:44 | WRN | An output was skipped', 'warn'],
+    ['FTL | Worker exited', 'error'],
+    ['\u001b[33m[warning] 00:26:41 | INF | Model loaded\u001b[0m', 'info'],
+  ]
+  for (const [line, expected] of cases) assert.equal(getLogLineLevel(line), expected, line)
+})
+
+test('task log levels keep tracebacks distinct without treating message keywords as severity', () => {
+  const getLogLineLevel = vm.runInNewContext(`${logLevelCode}\ngetLogLineLevel`)
+  for (const line of ['traceback:\nRuntimeError: mismatched tensors', 'Traceback (most recent call last):', '[warning] Traceback (most recent call last):', 'ValueError: invalid shape']) {
+    assert.equal(getLogLineLevel(line), 'error', line)
+  }
+  for (const line of ['', '12:26:42 AM Separating', 'Reading D:/Music/error-warning.wav', '[info] Previous error was recovered']) {
+    assert.equal(getLogLineLevel(line), 'info', line)
+  }
+})
+
+test('explicit log levels are preserved when the message starts with an exception name', () => {
+  const { getLogLineLevel, getLogLineLevels } = vm.runInNewContext(`${logLevelCode}\n({ getLogLineLevel, getLogLineLevels })`)
+  const cases = [
+    ['[info] ValueError: this was recovered', 'info'],
+    ['info: RuntimeError: previous failure was handled', 'info'],
+    ['[debug] TypeError: retry details', 'debug'],
+    ['warning: ValueError: optional setting was ignored', 'warn'],
+    ['[info] Traceback (most recent call last):', 'info'],
+  ]
+  for (const [line, expected] of cases) {
+    assert.equal(getLogLineLevel(line), expected, line)
+    assert.deepEqual(Array.from(getLogLineLevels([line])), [expected], line)
+  }
+})
+
+test('a new warning directly after a traceback retains its own level', () => {
+  const getLogLineLevels = vm.runInNewContext(`${logLevelCode}\ngetLogLineLevels`)
+  const traceback = [
+    'Traceback (most recent call last):',
+    '  File "worker.py", line 10, in run',
+    '    raise TypeError("bad argument")',
+    'TypeError: bad argument',
+  ]
+  const warnings = [
+    'warning: File "optional-model.yaml" is missing',
+    '[warning] File "optional-model.yaml" is missing',
+    '[warning] D:/runtime/transformer.py:49: UserWarning: ComplexHalf support is experimental',
+    '[warning]   rot = torch.complex(cos, sin)',
+    'warning: ValueError: optional setting was ignored',
+  ]
+  for (const warning of warnings) {
+    assert.deepEqual(Array.from(getLogLineLevels([...traceback, warning, '[info] Cleanup completed'])), [
+      ...Array(traceback.length).fill('error'), 'warn', 'info',
+    ], warning)
+  }
+})
+
+test('a split traceback keeps its frames, source and caret markers at error level', () => {
+  const getLogLineLevels = vm.runInNewContext(`${logLevelCode}\ngetLogLineLevels`)
+  const lines = [
+    'error: [INFERENCE_FAILED] Invalid model arguments',
+    'traceback:',
+    'Traceback (most recent call last):',
+    '  File "worker_infer.py", line 911, in cmd_infer',
+    '    separator = _prepare_separator(',
+    '                ^^^^^^^^^^^^^^^^^^^',
+    '    flags | DEFAULT_FLAGS',
+    '  File "worker_infer.py", line 164, in __init__',
+    '    super().__init__(*args, **kwargs)',
+    "TypeError: unexpected keyword argument 'target_instrument_override'",
+    '[warning] 00:51:00 | DBG | Closing separator',
+    '[info] Cleanup completed',
+  ]
+  const original = [...lines]
+
+  assert.deepEqual(Array.from(getLogLineLevels(lines)), [
+    'error', 'error', 'error', 'error', 'error', 'error', 'error', 'error', 'error', 'error', 'debug', 'info',
+  ])
+  assert.deepEqual(lines, original)
+})
+
+test('stderr wrappers and chained exceptions retain traceback severity until the next log', () => {
+  const getLogLineLevels = vm.runInNewContext(`${logLevelCode}\ngetLogLineLevels`)
+  const lines = [
+    '[warning] Traceback (most recent call last):',
+    '[warning]   File "worker.py", line 10, in run',
+    '[warning]     raise ValueError("invalid config")',
+    '[warning] ValueError: invalid config',
+    'During handling of the above exception, another exception occurred:',
+    'Traceback (most recent call last):',
+    '  File "worker.py", line 12, in run',
+    '    raise RuntimeError("failed") from error',
+    'RuntimeError: failed',
+    'The above exception was the direct cause of the following exception:',
+    'Traceback (most recent call last):',
+    '  File "worker.py", line 14, in run',
+    '    raise ModelLoadFailure("missing weights")',
+    'ModelLoadFailure: missing weights',
+    '00:51:01 Finished',
+    '[warning] Optional file missing',
+  ]
+
+  assert.deepEqual(Array.from(getLogLineLevels(lines)), [
+    ...Array(14).fill('error'), 'info', 'warn',
+  ])
+})
+
+test('traceback state ends at normal output and does not leak into another task', () => {
+  const getLogLineLevels = vm.runInNewContext(`${logLevelCode}\ngetLogLineLevels`)
+  assert.deepEqual(Array.from(getLogLineLevels([
+    'traceback:', '  File "worker.py", line 10', '[info]   Recovering runtime',
+    '  Runtime parameters', 'Reading D:/Music/error-warning.wav',
+  ])), ['error', 'error', 'info', 'info', 'info'])
+  assert.deepEqual(Array.from(getLogLineLevels(['info: Model loaded', '  Runtime parameters'])), ['info', 'info'])
 })
 
 test('preview audio requests metadata before playback', () => {
