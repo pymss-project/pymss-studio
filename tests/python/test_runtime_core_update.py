@@ -109,6 +109,7 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
         overlay_probe=None,
         manifest_value=None,
         repair=False,
+        audio_error=None,
     ):
         bundled_root, env, python = self.make_env(backend, manifest_version=manifest_version, bundled=bundled)
         base = probe(backend, pymss="2.1.3")
@@ -132,6 +133,7 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
              mock.patch.object(worker_bootstrap, "_manifest", return_value=manifest_value or manifest()), \
              mock.patch.object(worker_bootstrap, "_latest_pypi_version", side_effect=lambda name: {"pymss": "2.1.4", "pymss-core": "0.1.6"}[name]), \
              mock.patch.object(worker_bootstrap, "_probe_python_runtime", side_effect=lambda *_args, **_kwargs: probe_calls.pop(0) if probe_calls else final), \
+             mock.patch.object(worker_bootstrap, "_verify_runtime_audio", side_effect=audio_error) as audio_probe, \
              mock.patch.object(worker_bootstrap, "_ensure_runtime_pip"), \
              mock.patch.object(worker_bootstrap.subprocess, "Popen", side_effect=popen), \
              mock.patch.object(sys, "platform", "win32"), \
@@ -143,6 +145,10 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
                 "taskId": "overlay-update",
                 "repairDependencies": repair,
             })
+            if result == 0:
+                audio_probe.assert_called_once()
+                self.assertEqual(audio_probe.call_args.args[0], python)
+                self.assertEqual(audio_probe.call_args.args[1].name, "site-packages")
         return result, commands, env, python, [json.loads(line) for line in output.getvalue().splitlines()]
 
     def test_success_builds_overlay_without_torch_or_base_mutation(self):
@@ -203,6 +209,15 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
         self.assertNotEqual(result, 0)
         self.assertNotIn("overlayPath", json.loads(self.active.read_text(encoding="utf-8")))
         self.assertTrue(env.is_dir())
+
+    def test_failed_audio_decode_does_not_activate_overlay(self):
+        result, _commands, env, _python, events = self.run_update(
+            audio_error=RuntimeError("No module named 'audioread'"),
+        )
+        self.assertNotEqual(result, 0)
+        self.assertNotIn("overlayPath", json.loads(self.active.read_text(encoding="utf-8")))
+        self.assertTrue(env.is_dir())
+        self.assertIn("audioread", events[-1]["payload"]["message"])
 
     def test_newer_or_unknown_manifest_is_rejected_without_repair(self):
         for value in ("2026.10.1", "legacy", ""):

@@ -210,5 +210,6 @@ print('librosa', librosa.__version__)
 print('av', av.__version__)
 print('mlx', importlib.util.find_spec('mlx') is not None)
 PY
+PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RUNTIME_HOME" "$PY" "$(dirname "$0")/../python/runtime_audio_probe.py"
 bash "$(dirname "$0")/prune-python-runtime.sh" "$RUNTIME_DIR" --keep-venv
 PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip --version

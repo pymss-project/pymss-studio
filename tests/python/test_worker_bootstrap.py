@@ -1029,12 +1029,14 @@ class InstallRecordsTheNewEnvironmentTests(unittest.TestCase):
                  "packageVersions": {**probe_result("cpu")["packageVersions"], "pymss-core": "0.1.6"},
              }), \
              mock.patch.object(worker_bootstrap, "_runtime_pip_works", return_value=True), \
+             mock.patch.object(worker_bootstrap, "_verify_runtime_audio", return_value=None) as verify_audio, \
              mock.patch.object(worker_bootstrap, "_create_runtime_venv", side_effect=self._create_stub_venv), \
              mock.patch.object(worker_bootstrap.subprocess, "Popen", pip), \
              mock.patch.object(sys, "platform", "win32"), \
              contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(worker_bootstrap.cmd_install_runtime({"backend": "cpu", "mirror": "pypi"}), 0)
 
+        verify_audio.assert_called_once_with(env_python)
         log = (env_dir / "pymss-runtime-install.log").read_text(encoding="utf-8")
         self.assertIn("install backend=cpu", log)
         self.assertFalse(marker.exists())

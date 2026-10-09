@@ -628,6 +628,26 @@ def _probe_environment(overlay_path: Path | None = None) -> dict[str, str]:
     return env
 
 
+def _verify_runtime_audio(python_path: Path, overlay_path: Path | None = None) -> None:
+    """Exercise lazy imports and decoding before committing an installed environment."""
+    completed = subprocess.run(
+        [
+            str(_runtime_command_path(python_path)),
+            str(_runtime_command_path(Path(__file__).with_name("runtime_audio_probe.py"))),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        env={**_probe_environment(overlay_path), "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    if completed.returncode:
+        lines = completed.stderr.strip().splitlines()
+        reason = lines[-1][:500] if lines else f"exit code {completed.returncode}"
+        raise RuntimeError(f"Runtime audio decoder verification failed: {reason}")
+
+
 def _probe_python_runtime(
     python_path: Path,
     extras: list[str] | None = None,
@@ -1979,6 +1999,7 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
             raise RuntimeError(
                 "Runtime manifest verification failed: " + "; ".join(manifest_failures)
             )
+        _verify_runtime_audio(env_python)
         state = {
             "backend": backend,
             "manifestVersion": manifest["manifestVersion"],
@@ -2252,6 +2273,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             raise RuntimeError(
                 f"Torch version changed to {probed.get('torchVersion') or 'unknown'} during update; expected {torch_version}"
             )
+        _verify_runtime_audio(python_path, staging_site_packages)
         staging_generation.rename(final_generation)
         promoted_generation = final_generation
         overlay_path = final_generation / "site-packages"

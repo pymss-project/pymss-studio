@@ -2,6 +2,7 @@
 # Match the package bounds used by the shipped runtime manifest.  The CPU torch
 # wheel is installed by the workflow before this file so CI does not pull CUDA.
 librosa>=0.10.2,<0.11
+audioread>=3.0,<4
 numpy>=1.26,<3
 pymss-core==0.1.11
 pymss[proxy]==2.1.8

@@ -241,6 +241,7 @@ jobs:
           PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" -c "from pathlib import Path; from pymss.model_download import ARIA2C_PATH; assert ARIA2C_PATH and Path(ARIA2C_PATH).resolve() == Path('$BIN/aria2c').resolve(), 'pymss did not select the bundled aria2c'; print('aria2 resolver ok:', ARIA2C_PATH)"
           PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" "$WORKER" env_info
           PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" "$WORKER" list_models --payload "{}"
+          PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" "$(dirname "$WORKER")/runtime_audio_probe.py"
           codesign --verify --deep --strict --verbose=4 "$APP"
 
       - name: Build DMG with hdiutil

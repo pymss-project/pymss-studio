@@ -143,6 +143,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Staged CUDA pymss.graph import failed" }
           & "$stage\python-runtime\runtime-envs\cuda\Scripts\python.exe" "$stage\python\worker.py" list_models --payload "{}"
           if ($LASTEXITCODE -ne 0) { throw "Staged CUDA list_models failed with exit code $LASTEXITCODE" }
+          & "$stage\python-runtime\runtime-envs\cuda\Scripts\python.exe" "$stage\python\runtime_audio_probe.py"
+          if ($LASTEXITCODE -ne 0) { throw "Staged CUDA audio decoding failed with exit code $LASTEXITCODE" }
           ./scripts/prepare-python-runtime.ps1 -RewriteRuntimeEnvConfigs -TemplateRuntimeEnvConfigs -RuntimeEnvsDir "$stage/python-runtime/runtime-envs" -RuntimeDir "$stage/python-runtime"
           $workspacePattern = [regex]::Escape((Resolve-Path ".").Path)
           $leakedConfig = Get-ChildItem "$stage/python-runtime/runtime-envs" -Recurse -File |

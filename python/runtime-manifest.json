@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "baseGeneration": 1,
-  "manifestVersion": "2026.10.1",
+  "manifestVersion": "2026.10.2",
   "python": "3.12",
   "bootstrap": {
     "requests": "requests[socks]>=2.32,<3"
@@ -9,6 +9,7 @@
   "common": {
     "av": "av>=14,<15",
     "librosa": "librosa>=0.10.2,<0.11",
+    "audioread": "audioread>=3.0,<4",
     "numpy": "numpy>=1.26,<3",
     "filelock": "filelock>=3.12,<4",
     "fsspec": "fsspec>=2023.1,<2027",
