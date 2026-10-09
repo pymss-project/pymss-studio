@@ -552,6 +552,7 @@
     "overlapSize": "重叠大小",
     "numOverlap": "重叠数量",
     "chunkSize": "分块大小",
+    "invalidChunkSize": "分块大小不符合此模型的要求，请使用 {values} 个采样点。",
     "standardize": "输入标准化",
     "normalize": "输出归一化",
     "vrWindowSize": "VR Window Size",

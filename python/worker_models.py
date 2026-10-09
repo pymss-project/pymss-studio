@@ -15,6 +15,7 @@ from audio_tools.asr_cache import is_complete_asr_model_cache
 
 import yaml
 
+from worker_inference_constraints import chunk_size_constraint
 from worker_protocol import WORKER_VERSION, _as_bool, _as_float, _as_int, emit, emit_error, import_available
 
 
@@ -670,7 +671,11 @@ def resolve_inference_param_meta(
     for source, value in candidates:
         step = _positive_config_int(value)
         if step is not None:
-            return {"recommendedSampleStep": step, "source": source}
+            metadata = {"recommendedSampleStep": step, "source": source}
+            constraint = chunk_size_constraint(model_type, config)
+            if constraint:
+                metadata["chunkSizeConstraint"] = constraint
+            return metadata
     return {}
 
 

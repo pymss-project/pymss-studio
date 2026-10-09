@@ -552,6 +552,7 @@
     "overlapSize": "Overlap Size",
     "numOverlap": "Overlap Count",
     "chunkSize": "Chunk Size",
+    "invalidChunkSize": "The chunk size does not meet this model's requirements. Use {values} samples.",
     "standardize": "Input Standardize",
     "normalize": "Output Normalize",
     "vrWindowSize": "VR Window Size",

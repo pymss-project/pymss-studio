@@ -7,7 +7,7 @@ import { MODEL_LIBRARY_PAGE_SIZES, normalizePageSize } from '@/utils/pagination'
 import { matchesModelSource, type ModelSourceFilter } from '@/utils/modelSource'
 import { useAppStore } from '@/stores/app'
 import { registerWindowCloseGuard } from '@/utils/windowCloseGuards'
-import { normalizeInferenceParamMeta, type InferenceParamMeta } from '@/features/inference/sampleStep'
+import { inferenceChunkSizeIssue, normalizeInferenceParamMeta, type InferenceParamMeta } from '@/features/inference/sampleStep'
 
 /** How the model library lays its entries out. */
 export type ModelViewMode = 'card' | 'list'
@@ -651,6 +651,9 @@ export const useModelStore = defineStore('model', () => {
       ...overrides,
     } as Record<string, unknown>)
     if (!normalized) return
+    const entry = selectedInfo.value?.name === name ? selectedInfo.value : models.value.find(item => item.name === name)
+    const chunkIssue = inferenceChunkSizeIssue(normalized.chunk_size, entry?.inferenceParamMeta)
+    if (chunkIssue) throw new Error(`Invalid chunk size. Use ${chunkIssue.values} samples.`)
     const previousOverrides = modelInferenceOverrides.value
     modelInferenceOverrides.value = {
       ...modelInferenceOverrides.value,

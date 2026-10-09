@@ -35,7 +35,7 @@ import { useAppStore } from '@/stores/app'
 import { formatBytes, formatSpeedMBps } from '@/utils/format'
 import { buildModelCategoryOptionsFromPairs, getModelCategoryLabel } from '@/utils/modelCategory'
 import { MODEL_LIBRARY_PAGE_SIZES } from '@/utils/pagination'
-import { resolveInferenceSampleStep } from '@/features/inference/sampleStep'
+import { inferenceChunkSizeIssue, resolveInferenceChunkStep, resolveInferenceSampleStep } from '@/features/inference/sampleStep'
 import ModelProgressBlock from '@/components/ModelProgressBlock.vue'
 import DownloadDetailModal from '@/components/DownloadDetailModal.vue'
 import CustomModelImportDialog from '@/components/CustomModelImportDialog.vue'
@@ -102,9 +102,13 @@ const noteEditorModel = ref<ModelEntry | null>(null)
 const noteDraft = ref('')
 const showInferenceEditor = ref(false)
 const inferenceEditorModel = ref<ModelEntry | null>(null)
-const inferenceEditorSampleStep = computed(() => inferenceEditorModel.value?.inferenceParamMeta?.recommendedSampleStep)
-const inferenceEditorOverlapStep = computed(() => resolveInferenceSampleStep(inferenceEditorModel.value?.inferenceParamMeta, 1))
-const inferenceEditorChunkStep = computed(() => resolveInferenceSampleStep(inferenceEditorModel.value?.inferenceParamMeta, 1024))
+const inferenceEditorMeta = computed(() => modelStore.models.find(item => item.name === inferenceEditorModel.value?.name)?.inferenceParamMeta
+  || inferenceEditorModel.value?.inferenceParamMeta)
+const inferenceEditorSampleStep = computed(() => inferenceEditorMeta.value?.recommendedSampleStep)
+const inferenceEditorOverlapStep = computed(() => resolveInferenceSampleStep(inferenceEditorMeta.value, 1))
+const inferenceEditorChunkStep = computed(() => resolveInferenceChunkStep(inferenceEditorMeta.value, 1024))
+const inferenceEditorChunkConstraint = computed(() => inferenceEditorMeta.value?.chunkSizeConstraint)
+const inferenceEditorChunkIssue = computed(() => inferenceChunkSizeIssue(inferenceDraft.value.chunk_size, inferenceEditorMeta.value))
 
 function updateInferenceDraftSize(key: 'overlap_size' | 'chunk_size', value: number | null) {
   inferenceDraft.value[key] = value as number
@@ -547,6 +551,10 @@ function canResetInferenceDefaults(model: ModelEntry | null | undefined) {
 async function saveInferenceDefaults() {
   const model = inferenceEditorModel.value
   if (!model) return
+  if (inferenceEditorChunkIssue.value) {
+    message.warning(t('inference.invalidChunkSize', inferenceEditorChunkIssue.value))
+    return
+  }
   try {
     await modelStore.setModelInferenceOverrides(model.name, inferenceDraft.value)
     if (selectedModel.value === model.name) {
@@ -1369,9 +1377,12 @@ onMounted(() => {
             </label>
             <label class="inference-editor-field">
               <span>{{ t('inference.chunkSize') }}</span>
-              <AlignedInferenceInputNumber :value="inferenceDraft.chunk_size" :step="inferenceEditorChunkStep" :alignment-step="inferenceEditorSampleStep" @update:value="updateInferenceDraftSize('chunk_size', $event)" />
+              <AlignedInferenceInputNumber :value="inferenceDraft.chunk_size" :step="inferenceEditorChunkStep" :alignment-step="inferenceEditorChunkConstraint?.step || inferenceEditorSampleStep" :alignment-offset="inferenceEditorChunkConstraint?.offset" :alignment-min="inferenceEditorChunkConstraint?.min" @update:value="updateInferenceDraftSize('chunk_size', $event)" />
             </label>
           </div>
+          <n-alert v-if="inferenceEditorChunkIssue" type="warning" :show-icon="false" style="margin-top:12px">
+            {{ t('inference.invalidChunkSize', inferenceEditorChunkIssue) }}
+          </n-alert>
         </div>
         <template #footer>
           <div class="model-inference-modal__footer">

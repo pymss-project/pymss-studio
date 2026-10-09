@@ -1000,6 +1000,18 @@ def _finalize_ensemble_output(saved: Any, *, payload: dict[str, Any], input_path
     }
 
 
+def _workflow_separator_factory(**kwargs: Any) -> Any:
+    from worker_infer import _studio_separator_type
+
+    separator_type = _studio_separator_type()
+    model_path = kwargs.pop("model_path", None)
+    if model_path:
+        kwargs.pop("model_dir", None)
+        return separator_type(model_path=model_path, **kwargs)
+    model_name = kwargs.pop("model_name")
+    return separator_type.from_model_name(model_name, **kwargs)
+
+
 def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
                inputs: dict[str, str] | None, output_dir: str, output_layout: str) -> dict[str, Any]:
     try:
@@ -1111,6 +1123,7 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
             audio_params=payload.get("audioParams") if isinstance(payload.get("audioParams"), dict) else None,
             debug=bool(payload.get("debug")),
             strict=True,
+            separator_cache=cleanup.enter_context(graph.SeparatorCache(factory=_workflow_separator_factory)),
         )
         if ensemble_stem is not None:
             return _finalize_ensemble_output(

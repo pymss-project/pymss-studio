@@ -30,7 +30,7 @@ import {
 } from '@vicons/ionicons5'
 import { useTaskStore, type ModelListSortMode, type OutputLayout, type SeparationJob, type SeparationTask, type StemOutput } from '@/stores/task'
 import { resolveJobStatus } from '@/features/tasks/lifecycle'
-import { resolveInferenceSampleStep } from '@/features/inference/sampleStep'
+import { inferenceChunkSizeIssue, resolveInferenceChunkStep, resolveInferenceSampleStep } from '@/features/inference/sampleStep'
 import { useWorkflowStore, type WorkflowEntry } from '@/stores/workflow'
 import { WORKFLOW_FORMAT_VERSION } from '@/workflows/formats'
 import {
@@ -228,7 +228,9 @@ const currentModelInfo = computed(() => {
 })
 const currentInferenceSampleStep = computed(() => currentModelInfo.value?.inferenceParamMeta?.recommendedSampleStep)
 const overlapSizeStep = computed(() => resolveInferenceSampleStep(currentModelInfo.value?.inferenceParamMeta, 1))
-const chunkSizeStep = computed(() => resolveInferenceSampleStep(currentModelInfo.value?.inferenceParamMeta, 1024))
+const chunkSizeStep = computed(() => resolveInferenceChunkStep(currentModelInfo.value?.inferenceParamMeta, 1024))
+const currentChunkConstraint = computed(() => currentModelInfo.value?.inferenceParamMeta?.chunkSizeConstraint)
+const currentChunkIssue = computed(() => inferenceChunkSizeIssue(chunk_size.value, currentModelInfo.value?.inferenceParamMeta))
 
 function updateOverlapSize(value: number | null) {
   overlap_size.value = value
@@ -310,6 +312,10 @@ async function saveCurrentModelInferenceDefaults() {
   task.normalizeInferenceInputsBeforeSubmit()
   const overrides = collectCurrentModelInferenceDefaults()
   if (!Object.keys(overrides).length) return
+  if (currentChunkIssue.value) {
+    message.warning(t('inference.invalidChunkSize', currentChunkIssue.value))
+    return
+  }
   try {
     await model.setModelInferenceOverrides(info.name, overrides)
     applyCurrentModelInferenceDefaults(info)
@@ -1767,6 +1773,10 @@ async function start() {
     message.warning(t('separate.startHintModelMissing'))
     return
   }
+  if (runMode.value === 'model' && !ensembleEnabled.value && currentChunkIssue.value) {
+    message.warning(t('inference.invalidChunkSize', currentChunkIssue.value))
+    return
+  }
   if (runMode.value === 'model' && !ensembleEnabled.value && !hasOutputStemSelection.value) {
     message.warning(t('separate.startHintNoOutputStems'))
     return
@@ -2829,7 +2839,8 @@ async function retryCurrentTask() {
                   <n-grid-item v-if="hasInferenceField('chunk_size')">
                     <div class="field-block">
                       <label>{{ t('inference.chunkSize') }}</label>
-                      <AlignedInferenceInputNumber :value="chunk_size" :step="chunkSizeStep" :alignment-step="currentInferenceSampleStep" @update:value="updateChunkSize" @blur="task.restoreInferenceNumberFallback('chunk_size')" />
+                      <AlignedInferenceInputNumber :value="chunk_size" :step="chunkSizeStep" :alignment-step="currentChunkConstraint?.step || currentInferenceSampleStep" :alignment-offset="currentChunkConstraint?.offset" :alignment-min="currentChunkConstraint?.min" @update:value="updateChunkSize" @blur="task.restoreInferenceNumberFallback('chunk_size')" />
+                      <n-text v-if="currentChunkIssue" type="warning">{{ t('inference.invalidChunkSize', currentChunkIssue) }}</n-text>
                     </div>
                   </n-grid-item>
                   <n-grid-item v-if="hasInferenceField('window_size')">

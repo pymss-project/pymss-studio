@@ -6,11 +6,15 @@ const props = withDefaults(defineProps<{
   value: number | null
   step: number
   alignmentStep?: number
+  alignmentOffset?: number
+  alignmentMin?: number
   min?: number
   max?: number
   disabled?: boolean
 }>(), {
   alignmentStep: undefined,
+  alignmentOffset: 0,
+  alignmentMin: 0,
   min: 0,
   max: 1_048_576,
   disabled: false,
@@ -65,7 +69,7 @@ function handleKeyDown(event: KeyboardEvent) {
 
 function handleUpdate(value: number | null) {
   const next = stepDirection
-    ? alignInferenceStepChange(props.value, value, props.alignmentStep, props.step)
+    ? alignInferenceStepChange(props.value, value, props.alignmentStep, props.step, props.alignmentOffset, props.alignmentMin)
     : value
   emit('update:value', next)
 }

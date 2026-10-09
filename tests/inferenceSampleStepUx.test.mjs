@@ -13,7 +13,7 @@ const simpleWorkflowTemplate = simpleWorkflow.template?.content || ''
 
 test('separation parameters use model-provided sample steps with existing fallbacks', () => {
   assert.ok(separate.scriptSetup?.content.includes('resolveInferenceSampleStep(currentModelInfo.value?.inferenceParamMeta, 1)'))
-  assert.ok(separate.scriptSetup?.content.includes('resolveInferenceSampleStep(currentModelInfo.value?.inferenceParamMeta, 1024)'))
+  assert.ok(separate.scriptSetup?.content.includes('resolveInferenceChunkStep(currentModelInfo.value?.inferenceParamMeta, 1024)'))
   assert.ok(separateTemplate.includes(':step="overlapSizeStep"'))
   assert.ok(separateTemplate.includes(':step="chunkSizeStep"'))
   assert.ok(separateTemplate.includes('@update:value="updateOverlapSize"'))
@@ -30,7 +30,7 @@ test('model defaults editor uses the same sample-step metadata', () => {
 test('simple workflow model parameters use the same sample-step metadata', () => {
   const script = simpleWorkflow.scriptSetup?.content || ''
   assert.ok(script.includes('resolveInferenceSampleStep(inferenceEditorModel.value?.inferenceParamMeta, 1)'))
-  assert.ok(script.includes('resolveInferenceSampleStep(inferenceEditorModel.value?.inferenceParamMeta, 1024)'))
+  assert.ok(script.includes('resolveInferenceChunkStep(inferenceEditorModel.value?.inferenceParamMeta, 1024)'))
   assert.ok(simpleWorkflowTemplate.includes(':step="inferenceEditorOverlapStep"'))
   assert.ok(simpleWorkflowTemplate.includes(':step="inferenceEditorChunkStep"'))
   assert.ok(simpleWorkflowTemplate.includes(':alignment-step="inferenceEditorSampleStep"'))

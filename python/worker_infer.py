@@ -20,6 +20,7 @@ from worker_models import (
     model_path_for,
 )
 from worker_protocol import _as_bool, _as_float, _as_int, emit, emit_error
+from worker_inference_constraints import InferenceParameterError, validate_chunk_size
 
 
 class ModelNotFoundError(RuntimeError):
@@ -160,6 +161,11 @@ def _studio_separator_type() -> type[Any]:
     from pymss import MSSeparator  # type: ignore
 
     class StudioMSSeparator(MSSeparator):
+        def update_inference_params(self, config: Any, params: Any) -> Any:
+            updated = super().update_inference_params(config, params)
+            validate_chunk_size(self.model_type, config, config.get("audio", {}).get("chunk_size"))
+            return updated
+
         def __init__(self, *args: Any, output_naming: Any = None, output_model: str = "", **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
             self._studio_naming = _normalize_output_naming(output_naming)
@@ -334,6 +340,8 @@ def resolve_pymss_output_dir(output_dir: str, success_files: list[str], fallback
     return str(Path(output_dir) / file_name)
 
 def _emit_inference_error(exc: Exception, task_id: str) -> int:
+    if isinstance(exc, InferenceParameterError):
+        return emit_error("INFERENCE_PARAMS_INVALID", str(exc), task_id=task_id)
     message = str(exc)
     lowered = message.lower()
     if "no audio stream found" in lowered:
@@ -685,6 +693,7 @@ def _enrich_inference_params_for_model(
         chunk_size = _as_int(inference.get('chunk_size'))
     if chunk_size is None:
         chunk_size = _as_int(audio.get('chunk_size'))
+    validate_chunk_size(normalized_model_type, config, chunk_size)
 
     if explicit_overlap_size is None:
         derived_overlap_size: int | None = None

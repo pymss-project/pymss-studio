@@ -12,7 +12,7 @@ import {
 } from '@vicons/ionicons5'
 import type { ModelDefaultInferenceParams, ModelEntry } from '@/stores/model'
 import AlignedInferenceInputNumber from '@/components/AlignedInferenceInputNumber.vue'
-import { resolveInferenceSampleStep } from '@/features/inference/sampleStep'
+import { inferenceChunkSizeIssue, resolveInferenceChunkStep, resolveInferenceSampleStep } from '@/features/inference/sampleStep'
 import { hasInvalidSimpleInferenceNumbers } from '@/workflows/formats'
 import {
   configuredStemsFor,
@@ -184,7 +184,9 @@ const inferenceEditorModelType = computed(() => String(
 const inferenceEditorIsVr = computed(() => inferenceEditorModelType.value === 'vr')
 const inferenceEditorSampleStep = computed(() => inferenceEditorModel.value?.inferenceParamMeta?.recommendedSampleStep)
 const inferenceEditorOverlapStep = computed(() => resolveInferenceSampleStep(inferenceEditorModel.value?.inferenceParamMeta, 1))
-const inferenceEditorChunkStep = computed(() => resolveInferenceSampleStep(inferenceEditorModel.value?.inferenceParamMeta, 1024))
+const inferenceEditorChunkStep = computed(() => resolveInferenceChunkStep(inferenceEditorModel.value?.inferenceParamMeta, 1024))
+const inferenceEditorChunkConstraint = computed(() => inferenceEditorModel.value?.inferenceParamMeta?.chunkSizeConstraint)
+const inferenceEditorChunkIssue = computed(() => inferenceChunkSizeIssue(inferenceDraft.value.chunk_size, inferenceEditorModel.value?.inferenceParamMeta))
 
 function inferenceNumber(key: keyof SimpleWorkflowInferenceParams, fallback: number) {
   const value = inferenceDraft.value[key]
@@ -264,6 +266,10 @@ function closeInferenceEditor() {
 function saveInferenceEditor() {
   const step = inferenceEditorStep.value
   if (!step) return
+  if (inferenceMode.value === 'custom' && inferenceEditorChunkIssue.value) {
+    message.warning(t('inference.invalidChunkSize', inferenceEditorChunkIssue.value))
+    return
+  }
   if (inferenceMode.value === 'global') {
     step.inferenceParams = undefined
   } else {
@@ -1584,7 +1590,8 @@ onBeforeUnmount(() => {
                 </label>
                 <label>
                   <span>{{ t('inference.chunkSize') }}</span>
-                  <AlignedInferenceInputNumber :value="inferenceNumber('chunk_size', 0)" :step="inferenceEditorChunkStep" :alignment-step="inferenceEditorSampleStep" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('chunk_size', $event)" />
+                  <AlignedInferenceInputNumber :value="inferenceNumber('chunk_size', 0)" :step="inferenceEditorChunkStep" :alignment-step="inferenceEditorChunkConstraint?.step || inferenceEditorSampleStep" :alignment-offset="inferenceEditorChunkConstraint?.offset" :alignment-min="inferenceEditorChunkConstraint?.min" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('chunk_size', $event)" />
+                  <n-text v-if="inferenceEditorChunkIssue" type="warning">{{ t('inference.invalidChunkSize', inferenceEditorChunkIssue) }}</n-text>
                 </label>
               </template>
             </div>

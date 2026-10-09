@@ -243,6 +243,7 @@ test('advanced inference settings expose model-scoped save and reset actions', a
     showStandardizeField: { value: true },
     showNormalizeField: { value: true },
     currentModelInfo: { value: info },
+    currentChunkIssue: { value: undefined },
     model: {
       models: [info],
       getModelBaseInferenceDefaults: () => info.defaultInferenceParams,

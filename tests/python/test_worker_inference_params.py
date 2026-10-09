@@ -57,6 +57,22 @@ class InferenceParameterCompatibilityTests(unittest.TestCase):
         self.assertEqual(defaults["chunk_size"], 882000)
         self.assertEqual(defaults["num_overlap"], 2)
 
+    def test_mdx_chunk_validation_rejects_custom_size_before_constructing_a_model(self) -> None:
+        from worker_inference_constraints import InferenceParameterError
+
+        self.config["audio"] = {"hop_length": 1024, "n_fft": 8192, "chunk_size": 261120}
+        self.config["model"] = {"num_scales": 5, "scale": [2, 2]}
+        self.config["inference"].pop("chunk_size")
+        self.write_config()
+        meta = worker_models.resolve_inference_param_meta(types.SimpleNamespace(model_type="mdx23c"), self.config_path)
+        self.assertEqual(meta["chunkSizeConstraint"], {"step": 32768, "offset": 31744, "min": 31744})
+        with self.assertRaisesRegex(InferenceParameterError, "457728 or 490496"):
+            self.runtime_params({"chunk_size": 465920, "overlap_size": 350208}, "mdx23c")
+        for chunk in [261120, 457728, 490496]:
+            params = self.runtime_params({"chunk_size": chunk, "overlap_size": 350208}, "mdx23c")
+            self.assertEqual(params, {"chunk_size": chunk, "overlap_size": 350208})
+        self.assertNotIn("chunk_size", self.runtime_params({}, "mdx23c"))
+
     def test_recommended_sample_step_uses_architecture_hop(self) -> None:
         cases = (
             ("bs_roformer", {"model": {"stft_hop_length": 512, "fft_size": 2048}}, 512, "model.stft_hop_length"),

@@ -28,6 +28,7 @@ class EnsembleOutputTests(unittest.TestCase):
         }
         self.graph = types.ModuleType("pymss.graph")
         self.graph.PROGRESS_EVENT_VERSION = 1
+        self.graph.SeparatorCache = lambda **_kwargs: contextlib.nullcontext()
         self.graph.load_comfy_file = mock.Mock(return_value=object())
         self.graph.run_dag = mock.Mock(side_effect=self.save_audio)
         package = types.ModuleType("pymss")
