@@ -22,6 +22,7 @@ import {
   BUILTIN_SPECS,
 } from '@/litegraph/registerNodes'
 import { litegraphToComfy, comfyToLitegraph } from '@/litegraph/graphAdapter'
+import { installCanvasDpi } from '@/litegraph/canvasDpi'
 import {
   createWorkflowHistory,
   recordWorkflowSnapshot,
@@ -355,7 +356,7 @@ watch(definition, () => {
 })
 
 // --- lifecycle -------------------------------------------------------------
-let resizeObserver: ResizeObserver | null = null
+let disposeCanvasDpi: (() => void) | null = null
 
 onMounted(() => {
   registerPymssNodes(nodeTranslator)
@@ -363,6 +364,7 @@ onMounted(() => {
   if (!canvasEl.value) return
   const graph = new LGraph()
   const canvas = new LGraphCanvas(canvasEl.value, graph)
+  disposeCanvasDpi = installCanvasDpi(canvas)
   applyPymssPortColors(canvas)
   graphRef.value = graph
   canvasRef.value = canvas
@@ -380,10 +382,7 @@ onMounted(() => {
     configureGraphNode(node)
     if (ready.value) scheduleSnap()
   }
-  resizeObserver = new ResizeObserver(() => (canvas as any).resize())
-  resizeObserver.observe(canvasEl.value.parentElement || canvasEl.value)
   canvasEl.value.addEventListener('keydown', onCanvasKey)
-  canvas.resize()
   // Load existing definition (e.g. reopening an editor) or seed a starter graph.
   initializeGraph()
 })
@@ -391,7 +390,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (pendingSnap) cancelAnimationFrame(pendingSnap)
   pendingSnap = 0
-  resizeObserver?.disconnect()
+  disposeCanvasDpi?.()
+  disposeCanvasDpi = null
   canvasEl.value?.removeEventListener('keydown', onCanvasKey)
   try { graphRef.value?.stop?.() } catch { /* ignore */ }
   canvasRef.value?.stopRendering?.()

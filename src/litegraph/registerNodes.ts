@@ -65,30 +65,6 @@ function localizeContextMenu(menu: any) {
   }
 }
 
-// litegraph 0.17 的 hidpi 处理是坏的: resize() 把 bgcanvas/canvas 尺寸都设为
-// CSS 像素,但 drawBackCanvas() 里 ctx.setTransform(devicePixelRatio,...) 又乘
-// 了 dpr,且 drawFrontCanvas 合成时 drawImage(bgcanvas, w/dpr, h/dpr) 再除一次。
-// Retina(dpr=2)下背景内容只占左上 1/4。上游 bug 未修,这里 patch 两个绘制方法,
-// 绘制期间把 window.devicePixelRatio 视为 1,让整个画布统一按 CSS 分辨率渲染
-// (代价: Retina 下画布内容略低清,但渲染区域和鼠标坐标都正确)。
-if (typeof window !== 'undefined') {
-  const proto = (LGraphCanvas as any)?.prototype
-  if (proto && !proto.__pymssDprPatched) {
-    const withCssDpr = (fn: (...a: any[]) => any) => function (this: any, ...args: any[]) {
-      const realDpr = window.devicePixelRatio
-      Object.defineProperty(window, 'devicePixelRatio', { get: () => 1, configurable: true })
-      try {
-        return fn.apply(this, args)
-      } finally {
-        Object.defineProperty(window, 'devicePixelRatio', { get: () => realDpr, configurable: true })
-      }
-    }
-    proto.drawBackCanvas = withCssDpr(proto.drawBackCanvas)
-    proto.drawFrontCanvas = withCssDpr(proto.drawFrontCanvas)
-    proto.__pymssDprPatched = true
-  }
-}
-
 // 右键菜单/搜索框的子菜单默认需要点击才展开。litegraph 的 ContextMenu 支持
 // autoopen 选项(hover 自动展开子菜单)但没有全局开关,这里 patch 构造函数,
 // 所有菜单默认 autoopen: true。
