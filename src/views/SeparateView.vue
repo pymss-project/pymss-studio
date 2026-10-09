@@ -1712,9 +1712,9 @@ function buildEnsembleWorkflow(): WorkflowEntry {
     if (sepNode) sepNode.outputs[0].links = [lid]
   })
 
-  // 4. save_audio: input audio(0), filename(1)
+  // 4. save_audio: input audio(0), filename(1); sample rate '0' keeps the ensemble's own rate
   const saveId = nextId()
-  nodes.push({ id: saveId, type: 'pymss_save_audio', pos: [1180, 210], size: [240, 120], flags: {}, order: nodes.length, mode: 0, properties: {}, widgets_values: [fmt, 'Default', '44100', 'FLOAT', 'PCM_24', '320k'], inputs: [{ name: 'audio', type: 'AUDIO', link: null }, { name: 'filename', type: 'STRING', shape: 7, link: null }], outputs: [] })
+  nodes.push({ id: saveId, type: 'pymss_save_audio', pos: [1180, 210], size: [240, 120], flags: {}, order: nodes.length, mode: 0, properties: {}, widgets_values: [fmt, 'Default', '0', 'FLOAT', 'PCM_24', '320k'], inputs: [{ name: 'audio', type: 'AUDIO', link: null }, { name: 'filename', type: 'STRING', shape: 7, link: null }], outputs: [] })
   const lsave = link(ensId, 0, saveId, 0, 'AUDIO')
   nodes[nodes.length - 1].inputs[0].link = lsave
   nodes[nodes.length - 1].outputs = []

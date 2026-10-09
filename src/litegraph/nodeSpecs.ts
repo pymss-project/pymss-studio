@@ -217,7 +217,10 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
     outputs: [],
     widgets: [
       { name: 'output_format', type: 'combo', default: 'wav', options: ['wav', 'flac', 'mp3', 'm4a'] },
-      { name: 'sample_rate', type: 'combo', default: '44100', options: ['32000', '44100', '48000'] },
+      // '0' keeps the incoming sample rate instead of resampling (which low-passes near
+      // 21 kHz). It must stay numeric: pymss tells this layout from the six-value one by
+      // checking that widgets_values[1] is all digits.
+      { name: 'sample_rate', type: 'combo', default: '0', options: ['0', '32000', '44100', '48000'] },
       { name: 'wav_bit_depth', type: 'combo', default: 'FLOAT', options: ['FLOAT', 'PCM_24', 'PCM_16'] },
       { name: 'flac_bit_depth', type: 'combo', default: 'PCM_24', options: ['PCM_24', 'PCM_16'] },
       { name: 'mp3_bit_rate', type: 'combo', default: '320k', options: ['128k', '192k', '256k', '320k'] },
