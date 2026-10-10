@@ -77,3 +77,7 @@ src-tauri/tauri.bundle.resources.json
 *.exe
 !src-tauri/icons/*.ico
 .uv-cache/
+# MoInstaller build products
+installer/installer.toml
+installer/stage/
+installer/tests-fixture/stage/

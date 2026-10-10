@@ -1,5 +1,5 @@
 name: Build Windows installer
-description: Build and upload an Inno Setup installer from a staged Windows package
+description: Build and upload a MoInstaller-based setup.exe from a staged Windows package
 inputs:
   version:
     description: Normalized package version
@@ -22,44 +22,36 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install Inno Setup
+    - name: Download mo CLI from MoInstaller releases
       shell: pwsh
-      run: choco install innosetup --no-progress -y
-    - name: Install Inno Setup Chinese language file
-      shell: pwsh
+      env:
+        MO_RELEASE: v0.2.7
       run: |
-        $languages = "C:\Program Files (x86)\Inno Setup 6\Languages"
-        New-Item -ItemType Directory -Force -Path $languages | Out-Null
-        Invoke-WebRequest `
-          -Uri "https://raw.githubusercontent.com/kira-96/Inno-Setup-Chinese-Simplified-Translation/master/ChineseSimplified.isl" `
-          -OutFile (Join-Path $languages "ChineseSimplified.isl")
-        if (!(Test-Path (Join-Path $languages "ChineseSimplified.isl"))) {
-          throw "ChineseSimplified.isl was not installed"
-        }
+        $url = "https://github.com/HuanLinOTO/MoInstaller/releases/download/$env:MO_RELEASE/mo-x86_64-pc-windows-msvc.exe"
+        curl.exe --location --fail --retry 5 --retry-all-errors --output mo.exe $url
+        if ($LASTEXITCODE -ne 0 -or !(Test-Path mo.exe)) { throw 'mo.exe download failed' }
     - name: Download staged package
       uses: actions/download-artifact@v4
       with:
         name: ${{ inputs.stage-artifact }}
         path: release/${{ inputs.stage-name }}
-    - name: Build Inno Setup installer with LZMA2
+    - name: Render manifest and build setup.exe
       shell: pwsh
-      env:
-        PYMSS_VERSION: ${{ inputs.version }}
-        PYMSS_PACKAGE_SUFFIX: ${{ inputs.package-suffix }}
       run: |
-        $stageFull = (Resolve-Path "release/${{ inputs.stage-name }}").Path
-        $releaseFull = (Resolve-Path "release").Path
-        $drive = "Z:"
-        subst $drive $stageFull
-        if ($LASTEXITCODE -ne 0) { throw "Unable to map $stageFull to $drive" }
-        try {
-          $env:PYMSS_PORTABLE_DIR = $drive
-          $env:PYMSS_INSTALLER_OUTPUT = $releaseFull
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer\pymss-studio.iss"
-          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
-        } finally {
-          subst $drive /D | Out-Null
-        }
+        $ErrorActionPreference = 'Stop'
+        $stageName = '${{ inputs.stage-name }}'
+        $outFile = 'release/${{ inputs.output-file }}'
+        # staged payload lives under installer/stage/<stage-name>/ (glob base = installer/)
+        New-Item -ItemType Directory -Force -Path installer/stage | Out-Null
+        Move-Item ("release/" + $stageName) ("installer/stage/" + $stageName)
+        $tpl = Get-Content installer/installer.toml.in -Raw
+        $manifest = $tpl -replace '__PYMSS_VERSION__', '${{ inputs.version }}' -replace '__STAGE_NAME__', $stageName
+        Set-Content installer/installer.toml -Value $manifest -NoNewline -Encoding utf8
+        & (Join-Path $env:GITHUB_WORKSPACE 'mo.exe') build installer/installer.toml --out $outFile
+        if ($LASTEXITCODE -ne 0) { throw "mo build failed with exit code $LASTEXITCODE" }
+        if (!(Test-Path $outFile)) { throw "installer was not produced at $outFile" }
+        Remove-Item installer/installer.toml -Force
+        Remove-Item installer/stage -Recurse -Force
     - name: Upload Windows installer artifact
       uses: actions/upload-artifact@v4
       with:

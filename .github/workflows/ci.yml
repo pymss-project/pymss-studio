@@ -52,3 +52,26 @@ jobs:
 
       - name: Check Tauri backend
         run: cargo check --manifest-path src-tauri/Cargo.toml
+  installer-smoke:
+    name: Installer migration smoke (MoInstaller)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      MO_RELEASE: v0.2.7
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download mo CLI from MoInstaller releases
+        shell: pwsh
+        run: |
+          $url = "https://github.com/HuanLinOTO/MoInstaller/releases/download/$env:MO_RELEASE/mo-x86_64-pc-windows-msvc.exe"
+          curl.exe --location --fail --retry 5 --retry-all-errors --output mo.exe $url
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path mo.exe)) { throw 'mo.exe download failed' }
+
+      - name: Stage smoke fixture tree
+        shell: pwsh
+        run: ./installer/tests-fixture/make-fixture.ps1
+
+      - name: Build + install + upgrade + uninstall smoke
+        shell: pwsh
+        run: ./installer/tests-fixture/smoke.ps1 -MoPath "${{ github.workspace }}/mo.exe"
