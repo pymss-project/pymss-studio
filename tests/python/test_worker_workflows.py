@@ -17,6 +17,7 @@ import worker_workflows
 from worker_workflows import (
     _apply_simple_ensembles,
     _apply_simple_output_names,
+    _apply_simple_save_sample_rate,
     _prepare_legacy_global_input,
     _prepare_simple_runtime_definition,
     _finalize_simple_output_paths,
@@ -305,6 +306,30 @@ class SimpleOutputAssociationTests(unittest.TestCase):
             self.assertFalse(output_dir.exists())
 
 
+class SimpleSaveSampleRateTests(unittest.TestCase):
+    @staticmethod
+    def node(node_type, widgets=None):
+        data = {} if widgets is None else {"widgets_values": widgets}
+        return SimpleNamespace(id=node_type, type=node_type, data=data)
+
+    def test_compiled_saves_keep_the_incoming_sample_rate(self) -> None:
+        saves = [self.node("pymss_save_audio", ["flac", "Default", "44100", "FLOAT", "PCM_24", "320k"]) for _ in range(2)]
+        _apply_simple_save_sample_rate(SimpleNamespace(nodes=[self.node("input_audio"), *saves]))
+        for save in saves:
+            self.assertEqual(save.data["widgets_values"], ["flac", "Default", "0", "FLOAT", "PCM_24", "320k"])
+
+    def test_only_the_compilers_fixed_rate_on_save_nodes_is_replaced(self) -> None:
+        explicit = self.node("pymss_save_audio", ["wav", "Default", "48000", "FLOAT", "PCM_24", "320k"])
+        other = self.node("pymss_resample", ["wav", "Default", "44100"])
+        bare = self.node("pymss_save_audio")
+        short = self.node("pymss_save_audio", ["wav"])
+        _apply_simple_save_sample_rate(SimpleNamespace(nodes=[explicit, other, bare, short]))
+        self.assertEqual(explicit.data["widgets_values"][2], "48000")
+        self.assertEqual(other.data["widgets_values"], ["wav", "Default", "44100"])
+        self.assertEqual(bare.data, {})
+        self.assertEqual(short.data["widgets_values"], ["wav"])
+
+
 class NativeSimpleAudioOperationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -318,12 +343,13 @@ class NativeSimpleAudioOperationTests(unittest.TestCase):
         cls.np, cls.graph, cls.core = np, graph, core
         cls.load_audio, cls.save_audio = staticmethod(load_audio), staticmethod(save_audio)
 
-    def run_workflow(self, definition, *, factors=None, expected_file_count=1, separation_params=None):
+    def run_workflow(self, definition, *, factors=None, expected_file_count=1, separation_params=None,
+                     source_rate=44100):
         np, graph = self.np, self.graph
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         input_path = root / "song.wav"
         samples = np.array([[0.8, -0.7, 0.2, -0.1] * 64], dtype=np.float32)
-        self.save_audio(str(input_path), samples.T, 44100, "wav", {"wav_bit_depth": "FLOAT"})
+        self.save_audio(str(input_path), samples.T, source_rate, "wav", {"wav_bit_depth": "FLOAT"})
         separation_inputs = []
         native_lookup = self.core.get_node_type
 
@@ -352,7 +378,7 @@ class NativeSimpleAudioOperationTests(unittest.TestCase):
                 input_path=str(input_path), inputs=None, output_dir=str(root / "results"), output_layout="flat",
             )
         actual, sample_rate = self.load_audio(result["files"][0], sr=None, mono=False)
-        self.assertEqual(sample_rate, 44100)
+        self.assertEqual(sample_rate, source_rate)
         self.assertEqual(len(result["files"]), expected_file_count)
         return np.asarray(actual).reshape(samples.shape), samples, separation_inputs, result
 
@@ -403,6 +429,27 @@ class NativeSimpleAudioOperationTests(unittest.TestCase):
         self.np.testing.assert_array_equal(inputs[0], -samples)
         self.np.testing.assert_allclose(actual, -samples * 0.25, atol=1e-6)
         self.assertEqual(result["outputs"][0]["stem"], "Dry")
+
+    def test_native_saves_keep_the_source_sample_rate_instead_of_forcing_44100(self) -> None:
+        step = {"id": "split", "model": "fixture", "stems": ["Vocals"]}
+        for name, definition, gain in (
+            ("step save", {
+                "version": 1, "studio": {"editor": "simple"},
+                "steps": [{**step, "save": {"Vocals": "Default"}}],
+            }, 0.25),
+            ("ensemble save", {
+                "version": 1, "studio": {"editor": "simple"}, "steps": [step],
+                "ensembles": [SimpleAudioOperationTests.operation(
+                    "avg_wave", ["split.Vocals", "input"], id="blend", save="Default",
+                )],
+            }, 0.625),
+        ):
+            with self.subTest(name):
+                actual, samples, _inputs, result = self.run_workflow(
+                    definition, source_rate=48000, factors=[0.25],
+                )
+                self.np.testing.assert_allclose(actual, samples * gain, atol=1e-6)
+                self.assertEqual(result["outputs"][0]["sampleRate"], 48000)
 
     def test_native_multi_save_chain_keeps_audio_stems_and_filenames_associated(self) -> None:
         for studio in (True, False):
@@ -745,6 +792,7 @@ class WorkflowOutputMetadataTests(unittest.TestCase):
             [("input", 0, 0), ("step:modelB", 2, 1)],
         )
         self.assertEqual(save.inputs[0].source_node_id, ensemble.id)
+        self.assertEqual(save.data["widgets_values"], ["flac", "Default", "0", "FLOAT", "PCM_24", "320k"])
         self.assertEqual(cleanup.inputs[0].source_node_id, ensemble.id)
         self.assertEqual(cleanup.inputs[0].source_slot, 0)
         self.assertEqual(cleanup.inputs[0].target_slot, 0)

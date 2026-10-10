@@ -447,6 +447,24 @@ def _apply_simple_inference_params(dag: Any, params_by_step: dict[str, dict[str,
         node.data["studio_zero_params"] = zeros
 
 
+# pymss only resamples a Save Audio node to a positive rate, so "0" keeps the incoming one.
+_KEEP_SAVE_SAMPLE_RATE = "0"
+
+
+def _apply_simple_save_sample_rate(dag: Any) -> None:
+    """Keep compiled saves at their audio's own sample rate.
+
+    pymss' YAML compiler writes a fixed "44100" into every Save Audio node, which
+    resamples 48 kHz and higher stems through a steep low-pass near 21 kHz.
+    """
+    for node in dag.nodes:
+        if node.type != "pymss_save_audio":
+            continue
+        widgets = node.data.get("widgets_values")
+        if isinstance(widgets, list) and len(widgets) > 2 and str(widgets[2]) == "44100":
+            widgets[2] = _KEEP_SAVE_SAMPLE_RATE
+
+
 def _apply_simple_output_names(dag: Any, definition: dict[str, Any], *, input_path: str,
                                output_format: str, output_dir: Path | None = None,
                                reserved_names: set[str] | None = None,
@@ -808,7 +826,7 @@ def _apply_simple_ensembles(dag: Any, definition: dict[str, Any], *, input_path:
             id=save_id,
             type="pymss_save_audio",
             inputs=save_inputs,
-            data={"widgets_values": [output_format, "Default", "44100", "FLOAT", "PCM_24", "320k"]},
+            data={"widgets_values": [output_format, "Default", _KEEP_SAVE_SAMPLE_RATE, "FLOAT", "PCM_24", "320k"]},
             title=save_id,
         ))
 
@@ -1067,6 +1085,7 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
         inference_params = _simple_inference_params(wf)
         dag = graph.compile_workflow_to_dag(wf)
         _apply_simple_inference_params(dag, inference_params)
+        _apply_simple_save_sample_rate(dag)
         reserved_simple_names: set[str] = set()
         simple_output_metadata = _apply_simple_output_names(
             dag,
