@@ -391,9 +391,9 @@ def cmd_download_model(payload: dict[str, Any]) -> int:
         ) -> None:
             nonlocal last_emitted_progress, last_emitted_files
             if total_bytes > 0:
-                progress = min(95, max(8, int(downloaded_bytes / total_bytes * 95)))
+                progress = min(95, int(downloaded_bytes / total_bytes * 95))
             else:
-                progress = min(95, max(8, int((completed_files / total_files) * 95)))
+                progress = min(95, int((completed_files / total_files) * 95))
             # Byte counts move constantly, and pymss's callback can fire several times a second
             # on a fast link. Only re-emit when the bar would actually change or a file finishes,
             # so the UI is not woken for updates it would render identically.
