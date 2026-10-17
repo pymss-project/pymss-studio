@@ -43,6 +43,8 @@ test('ensemble graph carries the configured logical output stem without changing
   const separate = definition.nodes.filter(node => node.type === 'mss_separate')
   assert.deepEqual(Array.from(separate, node => node.outputs[0].name), ['Vocals (Audio)', 'vocals (Audio)'])
   assert.equal(definition.nodes.filter(node => node.type === 'pymss_save_audio').length, 1)
+  const save = definition.nodes.find(node => node.type === 'pymss_save_audio')
+  assert.deepEqual(Array.from(save.widgets_values), ['flac', 'Default', '0', 'FLOAT', 'PCM_24', '320k'])
   assert.equal(outputNamingConfig.value.template, '%index%*%filename%*%stem%')
   assert.deepEqual(Array.from(outputNamingConfig.value.stemOrder), ['人声'])
 })
