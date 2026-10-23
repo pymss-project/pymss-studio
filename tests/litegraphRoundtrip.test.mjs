@@ -118,7 +118,29 @@ test('MSS params accept model defaults and unrestricted positive integer overrid
 test('save audio sample-rate choices stop at 48 kHz', () => {
   const node = LiteGraph.createNode('pymss_save_audio')
   const sampleRate = node.widgets.find(widget => widget.name === 'sample_rate')
-  assert.deepEqual(sampleRate.options.values, ['32000', '44100', '48000'])
+  assert.deepEqual(sampleRate.options.values, ['0', '32000', '44100', '48000'])
+})
+
+test('new save nodes keep the incoming sample rate instead of resampling to 44.1 kHz', () => {
+  const graph = new LGraph()
+  const node = LiteGraph.createNode('pymss_save_audio')
+  graph.add(node)
+  assert.equal(node.widgets.find(widget => widget.name === 'sample_rate').value, '0')
+  const exported = exportGraph(graph)
+  const values = exported.nodes[0].widgets_values
+  assert.deepEqual(values, ['wav', '0', 'FLOAT', 'PCM_24', '320k'])
+  // pymss tells this layout from the six-value upstream one by an all-digit widgets_values[1].
+  assert.match(values[1], /^\d+$/)
+  assert.deepEqual(load(exported).nodes[0].widgets.map(widget => widget.value), values)
+})
+
+test('saved workflows keep an explicit 44.1 kHz save rate', () => {
+  const source = fixture('example_mss_separate')
+  const save = source.nodes.find(node => node.type === 'pymss_save_audio')
+  save.widgets_values = ['wav', '44100', 'FLOAT', 'PCM_24', '320k']
+  save.inputs = save.inputs.filter(input => input.name !== 'output_folder')
+  const exported = exportGraph(load(source))
+  assert.deepEqual(exported.nodes.find(n => n.id === save.id).widgets_values, ['wav', '44100', 'FLOAT', 'PCM_24', '320k'])
 })
 
 test('separate nodes shrink after switching from six stems to two', () => {
