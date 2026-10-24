@@ -30,6 +30,14 @@ def run_command(command: str, payload: dict) -> int:
         configure_process_proxy(load_proxy_config())
         from worker_bootstrap import cmd_update_runtime_core
         return cmd_update_runtime_core(payload)
+    if command == "plugin_marketplace":
+        configure_process_proxy(load_proxy_config())
+        from worker_plugins import cmd_plugin_marketplace
+        return cmd_plugin_marketplace(payload)
+    if command == "manage_plugin":
+        configure_process_proxy(load_proxy_config())
+        from worker_plugins import cmd_manage_plugin
+        return cmd_manage_plugin(payload)
     if command == "optional_package_status":
         from worker_optional_packages import cmd_optional_package_status
         return cmd_optional_package_status(payload)
@@ -131,6 +139,18 @@ def run_command(command: str, payload: dict) -> int:
     if command == "infer":
         from worker_infer import cmd_infer
         return cmd_infer(payload)
+    if command == "list_operations":
+        from worker_operations import cmd_list_operations
+        return cmd_list_operations(payload)
+    if command == "describe_operation":
+        from worker_operations import cmd_describe_operation
+        return cmd_describe_operation(payload)
+    if command == "run_operation":
+        from worker_operations import cmd_run_operation
+        return cmd_run_operation(payload)
+    if command == "list_nodes":
+        from worker_nodes import cmd_list_nodes
+        return cmd_list_nodes(payload)
     if command == "infer_workflow":
         from worker_workflows import cmd_infer_workflow
         return cmd_infer_workflow(payload)

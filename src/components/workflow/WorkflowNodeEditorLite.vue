@@ -42,11 +42,85 @@ import type { NodeSpec } from '@/litegraph/nodeSpecs'
 import { translateNodeCategory, translateNodeTitle, type NodeTranslator } from '@/litegraph/nodeLocalization'
 import { isGraphWorkflowDefinition } from '@/workflows/formats'
 import { applyGraphDefaultWidgets, type GraphDefaults } from '@/workflows/graphDefaults'
+import { registerPluginNodeSpecs } from '@/litegraph/registerNodes'
 
 const studioLog = createLogger('ui.components.workflow.WorkflowNodeEditorLite')
 
-// All node specs the palette offers (pymss nodes + ComfyUI builtin audio/string nodes).
+// All node specs the palette offers (pymss + ComfyUI builtin + plugin-contributed).
 const ALL_SPECS: Record<string, NodeSpec> = { ...NODE_SPECS, ...BUILTIN_SPECS }
+
+type PluginNodeDecl = {
+  type?: string
+  title?: string
+  category?: string
+  description?: string
+  registered?: boolean
+  pluginId?: string
+  inputs?: { name?: string; type?: string; widget?: string }[]
+  outputs?: { name?: string; type?: string }[]
+  widgets?: { name?: string; type?: string; default?: unknown; min?: number; max?: number; step?: number; options?: string[] }[]
+}
+
+/** Plugin node types the worker reports as not registered (plugin broken or
+ *  its runtime missing). Nodes of these types on canvas are flagged. */
+const unregisteredPluginNodes = ref<Map<string, string>>(new Map())
+
+/** Fetch plugin node declarations and merge them into the spec pool. */
+async function loadPluginNodeSpecs() {
+  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
+  try {
+    const response = await invoke<{ nodes?: PluginNodeDecl[] }>('list_nodes')
+    const declarations = Array.isArray(response?.nodes) ? response.nodes : []
+    const PORT_VALUES = ['AUDIO', 'STRING', 'COMBO', 'BOOLEAN', 'PYMSS_MSS_PARAMS', 'PYMSS_VR_PARAMS'] as const
+    type PortName = typeof PORT_VALUES[number]
+    const toPort = (value: unknown): PortName => ((PORT_VALUES as readonly string[]).includes(String(value)) ? String(value) : 'AUDIO') as PortName
+    const specs: NodeSpec[] = declarations.map(decl => ({
+      type: String(decl.type || ''),
+      title: String(decl.title || decl.type || ''),
+      category: String(decl.category || 'pymss/plugins'),
+      inputs: (decl.inputs || []).map(port => ({
+        name: String(port.name || ''),
+        type: toPort(port.type),
+        widget: port.widget ? { name: String(port.widget) } : undefined,
+      })),
+      outputs: (decl.outputs || []).map(port => ({
+        name: String(port.name || ''),
+        type: toPort(port.type),
+      })),
+      widgets: (decl.widgets || []).map(widget => ({
+        name: String(widget.name || ''),
+        type: (['toggle', 'combo', 'number'].includes(String(widget.type)) ? String(widget.type) : 'text') as 'text',
+        default: widget.default as string | number | boolean,
+        options: widget.options,
+      })),
+    })).filter(spec => spec.type)
+    registerPluginNodeSpecs(specs)
+    for (const spec of specs) ALL_SPECS[spec.type] = spec
+    const broken = new Map<string, string>()
+    for (const decl of declarations) {
+      if (decl.type && decl.registered === false) broken.set(decl.type, decl.pluginId || decl.type)
+    }
+    unregisteredPluginNodes.value = broken
+    flagUnregisteredNodes()
+  } catch (error) {
+    console.warn('[workflow] plugin nodes unavailable', error)
+  }
+}
+
+/** Mark on-canvas nodes whose plugin executor is missing: red-tinted so the
+ *  user sees WHY the workflow would fail before running it. */
+function flagUnregisteredNodes() {
+  const graph = graphRef.value
+  if (!graph) return
+  for (const node of graph.nodes || []) {
+    const missing = unregisteredPluginNodes.value.get(String(node.type))
+    if (missing) {
+      node.color = '#5a2d2d'
+      node.bgcolor = '#3b1f1f'
+      ;(node as any).pymssMissingPlugin = missing
+    }
+  }
+}
 
 const props = withDefaults(defineProps<{
   readonly?: boolean
@@ -491,7 +565,9 @@ function fitExecutionCanvas() {
 
 onMounted(() => {
   registerPymssNodes(nodeTranslator)
+  void loadPluginNodeSpecs()
   applyTheme()
+  // Re-flag once the graph is configured (plugin specs may arrive after).
   if (!canvasEl.value) return
   const graph = new LGraph()
   const canvas = new LGraphCanvas(canvasEl.value, graph)
@@ -504,6 +580,12 @@ onMounted(() => {
   canvas.onDrawForeground = drawRunningNodes
   // Track link/property edits so separate node stems follow the chosen model.
   graph.onNodeAdded = (node: any) => {
+    const missing = unregisteredPluginNodes.value.get(String(node.type))
+    if (missing) {
+      node.color = '#5a2d2d'
+      node.bgcolor = '#3b1f1f'
+      ;(node as any).pymssMissingPlugin = missing
+    }
     if (ready.value && !configuringGraph) {
       applyGraphDefaultWidgets([node], {
         device: props.defaultDevice,

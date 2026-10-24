@@ -13,7 +13,6 @@ const router = createRouter({
   history: createWebHashHistory(),
   routes: appRoutes,
 })
-
 router.beforeEach(createWorkflowEditorRouteGuard({
   isDesktopMainWindow: () => isTauriRuntime() && isMainTaskOwner(),
   openWindow: async (command, args) => {
@@ -25,7 +24,6 @@ router.beforeEach(createWorkflowEditorRouteGuard({
   },
   onError: error => useToastStore().error(error instanceof Error ? error.message : i18n.global.t('workflows.editorWindowOpenFailed')),
 }))
-
 router.afterEach((to, from, failure) => {
   if (!failure && typeof to.name === 'string' && to.name !== from.name) recordFeatureVisit(to.name)
 })

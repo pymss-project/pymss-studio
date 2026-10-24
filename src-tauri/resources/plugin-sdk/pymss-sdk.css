@@ -1,0 +1,146 @@
+/* pymss plugin SDK stylesheet.
+ * Design tokens arrive at runtime from the host (host.theme -> SDK writes the
+ * custom properties below). A neutral dark fallback keeps pages presentable
+ * even before/without the handshake.
+ *
+ * Usage (plugin view page):
+ *   <link rel="stylesheet" href="pymss-plugin://sdk/pymss-sdk.css">
+ *   <script src="pymss-plugin://sdk/pymss-sdk.js"></script>
+ * then compose pages with the .pymss-* classes.
+ */
+
+:root {
+  /* overwritten by host.theme; fallback ~= Studio dark */
+  --surface: #0f1117;
+  --surface-1: #161922;
+  --surface-2: #1e232e;
+  --surface-3: #2a313f;
+  --on-surface-heading: #eef1f7;
+  --on-surface: #cdd2dc;
+  --on-surface-muted: #969eae;
+  --outline: rgba(190, 201, 222, 0.115);
+  --outline-strong: rgba(205, 214, 232, 0.19);
+  --primary: #7299d7;
+  --primary-strong: #b5caf0;
+  --primary-soft: rgba(114, 153, 215, 0.18);
+  --danger: #e5484d;
+  --success: #46a758;
+  --warning: #ffb224;
+  --radius: 10px;
+  --radius-small: 6px;
+  --font-sans: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+html, body {
+  margin: 0;
+  padding: 16px;
+  background: var(--surface);
+  color: var(--on-surface);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+.pymss-title { color: var(--on-surface-heading); font-size: 16px; font-weight: 600; margin: 0 0 4px; }
+.pymss-subtitle { color: var(--on-surface-muted); font-size: 13px; margin: 0 0 12px; }
+.pymss-muted { color: var(--on-surface-muted); }
+.pymss-heading { color: var(--on-surface-heading); font-weight: 600; }
+
+.pymss-card {
+  background: var(--surface-1);
+  border: 1px solid var(--outline);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 12px;
+}
+.pymss-card--flat { background: var(--surface-2); }
+
+.pymss-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pymss-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.pymss-spacer { flex: 1; }
+
+.pymss-btn {
+  appearance: none;
+  border: 1px solid var(--outline-strong);
+  background: var(--surface-2);
+  color: var(--on-surface);
+  border-radius: var(--radius-small);
+  padding: 6px 14px;
+  font: inherit;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.pymss-btn:hover:not(:disabled) { background: var(--surface-3); }
+.pymss-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.pymss-btn--primary {
+  background: var(--primary);
+  border-color: transparent;
+  color: #0d1524;
+  font-weight: 600;
+}
+.pymss-btn--primary:hover:not(:disabled) { background: var(--primary-strong); }
+.pymss-btn--danger { background: transparent; border-color: var(--danger); color: var(--danger); }
+.pymss-btn--small { padding: 3px 10px; font-size: 13px; }
+
+.pymss-input, .pymss-select, .pymss-textarea {
+  appearance: none;
+  border: 1px solid var(--outline-strong);
+  background: var(--surface-2);
+  color: var(--on-surface);
+  border-radius: var(--radius-small);
+  padding: 6px 10px;
+  font: inherit;
+  min-width: 0;
+}
+.pymss-input:focus, .pymss-select:focus, .pymss-textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+.pymss-textarea { resize: vertical; min-height: 72px; }
+
+.pymss-label { display: block; color: var(--on-surface-muted); font-size: 13px; margin-bottom: 4px; }
+.pymss-field { margin-bottom: 10px; min-width: 0; }
+
+.pymss-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.pymss-table th {
+  text-align: left; color: var(--on-surface-muted); font-weight: 500;
+  border-bottom: 1px solid var(--outline-strong); padding: 6px 8px;
+}
+.pymss-table td { border-bottom: 1px solid var(--outline); padding: 6px 8px; }
+
+.pymss-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  border-radius: 999px; padding: 1px 9px; font-size: 12px;
+  background: var(--primary-soft); color: var(--primary-strong);
+  border: 1px solid var(--outline);
+}
+.pymss-badge--success { background: rgba(70, 167, 88, 0.15); color: var(--success); }
+.pymss-badge--danger { background: rgba(229, 72, 77, 0.15); color: var(--danger); }
+.pymss-badge--warning { background: rgba(255, 178, 36, 0.15); color: var(--warning); }
+
+.pymss-progress {
+  height: 6px; border-radius: 999px; overflow: hidden;
+  background: var(--surface-3);
+}
+.pymss-progress > i {
+  display: block; height: 100%; width: 0;
+  background: var(--primary); transition: width 0.2s;
+}
+
+.pymss-alert {
+  border-radius: var(--radius-small);
+  padding: 8px 12px; font-size: 13px; margin-bottom: 10px;
+  border: 1px solid var(--outline);
+  background: var(--surface-2);
+}
+.pymss-alert--error { border-color: rgba(229, 72, 77, 0.4); color: var(--danger); background: rgba(229, 72, 77, 0.08); }
+.pymss-alert--success { border-color: rgba(70, 167, 88, 0.4); color: var(--success); background: rgba(70, 167, 88, 0.08); }
+
+.pymss-divider { border: 0; border-top: 1px solid var(--outline); margin: 12px 0; }
+.pymss-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px; background: var(--surface-2);
+  border-radius: var(--radius-small); padding: 10px 12px;
+  white-space: pre-wrap; word-break: break-all;
+}

@@ -402,10 +402,35 @@ export function refreshNodeModelOptions(node: any, values: string[]) {
   widget.options.values = values
 }
 
+const PLUGIN_NODE_SPECS: Record<string, NodeSpec> = {}
+let pluginSpecsLoaded = false
+
+/** Merge plugin-contributed node specs (manifest [[contributions.nodes]]). */
+export function registerPluginNodeSpecs(specs: NodeSpec[]) {
+  for (const spec of specs) {
+    if (!spec?.type) continue
+    if (NODE_SPECS[spec.type] || BUILTIN_SPECS[spec.type]) continue // never shadow built-ins
+    const existing = PLUGIN_NODE_SPECS[spec.type]
+    PLUGIN_NODE_SPECS[spec.type] = spec
+    if (registered && !existing) {
+      const cls = makeNodeClass(spec) as any
+      LiteGraph.registerNodeType(spec.type, cls)
+      cls.category = translateNodeCategory(spec.category)
+      registeredNodeClasses.push({ cls, spec })
+    }
+  }
+  pluginSpecsLoaded = true
+}
+
+export function pluginNodeSpecsLoaded() {
+  return pluginSpecsLoaded
+}
+
 function specForNode(node: AnyNode): NodeSpec | undefined {
   const type = String(node?.type || '')
   return NODE_SPECS[type]
     || BUILTIN_SPECS[type]
+    || PLUGIN_NODE_SPECS[type]
     || NODE_SPECS[type.replace(/^pymss_/, '')]
 }
 
@@ -544,6 +569,14 @@ function makeNodeClass(spec: NodeSpec): any {
       localizeNodeWithSpec(this, spec)
       if (isWorkflowSeparationNodeType(spec.type)) {
         this.setSize([Math.max(this.size[0], SEPARATE_NODE_MIN_WIDTH), this.size[1]])
+      } else {
+        // Widen short-spec nodes so the title is not truncated by the 140px
+        // default: estimate ~7px per CJK char and ~6.3px per latin char.
+        const title = String(this.title || spec.title || '')
+        let estimate = 0
+        for (const ch of title) estimate += ch.charCodeAt(0) > 0x2e80 ? 7.2 : 6.3
+        const minTitleWidth = Math.ceil(estimate) + 34 // padding + title dot
+        if (this.size[0] < minTitleWidth) this.setSize([minTitleWidth, this.size[1]])
       }
     }
 
@@ -603,6 +636,7 @@ export function allNodeTypes(): string[] {
     if (isWorkflowSeparationNodeType(spec.type)) types.add(`pymss_${spec.type}`)
   }
   for (const spec of Object.values(BUILTIN_SPECS)) types.add(spec.type)
+  for (const spec of Object.values(PLUGIN_NODE_SPECS)) types.add(spec.type)
   return [...types]
 }
 
@@ -631,6 +665,9 @@ export function registerPymssNodes(translator?: NodeTranslator) {
     }
   }
   for (const spec of Object.values(BUILTIN_SPECS)) {
+    register(spec)
+  }
+  for (const spec of Object.values(PLUGIN_NODE_SPECS)) {
     register(spec)
   }
 }

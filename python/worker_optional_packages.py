@@ -12,6 +12,7 @@ import hashlib
 import importlib
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -29,6 +30,45 @@ OPTIONAL_PACKAGES: dict[str, dict[str, str]] = {
         "verifyCode": "import funasr, torchaudio",
     },
 }
+
+# On Apple Silicon the FunASR component is satisfied by the asr *plugin*
+# (funasr-mlx backend) instead of the Torch-based sidecar: the MLX runtime
+# ships no PyTorch, so the legacy path can only fail there.
+def _is_apple_silicon() -> bool:
+    """Runtime check (tests monkeypatch sys.platform; keep it authoritative)."""
+    return sys.platform == "darwin" and platform.machine() == "arm64"
+
+
+_APPLE_SILICON = _is_apple_silicon()
+
+
+def _apple_silicon_plugin_status(runtime: RuntimeContext | None = None) -> dict[str, Any] | None:
+    """funasr component status backed by the installed asr plugin (macOS arm64)."""
+    if not _APPLE_SILICON:
+        return None
+    runtime = runtime or _runtime_context()
+    try:
+        from worker_plugins import _inventory, _root
+
+        # verify=False: status probes must never import plugin code or spawn a
+        # verification subprocess (same contract as the sidecar metadata path).
+        installed = _inventory(_root(), verify=False).get("installed", [])
+    except Exception:
+        return None
+    row = next((item for item in installed if item.get("name") == "asr"), None)
+    if not row:
+        return None
+    # Plugin present: the component reports through the plugin's funasr-mlx sidecar.
+    return {
+        "package": "funasr",
+        "requirement": "asr plugin (funasr-mlx)",
+        "installed": bool(row.get("loaded")),
+        "present": True,
+        "version": "mlx",
+        "source": "plugin",
+        "issue": None if row.get("loaded") else "plugin_not_loaded",
+        "runtimeIdentity": runtime.identity,
+    }
 
 
 @dataclass(frozen=True)
@@ -174,6 +214,11 @@ def optional_package_status(name: Any, runtime: RuntimeContext | None = None) ->
 
     runtime = runtime or _runtime_context()
     normalized, spec = _package_spec(name)
+    # Apple Silicon: the funasr component is backed by the asr plugin.
+    if normalized == "funasr":
+        plugin_status = _apple_silicon_plugin_status(runtime)
+        if plugin_status is not None:
+            return plugin_status
     directory = _package_dir(normalized, runtime)
     managed_version = _sidecar_version(normalized, directory)
     environment_version = None if managed_version else _environment_version(normalized, runtime)
@@ -454,6 +499,47 @@ def _uninstall_package(
     importlib.invalidate_caches()
 
 
+def _manage_funasr_via_plugin(
+    action: str,
+    payload: dict[str, Any],
+    task_id: str | None,
+    runtime: RuntimeContext,
+) -> int:
+    """Install/uninstall the asr plugin as the Apple Silicon funasr component."""
+    from worker_plugins import cmd_manage_plugin
+
+    mirror = str(payload.get("mirror") or "auto")
+    locale = str(payload.get("locale") or "")
+    if action == "install":
+        current = _apple_silicon_plugin_status(runtime)
+        if current and current["installed"]:
+            _emit_stage("funasr", action, "The ASR plugin is already installed", task_id)
+            emit("optional_package_status", current)
+            return 0
+        _emit_stage("funasr", action, "Installing the ASR plugin (funasr-mlx backend)", task_id)
+        code = cmd_manage_plugin({
+            "action": "install",
+            "name": "asr",
+            "mirror": mirror,
+            "locale": locale,
+            "taskId": task_id or "funasr_plugin_install",
+        })
+    else:
+        current = _apple_silicon_plugin_status(runtime)
+        if not current or not current["present"]:
+            _emit_stage("funasr", action, "The ASR plugin is not installed", task_id)
+            return 0
+        _emit_stage("funasr", action, "Removing the ASR plugin", task_id)
+        code = cmd_manage_plugin({
+            "action": "uninstall",
+            "name": "asr",
+            "taskId": task_id or "funasr_plugin_uninstall",
+        })
+    # Final status event keeps the UI in sync with the plugin outcome.
+    emit("optional_package_status", optional_package_status("funasr", runtime))
+    return code
+
+
 def cmd_optional_package_status(payload: dict[str, Any]) -> int:
     try:
         status = optional_package_status(payload.get("package"), _runtime_context())
@@ -471,6 +557,14 @@ def cmd_manage_optional_package(payload: dict[str, Any]) -> int:
         name, spec = _package_spec(payload.get("package"))
         if action not in {"install", "uninstall"}:
             raise ValueError(f"Unsupported optional package action: {action or 'missing'}")
+        # Apple Silicon: installing/uninstalling the funasr component manages the
+        # asr plugin (funasr-mlx backend) through the plugin lifecycle instead of
+        # the Torch-based sidecar, which cannot work without PyTorch.
+        # Apple Silicon reroutes funasr to the asr plugin — but only when there is
+        # no managed sidecar copy in play: a present sidecar copy means classic
+        # optional-package semantics (install/uninstall of that copy).
+        if name == "funasr" and _is_apple_silicon() and not optional_package_status(name, runtime)["installed"] and action == "install":
+            return _manage_funasr_via_plugin(action, payload, task_id, runtime)
         current = optional_package_status(name, runtime)
         if action == "install" and not current["installed"]:
             _emit_stage(name, action, f"Installing {spec['requirement']}", task_id)

@@ -53,7 +53,10 @@ test('advanced editor locale catalogs cover every registered node type', () => {
   const expected = Object.keys({ ...NODE_SPECS, ...BUILTIN_SPECS }).sort()
   for (const locale of ['en', 'zh-CN']) {
     const actual = Object.keys(messages[locale].workflows.advancedEditor.nodes).sort()
-    assert.deepEqual(actual, expected, locale)
+    // Locale catalogs may additionally cover dynamic plugin node types
+    // (manifest [[contributions.nodes]]); every static type must be present.
+    const missing = expected.filter(type => !actual.includes(type))
+    assert.deepEqual(missing, [], `${locale} missing: ${missing.join(', ')}`)
   }
 })
 

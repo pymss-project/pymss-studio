@@ -36,8 +36,14 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg", "deb", "rpm"],
+    "targets": [
+      "app",
+      "dmg",
+      "deb",
+      "rpm"
+    ],
     "resources": [
+      "resources/plugin-sdk/*",
       "../python/*.py",
       "../python/*.json",
       "../python/*.txt",

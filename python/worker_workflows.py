@@ -1166,6 +1166,17 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
                *, separator_cache: Any = None) -> dict[str, Any]:
     graph = _workflow_graph()
 
+    # Activate marketplace plugins so plugin-contributed graph node types are
+    # registered (graph node registry and plugin nodes share one pool). Readers
+    # only take the shared lock for recovery; writers stay unblocked.
+    try:
+        from worker_plugins import operation_runtime
+
+        operation_runtime()
+    except Exception as exc:  # noqa: BLE001 — missing plugins never block built-in graphs
+        import sys
+        print(f"[workflow] plugin nodes unavailable: {exc}", file=sys.stderr)
+
     workbench = payload.get("workbench") is True
     output_targets = _normalize_inputs(payload.get("workbenchOutputs")) if workbench else {}
     if workbench:
@@ -1260,6 +1271,7 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
             graph_output_dir = Path(cleanup.enter_context(tempfile.TemporaryDirectory(
                 prefix=".pymss-ensemble-", dir=task_output_dir,
             )))
+        node_results: dict[int, Any] = {}
         from worker_workflow_logs import workflow_logging
 
         log_scope = cleanup.enter_context(workflow_logging(
@@ -1277,6 +1289,7 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
             output_dir=graph_output_dir,
             input_path=input_path,
             inputs=runtime_inputs or None,
+            node_results=node_results,
             **callbacks,
             logger=log_scope.logger,
             device=_resolve_device(payload),
@@ -1337,13 +1350,37 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
             item["sampleRate"] = rec.sample_rate
         outputs.append(item)
 
-    return {
+    # Non-output leaf nodes (plugin STRING producers: ASR text, measurements,
+    # MIDI paths) surface as nodeValues so the task result carries their work.
+    node_values: list[dict[str, Any]] = []
+    try:
+        from pymss.graph.core import StringArtifact
+
+        for node in dag.nodes:
+            result = node_results.get(node.id)
+            if result is None or not getattr(result, "outputs", None):
+                continue
+            for slot, artifact in result.outputs.items():
+                if isinstance(artifact, StringArtifact):
+                    node_values.append({
+                        "nodeId": node.id,
+                        "nodeType": str(node.type),
+                        "slot": slot,
+                        "value": str(artifact.value),
+                    })
+    except Exception:
+        pass
+
+    result_payload = {
         "files": saved_paths,
         "outputs": outputs,
         "outputDir": str(Path(saved_paths[0]).parent.resolve()) if workbench and saved_paths else str(task_output_dir.resolve()),
         **({"outputDirectories": sorted({str(Path(path).parent.resolve()) for path in saved_paths})} if workbench else {}),
         "outputFormat": output_format,
     }
+    if node_values:
+        result_payload["nodeValues"] = node_values
+    return result_payload
 
 
 def cmd_infer_workflow(payload: dict[str, Any]) -> int:

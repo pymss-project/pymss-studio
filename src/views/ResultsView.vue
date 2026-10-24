@@ -644,6 +644,15 @@ function shortenPath(value: string) {
   return `${value.slice(0, 34)}…${value.slice(-44)}`
 }
 
+async function copyNodeValue(value: string) {
+  try {
+    await navigator.clipboard.writeText(value)
+    message.success(t('common.copied'))
+  } catch {
+    message.error(t('common.copyFailed'))
+  }
+}
+
 function outputFileName(value: string) {
   return getFileName(value) || shortenPath(value)
 }
@@ -896,6 +905,20 @@ function formatDurationMs(value: number | undefined) {
                 <div v-for="output in result.outputs" :key="output.path" class="stem-line" :title="output.path">
                   <span class="stem-line__stem">{{ output.stem }}</span>
                   <span class="stem-line__path">{{ outputFileName(output.path) }}</span>
+                </div>
+              </div>
+              <div v-if="result.nodeValues?.length" class="result-detail-card__node-values">
+                <div class="node-value-line__header">{{ t('results.nodeValues') }}</div>
+                <div
+                  v-for="(entry, index) in result.nodeValues"
+                  :key="`${entry.nodeId}-${entry.slot}-${index}`"
+                  class="node-value-line"
+                >
+                  <span class="node-value-line__label">{{ entry.nodeType }}</span>
+                  <span class="node-value-line__value">{{ entry.value }}</span>
+                  <n-button size="tiny" tertiary @click.stop="copyNodeValue(entry.value)">
+                    {{ t('common.copy') }}
+                  </n-button>
                 </div>
               </div>
             </section>
@@ -1232,6 +1255,30 @@ function formatDurationMs(value: number | undefined) {
   white-space: nowrap;
   color: var(--primary-strong);
   font-weight: 700;
+}
+
+.node-value-line__header {
+  color: var(--text-muted, #969eae);
+  font-size: 12px;
+  margin: 4px 0 2px;
+}
+
+.node-value-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 13px;
+}
+
+.node-value-line__label {
+  color: var(--text-muted, #969eae);
+  min-width: 120px;
+}
+
+.node-value-line__value {
+  flex: 1;
+  word-break: break-all;
 }
 
 .stem-line__path {

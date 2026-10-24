@@ -68,7 +68,10 @@ docs/
 # Build/release artifacts
 release/
 python-runtime/
-src-tauri/resources/
+# src-tauri/resources/ is gitignored for generated runtime artifacts, but the
+# plugin SDK assets ship in-repo — unignore that subtree.
+src-tauri/resources/*
+!src-tauri/resources/plugin-sdk/
 src-tauri/tauri.bundle.resources.json
 *.zip
 *.tar.zst
@@ -77,3 +80,5 @@ src-tauri/tauri.bundle.resources.json
 *.exe
 !src-tauri/icons/*.ico
 .uv-cache/
+.tmp/
+.pi/herdr-team/

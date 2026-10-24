@@ -7,6 +7,7 @@ mod diagnostic_report;
 mod error;
 mod log_record;
 mod model_dir_migration;
+mod plugin_views;
 #[cfg(any(target_os = "macos", test))]
 mod macos_update;
 #[cfg(any(target_os = "linux", test))]
@@ -28,6 +29,7 @@ mod workflow_editors;
 
 use state::AppState;
 use tauri::{Emitter, Manager};
+
 
 fn main() {
     terminal::attach_parent();
@@ -56,6 +58,9 @@ fn main() {
     };
 
     let builder = tauri::Builder::default()
+        .register_uri_scheme_protocol("pymss-plugin", |ctx, request| {
+            plugin_views::serve_view(ctx.app_handle(), &request)
+        })
         .on_page_load(|webview, _payload| {
             let window = webview.window();
             if !cfg!(target_os = "macos") {
@@ -121,6 +126,13 @@ fn main() {
             commands::app_cmd::cancel_editor_mix_export,
             commands::app_cmd::start_audio_tool,
             commands::tempo_key::start_tempo_key_analysis,
+            commands::app_cmd::start_operation_task,
+            commands::app_cmd::list_operations,
+            commands::app_cmd::list_nodes,
+            commands::app_cmd::plugin_marketplace,
+            commands::app_cmd::manage_plugin,
+            commands::app_cmd::set_plugin_view_root,
+            commands::app_cmd::describe_operation,
             commands::app_cmd::get_app_paths,
             commands::app_cmd::get_env_info,
             commands::app_cmd::generate_waveform_peaks,

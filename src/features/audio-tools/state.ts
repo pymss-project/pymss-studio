@@ -10,6 +10,7 @@ export type StoredAudioToolsState = {
   mergeSortDirection?: 'asc' | 'desc'
   mergeRegex?: string
   midiModelPath?: string
+  midiLanguage?: string
   asrModelMode?: 'preset' | 'local'
   asrPreset?: string
   asrLanguage?: string

@@ -151,6 +151,16 @@ Open **Tools** to use these utilities independently of the separation workflow.
 
 The optional FunASR component installs on demand; ASR models download and cache on first use. The ASR tool is currently unavailable on macOS. Download a model archive from the [GAME release](https://github.com/openvpi/GAME/releases/tag/v1.0.0) linked in the MIDI tool. **Keep the complete extracted directory: `model.pt` requires `config.yaml` beside it, and language-conditioned models also require `lang_map.json`.** Do not move the weights alone. Language, output, and parameter options depend on the selected tool and model.
 
+## Plugin marketplace
+
+Open **Plugins** in the sidebar to browse and search the official catalog. Install and activate a Python runtime in Settings first. **Install from source** accepts a plugin name, a Git repository URL, or a local folder; repository subdirectories use `URL#path/to/plugin`.
+
+The Installed tab shows loading errors, operations, and update checks. Marketplace plugins support update, dependency repair, and uninstall. Existing plugins in `~/.pymss/plugins` (or `PYMSS_PLUGINS_DIR`) are also listed, with files and dependencies managed outside the marketplace. Plugins run Python code with your user permissions.
+
+Sources and additional dependencies are stored in `runtime-envs/plugins/<runtime-identity>/installed/` under the application data directory. Dependencies resolve against the active runtime with host versions constrained. Incompatible requirements fail without replacing the working plugin. Updates are staged and verified before activation. Each runtime has its own marketplace installations.
+
+**Run plugin operations** opens Tools → Plugin operations. Plugins must contribute operations through `setup(plugin)`, and the runtime must contain pymss operations support. Legacy capability or graph-node plugins may have no generic operations. Installation does not add dynamic nodes to the Studio workflow editor.
+
 ## Data, runtimes, and updates
 
 ### Data locations

@@ -10,6 +10,7 @@ const CATEGORY_KEYS: Record<string, string> = {
   'pymss/separate': 'separate',
   'pymss/output': 'output',
   'pymss/audio_tools': 'audioTools',
+  'pymss/plugins': 'plugins',
   'pymss/string': 'string',
   'pymss/builtin': 'builtin',
 }
