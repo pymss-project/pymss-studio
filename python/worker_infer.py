@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 import traceback
@@ -247,10 +248,21 @@ def _studio_separator_type() -> type[Any]:
         def separate(self, *args: Any, **kwargs: Any) -> Any:
             from worker_rocm import run_rocm_inference
             separate = super().separate
-            return run_rocm_inference(
-                lambda: separate(*args, **kwargs), getattr(self, "device", "auto"),
-                getattr(self, "device_ids", None), getattr(self, "logger", None),
-            )
+            previous_batch = getattr(self, "_studio_progress_batch", None)
+            batch = None
+            if getattr(self, "_studio_folder_progress", False):
+                batches = self._stem_batches_to_save()
+                matches = [index + 1 for index, stems in enumerate(batches) if stems == kwargs.get("stems")]
+                if len(batches) > 1 and len(matches) == 1:
+                    batch = (matches[0], len(batches))
+            self._studio_progress_batch = batch
+            try:
+                return run_rocm_inference(
+                    lambda: separate(*args, **kwargs), getattr(self, "device", "auto"),
+                    getattr(self, "device_ids", None), getattr(self, "logger", None),
+                )
+            finally:
+                self._studio_progress_batch = previous_batch
 
         def _calculate_expected_output_count(self) -> int:
             try:
@@ -370,12 +382,15 @@ def _studio_separator_type() -> type[Any]:
             self._studio_last_outputs = []
             self._studio_output_sources = {}
             self._prepare_output_contexts(input_folder, input_index)
+            previous_folder_progress = getattr(self, "_studio_folder_progress", False)
+            self._studio_folder_progress = True
             try:
                 success_files = super().process_folder(input_folder)
             except Exception:
                 self._discard_outputs_for_failed_inputs(set())
                 raise
             finally:
+                self._studio_folder_progress = previous_folder_progress
                 self._studio_input_contexts = {}
                 self._studio_active_context = None
                 self._studio_active_output_count = 0
@@ -392,6 +407,30 @@ def _studio_separator_type() -> type[Any]:
             )
 
     return StudioMSSeparator
+
+
+def _separation_progress_payload(separator: Any, done: Any, total: Any, message: str | None) -> dict[str, Any] | None:
+    try:
+        done_value, total_value = float(done), float(total)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(done_value) or not math.isfinite(total_value):
+        return None
+    model_type = getattr(separator, "model_type", None)
+    normalized_type = model_type.strip().lower() if isinstance(model_type, str) else ""
+    payload: dict[str, Any] = {
+        "stage": "separating", "message": message or "Separating",
+        "unit": ("patches" if normalized_type == "vr" else "seconds") if normalized_type else None,
+    }
+    batch = getattr(separator, "_studio_progress_batch", None)
+    if batch is not None and total_value > 0 and 0 <= done_value <= total_value:
+        index, count = batch
+        done_value += (index - 1) * total_value
+        total_value *= count
+        payload.update(stemBatchIndex=index, stemBatchCount=count)
+    if not math.isfinite(done_value) or not math.isfinite(total_value):
+        return None
+    return {**payload, "done": done_value, "total": total_value}
 
 
 def resolve_pymss_output_dir(output_dir: str, success_files: list[str], fallback_input: str, save_as_folder: bool) -> str:
@@ -816,37 +855,21 @@ def cmd_infer_batch(payload: dict[str, Any]) -> int:
     active_task_id: str | None = None
     terminal_task_ids: set[str] = set()
     failed = False
-    last_reported_done: float | None = None
-    last_reported_total: float | None = None
-    last_progress_message = ""
+    last_progress: dict[str, Any] | None = None
+    last_progress_task_id: str | None = None
 
     def emit_batch_progress(done: Any, total: Any, message: str | None = None) -> None:
-        nonlocal last_reported_done, last_reported_total, last_progress_message
-        try:
-            total_value = float(total)
-            done_value = float(done)
-        except (TypeError, ValueError):
+        nonlocal last_progress, last_progress_task_id
+        progress = _separation_progress_payload(separator, done, total, message)
+        if progress is None or (progress == last_progress and active_task_id == last_progress_task_id):
             return
-        safe_message = message or "Separating"
-        if (
-            done_value == last_reported_done
-            and total_value == last_reported_total
-            and safe_message == last_progress_message
-        ):
-            return
-        last_reported_done = done_value
-        last_reported_total = total_value
-        last_progress_message = safe_message
+        last_progress = progress
+        last_progress_task_id = active_task_id
         targets = [active_task_id] if active_task_id else [item["taskId"] for item in batch_tasks]
         for task_id in targets:
             if not task_id:
                 continue
-            emit("task_progress", {
-                "stage": "separating",
-                "message": safe_message,
-                "done": done_value,
-                "total": total_value,
-            }, task_id=task_id)
+            emit("task_progress", progress, task_id=task_id)
 
     try:
         Path(output_root).mkdir(parents=True, exist_ok=True)
@@ -922,33 +945,15 @@ def cmd_infer(payload: dict[str, Any]) -> int:
     save_as_folder = output_layout == "folders"
     task_output = resolve_pymss_output_dir(output_dir, [], input_path, save_as_folder)
 
-    last_reported_done: float | None = None
-    last_reported_total: float | None = None
-    last_progress_message = ""
+    last_progress: dict[str, Any] | None = None
 
     def emit_separation_progress(done: Any, total: Any, message: str | None = None) -> None:
-        nonlocal last_reported_done, last_reported_total, last_progress_message
-        try:
-            total_value = float(total)
-            done_value = float(done)
-        except (TypeError, ValueError):
+        nonlocal last_progress
+        progress = _separation_progress_payload(separator, done, total, message)
+        if progress is None or progress == last_progress:
             return
-        safe_message = message or "Separating"
-        if (
-            done_value == last_reported_done
-            and total_value == last_reported_total
-            and safe_message == last_progress_message
-        ):
-            return
-        last_reported_done = done_value
-        last_reported_total = total_value
-        last_progress_message = safe_message
-        emit("task_progress", {
-            "stage": "separating",
-            "message": safe_message,
-            "done": done_value,
-            "total": total_value,
-        }, task_id=task_id)
+        last_progress = progress
+        emit("task_progress", progress, task_id=task_id)
 
     separator = None
     cleanup = ExitStack()

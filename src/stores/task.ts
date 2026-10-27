@@ -100,6 +100,9 @@ export type SeparationTask = {
   progressCurrent?: number
   progressTotal?: number
   progressDetail?: string
+  progressUnit?: string
+  lastProgressAt?: number
+  lastProgressPercent?: number
   files: string[]
   outputs: StemOutput[]
   /** Plugin graph leaf values (ASR text, measurements, MIDI paths) by node. */
@@ -434,6 +437,10 @@ function normalizeTask(task: Partial<SeparationTask>, windows = /^[A-Za-z]:|^\\\
     progressCurrent: typeof task.progressCurrent === 'number' ? task.progressCurrent : undefined,
     progressTotal: typeof task.progressTotal === 'number' ? task.progressTotal : undefined,
     progressDetail: task.progressDetail || undefined,
+    progressUnit: typeof task.progressUnit === 'string' ? task.progressUnit : undefined,
+    lastProgressAt: normalizeTimestamp(task.lastProgressAt),
+    lastProgressPercent: typeof task.lastProgressPercent === 'number' && Number.isFinite(task.lastProgressPercent)
+      ? clamp(task.lastProgressPercent, 0, 99) : undefined,
     files: normalizedFiles,
     outputs: normalizedOutputs,
     logs: interrupted
@@ -1486,13 +1493,21 @@ export const useTaskStore = defineStore('task', () => {
       task.stageLabel = STAGE_META.separating.label
       task.message = message || STAGE_META.separating.label
       if (fraction !== undefined) task.progress = Math.max(task.progress || 0, Math.min(90, 35 + fraction * 55))
+      if (fraction !== undefined && task.lastProgressPercent !== task.progress) {
+        task.lastProgressAt = Date.now()
+        task.lastProgressPercent = task.progress
+      }
       const done = Number(payload.done)
       const total = Number(payload.total)
-      if (payload.unit === 'seconds' && Number.isFinite(done) && Number.isFinite(total)) {
+      if (payload.unit === 'seconds' && payload.done != null && payload.total != null
+        && Number.isFinite(done) && done >= 0 && Number.isFinite(total) && total > 0 && done <= total) {
+        if (task.progressCurrent !== done || task.progressTotal !== total) task.lastProgressAt = Date.now()
+        task.progressUnit = 'seconds'
         task.progressCurrent = done
         task.progressTotal = total
         task.progressDetail = message || undefined
       } else {
+        task.progressUnit = undefined
         task.progressCurrent = undefined
         task.progressTotal = undefined
         task.progressDetail = undefined
@@ -1533,6 +1548,12 @@ export const useTaskStore = defineStore('task', () => {
       const detail = typeof event.payload?.message === 'string' ? event.payload.message : undefined
       const nodeId = typeof event.payload?.nodeId === 'string' ? event.payload.nodeId : undefined
       const nodeProgress = event.payload?.nodeProgress
+      const unit = typeof event.payload?.unit === 'string' ? event.payload.unit : undefined
+      const nextCurrent = Number.isFinite(done) ? done : undefined
+      const nextTotal = Number.isFinite(total) ? total : undefined
+      const countersChanged = task.progressCurrent !== nextCurrent || task.progressTotal !== nextTotal || task.progressUnit !== unit
+      const nodeProgressChanged = Boolean(nodeId && typeof nodeProgress === 'number' && Number.isFinite(nodeProgress)
+        && task.nodeStates?.[nodeId]?.progress !== clamp(nodeProgress, 0, 1) * 100)
       if (nodeId && typeof nodeProgress === 'number' && Number.isFinite(nodeProgress)) {
         const fraction = clamp(nodeProgress, 0, 1)
         task.nodeStates ||= {}
@@ -1551,9 +1572,10 @@ export const useTaskStore = defineStore('task', () => {
       if (stage !== 'queued') markTaskStarted(task)
       task.stageLabel = STAGE_META[stage].label
       task.message = detail || STAGE_META[stage].label
-      task.progressCurrent = Number.isFinite(done) ? done : undefined
-      task.progressTotal = Number.isFinite(total) ? total : undefined
+      task.progressCurrent = nextCurrent
+      task.progressTotal = nextTotal
       task.progressDetail = detail
+      task.progressUnit = unit
       const explicitProgress = event.payload?.progress
       const resolvedProgress = typeof explicitProgress === 'number' && Number.isFinite(explicitProgress)
         ? clamp(explicitProgress, 0, 99)
@@ -1561,6 +1583,15 @@ export const useTaskStore = defineStore('task', () => {
       task.progress = stage === 'separating'
         ? resolvedProgress
         : Math.max(task.progress || 0, resolvedProgress)
+      const hasCounters = event.payload?.done != null && event.payload?.total != null
+        && Number.isFinite(done) && done >= 0 && Number.isFinite(total) && total > 0 && done <= total
+      const hasPercentage = typeof explicitProgress === 'number' && Number.isFinite(explicitProgress)
+      if ((hasCounters || hasPercentage)
+        && (countersChanged || nodeProgressChanged || task.lastProgressPercent !== task.progress || task.lastProgressAt === undefined)) {
+        // Terminal task progress is 100 for queue accounting. Keep the measured value for the log footer.
+        task.lastProgressPercent = task.progress
+        task.lastProgressAt = Date.now()
+      }
       touch(task)
       queueProgressPersist()
     } else if (event.type === 'task_log' || event.type === 'worker_log') {

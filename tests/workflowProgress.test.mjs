@@ -19,9 +19,14 @@ assert.equal(selected.length, names.size + 1)
 const code = ts.transpileModule(selected.join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
 
 function setup() {
+  let now = 1000
+  class Clock extends Date {
+    static now() { return now }
+  }
   const task = { id: 'workflow', status: 'separating', progress: 35, createdAt: 1, logs: [], runConfig: {} }
   const terminal = ['done', 'failed', 'cancelled']
   const handle = vm.runInNewContext(`${code}\nhandleWorkerEvent`, {
+    Date: Clock,
     tasks: { value: [task] },
     TERMINAL_STATUSES: terminal,
     isTerminalTaskStatus: status => terminal.includes(status),
@@ -34,10 +39,61 @@ function setup() {
   })
   return {
     task,
+    advance: milliseconds => { now += milliseconds },
     progress: payload => handle({ type: 'task_progress', taskId: task.id, payload: { stage: 'separating', ...payload } }),
     execution: payload => handle({ type: 'workflow_execution', taskId: task.id, payload }),
     event: (type, payload) => handle({ type, taskId: task.id, payload }),
   }
+}
+
+test('normal mode preserves progress units and timestamps only changed valid progress', () => {
+  const { task, progress, advance, event } = setup()
+  progress({ done: 12, total: 231, unit: 'seconds' })
+  assert.equal(task.progressUnit, 'seconds')
+  assert.equal(task.lastProgressPercent, 5)
+  assert.equal(task.lastProgressAt, 1000)
+  advance(10000)
+  progress({ done: 12, total: 231, unit: 'seconds' })
+  event('task_log', { level: 'info', message: 'Model is running' })
+  assert.equal(task.lastProgressAt, 1000)
+  progress({ done: 38, total: 231, unit: 'seconds' })
+  assert.equal(task.lastProgressAt, 11000)
+  assert.equal(task.lastProgressPercent, 16)
+  advance(1000)
+  progress({ done: NaN, total: 0 })
+  assert.equal(task.lastProgressAt, 11000)
+  assert.equal(task.lastProgressPercent, 16)
+})
+
+test('counterless workflow repeats do not refresh time while sub-percent node changes do', () => {
+  const { task, progress, advance } = setup()
+  const payload = { progress: 44, nodeId: 'split', nodeProgress: .4, message: 'Running workflow' }
+  progress(payload)
+  assert.equal(task.lastProgressAt, 1000)
+  advance(45000)
+  progress(payload)
+  assert.equal(task.lastProgressAt, 1000)
+  assert.equal(task.lastProgressPercent, 44)
+  advance(1000)
+  progress({ ...payload, nodeProgress: .41 })
+  assert.equal(task.lastProgressAt, 47000)
+  assert.equal(task.lastProgressPercent, 44)
+  advance(1000)
+  progress({ ...payload, nodeProgress: .41 })
+  assert.equal(task.lastProgressAt, 47000)
+})
+
+for (const terminal of ['error', 'task_cancelled']) {
+  test(`${terminal} preserves the last measured percentage and rejects late progress`, () => {
+    const { task, progress, event } = setup()
+    progress({ done: 4, total: 10, unit: 'patches' })
+    event(terminal, { message: 'Stopped' })
+    assert.equal(task.lastProgressPercent, 40)
+    assert.equal(task.lastProgressAt, 1000)
+    progress({ done: 9, total: 10, unit: 'patches' })
+    assert.equal(task.lastProgressPercent, 40)
+    assert.equal(task.lastProgressAt, 1000)
+  })
 }
 
 for (const protocol of ['progress', 'execution']) {

@@ -66,6 +66,118 @@ class InferenceLifecycleTests(unittest.TestCase):
             "outputDir": str(self.output.resolve()), "outputRoot": str(self.output.resolve()), "outputFormat": "wav",
         }, task_id="separation-1")
 
+    def test_progress_units_follow_the_model_and_preserve_deduplication_in_normal_mode(self) -> None:
+        for model_type, expected_unit in [
+            ("vr", "patches"), (" VR ", "patches"), ("mel_band_roformer", "seconds"),
+            (None, None), ("   ", None),
+        ]:
+            with self.subTest(model_type=model_type):
+                self.separator.model_type = model_type
+
+                def process(*_args):
+                    callback = self.prepare.call_args.kwargs["progress_callback"]
+                    callback(float("nan"), 231, "Invalid progress")
+                    callback(12, float("inf"), "Invalid progress")
+                    callback(10 ** 400, 231, "Invalid progress")
+                    callback(12, 10 ** 400, "Invalid progress")
+                    callback(12, 231, "Custom progress message")
+                    callback(12, 231, "Custom progress message")
+                    return [self.source.name]
+
+                self.separator.process_folder.side_effect = process
+                self.assertEqual(self.run_command(), 0)
+                progress = [call for call in self.emit.call_args_list if call.args[0] == "task_progress"]
+                self.assertEqual(len(progress), 1)
+                self.assertEqual(progress[0].args[1], {
+                    "stage": "separating", "message": "Custom progress message",
+                    "done": 12.0, "total": 231.0, "unit": expected_unit,
+                })
+                self.assertEqual(progress[0].kwargs, {"task_id": "separation-1"})
+
+    def test_batch_progress_units_keep_the_active_file_attribution(self) -> None:
+        second = self.root / "second.wav"
+        second.touch()
+        self.payload["tasks"] = [
+            {"taskId": "separation-1", "input": str(self.source)},
+            {"taskId": "separation-2", "input": str(second)},
+        ]
+        self.separator.model_type = "vr"
+
+        def process(path, *_args):
+            callback = self.prepare.call_args.kwargs["progress_callback"]
+            callback(float("inf"), 231, "Invalid progress")
+            callback(12, float("nan"), "Invalid progress")
+            callback(12, 231, "Processing audio")
+            return [Path(path).name]
+
+        self.separator.process_folder.side_effect = process
+        self.assertEqual(self.run_command(), 0)
+        progress = [call for call in self.emit.call_args_list if call.args[0] == "task_progress"]
+        self.assertEqual([call.kwargs["task_id"] for call in progress], ["separation-1", "separation-2"])
+        self.assertTrue(all(call.args[1]["unit"] == "patches" for call in progress))
+
+    def test_stem_batches_accumulate_per_file_and_restore_context_after_failure(self) -> None:
+        class SeparatorBase:
+            def __init__(self, *, groups, progress_callback, model_type="mel_band_roformer"):
+                self.groups = groups
+                self.progress_callback = progress_callback
+                self.model_type = model_type
+                self.config = types.SimpleNamespace(training=types.SimpleNamespace(instruments=["vocals", "drums", "bass"]))
+                self.logger = mock.Mock()
+                self.reject = False
+
+            def _stems_to_save(self):
+                return self.config.training.instruments
+
+            def _stem_batches_to_save(self):
+                return self.groups
+
+            def process_folder(self, path):
+                for stems in self._stem_batches_to_save():
+                    self.separate(None, pbar=False, stems=stems)
+                return [Path(path).name]
+
+            def separate(self, _mix, **_kwargs):
+                self.progress_callback(0, 231, "Processing audio")
+                if self.reject:
+                    raise RuntimeError("Inference failed")
+                self.progress_callback(231, 231, "Processing audio")
+                return {}
+
+        self.pymss.MSSeparator = SeparatorBase
+        with mock.patch.dict(sys.modules, {"pymss": self.pymss}), \
+                mock.patch("worker_rocm.configure_rocm_runtime"), \
+                mock.patch("worker_rocm.run_rocm_inference", side_effect=lambda action, *_args: action()):
+            separator_type = worker_infer._studio_separator_type()
+            for model_type, expected_unit in [("mel_band_roformer", "seconds"), ("vr", "patches")]:
+                separator = None
+
+                def callback(done, total, message):
+                    self.prepare.call_args.kwargs["progress_callback"](done, total, message)
+
+                separator = separator_type(groups=[["vocals"], ["drums"], ["bass"]], progress_callback=callback, model_type=model_type)
+                self.separator = separator
+                for _ in range(2):
+                    self.assertEqual(self.run_command(), 0)
+                    emitted = [call.args[1] for call in self.emit.call_args_list if call.args[0] == "task_progress"]
+                    self.assertEqual([item["done"] for item in emitted], [0, 231, 231, 462, 462, 693])
+                    self.assertTrue(all(item["total"] == 693 and item["unit"] == expected_unit for item in emitted))
+                    self.assertEqual([item["stemBatchIndex"] for item in emitted], [1, 1, 2, 2, 3, 3])
+                    self.assertTrue(all(item["stemBatchCount"] == 3 for item in emitted))
+                separator.reject = True
+                self.assertEqual(self.run_command(), 17)
+                separator.reject = False
+                with mock.patch.object(worker_infer, "emit") as emitter:
+                    separator.separate(None, stems="vocals")
+                emitted = [call.args[1] for call in emitter.call_args_list if call.args[0] == "task_progress"]
+                self.assertEqual([item["total"] for item in emitted], [231, 231])
+                self.assertNotIn("stemBatchIndex", emitted[0])
+                separator.groups = [["vocals", "drums", "bass"]]
+                self.assertEqual(self.run_command(), 0)
+                emitted = [call.args[1] for call in self.emit.call_args_list if call.args[0] == "task_progress"]
+                self.assertEqual([item["done"] for item in emitted], [0, 231])
+                self.assertNotIn("stemBatchIndex", emitted[0])
+
     def test_generic_errors_preserve_code_message_traceback_and_task_id(self) -> None:
         for message, code in [
             ("No audio stream found in input", "INPUT_AUDIO_STREAM_MISSING"),

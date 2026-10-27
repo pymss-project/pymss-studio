@@ -918,6 +918,22 @@ const currentTaskOutputSummary = computed(() => shortenMiddle(currentTaskOutputP
 const taskClockNow = ref(Date.now())
 let taskClockTimer: ReturnType<typeof setInterval> | null = null
 const currentTaskDuration = computed(() => currentTask.value ? taskDuration(currentTask.value, taskClockNow.value) : '')
+const logProgressPercent = computed(() => {
+  const item = currentTask.value
+  if (item?.status === 'done') return 100
+  return typeof item?.lastProgressPercent === 'number' && Number.isFinite(item.lastProgressPercent)
+    ? Math.round(Math.max(0, Math.min(99, item.lastProgressPercent))) : undefined
+})
+const logProgressIndeterminate = computed(() => Boolean(currentTask.value
+  && !['queued', 'done', 'failed', 'cancelled'].includes(currentTask.value.status)
+  && logProgressPercent.value === undefined))
+const logProgressUpdateLabel = computed(() => {
+  const item = currentTask.value
+  if (item?.status !== 'separating') return ''
+  if (typeof item.lastProgressAt !== 'number') return t('tasks.progressWaitingFirst')
+  const seconds = Math.max(0, Math.floor((taskClockNow.value - item.lastProgressAt) / 1000))
+  return t('tasks.progressUpdatedAgo', { seconds })
+})
 
 function stopTaskClock() {
   if (taskClockTimer === null) return
@@ -1454,6 +1470,7 @@ function normalizeProgressMessage(value?: string) {
     'checking model files': t('tasks.progressCheckingModel'),
     'loading model': t('tasks.progressLoadingModel'),
     'separating audio': t('tasks.progressSeparatingHint'),
+    'processing audio': t('tasks.progressSeparatingHint'),
     'processing audio chunks': t('tasks.progressProcessingChunks'),
     'processing vr batches': t('tasks.progressProcessingVrBatches'),
     'collecting outputs': t('tasks.progressCollectingOutputs'),
@@ -1488,9 +1505,19 @@ function progressDetail(item: SeparationTask) {
     item.status === 'separating'
     && typeof item.progressCurrent === 'number'
     && typeof item.progressTotal === 'number'
+    && Number.isFinite(item.progressCurrent)
+    && Number.isFinite(item.progressTotal)
+    && item.progressCurrent >= 0
+    && item.progressCurrent <= item.progressTotal
     && item.progressTotal > 0
   ) {
-    return `${formatProgressTime(item.progressCurrent)} / ${formatProgressTime(item.progressTotal)}`
+    if (item.progressUnit === 'seconds') return t('tasks.progressAudioAmount', {
+      done: formatProgressTime(item.progressCurrent), total: formatProgressTime(item.progressTotal),
+    })
+    if (item.progressUnit === 'patches') return t('tasks.progressPatchAmount', {
+      done: item.progressCurrent, total: item.progressTotal,
+    })
+    return t('tasks.progressCountAmount', { done: item.progressCurrent, total: item.progressTotal })
   }
   return ''
 }
@@ -2033,6 +2060,7 @@ function goToResults() {
 
 function openCurrentLogs() {
   if (!currentTask.value) return
+  if (currentJob.value) focusedSeparationJobId.value = currentJob.value.id
   showLogModal.value = true
 }
 
@@ -3198,6 +3226,7 @@ async function retryCurrentTask() {
     </n-modal>
     <n-modal v-model:show="showLogModal" style="width:var(--modal-width-lg)">
       <n-card
+        class="task-log-modal"
         :title="currentTask ? `${currentTaskFileName} - ${t('tasks.logs')}` : t('tasks.logs')"
         :bordered="false"
         size="small"
@@ -3205,6 +3234,30 @@ async function retryCurrentTask() {
         aria-modal="true"
       >
         <TaskLogConsole :lines="currentTask?.logs || []" />
+        <template v-if="currentTask" #footer>
+          <div class="task-log-progress" :class="`task-log-progress--${currentTask.status}`">
+            <div class="task-log-progress__row">
+              <div
+                class="task-log-progress__rail"
+                :class="{ 'task-log-progress__rail--indeterminate': logProgressIndeterminate }"
+                role="progressbar"
+                :aria-label="statusLabel(currentTask.status)"
+                :aria-valuenow="logProgressPercent"
+                :aria-valuemin="0"
+                :aria-valuemax="100"
+              >
+                <span :style="{ width: logProgressIndeterminate ? '35%' : `${logProgressPercent ?? 0}%` }" />
+              </div>
+              <span v-if="logProgressPercent !== undefined" class="task-log-progress__percentage">{{ logProgressPercent }}%</span>
+            </div>
+            <div class="task-log-progress__details">
+              <strong>{{ statusLabel(currentTask.status) }}</strong>
+              <span v-if="progressDetail(currentTask)" :title="progressDetail(currentTask)">{{ progressDetail(currentTask) }}</span>
+              <span :title="t('tasks.progressElapsed', { duration: currentTaskDuration })">{{ t('tasks.progressElapsed', { duration: currentTaskDuration }) }}</span>
+              <span v-if="logProgressUpdateLabel" :title="logProgressUpdateLabel">{{ logProgressUpdateLabel }}</span>
+            </div>
+          </div>
+        </template>
       </n-card>
     </n-modal>
   </div>
@@ -3212,6 +3265,31 @@ async function retryCurrentTask() {
 
 
 <style scoped>
+.task-log-modal { max-height: calc(100dvh - 48px); }
+.task-log-modal :deep(.n-card__content) { min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+.task-log-modal :deep(.log-console) { min-height: 0; }
+.task-log-modal :deep(.n-card-header),
+.task-log-modal :deep(.n-card__footer) { flex-shrink: 0; }
+.task-log-progress { display: grid; gap: 7px; font-variant-numeric: tabular-nums; }
+.task-log-progress__row { display: flex; align-items: center; gap: 10px; min-height: 14px; }
+.task-log-progress__percentage { flex-shrink: 0; min-width: 3ch; text-align: right; color: var(--on-surface-muted); font-size: 12px; }
+.task-log-progress__rail { flex: 1; min-width: 0; height: 5px; overflow: hidden; border-radius: 999px; background: var(--surface-2); }
+.task-log-progress__rail > span { display: block; height: 100%; border-radius: inherit; background: var(--primary); transition: width 180ms ease; }
+.task-log-progress--failed .task-log-progress__rail > span { background: var(--danger, #d94848); }
+.task-log-progress--cancelled .task-log-progress__rail > span { background: var(--warning, #d69e2e); }
+.task-log-progress--done .task-log-progress__rail > span { background: var(--success, #18a058); }
+.task-log-progress__rail--indeterminate > span { animation: task-log-progress-loading 1.8s ease-in-out infinite; }
+.task-log-progress__details { display: flex; align-items: center; gap: 12px; min-width: 0; color: var(--on-surface-muted); font-size: 12px; line-height: 1.6; }
+.task-log-progress__details > strong { flex-shrink: 0; }
+.task-log-progress__details > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@keyframes task-log-progress-loading {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(300%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .task-log-progress__rail > span { animation: none; transition: none; }
+}
+
 .batch-queue-scopes { margin-bottom: 14px; }
 /* ============ Workstation shell ============ */
 .separate-page {
