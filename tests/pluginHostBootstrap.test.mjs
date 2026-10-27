@@ -41,6 +41,8 @@ async function bootstrap(capabilities) {
     useSettingsStore: () => ({ initialize: async () => {} }),
     useAppStore: () => appState, useUpdateStore: () => updates,
     isTauriRuntime: () => false, isMainTaskOwner: () => true,
+    isWebRuntime: () => false, isTutorialFrame: () => false,
+    installWebRuntime: async () => {},
     pluginHostCapabilities: async () => capabilities,
     initializeWorkbenchBridge: async () => {}, connectWorkerEvents: async () => {},
     initTheme() {}, activeRuntimeEnvironment: () => undefined,

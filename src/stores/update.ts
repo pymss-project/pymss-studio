@@ -7,7 +7,7 @@ import { exit } from '@tauri-apps/plugin-process'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useAppStore } from '@/stores/app'
 import { useSettingsStore } from '@/stores/settings'
-import { isTauriRuntime, loadAppStore, saveAppStore } from '@/utils/appStore'
+import { isDesktopRuntime, loadAppStore, saveAppStore } from '@/utils/appStore'
 import { isMainTaskOwner } from '@/utils/taskOwner'
 import { registerWindowCloseGuard } from '@/utils/windowCloseGuards'
 import i18n from '@/i18n'
@@ -152,7 +152,7 @@ export const useUpdateStore = defineStore('update', () => {
         deferredVersion.value = String(payload?.deferredVersion || '')
         deferredAt.value = String(payload?.deferredAt || '')
         lastAcceptedVersion.value = String(payload?.lastAcceptedVersion || '')
-        if (isTauriRuntime()) {
+        if (isDesktopRuntime()) {
           const nextUnlisten = await listen<UpdateDownloadEvent>('pymss://managed-update-event', (event) => {
             if (event.payload.event === 'RestartRequired') {
               restartRequired.value = true
@@ -276,6 +276,7 @@ export const useUpdateStore = defineStore('update', () => {
 
   async function checkForUpdates(manual = false) {
     if (!isMainTaskOwner()) return null
+    if (!isDesktopRuntime()) return null
     if (restartRequired.value) return availableUpdate.value
     const app = useAppStore()
     const settings = useSettingsStore()

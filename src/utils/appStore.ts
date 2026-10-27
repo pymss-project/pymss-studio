@@ -1,9 +1,13 @@
 import { invoke } from '@tauri-apps/api/core'
 import { isTutorialFrame, tutorialAdapter } from '../features/onboarding/demoContext.ts'
+import { isWebRuntime } from './webRuntime.ts'
 
 export type AppStoreName = 'app-settings' | 'task-history' | 'model-state' | 'editor-ui' | 'audio-tools' | 'workflow-state' | 'separate-state' | 'update-state'
 
+/** True when a native desktop IPC bridge exists (Tauri webview or the web-mode emulation). */
+export const hasBackendBridge = () => isWebRuntime() || (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window)
 export const isTauriRuntime = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+export const isDesktopRuntime = isTauriRuntime
 
 const saveQueues = new Map<AppStoreName, Promise<void>>()
 
@@ -38,7 +42,7 @@ function readLocalStore<T>(name: AppStoreName): T | null {
 
 export async function loadAppStore<T>(name: AppStoreName): Promise<T | null> {
   if (isTutorialFrame()) return tutorialAdapter().invoke('load_app_store', { name }) as Promise<T | null>
-  if (!isTauriRuntime()) {
+  if (!hasBackendBridge()) {
     return readLocalStore<T>(name)
   }
   try {
@@ -54,7 +58,7 @@ export async function loadAppStore<T>(name: AppStoreName): Promise<T | null> {
 
 async function writeAppStore(name: AppStoreName, data: unknown, serialized: string) {
   if (isTutorialFrame()) { await tutorialAdapter().invoke('save_app_store', { name, data }); return }
-  if (!isTauriRuntime()) {
+  if (!hasBackendBridge()) {
     localStorage.setItem(localStoreKey(name), serialized)
     return
   }

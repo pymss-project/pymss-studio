@@ -7,7 +7,7 @@ import { useWorkflowStore } from '@/stores/workflow'
 import { cloneWorkflow } from '@/workflows/workbench'
 import { createWorkbenchBridge, type WorkbenchAction } from '@/workflows/workbenchBridge'
 import { isMainTaskOwner } from '@/utils/taskOwner'
-import { isTauriRuntime } from '@/utils/appStore'
+import { hasBackendBridge as isTauriRuntime } from '@/utils/appStore'
 
 let bridge: ReturnType<typeof createWorkbenchBridge> | undefined
 export function initializeWorkbenchBridge() {

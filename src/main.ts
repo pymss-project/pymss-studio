@@ -10,6 +10,7 @@ import { connectWorkerEvents } from './utils/events'
 import { isMainTaskOwner } from './utils/taskOwner'
 import { initializeWorkbenchBridge } from './utils/workbenchBridge'
 import { isTauriRuntime } from './utils/appStore'
+import { installWebRuntime, isWebRuntime } from './utils/webRuntime'
 import { listenForEditorExportPreferences } from './utils/editorExportPreferences'
 import { useSettingsStore } from '@/stores/settings'
 import { useAppStore, type RuntimeBackend } from '@/stores/app'
@@ -41,6 +42,16 @@ async function bootstrap() {
   // one of those IPC calls is delayed or unavailable; its stores can hydrate
   // in the background while the route remains usable.
   mounted()
+
+  // Web mode installs a browser-side Tauri IPC emulation before any store
+  // touches @tauri-apps/api; failures must not block the desktop path.
+  if (isWebRuntime() || (!isTauriRuntime() && typeof window !== 'undefined' && !isTutorialFrame())) {
+    try {
+      await installWebRuntime('')
+    } catch (error) {
+      studioLog.warn('Failed to install web runtime bridge', error)
+    }
+  }
 
   const settings = useSettingsStore(pinia)
   const appState = useAppStore(pinia)

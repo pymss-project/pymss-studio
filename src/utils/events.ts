@@ -5,6 +5,7 @@ import { useTaskStore } from '@/stores/task'
 import { useModelStore, type WorkerEvent } from '@/stores/model'
 import { retryWithDelays } from '@/utils/async'
 import { isMainTaskOwner } from '@/utils/taskOwner'
+import { isWebRuntime } from '@/utils/webRuntime'
 import type { WorkerEventConnectionStatus } from '@/stores/app'
 
 let unlistenWorkerEvents: UnlistenFn | undefined
@@ -12,12 +13,13 @@ let registrationInFlight: Promise<void> | null = null
 
 // Tauri injects its internals before normal application startup, but keeping
 // this check dynamic also covers delayed webview initialization and reconnects.
+// Web mode installs the same internals surface over SSE.
 function hasTauriEventApi() {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+  return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window)
 }
 
 export async function registerWorkerEvents() {
-  if (!hasTauriEventApi() || unlistenWorkerEvents) return
+  if ((!hasTauriEventApi() && !isWebRuntime()) || unlistenWorkerEvents) return
   if (!registrationInFlight) {
     registrationInFlight = listen('pymss://worker-event', (event) => {
       const app = useAppStore()

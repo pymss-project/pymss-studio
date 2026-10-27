@@ -38,5 +38,16 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
     watch: { ignored: ['**/src-tauri/**'] },
+    // Web-mode development: `pnpm dev` + `node scripts/web-server.mjs` (see docs/web-mode.md).
+    proxy: {
+      '/api': {
+        target: process.env.PYMSS_WEB_DEV_SERVER || 'http://127.0.0.1:8710',
+        changeOrigin: true,
+      },
+      '/login': {
+        target: process.env.PYMSS_WEB_DEV_SERVER || 'http://127.0.0.1:8710',
+        changeOrigin: true,
+      },
+    },
   },
 })

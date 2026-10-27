@@ -111,6 +111,16 @@ xattr -cr '/Applications/Pymss Studio.app'
 
 For a repeatable processing chain, open or create a workflow under **Workflows** in a separate editor window, choose files or a folder on its input nodes and directories on its output nodes, then save and run directly in the editor. Follow node progress on the canvas; edits made during execution apply to the next run. A short input can help confirm the model, device, and outputs before a larger batch.
 
+### Web mode
+
+The full studio also runs in a plain browser, served by a small Node bridge that reuses the same Python worker as the desktop app:
+
+```bash
+pnpm build && pnpm web   # http://127.0.0.1:8710
+```
+
+See [docs/web-mode.md](docs/web-mode.md) for options (port, host, Python interpreter, data root, access password) and the list of behavioral differences.
+
 ## Preview
 
 These previews show the main features in English and Chinese, with light and dark themes at 1920 × 1080. Click an image to view it at full size.

@@ -5,7 +5,7 @@ import { computed, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { createRuntimeQueryQueue, createRuntimeReadCache } from '@/utils/runtimeQueries'
 import { activeRuntimeEnvironment, supportsRuntimeCoreUpdate, supportsRuntimeManagement } from '@/utils/runtime'
-import { isTauriRuntime } from '@/utils/appStore'
+import { hasBackendBridge as isTauriRuntime } from '@/utils/appStore'
 import { registerWindowCloseGuard } from '@/utils/windowCloseGuards'
 import { useSettingsStore } from '@/stores/settings'
 

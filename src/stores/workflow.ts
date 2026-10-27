@@ -2,7 +2,7 @@ import { createLogger } from '@/utils/logger'
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { isTauriRuntime, loadAppStore, saveAppStore } from '@/utils/appStore'
+import { hasBackendBridge as isTauriRuntime, loadAppStore, saveAppStore } from '@/utils/appStore'
 import { isWorkflowEditorSnapshot, workflowEditorFor, WorkflowEditorInUseError, type WorkflowEditorSnapshot, type WorkflowEditorRecord } from '@/utils/workflowEditorState'
 import {
   detectWorkflowFormat,

@@ -8,6 +8,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useDialog, useMessage, type DropdownOption } from 'naive-ui'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
+import { isWebRuntime, webFetch } from '@/utils/webRuntime'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import {
   CubeOutline,
@@ -1699,6 +1700,39 @@ onMounted(async () => {
   }
   if (!app.envInfo && !app.envLoading) {
     app.checkEnvInBackground().catch(() => {})
+  }
+  if (isWebRuntime()) {
+    // Browser mode: HTML5 drag&drop with server-side upload.
+    const onDragOver = (event: DragEvent) => { event.preventDefault(); isDragging.value = true }
+    const onDragLeave = () => { isDragging.value = false }
+    const onDrop = async (event: DragEvent) => {
+      event.preventDefault()
+      isDragging.value = false
+      if (beginnerGuide.demoActive) return
+      const files = [...(event.dataTransfer?.files || [])]
+      if (!files.length) return
+      try {
+        const form = new FormData()
+        for (const file of files) form.append('files', file, file.name)
+        const response = await webFetch('/api/uploads', { method: 'POST', body: form })
+        if (!response.ok) throw new Error(`upload failed: ${response.status}`)
+        const payload = await response.json() as { paths?: string[] }
+        const added = await task.addPaths(payload.paths || [])
+        if (added > 0) message.success(t('separate.addedFiles', { count: added }))
+        else message.warning(t('separate.noAudioAdded'))
+      } catch (error) {
+        message.error(String((error as Error).message || error))
+      }
+    }
+    window.addEventListener('dragover', onDragOver)
+    window.addEventListener('dragleave', onDragLeave)
+    window.addEventListener('drop', onDrop)
+    unlistenDragDrop = () => {
+      window.removeEventListener('dragover', onDragOver)
+      window.removeEventListener('dragleave', onDragLeave)
+      window.removeEventListener('drop', onDrop)
+    }
+    return
   }
   try {
     unlistenDragDrop = await getCurrentWebview().onDragDropEvent(async (event) => {

@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { createWorkflowEditorRouteGuard } from '@/workflows/editorWindow'
 import { isMainTaskOwner } from '@/utils/taskOwner'
 import { isTauriRuntime } from '@/utils/appStore'
+import { isWebRuntime } from '@/utils/webRuntime'
 import { recordFeatureVisit } from '@/utils/logger'
 import { useToastStore } from '@/stores/toast'
 import { useWorkflowStore } from '@/stores/workflow'
@@ -16,7 +17,11 @@ const router = createRouter({
 router.beforeEach(createWorkflowEditorRouteGuard({
   isDesktopMainWindow: () => isTauriRuntime() && isMainTaskOwner(),
   openWindow: async (command, args) => {
-    const result = await invoke(command, args)
+    const result = await invoke<{ url?: string }>(command, args)
+    if (isWebRuntime() && result?.url) {
+      window.open(`#${result.url.replace(/^#/, '')}`, '_blank')
+      return result
+    }
     const workflow = useWorkflowStore()
     const id = args.payload.newWorkflow ? '__new__' : args.payload.workflowId
     workflow.recordEditorOpened(result, command === 'open_workflow_simple_editor_window' ? 'simple' : 'advanced', id)

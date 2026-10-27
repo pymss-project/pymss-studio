@@ -18,7 +18,9 @@
     "vst:dev": "node scripts/vst-lab.mjs dev",
     "vst:build": "node scripts/vst-lab.mjs build",
     "plugins:build": "node scripts/tauri.mjs build --config src-tauri/tauri.plugins.conf.json --features native-plugins",
-    "test:native-audio": "cargo test --manifest-path native/Cargo.toml -p pymss-audio-host --lib"
+    "test:native-audio": "cargo test --manifest-path native/Cargo.toml -p pymss-audio-host --lib",
+    "web": "node scripts/web-server.mjs",
+    "web:dev": "node scripts/web-server.mjs --port 8710"
   },
   "dependencies": {
     "@comfyorg/litegraph": "0.17.2",
