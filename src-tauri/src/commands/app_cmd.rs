@@ -3167,7 +3167,13 @@ pub async fn reveal_path(app: AppHandle, path: String) -> AppResult<()> {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        Command::new("xdg-open").arg(reveal_target).spawn()?;
+        let mut command = Command::new("xdg-open");
+        #[cfg(target_os = "linux")]
+        crate::appimage_environment::clean_environment(
+            &mut command,
+            std::env::var_os("APPDIR").as_deref(),
+        );
+        command.arg(reveal_target).spawn()?;
     }
     Ok(())
 }

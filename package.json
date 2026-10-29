@@ -37,7 +37,7 @@
     "vue-router": "^4.6.3"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.8.4",
+    "@tauri-apps/cli": "^2.12.4",
     "@vitejs/plugin-vue": "^6.0.2",
     "happy-dom": "^20.11.2",
     "sass": "^1.94.2",

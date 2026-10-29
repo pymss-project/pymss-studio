@@ -10,6 +10,8 @@ mod error;
 mod log_record;
 mod model_dir_migration;
 mod plugin_views;
+#[cfg(any(target_os = "linux", test))]
+mod appimage_environment;
 #[cfg(any(target_os = "macos", test))]
 mod macos_update;
 #[cfg(any(target_os = "linux", test))]

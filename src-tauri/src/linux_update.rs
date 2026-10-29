@@ -43,12 +43,15 @@ fn restore_image(target: &Path, backup: &Path) -> AppResult<()> {
 #[cfg(target_os = "linux")]
 mod platform {
     use super::*;
+    use crate::appimage_environment::clean_environment;
+    #[cfg(test)]
+    use crate::appimage_environment::clean_value;
     use crate::update_sources::{UpdateProvider, UpdateSource};
     use crate::update_stream::VerifiedStream;
     use crate::{
         python::worker, storage, update_manager, update_sources, update_startup as startup,
     };
-    use std::ffi::{CString, OsStr, OsString};
+    use std::ffi::{CString, OsStr};
     use std::io::Write;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -215,50 +218,6 @@ mod platform {
         validate_image(file)?;
         let _ = app.emit(EVENT, serde_json::json!({"event":"Finished"}));
         Ok(())
-    }
-
-    // AppRun modifies the desktop environment to point inside its mount. Keep the
-    // user's original entries while removing paths that would pin the old image.
-    fn clean_value(value: &OsStr, mount: &Path) -> Option<OsString> {
-        let original: Vec<_> = std::env::split_paths(value).collect();
-        let paths: Vec<_> = original
-            .iter()
-            .filter(|path| !path.starts_with(mount))
-            .collect();
-        if paths.len() == original.len() {
-            return Some(value.to_owned());
-        }
-        if paths.is_empty() {
-            return None;
-        }
-        std::env::join_paths(paths).ok()
-    }
-
-    fn clean_environment(command: &mut Command, mount: Option<&OsStr>) {
-        for key in ["APPIMAGE", "APPDIR", "ARGV0"] {
-            command.env_remove(key);
-        }
-        let Some(mount) = mount else {
-            return;
-        };
-        let mount = Path::new(mount);
-        if !mount.is_absolute() || mount.parent().is_none() {
-            return;
-        }
-        for (key, value) in std::env::vars_os() {
-            if key == "APPIMAGE" || key == "APPDIR" || key == "ARGV0" {
-                continue;
-            }
-            match clean_value(&value, mount) {
-                Some(clean) if clean != value => {
-                    command.env(key, clean);
-                }
-                None => {
-                    command.env_remove(key);
-                }
-                _ => (),
-            }
-        }
     }
 
     fn extracted_mount(mount: Option<&OsStr>) -> bool {

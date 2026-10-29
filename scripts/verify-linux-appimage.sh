@@ -8,6 +8,51 @@ PROBE_ROOT="$(mktemp -d)"
 trap 'rm -rf "$PROBE_ROOT"' EXIT
 (cd "$PROBE_ROOT" && "$IMAGE" --appimage-extract > /dev/null)
 APPDIR="$PROBE_ROOT/squashfs-root"
+# Inspect the GUI bundle without launching GTK or sourcing AppRun hooks.
+python3 - "$APPDIR" <<'PY'
+from pathlib import Path
+import os
+import shlex
+import sys
+
+appdir = Path(sys.argv[1]).resolve(strict=True)
+# Only check AppRun's shared search directories. The media tools also have
+# private dependencies under their resource directory, outside the GUI stack.
+for directory in ("usr/lib", "usr/lib64", "usr/lib/x86_64-linux-gnu", "lib", "lib64", "lib/x86_64-linux-gnu"):
+    for pattern in ("libwayland-client.so*", "libEGL.so*", "libEGL_mesa.so*", "libgbm.so*"):
+        for library in (appdir / directory).glob(pattern):
+            raise SystemExit(f"Host graphics library must not be bundled in the GUI search path: {library.relative_to(appdir)}")
+
+hooks = appdir / "apprun-hooks"
+gtk_hook = hooks / "linuxdeploy-plugin-gtk.sh"
+if not gtk_hook.is_file():
+    raise SystemExit("AppImage is missing its GTK startup hook")
+exports = {}
+for line in gtk_hook.read_text(encoding="utf-8").splitlines():
+    if line.lstrip().startswith("export "):
+        for token in shlex.split(line, comments=True)[1:]:
+            name, separator, value = token.partition("=")
+            if separator:
+                exports[name] = value
+if "GIO_EXTRA_MODULES" in exports:
+    raise SystemExit("AppImage contains the obsolete GIO_EXTRA_MODULES override")
+value = exports.get("GIO_MODULE_DIR", "")
+prefix = next((prefix for prefix in ("$APPDIR/", "${APPDIR}/") if value.startswith(prefix)), None)
+if prefix is None:
+    raise SystemExit("AppImage GIO_MODULE_DIR must be relative to APPDIR")
+module_dir = (appdir / value[len(prefix):].lstrip("/")).resolve()
+if not module_dir.is_relative_to(appdir) or not module_dir.is_dir():
+    raise SystemExit("AppImage GIO_MODULE_DIR does not contain bundled GIO modules")
+modules = list(module_dir.glob("*.so"))
+if not modules or any(not module.is_file() or not module.resolve().is_relative_to(appdir) for module in modules):
+    raise SystemExit("AppImage GIO modules are missing or resolve outside the bundle")
+build_paths = [value for key in ("GITHUB_WORKSPACE", "RUNNER_TEMP") if (value := os.environ.get(key))]
+for hook in sorted(hooks.glob("*.sh")):
+    content = hook.read_text(encoding="utf-8")
+    if any(path in content for path in build_paths):
+        raise SystemExit(f"AppImage startup hook contains a build-machine path: {hook.name}")
+print("AppImage GUI library exclusions and relocatable GIO module paths verified")
+PY
 RESOURCE_ID="$(find "$APPDIR/usr" -path '*/python-runtime/bootstrap-id' -print -quit)"
 test -n "$RESOURCE_ID"
 RESOURCES="$(dirname "$(dirname "$RESOURCE_ID")")"

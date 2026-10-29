@@ -8,6 +8,7 @@ ARM Linux is not included in this release.
 3. Install CPU, NVIDIA CUDA or AMD ROCm in Settings > Runtime Environment.
 
 Python and audio tools are bundled. A system Python installation is not required.
+Desktop integration uses the system xdg-open command (provided by xdg-utils).
 Runtime environments and user data are stored under ~/.pymss-studio by default.
 The first runtime installation requires a network connection and additional disk space.
 GPU environments require compatible host drivers and supported hardware. The Linux
