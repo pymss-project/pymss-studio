@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { useOptionalRuntimePackage } from '../src/features/audio-tools/optionalRuntimePackage.ts'
+import { useOptionalRuntimePackage } from '../src/features/runtime-packages/optionalRuntimePackage.ts'
 
 test('optional package activity survives component consumers being replaced', () => {
   const firstPage = useOptionalRuntimePackage('funasr')

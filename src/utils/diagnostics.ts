@@ -1,5 +1,5 @@
 import type { EnvInfo, RuntimeInfo, WorkerEventConnectionStatus } from '../stores/app.ts'
-import type { OptionalPackageStatus } from '../features/audio-tools/optionalRuntimePackage.ts'
+import type { OptionalPackageStatus } from '../features/runtime-packages/optionalRuntimePackage.ts'
 
 export type DiagnosticState = 'ok' | 'warn' | 'error' | 'unknown' | 'optional'
 export type DiagnosticCheck = {

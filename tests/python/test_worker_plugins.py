@@ -36,6 +36,11 @@ class PluginMarketplaceTests(unittest.TestCase):
         self.addCleanup(self.environment.stop)
         (self.work / "active.json").write_text('{"backend":"cpu"}')
         self.root = plugins._root()
+        self.plugin_manifest = self.work / "plugin-manifest.json"
+        self.plugin_manifest.write_text(json.dumps({"schemaVersion": 1, "repository": {"url": "https://github.com/example/plugins", "ref": "main"}, "preinstalled": []}), encoding="utf-8")
+        self.manifest_patch = mock.patch.object(plugins, "_PLUGIN_MANIFEST", self.plugin_manifest)
+        self.manifest_patch.start()
+        self.addCleanup(self.manifest_patch.stop)
         self.reset_runtime()
         self.addCleanup(self.reset_runtime)
         original_path = list(sys.path)
@@ -48,12 +53,20 @@ class PluginMarketplaceTests(unittest.TestCase):
         pymss.operations._DEFAULT_RUNTIME = None
         pymss.plugins.reset()
 
-    def source(self, *, name="hello", version="1.0.0", broken=False, operation="example.hello", print_message=False):
+    @staticmethod
+    def manifest(name, version="1.0.0", operation=None, dependencies="[]"):
+        operation = operation or f"{name}.hello"
+        return (
+            f'[project]\nname="pymss-plugin-{name}"\nversion="{version}"\nrequires-python=">=3.10"\ndependencies={dependencies}\n\n'
+            f'[tool.pymss.plugin]\nid="{name}"\napi_version=2\n\n'
+            f'[[tool.pymss.plugin.operations]]\nid="{operation}"\ntitle="Hello"\n'
+        )
+
+    def source(self, *, name="hello", version="1.0.0", broken=False, operation=None, print_message=False):
+        operation = operation or f"{name}.hello"
         source = self.work / "sources" / name
         source.mkdir(parents=True, exist_ok=True)
-        source.joinpath("pyproject.toml").write_text(
-            f'[project]\nname="pymss-plugin-{name}"\nversion="{version}"\nrequires-python=">=3.10"\ndependencies=[]\n',
-        )
+        source.joinpath("pyproject.toml").write_text(PluginMarketplaceTests.manifest(name, version, operation))
         code = f'''def run(ctx, inputs, params):
     return {{"value": 42}}
 
@@ -85,17 +98,47 @@ def setup(plugin):
     def test_install_from_local_source_and_run_through_worker(self):
         snapshot = self.install(self.source(print_message=True))
         self.assertTrue(snapshot["installed"][0]["loaded"])
-        self.assertEqual(snapshot["installed"][0]["operations"], ["example.hello"])
+        self.assertEqual(snapshot["installed"][0]["operations"], ["hello.hello"])
+        self.assertEqual(snapshot["installed"][0]["operationTitles"], {"hello.hello": "Hello"})
+        self.assertEqual(snapshot["installed"][0]["pluginId"], "hello")
         output = io.StringIO()
         with redirect_stdout(output):
             code = worker_operations.cmd_run_operation({
-                "operation": "example.hello", "inputs": {}, "params": {},
+                "operation": "hello.hello", "inputs": {}, "params": {},
                 "outputDir": str(self.work / "output"), "requestId": "hello-run",
             })
         self.assertEqual(code, 0, output.getvalue())
         event = json.loads(output.getvalue().splitlines()[-1])
         self.assertEqual(event["payload"]["outputs"]["value"]["value"], 42)
         self.assertEqual(os.environ["PYMSS_PLUGINS_DIR"], str(self.work / "manual"))
+
+    def test_incompatible_runtime_is_rejected_before_acquiring_or_migrating_plugins(self):
+        from pymss.plugins import manifest
+
+        legacy = self.root / "installed/oldtool"
+        legacy.mkdir(parents=True)
+        (legacy / "pyproject.toml").write_text('[tool.pymss.plugin]\nid="oldtool"\napi_version=1\n')
+        with mock.patch.object(manifest, "API_VERSION", 1), \
+             mock.patch.object(plugins, "_acquire_source", side_effect=AssertionError("source acquired")) as acquire:
+            code, events = self.manage("install", target=str(self.source()))
+        self.assertEqual(code, 1)
+        self.assertEqual(events[-1]["payload"]["code"], "PLUGIN_RUNTIME_INCOMPATIBLE")
+        self.assertIn("plugin protocol v2", events[-1]["payload"]["message"])
+        acquire.assert_not_called()
+        self.assertTrue(legacy.is_dir())
+        self.assertFalse((self.root / "legacy-v1").exists())
+
+    def test_verification_rejects_the_legacy_runtime_loader_before_spawning(self):
+        from pymss.operations import Runtime
+
+        def legacy_loader(runtime):
+            return []
+
+        with mock.patch.object(Runtime, "load_plugins", legacy_loader), \
+             mock.patch.object(plugins.subprocess, "run", side_effect=AssertionError("unexpected probe")) as run:
+            with self.assertRaisesRegex(RuntimeError, "plugin protocol v2"):
+                plugins._probe(self.root)
+        run.assert_not_called()
 
     def test_successful_update_replaces_source_and_version(self):
         source = self.source()
@@ -137,7 +180,7 @@ def setup(plugin):
         self.assertTrue(manual.exists())
 
     def test_invalid_names_cannot_escape_installation_directory(self):
-        for name in ["../hello", "/hello", "hello/../../", "", ".hidden", "a\\b"]:
+        for name in ["../hello", "/hello", "hello/../../", "", ".hidden", "a\\b", "hello.", "a..b", "Upper"]:
             with self.subTest(name=name):
                 code, events = self.manage("uninstall", name=name)
                 self.assertEqual(code, 1)
@@ -171,6 +214,28 @@ def setup(plugin):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(output.getvalue())["payload"]["catalog"][0]["tags"], ["audio"])
 
+    def test_configured_registry_is_passed_explicitly_and_environment_override_wins(self):
+        from pymss.plugins import install as installer
+        os.environ.pop("PYMSS_PLUGINS_REGISTRY", None)
+        with plugins._plugin_registry():
+            self.assertEqual(plugins._REGISTRY_URL.get(), "https://raw.githubusercontent.com/example/plugins/main/registry.json")
+            self.assertNotIn("PYMSS_PLUGINS_REGISTRY", os.environ)
+        self.assertIsNone(plugins._REGISTRY_URL.get())
+        with mock.patch.object(installer, "list_available", return_value=[]) as list_available, redirect_stdout(io.StringIO()):
+            plugins.cmd_plugin_marketplace({})
+        list_available.assert_called_once_with("https://raw.githubusercontent.com/example/plugins/main/registry.json")
+        with mock.patch.dict(os.environ, {"PYMSS_PLUGINS_REGISTRY": "https://override/registry.json"}):
+            with plugins._plugin_registry():
+                self.assertEqual(plugins._REGISTRY_URL.get(), "https://override/registry.json")
+
+    def test_inventory_only_marketplace_query_does_not_require_registry_config(self):
+        with mock.patch.object(plugins, "_PLUGIN_MANIFEST", self.work / "missing.json"):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = plugins.cmd_plugin_marketplace({"includeCatalog": False})
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue())["payload"]["catalog"], [])
+
     def test_recovery_restores_previous_version_after_interrupted_publication(self):
         self.install(self.source())
         backup = self.root / "backups/hello"
@@ -180,21 +245,98 @@ def setup(plugin):
         self.assertTrue(snapshot["installed"][0]["loaded"])
         self.assertFalse(backup.exists())
 
-    def test_duplicate_operation_rejected_without_breaking_existing_plugin(self):
-        self.install(self.source())
-        code, events = self.manage("install", target=str(self.source(name="duplicate")))
+    def test_second_source_with_the_same_plugin_id_is_rejected(self):
+        source = self.source()
+        self.install(source)
+        copy = self.work / "elsewhere/renamed-folder"
+        shutil.copytree(source, copy)
+        code, events = self.manage("install", target=str(copy))
         self.assertEqual(code, 1, events)
-        self.assertFalse((self.root / "installed/duplicate").exists())
+        self.assertIn("already installed", events[-1]["payload"]["message"])
+        self.assertFalse((self.root / "installed/renamed-folder").exists())
         self.assertTrue(plugins._inventory(self.root)["installed"][0]["loaded"])
 
     def test_builtin_operation_collision_rejected(self):
-        self.source(operation="pymss.audio.adjust_volume")
         # Use an actual built-in id rather than assuming the DSP namespace.
         from pymss.operations import default_runtime
-        builtin = default_runtime().list_operations()[0]["id"]
-        code, events = self.manage("install", target=str(self.source(operation=builtin)))
+        builtin = next(item["id"] for item in default_runtime().list_operations() if item["id"].startswith("pymss.audio."))
+        code, events = self.manage("install", target=str(self.source(name="pymss.audio", operation=builtin)))
         self.assertEqual(code, 1, events)
-        self.assertFalse((self.root / "installed/hello").exists())
+        self.assertFalse((self.root / "installed/pymss.audio").exists())
+
+    def test_install_directory_is_the_manifest_plugin_id(self):
+        source = self.source(name="author.hello")
+        renamed = self.work / "checkout/any-folder-name"
+        shutil.copytree(source, renamed)
+        snapshot = self.install(renamed)
+        self.assertEqual(snapshot["installed"][0]["name"], "author.hello")
+        self.assertTrue((self.root / "installed/author.hello/__init__.py").is_file())
+
+    def test_update_source_providing_another_plugin_id_is_rejected(self):
+        source = self.source()
+        self.install(source)
+        source.joinpath("pyproject.toml").write_text(self.manifest("other", "2.0.0", "other.hello"))
+        source.joinpath("__init__.py").write_text(source.joinpath("__init__.py").read_text().replace("hello.hello", "other.hello"))
+        code, events = self.manage("update", name="hello")
+        self.assertEqual(code, 1, events)
+        self.assertIn("provides plugin other, not hello", events[-1]["payload"]["message"])
+        self.assertEqual(plugins._manifest(self.root / "installed/hello")["version"], "1.0.0")
+
+    def test_v1_installations_move_to_legacy_and_are_reported(self):
+        self.install(self.source())
+        legacy = self.root / "installed/oldtool"
+        legacy.mkdir()
+        legacy.joinpath("__init__.py").write_text("def setup(plugin):\n    pass\n")
+        legacy.joinpath("pyproject.toml").write_text('[tool.pymss.plugin]\nid="pymss.oldtool"\napi_version=1\n')
+        snapshot = plugins._inventory(self.root)
+        self.assertEqual(snapshot["legacyPlugins"], ["oldtool"])
+        self.assertEqual([row["name"] for row in snapshot["installed"] if row["managed"]], ["hello"])
+        self.assertTrue((self.root / "legacy-v1/oldtool/__init__.py").is_file())
+        self.assertFalse(legacy.exists())
+
+    def test_legacy_migration_preserves_existing_and_same_named_installations(self):
+        original = self.root / "legacy-v1/oldtool"
+        for directory, marker in (
+            (original, "archived"),
+            (self.root / "installed/oldtool", "enabled"),
+            (self.root / "disabled/oldtool", "disabled"),
+        ):
+            directory.mkdir(parents=True)
+            (directory / "pyproject.toml").write_text('[tool.pymss.plugin]\nid="oldtool"\napi_version=1\n')
+            (directory / "state.txt").write_text(marker)
+
+        snapshot = plugins._inventory(self.root)
+        self.assertEqual((original / "state.txt").read_text(), "archived")
+        archived = self.root / "legacy-v1"
+        self.assertEqual(sorted((path / "state.txt").read_text() for path in archived.iterdir()),
+                         ["archived", "disabled", "enabled"])
+        self.assertEqual(len(snapshot["legacyPlugins"]), 3)
+        self.assertEqual(plugins._inventory(self.root)["legacyPlugins"], snapshot["legacyPlugins"])
+
+    def test_inventory_reads_manifests_without_probing(self):
+        self.install(self.source())
+        with mock.patch.object(plugins, "_probe", side_effect=AssertionError("listing must not import plugins")):
+            snapshot = plugins._inventory(self.root)
+        self.assertTrue(snapshot["installed"][0]["loaded"])
+        self.assertEqual(snapshot["installed"][0]["operations"], ["hello.hello"])
+
+    def test_studio_views_must_stay_inside_the_plugin(self):
+        source = self.source()
+        (source / "ui").mkdir()
+        (source / "ui/index.html").write_text("<html></html>")
+        (self.work / "sources/secret.html").write_text("secret")
+        base = source.joinpath("pyproject.toml").read_text()
+        for entry, valid in [("ui/index.html", True), ("../secret.html", False), ("ui/missing.html", False)]:
+            with self.subTest(entry=entry):
+                source.joinpath("pyproject.toml").write_text(base + f'\n[tool.pymss.studio]\nsdk_version = 1\n[[tool.pymss.studio.views]]\nid="tool"\nentry="{entry}"\noperation="hello.hello"\n')
+                if valid:
+                    [view] = plugins._studio_views(source)
+                    self.assertEqual(Path(view["entryPath"]), (source / "ui/index.html").resolve())
+                    self.assertEqual(view["placements"], ["tool"])
+                    self.assertEqual(view["permissions"], ["operations"])
+                else:
+                    with self.assertRaisesRegex(ValueError, "inside the plugin"):
+                        plugins._studio_views(source)
 
     def test_backend_and_interpreter_both_scope_plugin_installations(self):
         (self.work / "active.json").write_text('{"backend":"mlx"}')
@@ -203,12 +345,19 @@ def setup(plugin):
         with mock.patch.object(sys, "executable", str(self.work / "another-venv/bin/python")):
             self.assertNotEqual(self.root, plugins._root())
 
-    def test_probe_failure_is_visible_on_installed_row(self):
+    def test_forced_verification_failure_is_visible(self):
         self.install(self.source())
         with mock.patch.object(plugins, "_probe", side_effect=RuntimeError("plugin probe timed out")):
-            snapshot = plugins._inventory(self.root)
-        self.assertIsNone(snapshot["installed"][0]["loaded"])
+            snapshot = plugins._inventory(self.root, verify=True)
+        self.assertTrue(snapshot["installed"][0]["loaded"])
         self.assertIn("timed out", snapshot["verificationError"])
+
+    def test_forced_verification_reports_import_failures(self):
+        self.install(self.source())
+        self.root.joinpath("installed/hello/__init__.py").write_text("raise RuntimeError('broken after install')\n")
+        snapshot = plugins._inventory(self.root, verify=True)
+        self.assertFalse(snapshot["installed"][0]["loaded"])
+        self.assertIn("broken after install", snapshot["installed"][0]["error"])
 
     def test_local_source_update_check_compares_its_declared_version(self):
         source = self.source()
@@ -220,17 +369,19 @@ def setup(plugin):
         self.assertFalse(update["up_to_date"])
         self.assertEqual(update["remote_version"], "2.0.0")
 
-    def test_manual_plugin_is_visible_and_operation_collision_names_the_owner(self):
-        manual = self.work / "manual/manual-hello"
+    def test_pymss_directory_plugin_is_visible_and_blocks_the_same_plugin_id(self):
+        manual = self.work / "manual/hello"
         manual.parent.mkdir(parents=True)
         shutil.copytree(self.source(), manual)
-        code, events = self.manage("install", target=str(self.source(name="managed-hello")))
+        copy = self.work / "managed/hello"
+        shutil.copytree(manual, copy)
+        code, events = self.manage("install", target=str(copy))
         self.assertEqual(code, 1, events)
-        self.assertIn("manually installed plugin manual-hello", events[-1]["payload"]["message"])
+        self.assertIn("already activated from", events[-1]["payload"]["message"])
         row = plugins._inventory(self.root)["installed"][0]
-        self.assertEqual(row["name"], "manual-hello")
+        self.assertEqual(row["name"], "hello")
         self.assertFalse(row["managed"])
-        self.assertTrue(row["loaded"])
+        self.assertIsNone(row["loaded"])
 
     def test_recovery_cleans_abandoned_install_and_uninstall_transactions(self):
         for name in ["install-abandoned", "removed-old"]:
@@ -250,11 +401,12 @@ def setup(plugin):
 
     def test_inventory_does_not_hold_exclusive_lock_while_probing(self):
         from worker_runtime_lock import runtime_lock
+        self.install(self.source())
         def probe(root):
             with runtime_lock(root / ".lock", timeout=0):
                 return []
         with mock.patch.object(plugins, "_probe", side_effect=probe):
-            self.assertIsNone(plugins._inventory(self.root)["verificationError"])
+            self.assertIsNone(plugins._inventory(self.root, verify=True)["verificationError"])
 
     def test_local_source_parent_can_contain_at_sign(self):
         original = self.source()
@@ -292,7 +444,7 @@ def setup(plugin):
             snapshot = plugins._inventory(self.root)
             runtime = plugins.operation_runtime()
         self.assertTrue(snapshot["installed"][0]["loaded"])
-        self.assertIn("example.hello", [item["id"] for item in runtime.list_operations()])
+        self.assertIn("hello.hello", [item["id"] for item in runtime.list_operations()])
 
     def test_missing_local_source_is_not_looked_up_in_the_registry(self):
         from pymss.plugins import install as installer
@@ -309,15 +461,17 @@ def setup(plugin):
         self.assertIn("Local plugin source folder is unavailable", events[-1]["payload"]["message"])
         self.assertTrue(plugins._inventory(self.root)["installed"][0]["loaded"])
 
-    def test_probe_failure_preserves_manual_plugin_names_with_unknown_status(self):
-        manual = self.work / "manual/hello"
-        manual.parent.mkdir(parents=True)
-        shutil.copytree(self.source(), manual)
-        with mock.patch.object(plugins, "_probe", side_effect=RuntimeError("probe timeout")):
-            snapshot = plugins._inventory(self.root)
-        self.assertEqual(snapshot["installed"][0]["name"], "hello")
-        self.assertFalse(snapshot["installed"][0]["managed"])
-        self.assertIsNone(snapshot["installed"][0]["loaded"])
+    def test_pymss_directory_plugins_are_listed_from_their_manifest(self):
+        manual = self.work / "manual"
+        shutil.copytree(self.source(name="author.manual"), manual / "renamed")
+        (manual / "old").mkdir()
+        (manual / "old/__init__.py").write_text("")
+        rows = {row["path"]: row for row in plugins._inventory(self.root)["installed"]}
+        listed = rows[str(manual / "renamed")]
+        self.assertEqual((listed["name"], listed["managed"], listed["loaded"]), ("author.manual", False, None))
+        broken = rows[str(manual / "old")]
+        self.assertFalse(broken["loaded"])
+        self.assertIn("pyproject.toml", broken["error"])
 
     def test_ssh_git_reference_is_separate_from_authentication_and_subpath(self):
         from pymss.plugins import install as installer
@@ -357,7 +511,7 @@ def setup(plugin):
         first = plugins.operation_runtime()
         second = plugins.operation_runtime()
         self.assertIs(first, second)
-        self.assertIn("example.hello", [item["id"] for item in second.list_operations()])
+        self.assertIn("hello.hello", [item["id"] for item in second.list_operations()])
 
     def test_real_pip_installs_a_local_wheel_into_the_plugin_sidecar(self):
         import zipfile
@@ -369,9 +523,7 @@ def setup(plugin):
             archive.writestr("studio_market_test_dep-1.0.0.dist-info/WHEEL", "Wheel-Version: 1.0\nGenerator: unittest\nRoot-Is-Purelib: true\nTag: py3-none-any\n")
             archive.writestr("studio_market_test_dep-1.0.0.dist-info/RECORD", "")
         requirement = f"studio-market-test-dep @ {wheel.as_uri()}"
-        source.joinpath("pyproject.toml").write_text(
-            '[project]\nname="hello"\nversion="1.0.0"\ndependencies=[' + json.dumps(requirement) + ']\n',
-        )
+        source.joinpath("pyproject.toml").write_text(self.manifest("hello", dependencies="[" + json.dumps(requirement) + "]"))
         entry = source / "__init__.py"
         entry.write_text("import studio_market_test_dep\n" + entry.read_text())
         snapshot = self.install(source)

@@ -59,7 +59,9 @@ jobs:
           --fixture-library native/target/tmp/vst3-fixture-target/debug/${{ runner.os == 'Windows' && 'vst3_fixture.dll' || runner.os == 'macOS' && 'libvst3_fixture.dylib' || 'libvst3_fixture.so' }}
           --output-dir "${{ runner.temp }}/vst3-restrictions"
       - name: Check experimental application bridge
-        run: cargo check --locked --manifest-path src-tauri/Cargo.toml --features vst-lab
+        run: |
+          python scripts/prepare-preinstalled-plugins.py --release
+          cargo check --locked --manifest-path src-tauri/Cargo.toml --features vst-lab
       - name: Check native host with ordinary application identity
         run: cargo check --locked --manifest-path src-tauri/Cargo.toml --features native-plugins
       - name: Verify process isolation and saved-state bridge

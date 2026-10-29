@@ -52,6 +52,7 @@ jobs:
         run: python -m unittest discover -s tests/python -t tests -p 'test_linux_*.py'
       - name: Check backend and bootstrap relocation
         run: |
+          python scripts/prepare-preinstalled-plugins.py --release
           cargo check --manifest-path src-tauri/Cargo.toml
           cargo test --manifest-path src-tauri/Cargo.toml bootstrap_cache
           cargo test --manifest-path src-tauri/Cargo.toml linux_update
@@ -72,6 +73,7 @@ jobs:
           python-version: '3.12'
       - name: Verify archive generation and platform-specific installation
         run: |
+          python scripts/prepare-preinstalled-plugins.py --release
           python -m unittest discover -s tests/python -t tests -p 'test_macos_update_release.py'
           cargo test --manifest-path src-tauri/Cargo.toml macos_update
           cargo test --manifest-path src-tauri/Cargo.toml update_startup
@@ -120,7 +122,9 @@ jobs:
             -r python/requirements-ci.txt
 
       - name: Run all tests
-        run: pnpm test:all
+        run: |
+          pnpm plugins:prepare --release
+          pnpm test:all
 
       - name: Build frontend
         run: pnpm build

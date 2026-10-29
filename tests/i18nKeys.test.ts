@@ -24,6 +24,10 @@ const DYNAMIC_KEY_PREFIXES = [
   'workflows.advancedEditor.nodes.',
   'workflows.advancedEditor.fields.',
   'workflows.advancedEditor.menu.',
+  // PluginTaskStatus / PluginLogDialog use typed action, phase and outcome IDs.
+  'plugins.actions.',
+  'plugins.phases.',
+  'plugins.taskStates.',
 ]
 
 /**

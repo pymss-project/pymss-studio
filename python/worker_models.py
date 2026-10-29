@@ -11,7 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from audio_tools.asr_cache import is_complete_asr_model_cache
+from worker_asr_cache import is_complete_asr_model_cache
 
 import yaml
 

@@ -15,7 +15,8 @@ from worker_protocol import emit, emit_error
 
 def cmd_list_nodes(payload: dict[str, Any]) -> int:
     try:
-        from worker_plugins import _manifest_contributions, _root, operation_runtime
+        from pymss.plugins.manifest import read_manifest
+        from worker_plugins import _root, operation_runtime
 
         # Ensure plugin node types are registered in the shared graph registry.
         try:
@@ -31,11 +32,12 @@ def cmd_list_nodes(payload: dict[str, Any]) -> int:
             for plugin in sorted(installed.iterdir()):
                 if not plugin.is_dir():
                     continue
-                contributions = _manifest_contributions(plugin)
-                for decl in contributions.get("nodes", []):
-                    decl = dict(decl)
-                    decl["pluginId"] = _manifest_contributions_plugin_id(plugin)
-                    nodes.append(decl)
+                try:
+                    manifest = read_manifest(plugin)
+                except Exception:  # noqa: BLE001 — a broken manifest contributes no nodes
+                    continue
+                for decl in manifest.to_dict()["contributions"]["nodes"]:
+                    nodes.append({**decl, "pluginId": manifest.plugin_id})
 
         # Live registration state: does the executor exist right now?
         registered: set[str] = set()
@@ -53,13 +55,3 @@ def cmd_list_nodes(payload: dict[str, Any]) -> int:
         return 0
     except Exception as error:  # noqa: BLE001
         return emit_error("NODES_LIST_FAILED", str(error))
-
-
-def _manifest_contributions_plugin_id(plugin) -> str:
-    try:
-        from pymss.plugins.manifest import read_manifest
-
-        manifest = read_manifest(plugin)
-        return manifest.plugin_id if manifest else plugin.name
-    except Exception:
-        return plugin.name

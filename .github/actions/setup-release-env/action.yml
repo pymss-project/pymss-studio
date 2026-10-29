@@ -37,3 +37,7 @@ runs:
     - name: Install frontend dependencies
       shell: bash
       run: pnpm install --frozen-lockfile
+
+    - name: Prepare configured offline plugins
+      shell: bash
+      run: pnpm plugins:prepare --release

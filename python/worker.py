@@ -38,6 +38,9 @@ def run_command(command: str, payload: dict) -> int:
         configure_process_proxy(load_proxy_config())
         from worker_plugins import cmd_manage_plugin
         return cmd_manage_plugin(payload)
+    if command == "plugin_source_info":
+        from worker_plugins import cmd_plugin_source_info
+        return cmd_plugin_source_info(payload)
     if command == "optional_package_status":
         from worker_optional_packages import cmd_optional_package_status
         return cmd_optional_package_status(payload)
@@ -130,12 +133,6 @@ def run_command(command: str, payload: dict) -> int:
     if command == "export_editor_mix":
         from worker_audio import cmd_export_editor_mix
         return cmd_export_editor_mix(payload)
-    if command == "audio_tools":
-        if str(payload.get("operation") or "").strip().lower() == "asr":
-            from worker_optional_packages import activate_optional_packages
-            activate_optional_packages()
-        from worker_tools import cmd_audio_tools
-        return cmd_audio_tools(payload)
     if command == "infer":
         from worker_infer import cmd_infer
         return cmd_infer(payload)
@@ -146,6 +143,10 @@ def run_command(command: str, payload: dict) -> int:
         from worker_operations import cmd_describe_operation
         return cmd_describe_operation(payload)
     if command == "run_operation":
+        from worker_plugins import operation_uses_optional_backend
+        if operation_uses_optional_backend(str(payload.get("operation") or "").strip()):
+            from worker_optional_packages import activate_optional_packages
+            activate_optional_packages()
         from worker_operations import cmd_run_operation
         return cmd_run_operation(payload)
     if command == "list_nodes":

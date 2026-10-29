@@ -163,7 +163,9 @@ The Installed tab shows loading errors, operations, and update checks. Marketpla
 
 Sources and additional dependencies are stored in `runtime-envs/plugins/<runtime-identity>/installed/` under the application data directory. Dependencies resolve against the active runtime with host versions constrained. Incompatible requirements fail without replacing the working plugin. Updates are staged and verified before activation. Each runtime has its own marketplace installations.
 
-**Run plugin operations** opens Tools → Plugin operations. Plugins must contribute operations through `setup(plugin)`, and the runtime must contain pymss operations support. Legacy capability or graph-node plugins may have no generic operations. Installation does not add dynamic nodes to the Studio workflow editor.
+**Refresh catalog** on Browse retrieves available plugins; **Check for updates** on Installed compares installed versions. Local development sources also compare package contents to detect same-version component changes. **Open tool** on each card opens that plugin's page. Reverification in the overflow menu only checks loading status. File updates retain installed dependencies unless dependency installation is explicitly selected in the update dialog.
+
+Plugins declare their category in `[tool.pymss.studio] category`: `convert`, `analyze`, `recognize`, or `edit`. Missing categories appear under Other. The marketplace and Tools use the same metadata, with package-owned `locales` for titles, descriptions and operation labels. Plugins contribute operations through `setup(plugin)` and require pymss operations support. Legacy capability or graph-node plugins may have no generic operations. Installation does not add dynamic nodes to the Studio workflow editor.
 
 ## Data, runtimes, and updates
 
@@ -262,11 +264,18 @@ You can reuse an existing bundled runtime or activated environment. Overriding b
 
 ### Commands
 
+`python/plugin-manifest.json` declares the official repository and an optional preinstallation list. The default list is empty: Studio builds do not fetch plugin sources, and users choose tools from the marketplace. Opening Tools without installed plugins shows an installation entry. Existing installed and disabled plugins are preserved.
+
+For local plugin development, build the plugin checkout and select its source through Diagnostics → Plugin source. Install or update the desired packages through the marketplace. Optional offline distributions may fill the preinstallation list and run `pnpm plugins:prepare --release`; pin the build `ref` to a commit. Prepared plugin files are ignored build resources. `pnpm plugins:prepare --check` verifies resource integrity without network access.
+
+The project defaults to its configured remote repository, including during desktop development. For temporary debugging on one machine, enable developer mode and use Diagnostics → Plugin sources to select a local checkout or edit the remote URL and catalog branch. Overrides are stored only in that machine's application settings as `plugin-source.json` and apply while developer mode is enabled. Restoring defaults clears the saved override. Explicit environment overrides still apply, with `PYMSS_PLUGINS_REGISTRY` taking precedence.
+
 | Command | Purpose |
 | --- | --- |
 | `pnpm dev` | Frontend server on port `1420` for UI development and browser previews. |
 | `pnpm tauri dev` | Full desktop application with frontend hot reload and Rust / Python orchestration. |
 | `pnpm build` | TypeScript checks and the frontend production build. |
+| `pnpm plugins:prepare` | Prepare configured offline plugin resources, reusing a verified snapshot. |
 | `pnpm tauri build` | Desktop build; runs the frontend build first. A complete inference runtime must be prepared separately. |
 | `pnpm test` / `pnpm test:frontend` | Frontend logic tests. |
 | `pnpm test:python` | Python Worker module tests. |

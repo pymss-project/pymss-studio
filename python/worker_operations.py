@@ -89,11 +89,11 @@ def _serialize_output(name: str, value: Any, output_dir: Path) -> Any:
     from pymss.graph.core import AudioArtifact
 
     if isinstance(value, AudioArtifact):
-        from audio_tools.common import _render_output
         from pymss.audio_io import save_audio
+        from pymss.plugins.kit import render_output
 
         filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(name))[:48].rstrip(" .") or "output"
-        path = _render_output(
+        path = render_output(
             output_dir / f"operation_output_{filename}.wav",
             lambda target: save_audio(str(target), value.audio.T, value.sample_rate, "wav", {}),
         )
@@ -142,11 +142,12 @@ def cmd_run_operation(payload: dict[str, Any]) -> int:
 
         from pymss.operations import OperationContext
 
-        def _progress(fraction, message=""):
+        def _progress(fraction, message="", event=None):
             emit("operation_progress", {
                 "operation": operation_id,
                 "fraction": float(fraction),
                 "message": str(message or ""),
+                **({"event": event} if event is not None else {}),
             }, request_id=request_id)
 
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -171,10 +172,14 @@ def cmd_run_operation(payload: dict[str, Any]) -> int:
     except ImportError as exc:
         return emit_error("OPERATIONS_UNAVAILABLE", str(exc), request_id=request_id)
     except Exception as exc:  # noqa: BLE001
+        code = getattr(exc, "code", None)
+        metadata = getattr(exc, "extra", None)
+        metadata = metadata if isinstance(metadata, dict) else {}
         return emit_error(
-            "OPERATION_FAILED",
+            code if isinstance(code, str) else "OPERATION_FAILED",
             str(exc),
             traceback.format_exc(),
             request_id=request_id,
-            extra={"operation": operation_id},
+            recoverable=getattr(exc, "recoverable", False) is True,
+            extra={"operation": operation_id, **metadata},
         )

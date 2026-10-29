@@ -1,4 +1,4 @@
-"""Check Windows component removal and macOS runtime storage notices."""
+"""Check macOS runtime storage notices and core-update confirmation."""
 
 import argparse
 from pathlib import Path
@@ -67,46 +67,9 @@ with sync_playwright() as playwright:
           window.__app.runtimeInfo=structuredClone(window.__runtime);
           window.__app.setWorkerEventConnection('connected');
         }""")
-        # The existing platform rules expose ASR on Windows and hide it on macOS.
-        page.get_by_role("button", name="语音识别", exact=True).click()
-        expect(page.get_by_role("button", name="卸载组件", exact=True)).to_be_enabled()
-        expect(page.get_by_text("基础环境组件，不可卸载", exact=True)).to_have_count(0)
-        page.screenshot(path=str(args.output_dir / "windows-environment-component.png"))
-        page.get_by_role("button", name="卸载组件", exact=True).click()
+        # Component controls belong to the independent ASR plugin view and are
+        # exercised by pymss-plugins/tests/manual/migrated_tool_views_smoke.py.
         dialog = page.get_by_role("dialog")
-        expect(dialog).to_contain_text("已下载的模型将保留")
-        dialog.get_by_role("button", name="卸载组件", exact=True).click()
-        page.wait_for_function("Boolean(window.__componentTask)")
-        expect(page.locator(".audio-tool-runtime-ready")).to_contain_text("正在卸载")
-        expect(page.locator(".audio-tool-dependency")).to_have_count(0)
-        page.evaluate("""() => {
-          window.__componentStatus.installed=false;window.__componentStatus.present=false;
-          window.__componentStatus.source=null;window.__componentStatus.version=null;
-          window.__componentStatus.canUninstall=false;
-          window.__emitComponentStatus();
-        }""")
-        expect(page.locator(".audio-tool-dependency")).to_contain_text("当前运行环境尚未安装 FunASR")
-        expect(page.get_by_text("FunASR 运行组件已卸载", exact=True).first).to_be_visible()
-        expect(page.get_by_role("button", name="卸载组件", exact=True)).to_have_count(0)
-
-        page.evaluate("""async () => {
-          Object.assign(window.__componentStatus,{installed:true,present:true,version:'1.3.26',
-            source:'managed',canUninstall:true});
-          const {useOptionalRuntimePackage}=await import('/src/features/audio-tools/optionalRuntimePackage.ts');
-          await useOptionalRuntimePackage('funasr').refresh();
-        }""")
-        page.get_by_role("button", name="卸载组件", exact=True).click()
-        expect(dialog).to_contain_text("已下载的模型将保留")
-        dialog.get_by_role("button", name="卸载组件", exact=True).click()
-        expect(page.locator(".audio-tool-runtime-ready")).to_contain_text("正在卸载")
-        page.evaluate("""() => {
-          Object.assign(window.__componentStatus,{installed:false,present:false,version:null,
-            source:null,canUninstall:false});
-          window.__emitComponentStatus();
-        }""")
-        expect(page.locator(".audio-tool-dependency")).to_contain_text("当前运行环境尚未安装 FunASR")
-        expect(page.get_by_role("button", name="卸载组件", exact=True)).to_have_count(0)
-
         page.evaluate("""async () => {
           window.__runtime.platform='darwin';window.__runtime.machine='arm64';
           window.__runtime.installedBackend='mlx';
@@ -150,6 +113,6 @@ with sync_playwright() as playwright:
         page.wait_for_function("window.__appliedPlan?.[3]?.planId===window.__corePlan.id")
         expect(dialog).to_have_count(0)
         assert not errors, errors
-        print("Windows environment and managed component removal, progress, bilingual runtime notices, and core update confirmation verified")
+        print("Bilingual macOS runtime notices and core update confirmation verified")
     finally:
         browser.close()

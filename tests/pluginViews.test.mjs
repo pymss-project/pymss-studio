@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import vm from 'node:vm'
 
 // Studio plugin view SDK host bridge logic, mirroring PluginViewHost.vue:
 // origin checks, permission allowlists, JSON-RPC dispatch, progress fanout.
@@ -101,4 +103,80 @@ test('plugin views are only offered for managed and loaded plugins', () => {
       .filter(v => v.placements.includes('tool'))
       .map(v => ({ plugin: row.name, viewId: v.id })))
   assert.deepEqual(toolViews, [{ plugin: 'ok', viewId: 'v' }])
+})
+
+function sdkHarness() {
+  const sent = []
+  const listeners = []
+  const parent = { postMessage: message => sent.push(message) }
+  const root = { style: { setProperty() {} }, dataset: {} }
+  const window = { parent, addEventListener: (_name, listener) => listeners.push(listener) }
+  const document = { documentElement: root, dispatchEvent() {}, addEventListener() {} }
+  vm.runInNewContext(readFileSync(new URL('../src-tauri/resources/plugin-sdk/pymss-sdk.js', import.meta.url), 'utf8'), {
+    window, document, CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init?.detail } },
+  })
+  const deliver = (data, source = parent) => listeners.forEach(listener => listener({ data, source }))
+  const respond = (id, result) => deliver({ jsonrpc: '2.0', id, result })
+  return { sdk: window.pymss, sent, deliver, respond, parent }
+}
+
+test('published SDK exposes the extended methods with operation ids and exact payloads', async () => {
+  const { sdk, sent, respond } = sdkHarness()
+  const start = sdk.startOperation('pymss.convert.batch', { format: 'wav' }, { audio: 'a.wav' }, undefined, { outputDir: '/out' })
+  assert.equal(typeof start.id, 'number')
+  assert.equal(sent.at(-1).method, 'operations.start')
+  assert.equal(JSON.stringify(sent.at(-1).params), JSON.stringify({
+    operation: 'pymss.convert.batch', params: { format: 'wav' }, inputs: { audio: 'a.wav' }, outputDir: '/out',
+  }))
+  const cancelling = sdk.cancelOperation(start.id)
+  assert.equal(JSON.stringify(sent.at(-1)), JSON.stringify({ jsonrpc: '2.0', id: cancelling.id, method: 'operations.cancel', params: { id: start.id } }))
+  respond(cancelling.id, true)
+  respond(start.id, { outputs: {} })
+  assert.equal(await cancelling, true)
+  assert.equal(JSON.stringify(await start), JSON.stringify({ outputs: {} }))
+
+  const read = sdk.readSettings()
+  assert.equal(JSON.stringify(sent.at(-1).params), JSON.stringify({}))
+  respond(read.id, { format: 'wav' })
+  assert.equal(JSON.stringify(await read), JSON.stringify({ format: 'wav' }))
+  const write = sdk.writeSettings({ format: 'flac' })
+  assert.equal(JSON.stringify(sent.at(-1).params), JSON.stringify({ data: { format: 'flac' } }))
+  respond(write.id, { format: 'flac' })
+  assert.equal(JSON.stringify(await write), JSON.stringify({ format: 'flac' }))
+
+  const pick = sdk.pickAudio({ multiple: true })
+  assert.equal(JSON.stringify(sent.at(-1).params), JSON.stringify({ multiple: true }))
+  respond(pick.id, { paths: ['/a.wav'] })
+  assert.equal(JSON.stringify(await pick), JSON.stringify({ paths: ['/a.wav'] }))
+  const scan = sdk.scanAudio(['/music'], false)
+  assert.equal(JSON.stringify(sent.at(-1).params), JSON.stringify({ paths: ['/music'], recursive: false }))
+  respond(scan.id, { files: ['/music/a.wav'] })
+  assert.equal(JSON.stringify(await scan), JSON.stringify({ files: ['/music/a.wav'] }))
+
+  const analysis = sdk.analyzeAudio({ operation: 'tempo_key', inputs: ['/a.wav'] })
+  assert.equal(JSON.stringify(sent.at(-1).params), JSON.stringify({ payload: { operation: 'tempo_key', inputs: ['/a.wav'] } }))
+  respond(analysis.id, { items: [] })
+  assert.equal(JSON.stringify(await analysis), JSON.stringify({ items: [] }))
+  const packageStatus = sdk.packageStatus()
+  assert.equal(JSON.stringify(sent.at(-1).params), JSON.stringify({ package: 'funasr' }))
+  respond(packageStatus.id, { package: 'funasr', installed: true })
+  assert.equal(JSON.stringify(await packageStatus), JSON.stringify({ package: 'funasr', installed: true }))
+  const manage = sdk.managePackage({ package: 'funasr', action: 'install' })
+  assert.equal(JSON.stringify(sent.at(-1).params), JSON.stringify({ payload: { package: 'funasr', action: 'install' } }))
+  respond(manage.id, { package: 'funasr', installed: true })
+  assert.equal(JSON.stringify(await manage), JSON.stringify({ package: 'funasr', installed: true }))
+})
+
+test('published SDK ignores foreign-frame responses and preserves task cancellation codes', async () => {
+  const { sdk, sent, deliver, parent } = sdkHarness()
+  const request = sdk.startOperation('plugin.convert', {}, {})
+  const id = request.id
+  deliver({ jsonrpc: '2.0', id, result: { forged: true } }, { postMessage() {} })
+  await new Promise(setImmediate)
+  assert.equal(sent.filter(message => message.id === id).length, 1)
+  deliver({
+    jsonrpc: '2.0', id,
+    error: { code: -32000, message: 'Stopped', data: { code: 'TASK_CANCELLED' } },
+  }, parent)
+  await assert.rejects(request, error => error.message === 'Stopped' && error.code === 'TASK_CANCELLED')
 })

@@ -31,42 +31,39 @@ OPTIONAL_PACKAGES: dict[str, dict[str, str]] = {
     },
 }
 
-# On Apple Silicon the FunASR component is satisfied by the asr *plugin*
-# (funasr-mlx backend) instead of the Torch-based sidecar: the MLX runtime
-# ships no PyTorch, so the legacy path can only fail there.
+_MLX_FUNASR_REQUIREMENT = "funasr-mlx>=0.2"
+_MLX_FUNASR_DISTRIBUTION = "funasr-mlx"
+
+# Apple Silicon uses a dedicated writable funasr-mlx sidecar because the
+# immutable MLX base runtime does not include PyTorch.
 def _is_apple_silicon() -> bool:
     """Runtime check (tests monkeypatch sys.platform; keep it authoritative)."""
     return sys.platform == "darwin" and platform.machine() == "arm64"
 
 
-_APPLE_SILICON = _is_apple_silicon()
-
-
-def _apple_silicon_plugin_status(runtime: RuntimeContext | None = None) -> dict[str, Any] | None:
-    """funasr component status backed by the installed asr plugin (macOS arm64)."""
-    if not _APPLE_SILICON:
+def _apple_silicon_sidecar_status(runtime: RuntimeContext | None = None) -> dict[str, Any] | None:
+    """Status for the writable funasr-mlx sidecar on Apple Silicon."""
+    if not _is_apple_silicon():
         return None
     runtime = runtime or _runtime_context()
-    try:
-        from worker_plugins import _inventory, _root
-
-        # verify=False: status probes must never import plugin code or spawn a
-        # verification subprocess (same contract as the sidecar metadata path).
-        installed = _inventory(_root(), verify=False).get("installed", [])
-    except Exception:
-        return None
-    row = next((item for item in installed if item.get("name") == "asr"), None)
-    if not row:
-        return None
-    # Plugin present: the component reports through the plugin's funasr-mlx sidecar.
+    managed_version = _sidecar_version(_MLX_FUNASR_DISTRIBUTION, _package_dir("funasr", runtime))
+    environment_version = None if managed_version else _environment_version(_MLX_FUNASR_DISTRIBUTION, runtime)
+    version = managed_version or environment_version
+    from pip._vendor.packaging.requirements import Requirement
+    def supported(value: str | None) -> bool:
+        try:
+            return bool(value) and Requirement(_MLX_FUNASR_REQUIREMENT).specifier.contains(value, prereleases=False)
+        except ValueError:
+            return False
     return {
         "package": "funasr",
-        "requirement": "asr plugin (funasr-mlx)",
-        "installed": bool(row.get("loaded")),
-        "present": True,
-        "version": "mlx",
-        "source": "plugin",
-        "issue": None if row.get("loaded") else "plugin_not_loaded",
+        "requirement": _MLX_FUNASR_REQUIREMENT,
+        "installed": supported(version),
+        "present": bool(version),
+        "version": version,
+        "source": "managed" if managed_version else "environment" if environment_version else None,
+        "issue": None if not version or supported(version) else "version_mismatch",
+        "canUninstall": bool(managed_version),
         "runtimeIdentity": runtime.identity,
     }
 
@@ -147,6 +144,8 @@ def _package_spec(name: Any) -> tuple[str, dict[str, str]]:
     spec = OPTIONAL_PACKAGES.get(normalized)
     if not spec:
         raise ValueError(f"Unsupported optional runtime package: {normalized or 'missing'}")
+    if normalized == "funasr" and _is_apple_silicon():
+        spec = {"requirement": _MLX_FUNASR_REQUIREMENT, "verifyCode": "from funasr_mlx.api import download_model, transcribe"}
     return normalized, spec
 
 
@@ -214,11 +213,10 @@ def optional_package_status(name: Any, runtime: RuntimeContext | None = None) ->
 
     runtime = runtime or _runtime_context()
     normalized, spec = _package_spec(name)
-    # Apple Silicon: the funasr component is backed by the asr plugin.
     if normalized == "funasr":
-        plugin_status = _apple_silicon_plugin_status(runtime)
-        if plugin_status is not None:
-            return plugin_status
+        mlx_status = _apple_silicon_sidecar_status(runtime)
+        if mlx_status is not None:
+            return mlx_status
     directory = _package_dir(normalized, runtime)
     managed_version = _sidecar_version(normalized, directory)
     environment_version = None if managed_version else _environment_version(normalized, runtime)
@@ -298,12 +296,22 @@ def _resolve_install_requirements(
     runtime: RuntimeContext | None = None,
 ) -> list[str]:
     runtime = runtime or _runtime_context()
-    torch_version = _environment_version("torch", runtime)
-    if not torch_version:
-        raise RuntimeError("The active runtime does not include PyTorch")
-    audio_version = torch_version.split("+", 1)[0]
+    mlx_only = name == "funasr" and _is_apple_silicon()
+    fixed = {}
+    audio_version = None
+    if mlx_only:
+        for package in ("mlx", "mlx-metal", "pymss", "pymss-core"):
+            version = _environment_version(package, runtime)
+            if version:
+                fixed[package] = version
+    else:
+        torch_version = _environment_version("torch", runtime)
+        if not torch_version:
+            raise RuntimeError("The active runtime does not include PyTorch")
+        audio_version = torch_version.split("+", 1)[0]
+        fixed = {"torch": torch_version, "torchaudio": audio_version}
     constraints = report_path.with_suffix(".constraints.txt")
-    constraints.write_text(f"torch=={torch_version}\ntorchaudio=={audio_version}\n", encoding="utf-8")
+    constraints.write_text("".join(f"{package}=={version}\n" for package, version in fixed.items()), encoding="utf-8")
     try:
         _run_process(
             [
@@ -342,7 +350,7 @@ def _resolve_install_requirements(
         if not all(character.isalnum() or character in {"-", "_", "."} for character in package_name):
             raise RuntimeError(f"pip returned an invalid package name: {package_name}")
         normalized_name = canonicalize_name(package_name)
-        if normalized_name == "torchaudio":
+        if normalized_name == "torchaudio" and not mlx_only:
             if version.split("+", 1)[0] != audio_version:
                 raise RuntimeError("The component requires a torchaudio version incompatible with the fixed runtime package torch.")
             # The dedicated audio installer selects the wheel matching the
@@ -351,7 +359,8 @@ def _resolve_install_requirements(
         if _is_base_accelerator_package(normalized_name) or normalized_name in {"pymss", "pymss-core"}:
             raise RuntimeError(f"The component requires changing the runtime package {package_name}. The base runtime was preserved.")
         resolved.append(f"{package_name}=={version}")
-    required_name = canonicalize_name(requirement.partition("==")[0].strip())
+    from pip._vendor.packaging.requirements import Requirement
+    required_name = canonicalize_name(Requirement(requirement).name)
     resolved_names = {
         canonicalize_name(value.partition("==")[0].strip())
         for value in resolved
@@ -457,8 +466,9 @@ def _install_package(
                 last_error = error
         if last_error:
             raise last_error
-        _install_torchaudio(staging, name, task_id, runtime)
-        _emit_stage(name, "install", "Verifying the FunASR runtime component", task_id)
+        if not (name == "funasr" and _is_apple_silicon()):
+            _install_torchaudio(staging, name, task_id, runtime)
+        _emit_stage(name, "install", "Verifying the ASR runtime component", task_id)
         _run_process(
             [
                 str(runtime.executable),
@@ -499,47 +509,6 @@ def _uninstall_package(
     importlib.invalidate_caches()
 
 
-def _manage_funasr_via_plugin(
-    action: str,
-    payload: dict[str, Any],
-    task_id: str | None,
-    runtime: RuntimeContext,
-) -> int:
-    """Install/uninstall the asr plugin as the Apple Silicon funasr component."""
-    from worker_plugins import cmd_manage_plugin
-
-    mirror = str(payload.get("mirror") or "auto")
-    locale = str(payload.get("locale") or "")
-    if action == "install":
-        current = _apple_silicon_plugin_status(runtime)
-        if current and current["installed"]:
-            _emit_stage("funasr", action, "The ASR plugin is already installed", task_id)
-            emit("optional_package_status", current)
-            return 0
-        _emit_stage("funasr", action, "Installing the ASR plugin (funasr-mlx backend)", task_id)
-        code = cmd_manage_plugin({
-            "action": "install",
-            "name": "asr",
-            "mirror": mirror,
-            "locale": locale,
-            "taskId": task_id or "funasr_plugin_install",
-        })
-    else:
-        current = _apple_silicon_plugin_status(runtime)
-        if not current or not current["present"]:
-            _emit_stage("funasr", action, "The ASR plugin is not installed", task_id)
-            return 0
-        _emit_stage("funasr", action, "Removing the ASR plugin", task_id)
-        code = cmd_manage_plugin({
-            "action": "uninstall",
-            "name": "asr",
-            "taskId": task_id or "funasr_plugin_uninstall",
-        })
-    # Final status event keeps the UI in sync with the plugin outcome.
-    emit("optional_package_status", optional_package_status("funasr", runtime))
-    return code
-
-
 def cmd_optional_package_status(payload: dict[str, Any]) -> int:
     try:
         status = optional_package_status(payload.get("package"), _runtime_context())
@@ -557,28 +526,20 @@ def cmd_manage_optional_package(payload: dict[str, Any]) -> int:
         name, spec = _package_spec(payload.get("package"))
         if action not in {"install", "uninstall"}:
             raise ValueError(f"Unsupported optional package action: {action or 'missing'}")
-        # Apple Silicon: installing/uninstalling the funasr component manages the
-        # asr plugin (funasr-mlx backend) through the plugin lifecycle instead of
-        # the Torch-based sidecar, which cannot work without PyTorch.
-        # Apple Silicon reroutes funasr to the asr plugin — but only when there is
-        # no managed sidecar copy in play: a present sidecar copy means classic
-        # optional-package semantics (install/uninstall of that copy).
-        if name == "funasr" and _is_apple_silicon() and not optional_package_status(name, runtime)["installed"] and action == "install":
-            return _manage_funasr_via_plugin(action, payload, task_id, runtime)
         current = optional_package_status(name, runtime)
         if action == "install" and not current["installed"]:
             _emit_stage(name, action, f"Installing {spec['requirement']}", task_id)
             _install_package(
-                name,
-                spec,
-                str(payload.get("mirror") or "auto").strip().lower(),
-                str(payload.get("locale") or "").strip().lower(),
-                task_id,
-                runtime,
+                name, spec, str(payload.get("mirror") or "auto").strip().lower(),
+                str(payload.get("locale") or "").strip().lower(), task_id, runtime,
             )
         elif action == "uninstall" and current["present"]:
             _emit_stage(name, action, f"Uninstalling {name}", task_id)
-            _uninstall_package(name, task_id, runtime)
+            if name == "funasr" and _is_apple_silicon():
+                shutil.rmtree(_package_dir(name, runtime), ignore_errors=True)
+                importlib.invalidate_caches()
+            else:
+                _uninstall_package(name, task_id, runtime)
         status = optional_package_status(name, runtime)
         if action == "install" and not status["installed"]:
             raise RuntimeError(f"{name} is still unavailable after installation")

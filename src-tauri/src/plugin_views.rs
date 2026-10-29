@@ -177,7 +177,7 @@ struct RawView {
     entry: String,
 }
 
-/// Read only view identities and entry paths; Python validates the full protocol.
+/// Read only view identities and entry paths from `[[tool.pymss.studio.views]]`; the worker validates the full declaration.
 fn parse_views(manifest: &Path) -> Result<Vec<RawView>, String> {
     let text = std::fs::read_to_string(manifest)
         .map_err(|error| format!("cannot read manifest: {error}"))?;
@@ -186,8 +186,7 @@ fn parse_views(manifest: &Path) -> Result<Vec<RawView>, String> {
     let Some(views) = document
         .get("tool")
         .and_then(|value| value.get("pymss"))
-        .and_then(|value| value.get("plugin"))
-        .and_then(|value| value.get("contributions"))
+        .and_then(|value| value.get("studio"))
         .and_then(|value| value.get("views"))
     else {
         return Ok(Vec::new());
@@ -272,7 +271,7 @@ mod tests {
     #[test]
     fn resolves_a_declared_view_entry() {
         let (_guard, root) = fixture(concat!(
-            "[[tool.pymss.plugin.contributions.views]]\n",
+            "[[tool.pymss.studio.views]]\n",
             "id = \"editor\"\n",
             "entry = \"ui/index.html\"\n"
         ));
@@ -283,13 +282,26 @@ mod tests {
     #[test]
     fn rejects_unknown_view_and_traversal() {
         let (_guard, root) = fixture(concat!(
-            "[[tool.pymss.plugin.contributions.views]]\n",
+            "[[tool.pymss.studio.views]]\n",
             "id = \"editor\"\n",
             "entry = \"ui/index.html\"\n"
         ));
         assert!(resolve_view(&root, "author.chain", "missing").is_err());
         assert!(resolve_view(&root, "author.chain", "../secrets").is_err());
         assert!(resolve_view(&root, "unknown.plugin", "editor").is_err());
+    }
+
+    #[test]
+    fn ignores_views_declared_in_the_v1_manifest_location() {
+        let (_guard, root) = fixture(concat!(
+            "[[tool.pymss.plugin.contributions.views]]
+",
+            "id = \"editor\"
+",
+            "entry = \"ui/index.html\"
+"
+        ));
+        assert!(resolve_view(&root, "author.chain", "editor").is_err());
     }
 
     #[test]
@@ -300,7 +312,7 @@ mod tests {
         fs::write(guard.path.join("secret.html"), "x").unwrap();
         fs::write(
             plugin.join("pyproject.toml"),
-            "[tool.pymss.plugin]\nid = \"author.evil\"\n[[tool.pymss.plugin.contributions.views]]\nid = \"v\"\nentry = \"../secret.html\"",
+            "[tool.pymss.plugin]\nid = \"author.evil\"\n[[tool.pymss.studio.views]]\nid = \"v\"\nentry = \"../secret.html\"",
         )
         .unwrap();
         assert!(resolve_view(&guard.path, "author.evil", "v").is_err());
@@ -309,7 +321,7 @@ mod tests {
     #[test]
     fn parses_quoted_paths_and_stops_at_other_contributions() {
         let (_guard, root) = fixture(concat!(
-            "[[tool.pymss.plugin.contributions.views]]\n",
+            "[[tool.pymss.studio.views]]\n",
             "id = \"editor\"\nentry = \"ui/panel #1.html\" # entry comment\n",
             "[[tool.pymss.plugin.contributions.graphs]]\n",
             "id = \"chain\"\nfile = \"graphs/chain.json\"\n",
@@ -322,7 +334,7 @@ mod tests {
     #[test]
     fn serves_encoded_entry_names_and_module_scripts_with_cors() {
         let (_guard, root) = fixture(concat!(
-            "[[tool.pymss.plugin.contributions.views]]\n",
+            "[[tool.pymss.studio.views]]\n",
             "id = \"editor\"\nentry = \"ui/panel #1.html\"\n",
         ));
         fs::write(root.join("author.chain/ui/panel #1.html"), "panel").unwrap();
@@ -395,7 +407,7 @@ mod tests {
     #[test]
     fn rejects_an_entry_symlink_into_another_plugin() {
         let (_guard, root) = fixture(concat!(
-            "[[tool.pymss.plugin.contributions.views]]\n",
+            "[[tool.pymss.studio.views]]\n",
             "id = \"editor\"\nentry = \"ui/foreign.html\"\n",
         ));
         let foreign = root.join("other.plugin/ui");

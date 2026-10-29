@@ -953,6 +953,12 @@ pub async fn save_app_store(app: AppHandle, name: String, data: Value) -> AppRes
     if name == "workflow-state" {
         return Err(AppError::Worker("workflow-state requires mutate_workflow_store".into()));
     }
+    if name == "plugin-tools" {
+        return Err(AppError::Worker("plugin-tools requires save_plugin_tool_settings".into()));
+    }
+    if name == "plugin-source" {
+        return Err(AppError::Worker("plugin-source requires debug_save_plugin_source".into()));
+    }
     session_log::append(
         &app,
         "DEBUG",
@@ -2057,8 +2063,49 @@ pub async fn editor_preview_chunk(app: AppHandle, path: String, index: u64, samp
 }
 
 #[tauri::command]
-pub async fn plugin_marketplace(app: AppHandle) -> AppResult<Value> {
-    run_worker_with_payload(&app, "plugin_marketplace", None)
+pub async fn debug_plugin_source(app: AppHandle) -> AppResult<Value> {
+    require_runtime_debug_developer_mode(&app)?;
+    let mut info = run_worker_with_payload(&app, "plugin_source_info", None)?;
+    if let Some(object) = info.as_object_mut() {
+        object.insert("settingsPath".into(), Value::String(storage::app_store_path(&app, "plugin-source")?.to_string_lossy().into_owned()));
+        object.insert("override".into(), storage::read_app_store(&app, "plugin-source")?);
+    }
+    Ok(info)
+}
+
+#[tauri::command]
+pub async fn debug_save_plugin_source(app: AppHandle, source: Value) -> AppResult<Value> {
+    require_runtime_debug_developer_mode(&app)?;
+    if source.to_string().len() > 8192 {
+        return Err(AppError::Worker("Plugin source configuration is too large".into()));
+    }
+    let _access = crate::python::worker::acquire_plugin_source_update()?;
+    if !source.is_null() {
+        let validation = run_worker_with_payload(&app, "plugin_source_info", Some(serde_json::json!({"source": source})))?;
+        if let Some(error) = validation.get("error").and_then(Value::as_str).filter(|value| !value.is_empty()) {
+            return Err(AppError::Worker(error.into()));
+        }
+        if validation.get("available").and_then(Value::as_bool) == Some(false) {
+            return Err(AppError::Worker("Plugin source is unavailable".into()));
+        }
+    }
+    storage::write_app_store(&app, "plugin-source", &source)?;
+    debug_plugin_source(app).await
+}
+
+#[tauri::command]
+pub async fn plugin_marketplace(app: AppHandle, payload: Option<Value>) -> AppResult<Value> {
+    run_worker_with_payload(&app, "plugin_marketplace", payload)
+}
+
+#[tauri::command]
+pub async fn load_plugin_tool_settings(app: AppHandle, plugin_name: String, view_id: String) -> AppResult<Value> {
+    storage::load_plugin_tool_settings(&app, &plugin_name, &view_id)
+}
+
+#[tauri::command]
+pub async fn save_plugin_tool_settings(app: AppHandle, plugin_name: String, view_id: String, data: Value) -> AppResult<()> {
+    storage::save_plugin_tool_settings(&app, &plugin_name, &view_id, &data)
 }
 
 #[tauri::command]
@@ -2383,23 +2430,6 @@ pub async fn cancel_editor_mix_export(
     let cancelled = cancel_task(app.clone(), state, task_id.clone()).await;
     cleanup_editor_export_temp_files(&directory, &task_id);
     cancelled
-}
-
-#[tauri::command]
-pub async fn start_audio_tool(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    payload: Value,
-) -> AppResult<Value> {
-    let task_id = payload
-        .get("requestId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| AppError::Worker("missing audio tool request id".into()))?
-        .to_string();
-    spawn_worker_background(app, state, "audio_tools", task_id.clone(), payload)?;
-    Ok(serde_json::json!({ "taskId": task_id, "started": true }))
 }
 
 #[tauri::command]

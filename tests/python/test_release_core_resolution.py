@@ -31,6 +31,38 @@ class ReleaseCoreResolutionTests(unittest.TestCase):
         })
         self.path.write_text(json.dumps(self.manifest), encoding="utf-8")
 
+    def test_default_core_requirements_are_unversioned(self):
+        self.assertEqual(MANIFEST["common"]["pymss"], "pymss[proxy]")
+        self.assertEqual(MANIFEST["common"]["pymss-core"], "pymss-core")
+        for filename in ("requirements.txt", "requirements-ci.txt"):
+            lines = (ROOT / "python" / filename).read_text(encoding="utf-8").splitlines()
+            self.assertIn("pymss[proxy]", lines)
+            self.assertIn("pymss-core", lines)
+
+    def test_unversioned_resolution_keeps_extras_and_records_resolved_versions(self):
+        self.manifest["common"].update({"pymss": "pymss[proxy]", "pymss-core": "pymss-core"})
+        self.path.write_text(json.dumps(self.manifest), encoding="utf-8")
+        report = {"version": "1", "install": [
+            {"metadata": {"name": "pymss", "version": "2.2.0"}},
+            {"metadata": {"name": "pymss-core", "version": "0.2.0"}},
+        ]}
+
+        def resolve(command, **_kwargs):
+            self.assertEqual(command[-2:], ["pymss[proxy]", "pymss-core"])
+            Path(command[command.index("--report") + 1]).write_text(json.dumps(report), encoding="utf-8")
+
+        with mock.patch.object(CORE.subprocess, "run", side_effect=resolve):
+            self.assertEqual(CORE.resolve_manifest(self.path), {"pymss": "2.2.0", "pymss-core": "0.2.0"})
+        resolved = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(resolved["common"]["pymss"], "pymss[proxy]==2.2.0")
+        self.assertEqual(resolved["common"]["pymss-core"], "pymss-core==0.2.0")
+
+    def test_bundle_verification_requires_a_resolved_version(self):
+        self.manifest["common"]["pymss"] = "pymss[proxy]"
+        self.path.write_text(json.dumps(self.manifest), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            CORE.verify_installed(self.path)
+
     def test_real_resolver_selects_newest_stable_python_compatible_wheels(self):
         for name, versions in (
             ("pymss", ("2.1.8", "2.1.9", "2.2.0rc1", "2.2.0")),

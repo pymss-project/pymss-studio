@@ -86,6 +86,12 @@ function guardLogKeys(event: KeyboardEvent) {
   height: 8px;
 }
 
+@supports selector(::-webkit-scrollbar) {
+  .log-console { scrollbar-width: auto; scrollbar-color: auto; }
+}
+.log-console::-webkit-scrollbar-button,
+.log-console::-webkit-scrollbar-corner { display: none; width: 0; height: 0; }
+
 .log-console::-webkit-scrollbar-track {
   background: transparent;
 }

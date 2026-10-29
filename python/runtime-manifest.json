@@ -21,8 +21,8 @@
     "requests": "requests>=2.32,<3",
     "pyyaml": "pyyaml>=6.0.1,<7",
     "tqdm": "tqdm>=4.60,<5",
-    "pymss": "pymss[proxy]==2.1.12",
-    "pymss-core": "pymss-core==0.1.14"
+    "pymss": "pymss[proxy]",
+    "pymss-core": "pymss-core"
   },
   "backends": {
     "cpu": {

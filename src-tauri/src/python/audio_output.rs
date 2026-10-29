@@ -352,9 +352,8 @@ mod tests {
         fs::create_dir(&output).unwrap();
         let mut scope = AudioOutputScope::create(&records, output.clone()).unwrap();
         let mut command = Command::new(if cfg!(windows) { "python" } else { "python3" });
-        command.args(["-c", "from pathlib import Path\nimport sys,time\nfrom audio_tools.common import _render_output\ndef render(path):\n path.write_bytes(b'partial')\n print('ready',flush=True)\n time.sleep(60)\n_render_output(Path(sys.argv[1])/'final.wav',render)"])
+        command.args(["-c", "from pathlib import Path\nimport sys,time\nfrom pymss.plugins.kit import render_output\ndef render(path):\n path.write_bytes(b'partial')\n print('ready',flush=True)\n time.sleep(60)\nrender_output(Path(sys.argv[1])/'final.wav',render)"])
             .arg(&output)
-            .env("PYTHONPATH", Path::new(env!("CARGO_MANIFEST_DIR")).join("../python"))
             .stdout(Stdio::piped()).stderr(Stdio::piped());
         scope.configure(&mut command);
         let mut child = command.spawn().unwrap();

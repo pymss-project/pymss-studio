@@ -24,14 +24,13 @@ pub(crate) fn recover_audio_output_temps(app: &AppHandle) {
     }
 }
 
-fn needs_audio_output_scope(command: &str, payload: &Value) -> bool {
-    command == "run_operation" || command == "audio_tools" && payload.get("operation").and_then(Value::as_str).is_some_and(|operation| {
-        ["convert", "merge", "slicer"].iter().any(|name| operation.trim().eq_ignore_ascii_case(name))
-    })
-}
-
 fn requires_background_result(command: &str) -> bool {
     matches!(command, "audio_tools" | "export_editor_mix" | "manage_plugin" | "run_operation")
+}
+
+fn take_cancelled_tasks(cancelled: &Mutex<HashSet<String>>, registered: &[String]) -> Vec<String> {
+    let Ok(mut cancelled) = cancelled.lock() else { return Vec::new() };
+    registered.iter().filter(|id| cancelled.remove(*id)).cloned().collect()
 }
 
 fn operation_output_directory(payload: &Value, default: &Path) -> AppResult<PathBuf> {
@@ -95,12 +94,14 @@ static PAYLOAD_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static RUNTIME_ACCESS: Mutex<RuntimeAccess> = Mutex::new(RuntimeAccess {
     users: 0,
     updating: false,
+    installing_plugins: 0,
 });
 // Application replacement also excludes bootstrap workers, which can otherwise keep
 // importing modules from the old bundle while its directory is being replaced.
 static APPLICATION_ACCESS: Mutex<RuntimeAccess> = Mutex::new(RuntimeAccess {
     users: 0,
     updating: false,
+    installing_plugins: 0,
 });
 
 pub(crate) fn acquire_application_update() -> AppResult<impl Drop> {
@@ -120,21 +121,30 @@ pub(crate) fn acquire_application_operation() -> AppResult<impl Drop + Send> {
         .ok_or_else(|| AppError::Worker("Unable to reserve the application for this operation".into()))
 }
 
+pub(crate) fn acquire_plugin_source_update() -> AppResult<impl Drop> {
+    acquire_runtime_access(&RUNTIME_ACCESS, "manage_plugin")?
+        .ok_or_else(|| AppError::Worker("Unable to reserve plugin source configuration".into()))
+}
+
 #[derive(Default)]
 struct RuntimeAccess {
     users: usize,
     updating: bool,
+    installing_plugins: usize,
 }
 
 struct RuntimeAccessGuard<'a> {
     access: &'a Mutex<RuntimeAccess>,
     updating: bool,
+    installing_plugins: bool,
 }
 
 impl Drop for RuntimeAccessGuard<'_> {
     fn drop(&mut self) {
         if let Ok(mut access) = self.access.lock() {
-            if self.updating {
+            if self.installing_plugins {
+                access.installing_plugins -= 1;
+            } else if self.updating {
                 access.updating = false;
             } else {
                 access.users -= 1;
@@ -147,6 +157,7 @@ fn requires_bootstrap_python(command: &str) -> bool {
     matches!(
         command,
         "health"
+            | "plugin_source_info"
             | "runtime_info"
             | "runtime_env_sizes"
             | "runtime_core_versions"
@@ -181,6 +192,7 @@ fn acquire_runtime_access<'a>(
     access: &'a Mutex<RuntimeAccess>,
     command: &str,
 ) -> AppResult<Option<RuntimeAccessGuard<'a>>> {
+    let installing_plugins = command == "install_plugin";
     let updating = matches!(command, "update_runtime_core" | "manage_plugin" | "activate_runtime" | "delete_runtime" | "install_runtime");
     if !updating && requires_bootstrap_python(command) {
         return Ok(None);
@@ -188,17 +200,28 @@ fn acquire_runtime_access<'a>(
     let mut state = access
         .lock()
         .map_err(|_| AppError::Worker("runtime access lock poisoned".into()))?;
-    if state.updating || (updating && state.users > 0) {
+    if state.updating || ((updating || installing_plugins) && state.users > 0)
+        || (!installing_plugins && state.installing_plugins > 0) {
         return Err(AppError::Worker(
             "RUNTIME_BUSY: The runtime is in use. Wait for running operations to finish before updating core packages or starting another operation.".into(),
         ));
     }
-    if updating {
+    if installing_plugins {
+        state.installing_plugins += 1;
+    } else if updating {
         state.updating = true;
     } else {
         state.users += 1;
     }
-    Ok(Some(RuntimeAccessGuard { access, updating }))
+    Ok(Some(RuntimeAccessGuard { access, updating, installing_plugins }))
+}
+
+fn runtime_access_command<'a>(command: &'a str, payload: &Value) -> &'a str {
+    if command == "manage_plugin" && payload.get("action").and_then(Value::as_str) == Some("install") {
+        "install_plugin"
+    } else {
+        command
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -707,6 +730,14 @@ fn make_payload_file(command: &str, task_id: Option<&str>, payload: Value) -> Ap
     Ok(path)
 }
 
+fn apply_plugin_source_override(cmd: &mut Command, developer_mode: bool, source: &Value) -> AppResult<()> {
+    cmd.env_remove("PYMSS_STUDIO_PLUGIN_SOURCE_OVERRIDE");
+    if developer_mode && !source.is_null() {
+        cmd.env("PYMSS_STUDIO_PLUGIN_SOURCE_OVERRIDE", serde_json::to_string(source)?);
+    }
+    Ok(())
+}
+
 fn build_worker_command(
     app: &AppHandle,
     command: &str,
@@ -763,6 +794,10 @@ fn build_worker_command(
     if let Some(overlay) = active_overlay {
         cmd.env("PYTHONPATH", overlay.to_string_lossy().to_string());
     }
+    // Source overrides belong to developer settings and affect only new workers.
+    let developer_mode = session_log::developer_mode_enabled();
+    let source = if developer_mode { storage::read_app_store(app, "plugin-source")? } else { Value::Null };
+    apply_plugin_source_override(&mut cmd, developer_mode, &source)?;
     // The collector owns persistence and terminal output. Never inherit legacy file writers.
     cmd.env_remove("PYMSS_STUDIO_AUDIO_TEMP_TOKEN")
         .env_remove("PYMSS_STUDIO_AUDIO_TEMP_STATE")
@@ -1428,7 +1463,7 @@ fn run_worker_with_payload_inner(
     operation_id: &str,
 ) -> AppResult<Value> {
     let _application_access = acquire_application_operation()?;
-    let _runtime_access = acquire_runtime_access(&RUNTIME_ACCESS, command)?;
+    let _runtime_access = acquire_runtime_access(&RUNTIME_ACCESS, runtime_access_command(command, payload.as_ref().unwrap_or(&Value::Null)))?;
     let payload_file = match payload {
         Some(value) => Some(make_payload_file(command, None, value)?),
         None => None,
@@ -1589,7 +1624,7 @@ fn spawn_worker_background_inner(
     operation_id: String,
 ) -> AppResult<()> {
     let mut application_access = Some(acquire_application_operation()?);
-    let mut runtime_access = acquire_runtime_access(&RUNTIME_ACCESS, command)?;
+    let mut runtime_access = acquire_runtime_access(&RUNTIME_ACCESS, runtime_access_command(command, &payload))?;
     let mut registered_task_ids = vec![task_id.clone()];
     if let Some(tasks) = payload.get("tasks").and_then(Value::as_array) {
         for item in tasks {
@@ -1617,22 +1652,14 @@ fn spawn_worker_background_inner(
     }
 
     let command_name = command.to_string();
-    if command == "run_operation" {
+    let mut audio_scope = if command == "run_operation" {
         let directory = operation_output_directory(&payload, &default_output_dir(&app)?)?;
         payload.as_object_mut()
             .ok_or_else(|| AppError::Worker("invalid operation request".into()))?
             .insert("outputDir".into(), Value::String(directory.to_string_lossy().into_owned()));
-    }
-    let mut audio_scope = if needs_audio_output_scope(command, &payload) {
-        let raw = payload.get("outputDir").and_then(Value::as_str).unwrap_or("");
-        let raw = if command == "run_operation" { raw } else { raw.trim() };
-        if raw.is_empty() { None } else {
-            let path = if raw == "~" { storage::home_dir(&app)? }
-                else if raw.starts_with("~/") || raw.starts_with("~\\") { storage::home_dir(&app)?.join(&raw[2..]) }
-                else { PathBuf::from(raw) };
-            let directory = if path.is_absolute() { path } else { std::env::current_dir()?.join(path) };
-            Some(audio_output::AudioOutputScope::create(&storage::temp_dir(&app)?.join("audio-output-cleanup"), directory)?)
-        }
+        Some(audio_output::AudioOutputScope::create(
+            &storage::temp_dir(&app)?.join("audio-output-cleanup"), directory,
+        )?)
     } else { None };
     let editor_export_directory = (command == "export_editor_mix")
         .then(|| {
@@ -1807,14 +1834,14 @@ fn spawn_worker_background_inner(
             log_worker_event_with_scope(&app, &command_name, &mut envelope, Some(&operation_id), Some(&task_id));
             let _ = app.emit("pymss://worker-event", &envelope);
         }
-        let mut was_cancelled = false;
-        if let Ok(mut cancelled) = app.state::<AppState>().cancelled_tasks.lock() {
-            for registered_task_id in &registered_task_ids {
-                if cancelled.remove(registered_task_id) {
-                    was_cancelled = true;
-                    terminal_task_ids.insert(registered_task_id.clone());
-                }
-            }
+        // Retain the consumed IDs for notification: draining them once for logging
+        // and again for emission loses the plugin supervisor's cancellation ACK.
+        let mut cancelled_task_ids = take_cancelled_tasks(
+            &app.state::<AppState>().cancelled_tasks, &registered_task_ids,
+        );
+        let was_cancelled = !cancelled_task_ids.is_empty();
+        for id in &cancelled_task_ids {
+            terminal_task_ids.insert(id.clone());
         }
         session_log::append(
             &app,
@@ -1839,17 +1866,16 @@ fn spawn_worker_background_inner(
                 ("durationMs", started_at.elapsed().as_millis().to_string()),
             ],
         );
-        if let Ok(mut cancelled) = app.state::<AppState>().cancelled_tasks.lock() {
-            for registered_task_id in &registered_task_ids {
-                if cancelled.remove(registered_task_id) {
-                    terminal_task_ids.insert(registered_task_id.clone());
-                    if command_name == "manage_plugin" {
-                        let _ = app.emit("pymss://worker-event", serde_json::json!({
-                            "type": "task_cancelled", "taskId": registered_task_id,
-                            "payload": { "message": "Cancelled" }
-                        }));
-                    }
-                }
+        cancelled_task_ids.extend(take_cancelled_tasks(
+            &app.state::<AppState>().cancelled_tasks, &registered_task_ids,
+        ));
+        for registered_task_id in cancelled_task_ids {
+            terminal_task_ids.insert(registered_task_id.clone());
+            if command_name == "manage_plugin" {
+                let _ = app.emit("pymss://worker-event", serde_json::json!({
+                    "type": "task_cancelled", "taskId": registered_task_id,
+                    "payload": { "message": "Cancelled" }
+                }));
             }
         }
         let missing_terminal_task_ids = registered_task_ids
@@ -1920,14 +1946,39 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn audio_output_scopes_match_python_operation_normalization() {
-        for operation in ["convert", "Convert", " MERGE ", "\tsLiCeR\n"] {
-            assert!(super::needs_audio_output_scope("audio_tools", &json!({"operation": operation})));
-        }
-        assert!(!super::needs_audio_output_scope("audio_tools", &json!({"operation": "scan"})));
-        assert!(!super::needs_audio_output_scope("infer", &json!({"operation": "convert"})));
-        assert!(!super::needs_audio_output_scope("audio_tools", &json!({})));
-        assert!(super::needs_audio_output_scope("run_operation", &json!({})));
+    fn cancelled_task_ids_survive_logging_for_supervisor_notification() {
+        use std::collections::HashSet;
+        use std::sync::Mutex;
+        let registered = vec!["plugin_manage_test".to_string(), "linked".to_string()];
+        let cancelled = Mutex::new(HashSet::from([registered[0].clone(), "foreign".into()]));
+        let mut notifications = super::take_cancelled_tasks(&cancelled, &registered);
+        assert!(!notifications.is_empty(), "exit logging must see cancellation");
+        // A cancellation arriving during exit logging is included in the same ACK batch.
+        cancelled.lock().unwrap().insert(registered[1].clone());
+        notifications.extend(super::take_cancelled_tasks(&cancelled, &registered));
+        assert_eq!(notifications, registered);
+        assert!(super::take_cancelled_tasks(&cancelled, &registered).is_empty());
+        assert!(cancelled.lock().unwrap().contains("foreign"));
+    }
+
+    #[test]
+    fn plugin_source_info_uses_bootstrap_without_an_active_runtime() {
+        assert_eq!(super::select_worker_python("plugin_source_info", "bootstrap", None).unwrap(), "bootstrap");
+    }
+
+    #[test]
+    fn plugin_source_overrides_require_developer_mode_and_snapshot_the_settings() {
+        let source = json!({"mode": "local", "localPath": "C:/plugins"});
+        let mut command = std::process::Command::new("python");
+        command.env("PYMSS_STUDIO_PLUGIN_SOURCE_OVERRIDE", "inherited");
+        super::apply_plugin_source_override(&mut command, false, &source).unwrap();
+        let value = command.get_envs().find(|(key, _)| *key == "PYMSS_STUDIO_PLUGIN_SOURCE_OVERRIDE").unwrap().1;
+        assert!(value.is_none());
+        super::apply_plugin_source_override(&mut command, true, &source).unwrap();
+        let value = command.get_envs().find(|(key, _)| *key == "PYMSS_STUDIO_PLUGIN_SOURCE_OVERRIDE").unwrap().1.unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&value.to_string_lossy()).unwrap(), source);
+        super::apply_plugin_source_override(&mut command, true, &serde_json::Value::Null).unwrap();
+        assert!(command.get_envs().find(|(key, _)| *key == "PYMSS_STUDIO_PLUGIN_SOURCE_OVERRIDE").unwrap().1.is_none());
     }
 
     #[test]
@@ -2010,6 +2061,28 @@ mod tests {
         assert!(is_background_terminal_event("manage_plugin", "task_cancelled"));
         assert!(!is_background_terminal_event("manage_plugin", "plugin_stage"));
         assert!(!is_background_terminal_event("manage_plugin", "plugin_log"));
+    }
+
+    #[test]
+    fn plugin_installs_share_access_and_keep_other_operations_excluded_until_all_exit() {
+        let access = std::sync::Mutex::new(super::RuntimeAccess::default());
+        let install = super::runtime_access_command("manage_plugin", &json!({"action": "install"}));
+        let first = super::acquire_runtime_access(&access, install).unwrap();
+        let second = super::acquire_runtime_access(&access, install).unwrap();
+        for command in ["infer", "run_operation", "manage_plugin", "plugin_marketplace", "activate_runtime", "delete_runtime", "update_runtime_core"] {
+            assert!(super::acquire_runtime_access(&access, command).is_err(), "{command}");
+        }
+        drop(first);
+        assert!(super::acquire_runtime_access(&access, "run_operation").is_err());
+        drop(second);
+        let reader = super::acquire_runtime_access(&access, "run_operation").unwrap();
+        assert!(super::acquire_runtime_access(&access, install).is_err());
+        drop(reader);
+        let update = super::acquire_runtime_access(&access, "update_runtime_core").unwrap();
+        assert!(super::acquire_runtime_access(&access, install).is_err());
+        drop(update);
+        assert_eq!(super::runtime_access_command("manage_plugin", &json!({"action":"update"})), "manage_plugin");
+        assert_eq!(super::runtime_access_command("run_operation", &json!({"action":"install"})), "run_operation");
     }
 
     #[test]

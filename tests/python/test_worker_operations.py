@@ -32,11 +32,11 @@ def _loudnorm_fixture(root: Path) -> Path:
         'version="0.2.0"\n'
         'requires-python=">=3.10"\n'
         'dependencies=[]\n\n'
-        '[project.entry-points."pymss.plugins"]\n'
-        'loudnorm="loudnorm"\n\n'
         '[tool.pymss.plugin]\n'
         'id="pymss.loudnorm"\n'
-        'api_version=1\n'
+        'api_version=2\n\n'
+        '[[tool.pymss.plugin.operations]]\n'
+        'id="pymss.loudnorm.normalize"\n'
     )
     (fixture / "__init__.py").write_text(
         'import numpy as np\n\n'
@@ -198,6 +198,27 @@ class RunOperationTests(unittest.TestCase):
 
 
 class OperationInputTests(unittest.TestCase):
+    def test_plugin_recovery_metadata_survives_the_operation_protocol(self):
+        from pymss.operations import OperationSpec, Runtime
+        class RecoveryError(RuntimeError):
+            code = "ASR_MODEL_INCOMPLETE"
+            recoverable = True
+            extra = {"recovery": {"tool": "asr", "modelIds": ["selected-model"]}}
+        def fail(*_):
+            raise RecoveryError("The selected model cache is incomplete")
+        runtime = Runtime()
+        runtime.register(spec=OperationSpec(id="test.recovery", schema_version=1, title="Recovery", inputs={}, params={"type": "object"}, outputs={}), run=fail)
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(worker_operations, "_runtime", return_value=runtime):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = worker_operations.cmd_run_operation({"operation": "test.recovery", "requestId": "recovery-1", "outputDir": directory})
+        event = _read_event(output)
+        self.assertEqual(code, 1)
+        self.assertEqual(event["requestId"], "recovery-1")
+        self.assertEqual(event["payload"]["code"], "ASR_MODEL_INCOMPLETE")
+        self.assertTrue(event["payload"]["recoverable"])
+        self.assertEqual(event["payload"]["recovery"]["modelIds"], ["selected-model"])
+
     def test_non_audio_file_descriptors_remain_objects(self):
         from pymss.operations import OperationSpec, Runtime
 

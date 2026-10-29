@@ -11,6 +11,7 @@ src-tauri/target/**
 src-tauri/gen/schemas/linux-schema.json
 
 # Python cache
+python/preinstalled_plugins/
 __pycache__/
 *.py[cod]
 *.pyd

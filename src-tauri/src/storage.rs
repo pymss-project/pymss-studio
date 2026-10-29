@@ -262,6 +262,8 @@ fn store_file_name(name: &str) -> AppResult<&'static str> {
         "model-state" => Ok("model-cache.json"),
         "editor-ui" => Ok("editor-ui.json"),
         "audio-tools" => Ok("audio-tools.json"),
+        "plugin-tools" => Ok("plugin-tools.json"),
+        "plugin-source" => Ok("plugin-source.json"),
         "workflow-state" => Ok("workflows.json"),
         "separate-state" => Ok("separate.json"),
         "update-state" => Ok("update.json"),
@@ -287,6 +289,45 @@ pub fn write_app_store(app: &AppHandle, name: &str, data: &Value) -> AppResult<(
     ensure_app_directories(app)?;
     let path = app_store_path(app, name)?;
     write_json_file(&path, data)
+}
+
+fn plugin_tool_key(plugin_name: &str, view_id: &str) -> AppResult<String> {
+    let valid = |value: &str, limit: usize| {
+        !value.is_empty() && value.len() <= limit
+            && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    };
+    if !valid(plugin_name, 100) || !valid(view_id, 200) {
+        return Err(AppError::Worker("Invalid plugin tool settings namespace".into()));
+    }
+    Ok(format!("{plugin_name}:{view_id}"))
+}
+
+pub fn load_plugin_tool_settings(app: &AppHandle, plugin_name: &str, view_id: &str) -> AppResult<Value> {
+    let key = plugin_tool_key(plugin_name, view_id)?;
+    let state = read_app_store(app, "plugin-tools")?;
+    Ok(state.get(&key).cloned().unwrap_or_else(|| serde_json::json!({})))
+}
+
+pub fn save_plugin_tool_settings(app: &AppHandle, plugin_name: &str, view_id: &str, data: &Value) -> AppResult<()> {
+    ensure_app_directories(app)?;
+    save_plugin_tool_settings_file(&app_store_path(app, "plugin-tools")?, plugin_name, view_id, data)
+}
+
+fn save_plugin_tool_settings_file(path: &Path, plugin_name: &str, view_id: &str, data: &Value) -> AppResult<()> {
+    let key = plugin_tool_key(plugin_name, view_id)?;
+    if !data.is_object() || serde_json::to_vec(data)?.len() > 2 * 1024 * 1024 {
+        return Err(AppError::Worker("Plugin tool settings must be an object of at most 2 MiB".into()));
+    }
+    // Keep the read/merge/write under the same lock used for atomic JSON publication.
+    let _guard = JSON_WRITE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let mut state = if path.is_file() {
+        serde_json::from_str::<Value>(&std::fs::read_to_string(path)?)?
+    } else {
+        serde_json::json!({})
+    };
+    let object = state.as_object_mut().ok_or_else(|| AppError::Worker("Invalid plugin tool settings store".into()))?;
+    object.insert(key, data.clone());
+    write_json_file_locked(path, &state)
 }
 
 pub(crate) fn write_json_file(path: &Path, data: &Value) -> AppResult<()> {
@@ -710,6 +751,37 @@ mod tests {
 
     fn path(name: &str) -> PathBuf {
         PathBuf::from(name)
+    }
+
+    #[test]
+    fn plugin_tool_settings_merge_concurrent_views_without_lost_updates() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("plugin-tools.json");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads = (0..8).map(|index| {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                super::save_plugin_tool_settings_file(&path, "convert", &format!("view-{index}"), &json!({"rate": index})).unwrap();
+            })
+        }).collect::<Vec<_>>();
+        for thread in threads { thread.join().unwrap(); }
+        let state: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(state.as_object().unwrap().len(), 8);
+        for index in 0..8 { assert_eq!(state[format!("convert:view-{index}")]["rate"], index); }
+    }
+
+    #[test]
+    fn plugin_tool_settings_reject_invalid_names_and_preserve_corrupt_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("plugin-tools.json");
+        assert!(super::save_plugin_tool_settings_file(&path, "../outside", "tool", &json!({})).is_err());
+        assert!(super::save_plugin_tool_settings_file(&path, "convert", "tool", &json!([])).is_err());
+        assert!(!path.exists());
+        std::fs::write(&path, "invalid JSON").unwrap();
+        assert!(super::save_plugin_tool_settings_file(&path, "convert", "tool", &json!({})).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "invalid JSON");
     }
 
     #[test]
@@ -1308,6 +1380,7 @@ mod tests {
         assert_eq!(stored, json!({ "revision": 2 }));
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     }
+
 
     #[test]
     fn env_root_has_highest_priority() {

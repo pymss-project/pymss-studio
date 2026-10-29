@@ -7,55 +7,57 @@ import { parse } from 'vue/compiler-sfc'
 
 const descriptor = parse(readFileSync(new URL('../src/views/ToolsView.vue', import.meta.url), 'utf8')).descriptor
 const source = ts.createSourceFile('tools.ts', descriptor.scriptSetup.content, ts.ScriptTarget.Latest, true)
-const names = new Set(['applyRequestedTool', 'applyRequestedPluginView', 'selectTool', 'selectPluginTool'])
-const functions = source.statements.filter(node => ts.isFunctionDeclaration(node) && names.has(node.name?.text))
-const code = ts.transpileModule(functions.map(node => node.getText(source)).join('\n'), {
-  compilerOptions: { target: ts.ScriptTarget.ES2022 },
-}).outputText
+const names = new Set(['applyRequestedPluginView', 'activatePluginTool', 'markUnavailable', 'replaceQuery', 'restoreStoredTool', 'resolveActivePluginHost', 'persistPluginSelection'])
+const code = ts.transpileModule(source.statements
+  .filter(node => ts.isFunctionDeclaration(node) && names.has(node.name?.text))
+  .map(node => node.getText(source)).join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
 
-function selection(query) {
+function entry(pluginId, routeId = `${pluginId}/tool`) {
+  return { key: `plugin:${routeId}`, routeId, pluginName: pluginId, view: { id: 'tool' } }
+}
+
+function selection(query = {}) {
   const requests = []
   const state = {
-    route: { query }, activeTool: { value: 'convert' }, activePluginTool: { value: 'gain/editor' },
-    visibleAudioTools: { value: [{ id: 'convert' }, { id: 'inspect' }] },
-    pluginToolViews: { value: [{ pluginName: 'gain', view: { id: 'editor' } }] },
-    guide: { phase: 'paused' },
-    router: { replace: value => { requests.push(JSON.parse(JSON.stringify(value))); return Promise.resolve() } },
+    route: { query }, activePluginTool: { value: '' }, mountedPluginTool: { value: null }, unavailableToolId: { value: '' },
+    switchingDisabled: { value: false }, pluginToolBusy: { value: false }, activePluginHost: { value: null }, restored: { value: false },
+    pluginMarket: { snapshot: { value: { pluginsDir: '/plugins' } } }, pluginTools: { value: [entry('convert'), entry('asr'), entry('merge')] },
+    router: { replace: value => { requests.push(JSON.parse(JSON.stringify(value))); return Promise.resolve() } }, recordFeatureVisit() {}, updateAudioToolsState() {},
   }
-  const controller = vm.runInNewContext(`${code}\n({ applyRequestedTool, applyRequestedPluginView, selectTool, selectPluginTool })`, state)
+  const controller = vm.runInNewContext(`${code}\n({ applyRequestedPluginView, activatePluginTool, restoreStoredTool, resolveActivePluginHost })`, state)
   return { state, requests, controller }
 }
 
-test('a valid built-in tool query leaves the plugin view', () => {
-  const { state, controller } = selection({ tool: 'inspect' })
-  controller.applyRequestedTool()
-  assert.equal(state.activePluginTool.value, '')
-  assert.equal(state.activeTool.value, 'inspect')
+test('requested plugin views activate their plugin-id route entries', () => {
+  for (const pluginId of ['pymss.convert', 'pymss.asr', 'pymss.merge']) {
+    const { state, controller } = selection({ pluginView: `${pluginId}/tool` })
+    state.pluginTools.value = [entry('pymss.convert'), entry('pymss.asr'), entry('pymss.merge')]
+    controller.applyRequestedPluginView()
+    assert.equal(state.activePluginTool.value, `plugin:${pluginId}/tool`)
+  }
 })
 
-test('selecting the existing built-in tool removes the plugin query', () => {
-  const { state, requests, controller } = selection({ pluginView: 'gain/editor', keep: 'value' })
-  controller.selectTool('convert')
-  assert.equal(state.activePluginTool.value, '')
-  assert.deepEqual(requests, [{ query: { tool: 'convert', keep: 'value' } }])
+test('stored selections restore by route id and report a miss so the caller can pick a default', () => {
+  const modern = selection()
+  assert.equal(modern.controller.restoreStoredTool({ activePluginTool: 'merge/tool' }), true)
+  assert.equal(modern.state.activePluginTool.value, 'plugin:merge/tool')
+  const stale = selection()
+  assert.equal(stale.controller.restoreStoredTool({ activePluginTool: 'removed/tool' }), false)
+  assert.equal(stale.state.activePluginTool.value, '')
+  assert.equal(stale.state.unavailableToolId.value, '')
 })
 
-test('selecting a plugin tool removes a stale built-in query', () => {
-  const { state, requests, controller } = selection({ tool: 'convert' })
-  controller.selectPluginTool('gain/editor')
-  assert.equal(state.activePluginTool.value, 'gain/editor')
-  assert.deepEqual(requests, [{ query: { pluginView: 'gain/editor' } }])
+test('disabled or missing requested views show unavailable state instead of selecting another tool', () => {
+  const { state, controller } = selection({ pluginView: 'asr/tool' })
+  state.pluginTools.value = [entry('convert')]
+  controller.applyRequestedPluginView()
+  assert.equal(state.activePluginTool.value, '')
+  assert.equal(state.unavailableToolId.value, 'asr/tool')
 })
 
-test('removing or invalidating the plugin query clears the plugin view', () => {
-  const { state, controller } = selection({ pluginView: 'gain/editor' })
-  controller.applyRequestedPluginView()
-  assert.equal(state.activePluginTool.value, 'gain/editor')
-  state.route.query = {}
-  controller.applyRequestedPluginView()
-  assert.equal(state.activePluginTool.value, '')
-  state.activePluginTool.value = 'gain/editor'
-  state.route.query = { pluginView: 'missing/editor' }
-  controller.applyRequestedPluginView()
-  assert.equal(state.activePluginTool.value, '')
+test('busy host preserves its original entry and root even when inventory has the same key', () => {
+  const { controller } = selection()
+  const original = { entry: entry('convert'), pluginsRoot: '/runtime-a/plugins' }
+  const resolved = controller.resolveActivePluginHost([entry('convert')], 'plugin:convert/tool', true, original, '/runtime-b/plugins')
+  assert.equal(resolved, original)
 })

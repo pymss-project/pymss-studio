@@ -23,11 +23,12 @@ import { useSettingsStore } from '@/stores/settings'
 import { useTaskStore } from '@/stores/task'
 import { useModelStore, type DownloadTask } from '@/stores/model'
 import { useWorkflowStore } from '@/stores/workflow'
-import { useOptionalRuntimePackage } from '@/features/audio-tools/optionalRuntimePackage'
+import { useOptionalRuntimePackage } from '@/features/runtime-packages/optionalRuntimePackage'
 import { buildDiagnosticChecks, isDiagnosticIssueEvent, summarizeDiagnosticChecks, type DiagnosticState } from '@/utils/diagnostics'
 import { detectRuntimePlatform } from '@/utils/runtime'
 import { isTauriRuntime } from '@/utils/appStore'
 import TaskLogConsole from '@/components/TaskLogConsole.vue'
+import PluginSourcePanel from '@/components/debug/PluginSourcePanel.vue'
 import { formatBytes } from '@/utils/format'
 import { normalizeLogRecord, formatLogRecord, logContextPreview, logMessagePreview, locationLabel, logClock, sourceLabel, type LogRecord } from '@/utils/logRecord'
 
@@ -45,7 +46,7 @@ const { developerMode, dataRoot, modelDir, outputDir, settingsDir, editorProject
 const { activeWorkerTasks, runningTasks } = storeToRefs(task)
 const { downloadTasks } = storeToRefs(modelStore)
 
-type DebugTab = 'overview' | 'runtime' | 'activity' | 'models' | 'events' | 'logs' | 'runtime-tools' | 'updates'
+type DebugTab = 'overview' | 'runtime' | 'activity' | 'models' | 'events' | 'logs' | 'runtime-tools' | 'updates' | 'plugins'
 type CatalogEditMode = 'simple' | 'advanced'
 type DebugLogLevelFilter = 'all' | 'error' | 'warn' | 'info' | 'debug' | 'unclassified'
 type DebugLogCategoryFilter = 'all' | 'issues' | 'traceback' | 'pymss' | 'worker' | 'app' | 'runtime' | 'store' | 'other'
@@ -301,6 +302,7 @@ const advancedTabs = computed(() => [
   { key: 'models', label: t('debug.tabModels') },
   { key: 'events', label: t('debug.tabEvents') },
   { key: 'runtime-tools', label: t('debug.tabRuntimeTools') },
+  { key: 'plugins', label: t('debugPlugins.tab') },
   { key: 'updates', label: t('debug.updateEndpointTitle') },
 ] as Array<{ key: DebugTab; label: string }>)
 const debugModelOptions = computed(() => modelStore.models
@@ -1429,6 +1431,7 @@ watch(developerMode, (enabled) => {
     </nav>
     </div>
 
+    <PluginSourcePanel v-if="activeTab === 'plugins' && developerMode" />
     <section v-if="activeTab === 'overview'" class="debug-overview-summary">
     <div class="debug-status-grid">
       <button v-for="item in statusCards" :key="item.label" type="button" class="debug-status-card" :class="`debug-status-card--${item.tone}`" @click="openStatusCard(item.tab)">

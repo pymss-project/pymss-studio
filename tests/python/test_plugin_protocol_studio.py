@@ -50,25 +50,25 @@ version = "1.0.0"
 
 [tool.pymss.plugin]
 id = "author.{name}"
-api_version = 1
+api_version = 2
+
+[[tool.pymss.plugin.operations]]
+id = "author.{name}.process"
 
 [[tool.pymss.plugin.contributions.graphs]]
 id = "chain"
 file = "graphs/chain.json"
 operation = "author.{name}.process"
 
-[[tool.pymss.plugin.contributions.views]]
+[tool.pymss.studio]
+sdk_version = 1
+[[tool.pymss.studio.views]]
 id = "editor"
 title = "Editor"
 entry = "ui/index.html"
 placements = ["tool", "workspace"]
 operation = "author.{name}.process"
 permissions = ["operations", "files.pickAudio"]
-
-[[tool.pymss.plugin.contributions.player]]
-operation = "author.{name}.process"
-scopes = ["clip"]
-modes = ["rendered_preview"]
 """
         (source / "pyproject.toml").write_text(toml)
         (source / "__init__.py").write_text(
@@ -83,26 +83,26 @@ modes = ["rendered_preview"]
         assert code == 0, events
         return source
 
-    def test_manifest_contributions_surface_views_graphs_player(self):
+    def test_studio_views_are_surfaced_from_the_studio_table(self):
         self.managed("chain")
-        row = next(item for item in plugins._inventory(self.root)["installed"] if item["name"] == "chain")
+        row = next(item for item in plugins._inventory(self.root)["installed"] if item["name"] == "author.chain")
         contributions = row["contributions"]
+        self.assertEqual(list(contributions), ["views"])
         self.assertEqual(contributions["views"][0]["pluginId"], "author.chain")
         entry_path = contributions["views"][0]["entryPath"].replace("\\", "/")
         self.assertTrue(entry_path.endswith("ui/index.html"))
         self.assertEqual(contributions["views"][0]["placements"], ["tool", "workspace"])
-        self.assertEqual(contributions["graphs"][0]["id"], "chain")
-        self.assertEqual(contributions["player"][0]["scopes"], ["clip"])
+        self.assertEqual(contributions["views"][0]["permissions"], ["operations", "files.pickAudio"])
 
     def test_view_entry_path_resolves_inside_the_plugin_directory(self):
         self.managed("chain")
-        row = next(item for item in plugins._inventory(self.root)["installed"] if item["name"] == "chain")
+        row = next(item for item in plugins._inventory(self.root)["installed"] if item["name"] == "author.chain")
         entry = Path(row["contributions"]["views"][0]["entryPath"])
-        plugin_dir = self.root / "installed" / "chain"
+        plugin_dir = self.root / "installed" / "author.chain"
         self.assertTrue(entry.is_file())
         self.assertTrue(plugin_dir in entry.parents)
 
-    def test_legacy_plugin_has_no_contributions(self):
+    def test_manifestless_directory_plugin_has_no_contributions(self):
         manual = self.work / "manual/plain"
         manual.mkdir(parents=True)
         manual.joinpath("__init__.py").write_text("")

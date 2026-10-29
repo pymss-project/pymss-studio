@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { createLogger } from '@/utils/logger'
 
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { darkTheme } from 'naive-ui'
+import { darkTheme, zhCN, enUS } from 'naive-ui'
 import TitleBar from '@/components/TitleBar.vue'
 import SideNav from '@/components/SideNav.vue'
 import { isMainTaskOwner } from '@/utils/taskOwner'
@@ -38,7 +38,13 @@ const updates = useUpdateStore()
 const workflow = useWorkflowStore()
 const route = useRoute()
 const router = useRouter()
-const { t } = useI18n()
+const ToolsView = defineAsyncComponent(() => import('@/views/ToolsView.vue'))
+const toolsOpened = ref(false)
+watch(() => route.name, name => {
+  if (name === 'tools') toolsOpened.value = true
+}, { immediate: true })
+const { t, locale } = useI18n()
+const componentLocale = computed(() => locale.value.startsWith('zh') ? zhCN : enUS)
 const bootReady = ref(false)
 const backgroundWarmupsStarted = ref(false)
 const deferredPromptShown = ref(false)
@@ -328,7 +334,7 @@ const themeOverrides = computed(() => {
 </script>
 
 <template>
-  <n-config-provider :theme="isDark ? darkTheme : null" :theme-overrides="themeOverrides">
+  <n-config-provider :theme="isDark ? darkTheme : null" :theme-overrides="themeOverrides" :locale="componentLocale">
     <n-notification-provider>
       <n-message-provider>
         <n-dialog-provider>
@@ -354,12 +360,12 @@ const themeOverrides = computed(() => {
           <div class="app-body" :inert="showStartupOnboarding || beginnerGuide.demoActive || undefined">
             <SideNav v-if="!isStandaloneRoute" />
             <main class="app-content">
+              <!-- Keep the iframe document attached so navigation preserves running plugin tasks. -->
+              <ToolsView v-if="toolsOpened" v-show="route.name === 'tools'" />
               <router-view v-slot="{ Component, route }">
                 <component v-if="isWorkflowEditorRoute" :is="Component" :key="route.fullPath" />
                 <transition v-else name="page" mode="out-in">
-                  <keep-alive include="ToolsView">
-                    <component :is="Component" :key="route.path" />
-                  </keep-alive>
+                  <component v-if="route.name !== 'tools'" :is="Component" :key="route.path" />
                 </transition>
               </router-view>
             </main>

@@ -14,5 +14,5 @@ requests[socks]>=2.32
 pyyaml>=6.0.1
 torch>=2.7.1
 tqdm>=4.60
-pymss[proxy]==2.1.12
-pymss-core==0.1.14
+pymss[proxy]
+pymss-core

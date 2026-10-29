@@ -48,21 +48,6 @@ test('deferred early errors reopen the prompt when no install overlay owns the e
   }
 })
 
-test('the ASR page only offers removal for removable components', () => {
-  for (const [status, expected] of [
-    [null, false],
-    [{ installed: false, present: false, canUninstall: false }, false],
-    [{ installed: true, present: true, source: 'environment', canUninstall: false }, false],
-    [{ installed: true, present: true, source: 'environment', canUninstall: true }, true],
-    [{ installed: true, present: true, source: 'managed', canUninstall: true }, true],
-    [{ installed: true }, true],
-  ]) {
-    assert.equal(componentComputed('../src/features/audio-tools/tools/asr/AsrTool.vue', 'funAsrCanUninstall', {
-      funAsrStatus: { value: status },
-    }), expected)
-  }
-})
-
 for (const [platform, machine, expected] of [
   ['darwin', 'arm64', ['mlx']],
   ['darwin', 'aarch64', ['mlx']],

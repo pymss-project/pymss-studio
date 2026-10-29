@@ -18,7 +18,7 @@ from pip._vendor.packaging.version import Version
 CORE_PACKAGES = ("pymss", "pymss-core")
 
 
-def core_requirements(manifest: dict) -> dict[str, Requirement]:
+def core_requirements(manifest: dict, *, require_pins: bool = False) -> dict[str, Requirement]:
     requirements = {}
     for name in CORE_PACKAGES:
         requirement = Requirement(manifest["common"][name])
@@ -26,10 +26,10 @@ def core_requirements(manifest: dict) -> dict[str, Requirement]:
         if (
             canonicalize_name(requirement.name) != name
             or requirement.url or requirement.marker
-            or len(pins) != 1 or pins[0].operator != "=="
-            or "*" in pins[0].version
+            or (pins and (len(pins) != 1 or pins[0].operator != "==" or "*" in pins[0].version))
+            or (require_pins and not pins)
         ):
-            raise ValueError(f"Release core must have an exact version: {name}")
+            raise ValueError(f"Release core must be unversioned or have an exact version; bundle verification requires a version: {name}")
         requirements[name] = requirement
     return requirements
 
@@ -40,8 +40,10 @@ def resolve_manifest(path: Path) -> dict[str, str]:
     candidates = []
     baselines = {}
     for name, requirement in requirements.items():
-        baselines[name] = Version(next(iter(requirement.specifier)).version)
-        requirement.specifier = type(requirement.specifier)(f">={baselines[name]}")
+        pins = list(requirement.specifier)
+        if pins:
+            baselines[name] = Version(pins[0].version)
+            requirement.specifier = type(requirement.specifier)(f">={baselines[name]}")
         candidates.append(str(requirement))
 
     # Resolve only the two core wheels. The runtime builder installs their full
@@ -67,7 +69,7 @@ def resolve_manifest(path: Path) -> dict[str, str]:
         if (
             name not in requirements or name in versions or item.get("is_yanked")
             or version.is_prerelease or version.is_devrelease or version.local
-            or version < baselines[name]
+            or (name in baselines and version < baselines[name])
         ):
             raise ValueError(f"Invalid stable release core: {name} {version}")
         versions[name] = str(version)
@@ -85,7 +87,7 @@ def resolve_manifest(path: Path) -> dict[str, str]:
 def verify_installed(path: Path) -> dict[str, str]:
     manifest = json.loads(path.read_text(encoding="utf-8"))
     versions = {}
-    for name, requirement in core_requirements(manifest).items():
+    for name, requirement in core_requirements(manifest, require_pins=True).items():
         installed = metadata.version(name)
         if not requirement.specifier.contains(installed, prereleases=True):
             raise ValueError(f"Bundled {name} {installed} does not match {requirement}")
