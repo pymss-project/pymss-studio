@@ -59,7 +59,7 @@ def _require_plugin_runtime() -> None:
 
         if API_VERSION < 2 or not callable(getattr(kit, "render_output", None)) or not callable(resolve_github_commit):
             raise ValueError("Plugin protocol v2 is unavailable")
-        inspect.signature(Runtime.load_plugins).bind(None, [], validate_plugin=None)
+        inspect.signature(Runtime.load_plugins).bind(None, [], validate_plugin=None, activation_context=None)
     except (ImportError, AttributeError, TypeError, ValueError):
         try:
             version = importlib.metadata.version("pymss")
@@ -403,14 +403,21 @@ def operation_runtime():
 
 def _load_runtime_plugins(runtime, root: Path) -> list[dict[str, Any]]:
     from pymss.plugins import ensure_plugins_loaded
+    from worker_optional_packages import optional_package_activation
 
     profile = runtime_profile()
+    components: dict[Path, list[str]] = {}
 
     def validate(plugin: Path) -> None:
-        require_compatible(_studio_metadata(plugin), profile)
+        metadata = _studio_metadata(plugin)
+        require_compatible(metadata, profile)
+        components[plugin] = _runtime_packages(metadata)
 
-    ensure_plugins_loaded(validate_plugin=validate)
-    return runtime.load_plugins([root / "installed"], validate_plugin=validate)
+    def activate(plugin: Path):
+        return optional_package_activation(components[plugin])
+
+    ensure_plugins_loaded(validate_plugin=validate, activation_context=activate)
+    return runtime.load_plugins([root / "installed"], validate_plugin=validate, activation_context=activate)
 
 
 def _operation_runtime():
@@ -527,6 +534,7 @@ def _studio_views(plugin: Path) -> list[dict[str, Any]]:
     root = plugin.resolve()
     metadata = _studio_metadata(plugin)
     requirements = read_requirements(metadata)
+    _runtime_packages(metadata)
     views, seen = [], set()
     for view in metadata.get("views", []):
         if not isinstance(view, dict):
@@ -578,16 +586,20 @@ def _deferred_dependency_operations(plugin: Path) -> set[str]:
     return {value for value in values if isinstance(value, str)} if isinstance(values, list) else set()
 
 
-def operation_uses_optional_backend(operation: str) -> bool:
-    """Whether an installed plugin manages this operation's backend as an optional runtime package."""
-    try:
-        return any(operation in _deferred_dependency_operations(plugin) for plugin in _installed(_root()))
-    except Exception:
-        return False
+def _runtime_packages(metadata: dict[str, Any]) -> list[str]:
+    from worker_optional_packages import OPTIONAL_PACKAGES
+
+    names = metadata.get("runtime_packages", [])
+    if not isinstance(names, list) or any(not isinstance(name, str) or name not in OPTIONAL_PACKAGES for name in names):
+        raise ValueError("Studio runtime_packages must list supported runtime component ids")
+    if len(names) != len(set(names)):
+        raise ValueError("Duplicate Studio runtime_packages entries")
+    return names
 
 
 def _validate_requirements(plugin: Path, *, operation: str | None = None) -> None:
     from pip._vendor.packaging.requirements import Requirement
+    from worker_optional_packages import optional_package_paths
     path = plugin / "pyproject.toml"
     if not path.exists():
         return
@@ -595,18 +607,20 @@ def _validate_requirements(plugin: Path, *, operation: str | None = None) -> Non
     if operation is not None and operation in _deferred_dependency_operations(plugin):
         # These Operations own an explicit optional-backend check/install UI.
         return
+    component_paths = optional_package_paths(_runtime_packages(_studio_metadata(plugin)))
+    search_paths = list(dict.fromkeys([
+        *(str(path) for path in component_paths if path.is_dir()),
+        *sys.path, str(plugin / ".studio-deps"),
+    ]))
     for text in project.get("dependencies", []):
         requirement = Requirement(text)
         if requirement.marker and not requirement.marker.evaluate({"extra": ""}):
             continue
-        try:
-            version = importlib.metadata.version(requirement.name)
-        except importlib.metadata.PackageNotFoundError:
-            # Listing does not activate sidecars; the plugin's own sidecar still satisfies it.
-            sidecar = next((item.version for item in importlib.metadata.distributions(name=requirement.name, path=[str(plugin / ".studio-deps")])), None)
-            if sidecar is None:
-                raise ValueError(f"Missing plugin dependency: {requirement.name}") from None
-            version = sidecar
+        # Inventory reads the same metadata search order without activating imports.
+        distribution = next(importlib.metadata.distributions(name=requirement.name, path=search_paths), None)
+        if distribution is None:
+            raise ValueError(f"Missing plugin dependency: {requirement.name}")
+        version = distribution.version
         if requirement.specifier and version not in requirement.specifier:
             raise ValueError(f"Plugin requires {requirement}; current runtime provides {version}")
 

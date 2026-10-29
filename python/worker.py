@@ -143,10 +143,6 @@ def run_command(command: str, payload: dict) -> int:
         from worker_operations import cmd_describe_operation
         return cmd_describe_operation(payload)
     if command == "run_operation":
-        from worker_plugins import operation_uses_optional_backend
-        if operation_uses_optional_backend(str(payload.get("operation") or "").strip()):
-            from worker_optional_packages import activate_optional_packages
-            activate_optional_packages()
         from worker_operations import cmd_run_operation
         return cmd_run_operation(payload)
     if command == "list_nodes":

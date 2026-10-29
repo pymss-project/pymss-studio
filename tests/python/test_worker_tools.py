@@ -77,19 +77,32 @@ class WorkerToolsTests(unittest.TestCase):
         self.assertTrue(events[-1]["payload"]["recoverable"])
         self.assertEqual(events[-1]["payload"]["recovery"]["modelIds"], ["model-id"])
 
-    def test_optional_backends_are_activated_only_for_declaring_operations(self):
+    def test_declared_runtime_packages_are_activated_before_plugin_loading(self):
+        from pymss import plugins
+        import worker_optional_packages
+
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             plugin = root / "installed/pymss.asr"
             plugin.mkdir(parents=True)
             plugin.joinpath("pyproject.toml").write_text(
                 '[tool.pymss.plugin]\nid="pymss.asr"\napi_version=2\n\n'
-                '[tool.pymss.studio]\ndeferred_dependency_operations=["pymss.asr.tool"]\n'
+                '[tool.pymss.studio]\nruntime_packages=["funasr"]\n'
+                'deferred_dependency_operations=["pymss.asr.tool"]\n'
             )
-            with mock.patch.object(worker_plugins, "_root", return_value=root):
-                self.assertTrue(worker_plugins.operation_uses_optional_backend("pymss.asr.tool"))
-                self.assertFalse(worker_plugins.operation_uses_optional_backend("pymss.asr.transcribe"))
-                self.assertFalse(worker_plugins.operation_uses_optional_backend("other.tool"))
+            runtime = mock.Mock()
+            with mock.patch.object(plugins, "ensure_plugins_loaded"), \
+                 mock.patch.object(worker_optional_packages, "activate_optional_packages") as activate:
+                def load(roots, *, validate_plugin, activation_context):
+                    self.assertEqual(roots, [root / "installed"])
+                    validate_plugin(plugin)
+                    activate.assert_not_called()
+                    with activation_context(plugin):
+                        activate.assert_called_once_with(names=["funasr"])
+                    return []
+
+                runtime.load_plugins.side_effect = load
+                worker_plugins._load_runtime_plugins(runtime, root)
 
 
 if __name__ == "__main__":

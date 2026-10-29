@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "repository": {
-    "url": "https://github.com/TheSmallHanCat/pymss-plugins",
+    "url": "https://github.com/pymss-project/pymss-plugins",
     "ref": "main",
     "registryRef": "main"
   },

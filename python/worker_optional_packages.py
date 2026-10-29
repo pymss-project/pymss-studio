@@ -16,9 +16,12 @@ import platform
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 from worker_protocol import emit, emit_error
@@ -149,15 +152,68 @@ def _package_spec(name: Any) -> tuple[str, dict[str, str]]:
     return normalized, spec
 
 
-def activate_optional_packages(runtime: RuntimeContext | None = None) -> None:
+def optional_package_paths(names: Iterable[str], runtime: RuntimeContext | None = None) -> list[Path]:
+    """Resolve host-managed component directories using their public package ids."""
+    packages = [_package_spec(name)[0] for name in names]
+    if not packages:
+        return []
     runtime = runtime or _runtime_context()
-    for name in OPTIONAL_PACKAGES:
-        directory = _package_dir(name, runtime)
-        if directory.is_dir():
-            value = str(directory)
-            if value not in sys.path:
-                sys.path.insert(0, value)
+    return [_package_dir(name, runtime) for name in packages]
+
+
+def activate_optional_packages(
+    runtime: RuntimeContext | None = None, *, names: Iterable[str] = OPTIONAL_PACKAGES,
+) -> list[str]:
+    added = [str(directory) for directory in optional_package_paths(names, runtime)
+             if directory.is_dir() and str(directory) not in sys.path]
+    sys.path[:0] = added
     importlib.invalidate_caches()
+    return added
+
+
+@contextmanager
+def optional_package_activation(names: Iterable[str]) -> Iterator[None]:
+    """Keep component imports only when the plugin's activation succeeds."""
+    previous_modules = set(sys.modules)
+    added = activate_optional_packages(names=names)
+    try:
+        yield
+    except BaseException:
+        if added:
+            roots = [Path(os.path.abspath(value)) for value in added]
+            # Roll back complete newly imported package trees. A namespace may
+            # span component and host directories; deleting only its parent
+            # would leave cached children detached from subsequent imports.
+            removed: set[str] = set()
+            for name in sorted(set(sys.modules) - previous_modules, key=len):
+                parent_name = name.rpartition(".")[0]
+                while parent_name and parent_name not in removed:
+                    parent_name = parent_name.rpartition(".")[0]
+                if parent_name:
+                    removed.add(name)
+                    continue
+                module = sys.modules.get(name)
+                if not isinstance(module, ModuleType):
+                    continue
+                attributes = vars(module)
+                locations = list(attributes.get("__path__") or ())
+                filename = attributes.get("__file__")
+                if filename:
+                    locations.append(filename)
+                if any(Path(os.path.abspath(location)).is_relative_to(root)
+                       for location in locations if isinstance(location, (str, os.PathLike)) for root in roots):
+                    removed.add(name)
+            for name in sorted(removed, key=len, reverse=True):
+                module = sys.modules.pop(name, None)
+                parent_name, _, attribute = name.rpartition(".")
+                parent = sys.modules.get(parent_name)
+                if isinstance(parent, ModuleType) and vars(parent).get(attribute) is module:
+                    vars(parent).pop(attribute, None)
+            sys.path[:] = [value for value in sys.path if value not in added]
+            for value in added:
+                sys.path_importer_cache.pop(value, None)
+            importlib.invalidate_caches()
+        raise
 
 
 def _sidecar_version(name: str, directory: Path) -> str | None:
