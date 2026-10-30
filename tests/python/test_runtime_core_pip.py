@@ -30,6 +30,9 @@ class OfflineCoreUpdateTests(unittest.TestCase):
     def test_bundle_replacement_preserves_core_components_and_rollback(self):
         self.run_offline_update(bundled=True, replace_bundle=True)
 
+    def test_bundle_replacement_preserves_mlx_components_and_rollback(self):
+        self.run_offline_update(bundled=True, replace_bundle=True, apple_silicon=True)
+
     @unittest.skipUnless(os.name == "posix", "POSIX directory symlinks")
     def test_bundled_runtime_update_and_rollback_through_a_directory_alias(self):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -43,12 +46,13 @@ class OfflineCoreUpdateTests(unittest.TestCase):
     def test_pruned_bundled_runtime_preserves_torch_dependencies_for_offline_updates(self):
         self.run_offline_update(bundled=True, pruned=True)
 
-    def run_offline_update(self, *, bundled, pruned=False, replace_bundle=False, temporary_parent=None):
+    def run_offline_update(self, *, bundled, pruned=False, replace_bundle=False, temporary_parent=None, apple_silicon=False):
         root = Path(self.enterContext(tempfile.TemporaryDirectory(dir=temporary_parent)))
+        backend = "mlx" if apple_silicon else "cpu"
         envs = root / "runtime-envs"
         envs.mkdir()
         bundled_envs = root / "Installed.app/Contents/Resources/python-runtime/runtime-envs"
-        base = (bundled_envs if bundled else envs) / "cpu"
+        base = (bundled_envs if bundled else envs) / backend
         venv.EnvBuilder(with_pip=True).create(base)
         python = base / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         wheels = root / "wheels"
@@ -70,6 +74,12 @@ class OfflineCoreUpdateTests(unittest.TestCase):
             }
             if name == "pymss":
                 entries["pymss/graph/__init__.py"] = ""
+            if name == "funasr-mlx":
+                entries["funasr_mlx/api.py"] = (
+                    "import mlx, sentencepiece\n"
+                    "def download_model(*args, **kwargs): pass\n"
+                    "def transcribe(*args, **kwargs): pass\n"
+                )
             record = io.StringIO()
             csv.writer(record).writerows((path, "", "") for path in [*entries, f"{info}/RECORD"])
             entries[f"{info}/RECORD"] = record.getvalue()
@@ -88,14 +98,21 @@ class OfflineCoreUpdateTests(unittest.TestCase):
         wheel("pymss-core", "0.2.0", ["torch>=2"])
         wheel("new-audio-dependency", "1.0")
         if replace_bundle:
-            wheel("funasr", "1.3.26", ["torch>=2", "torchaudio==2.7.1"])
-            wheel("torchaudio", "2.7.1", ["torch==2.7.1"])
+            if apple_silicon:
+                wheel("mlx", "0.31.0", ["mlx-metal==0.31.0"])
+                wheel("mlx-metal", "0.31.0")
+                wheel("funasr-mlx", "0.2.2", ["mlx>=0.31.0", "sentencepiece>=0.2"])
+                wheel("sentencepiece", "0.2.1")
+            else:
+                wheel("funasr", "1.3.26", ["torch>=2", "torchaudio==2.7.1"])
+                wheel("torchaudio", "2.7.1", ["torch==2.7.1"])
         child_env = os.environ.copy()
         child_env.pop("PYTHONHOME", None)
         child_env.pop("PYTHONPATH", None)
         seed = subprocess.run([
             str(python), "-m", "pip", "install", "--disable-pip-version-check", "--no-index", "--find-links", str(wheels),
             "pymss==2.1.4", "pymss-core==0.1.6", "torch==2.7.1",
+            *(["mlx==0.31.0"] if apple_silicon else []),
         ], env=child_env, capture_output=True, text=True, timeout=90)
         self.assertEqual(seed.returncode, 0, seed.stderr)
         if pruned:
@@ -111,11 +128,14 @@ class OfflineCoreUpdateTests(unittest.TestCase):
             "manifestVersion": "2026.10.2", "baseGeneration": 1,
             "python": f"{sys.version_info.major}.{sys.version_info.minor}",
             "common": {"pymss": "pymss[proxy]==2.1.4", "pymss-core": "pymss-core==0.1.6"},
-            "backends": {"cpu": {"platforms": [sys.platform], "torch": {"requirement": "torch==2.7.1"}}},
+            "backends": {backend: {
+                "platforms": [sys.platform], "torch": {"requirement": "torch==2.7.1"},
+                "extras": ["mlx"] if apple_silicon else [],
+            }},
         }
         state = {
             "source": "bundled" if bundled else "managed",
-            "backend": "cpu", "manifestVersion": manifest["manifestVersion"], "stateVersion": worker.ENV_STATE_VERSION,
+            "backend": backend, "manifestVersion": manifest["manifestVersion"], "stateVersion": worker.ENV_STATE_VERSION,
             "pythonPath": str(python), "torchVersion": "2.7.1", "torchBackend": "cpu",
             "packages": {"pymss": True, "pymss-core": True},
             "packageVersions": {"pymss": "2.1.4", "pymss-core": "0.1.6"},
@@ -137,9 +157,17 @@ class OfflineCoreUpdateTests(unittest.TestCase):
                 path.parent.mkdir()
                 path.write_bytes(b"retained user content")
             component = optional_packages.RuntimeContext(
-                python, "cpu", f"cpu-py{sys.version_info.major}{sys.version_info.minor}",
-                envs / "optional-packages" / f"cpu-py{sys.version_info.major}{sys.version_info.minor}",
+                python, backend, f"{backend}-py{sys.version_info.major}{sys.version_info.minor}",
+                envs / "optional-packages" / f"{backend}-py{sys.version_info.major}{sys.version_info.minor}",
             )
+            # Keep platform selection identical in fresh workers and the parent
+            # without changing the interpreter's native filesystem/pip platform.
+            component_bootstrap = (
+                "import worker_optional_packages as optional; "
+                f"optional._is_apple_silicon=lambda: {apple_silicon!r}; "
+            )
+            component_modules = ("funasr_mlx", "sentencepiece") if apple_silicon else ("funasr", "torchaudio")
+            base_modules = ("torch", "mlx", "mlx_metal") if apple_silicon else ("torch",)
 
             def check_fresh_component(expected_core):
                 environment = worker._probe_environment(
@@ -151,22 +179,25 @@ class OfflineCoreUpdateTests(unittest.TestCase):
                     "PYTHONPATH": os.pathsep.join(filter(None, [environment.get("PYTHONPATH"), str(resources)])),
                 })
                 status = subprocess.run([
-                    str(python), str(resources / "worker.py"), "optional_package_status", "--payload", '{"package":"funasr"}',
+                    str(python), "-c", component_bootstrap
+                    + 'raise SystemExit(optional.cmd_optional_package_status({"package":"funasr"}))',
                 ], env=environment, capture_output=True, text=True, timeout=30, check=True)
                 result = next(json.loads(line)["payload"] for line in status.stdout.splitlines()
                               if json.loads(line).get("type") == "optional_package_status")
                 self.assertTrue(result["installed"])
                 self.assertEqual(result["source"], "managed")
+                self.assertEqual(result["requirement"], optional_packages._package_spec("funasr")[1]["requirement"])
                 loaded = subprocess.run([
-                    str(python), "-c",
-                    "import json; from worker_optional_packages import activate_optional_packages; "
-                    "activate_optional_packages(); import pymss, funasr, torchaudio, torch; "
-                    "print(json.dumps({m.__name__: m.__file__ for m in (pymss, funasr, torchaudio, torch)}))",
+                    str(python), "-c", component_bootstrap
+                    + "import importlib,json; optional.activate_optional_packages(); "
+                    + f"modules=[importlib.import_module(name) for name in {('pymss', *component_modules, *base_modules)!r}]; "
+                    + "print(json.dumps({m.__name__: m.__file__ for m in modules}))",
                 ], env=environment, capture_output=True, text=True, timeout=30, check=True)
                 paths = json.loads(loaded.stdout)
                 self.assertTrue(Path(paths["pymss"]).resolve().is_relative_to(Path(expected_core).resolve()))
-                self.assertTrue(Path(paths["torch"]).resolve().is_relative_to(base.resolve()))
-                for name in ("funasr", "torchaudio"):
+                for name in base_modules:
+                    self.assertTrue(Path(paths[name]).resolve().is_relative_to(base.resolve()))
+                for name in component_modules:
                     self.assertTrue(Path(paths[name]).resolve().is_relative_to(component.packages_dir.resolve()))
 
             def fresh_rollback(payload):
@@ -218,9 +249,10 @@ class OfflineCoreUpdateTests(unittest.TestCase):
              mock.patch.object(worker, "_manifest", return_value=manifest), \
              mock.patch.object(worker, "_latest_pypi_version", side_effect=lambda name, channel="stable": {"pymss": "2.2.0", "pymss-core": "0.2.0"}[name]) as latest, \
              mock.patch.object(worker, "_verify_runtime_audio"), \
+             mock.patch.object(optional_packages, "_is_apple_silicon", return_value=apple_silicon), \
              mock.patch.object(worker.subprocess, "Popen", side_effect=offline_popen), \
              contextlib.redirect_stdout(io.StringIO()) as output:
-            payload = {"backend": "cpu", "pythonPath": str(python), "mirror": "pypi", "mode": "update", "taskId": "offline-pip"}
+            payload = {"backend": backend, "pythonPath": str(python), "mirror": "pypi", "mode": "update", "taskId": "offline-pip"}
             self.assertEqual(worker.cmd_update_runtime_core({**payload, "prepareOnly": True}), 0, output.getvalue())
             plan = next(json.loads(line)["payload"] for line in output.getvalue().splitlines() if json.loads(line)["type"] == "runtime_core_update_plan")
             self.assertEqual(plan["targetVersions"], {"pymss": "2.2.0", "pymss-core": "0.1.7"})
@@ -244,7 +276,7 @@ class OfflineCoreUpdateTests(unittest.TestCase):
                     "PIP_NO_INDEX": "1", "PIP_FIND_LINKS": wheels.as_uri(), "PIP_CONFIG_FILE": os.devnull,
                 }), mock.patch.object(sys, "path", list(sys.path)):
                     optional_packages._install_package(
-                        "funasr", optional_packages.OPTIONAL_PACKAGES["funasr"], "pypi", "en", runtime=component,
+                        *optional_packages._package_spec("funasr"), "pypi", "en", runtime=component,
                     )
                 check_fresh_component(installed["overlayPath"])
                 before_replacement = active.read_bytes()

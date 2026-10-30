@@ -38,6 +38,9 @@ class OptionalRuntimePackageTests(unittest.TestCase):
         self.environment.start()
         self.addCleanup(self.environment.stop)
         self.addCleanup(shutil.rmtree, self.root, True)
+        # Most fixtures describe Torch components; MLX cases select their own
+        # branch explicitly rather than inheriting the machine running the test.
+        self.enterContext(mock.patch.object(optional_packages, "_is_apple_silicon", return_value=False))
         self.enterContext(mock.patch.object(optional_packages, "_environment_version", side_effect=lambda name, runtime=None: {
             "torch": "2.7.1", "torchaudio": "2.7.1",
         }.get(name)))
@@ -599,22 +602,24 @@ class OfflineOptionalPackageTests(unittest.TestCase):
         isolated_path = list(sys.path)
         with mock.patch.dict(os.environ, environment, clear=True), \
              mock.patch.object(sys, "path", isolated_path), \
+             mock.patch.object(optional_packages, "_is_apple_silicon", return_value=False), \
              contextlib.redirect_stdout(io.StringIO()):
             if incompatible_torch:
                 target.mkdir(parents=True)
                 marker = target / "previous-component"
                 marker.write_text("preserved", encoding="utf-8")
                 with self.assertRaises(RuntimeError):
-                    optional_packages._install_package("funasr", optional_packages.OPTIONAL_PACKAGES["funasr"], "pypi", "en", runtime=runtime)
+                    optional_packages._install_package(*optional_packages._package_spec("funasr"), "pypi", "en", runtime=runtime)
                 self.assertEqual(marker.read_text(encoding="utf-8"), "preserved")
             else:
-                optional_packages._install_package("funasr", optional_packages.OPTIONAL_PACKAGES["funasr"], "pypi", "en", runtime=runtime)
+                optional_packages._install_package(*optional_packages._package_spec("funasr"), "pypi", "en", runtime=runtime)
                 # A fresh worker process adds the component directory only for
                 # the ASR path, while Torch and MLX keep loading from the base.
                 loaded = subprocess.run([
                     str(python), "-c",
                     "import sys, json; sys.path.insert(0, sys.argv[1]); "
-                    "from worker_optional_packages import activate_optional_packages; activate_optional_packages(); "
+                    "import worker_optional_packages as optional; optional._is_apple_silicon=lambda: False; "
+                    "optional.activate_optional_packages(); "
                     "import funasr, component_helper, torchaudio, torch, mlx; "
                     "print(json.dumps({m.__name__: m.__file__ for m in (funasr, component_helper, torchaudio, torch, mlx)}))",
                     str(_worker_test_bootstrap.WORKER_DIR),

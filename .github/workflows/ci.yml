@@ -81,9 +81,9 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml bundled_bootstrap_uses_user_overlay_without_changing_bundle
       - name: Verify plugin resources and native protocol paths
         run: |
-          python -m pip install --disable-pip-version-check --prefer-binary "numpy>=1.26,<3"
+          python -m pip install --disable-pip-version-check --prefer-binary -r python/requirements-ci.txt
           python -m unittest discover -s tests/python -t tests -p 'test_plugin_sdk_bundle.py'
-          python -m unittest discover -s tests/python -t tests -p 'test_audio_tool_output_safety.py'
+          python -m unittest discover -s tests/python -t tests -p 'test_worker_operations.py'
           cargo test --manifest-path src-tauri/Cargo.toml plugin_views
           cargo test --manifest-path src-tauri/Cargo.toml python::worker
 

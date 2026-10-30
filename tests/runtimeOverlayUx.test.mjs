@@ -13,8 +13,10 @@ test('an older runtime only prompts for confirmation and model preloading waits 
   assert.match(mainSource, /!runtimeCoreSyncAvailable\(activeRuntime, runtime\.manifestVersion\)/)
 })
 
-test('runtime overlay releases declare a stable base generation and exact core versions', () => {
+test('runtime overlay declares a stable base generation and v2-compatible core minimums', () => {
   assert.equal(manifest.baseGeneration, 1)
-  assert.match(manifest.common.pymss, /==\d+\.\d+\.\d+$/)
-  assert.match(manifest.common['pymss-core'], /==\d+\.\d+\.\d+$/)
+  // Release resolution pins this manifest separately; dependency synchronization
+  // must accept newer stable cores while requiring the v2-compatible baseline.
+  assert.equal(manifest.common.pymss, 'pymss[proxy]>=2.2.0')
+  assert.equal(manifest.common['pymss-core'], 'pymss-core>=0.1.14')
 })

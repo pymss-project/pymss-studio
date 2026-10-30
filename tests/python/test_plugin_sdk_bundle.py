@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import contextlib
 import io
 import json
@@ -16,6 +17,19 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class PluginSdkBundleTests(unittest.TestCase):
+    def test_ci_python_test_patterns_select_existing_test_cases(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        patterns = re.findall(r"python -m unittest discover -s tests/python -t tests -p [\"']([^\"']+)[\"']", workflow)
+        self.assertTrue(patterns)
+        for pattern in patterns:
+            with self.subTest(pattern=pattern):
+                files = list((ROOT / "tests/python").glob(pattern))
+                self.assertTrue(files, f"CI test pattern does not match a file: {pattern}")
+                self.assertTrue(any(
+                    isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_")
+                    for path in files for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+                ), f"CI test pattern does not contain test cases: {pattern}")
+
     def test_macos_release_maps_the_sdk_to_the_protocol_resource_directory(self):
         workflow = (ROOT / ".github/workflows/release-macos.yml").read_text(encoding="utf-8")
         step = workflow.split("- name: Build Tauri app bundle", 1)[1].split("- name:", 1)[0]

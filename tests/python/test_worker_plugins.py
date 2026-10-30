@@ -117,15 +117,19 @@ def setup(plugin):
 
         legacy = self.root / "installed/oldtool"
         legacy.mkdir(parents=True)
-        (legacy / "pyproject.toml").write_text('[tool.pymss.plugin]\nid="oldtool"\napi_version=1\n')
+        legacy_manifest = '[tool.pymss.plugin]\nid="oldtool"\napi_version=1\n'
+        (legacy / "pyproject.toml").write_text(legacy_manifest)
         with mock.patch.object(manifest, "API_VERSION", 1), \
              mock.patch.object(plugins, "_acquire_source", side_effect=AssertionError("source acquired")) as acquire:
             code, events = self.manage("install", target=str(self.source()))
         self.assertEqual(code, 1)
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertEqual(events[-1]["taskId"], "plugin_manage_test")
         self.assertEqual(events[-1]["payload"]["code"], "PLUGIN_RUNTIME_INCOMPATIBLE")
-        self.assertIn("plugin protocol v2", events[-1]["payload"]["message"])
+        self.assertTrue(events[-1]["payload"]["recoverable"])
         acquire.assert_not_called()
         self.assertTrue(legacy.is_dir())
+        self.assertEqual((legacy / "pyproject.toml").read_text(), legacy_manifest)
         self.assertFalse((self.root / "legacy-v1").exists())
 
     def test_verification_rejects_the_legacy_runtime_loader_before_spawning(self):
@@ -136,7 +140,7 @@ def setup(plugin):
 
         with mock.patch.object(Runtime, "load_plugins", legacy_loader), \
              mock.patch.object(plugins.subprocess, "run", side_effect=AssertionError("unexpected probe")) as run:
-            with self.assertRaisesRegex(RuntimeError, "plugin protocol v2"):
+            with self.assertRaises(plugins.PluginRuntimeIncompatible):
                 plugins._probe(self.root)
         run.assert_not_called()
 
@@ -475,13 +479,32 @@ def setup(plugin):
 
     def test_ssh_git_reference_is_separate_from_authentication_and_subpath(self):
         from pymss.plugins import install as installer
-        with mock.patch.object(installer, "install") as install:
-            plugins._acquire_source("ssh://git@example.com/repo.git@v1#plugins/hello", self.work)
-        self.assertEqual(install.call_args.args[0], "ssh://git@example.com/repo.git#plugins/hello")
-        self.assertEqual(install.call_args.kwargs["ref"], "v1")
-        with mock.patch.object(installer, "install") as install:
-            plugins._acquire_source("git@example.com:repo.git@feature/branch", self.work)
-        self.assertEqual(install.call_args.kwargs["ref"], "feature/branch")
+
+        source = self.source()
+
+        def clone_source(url, destination, *, subpath, ref):
+            shutil.copytree(source, destination)
+            return {}
+
+        cases = [
+            ("ssh://git@example.com/repo.git@v1#plugins/hello", "ssh://git@example.com/repo.git", "v1", "plugins/hello"),
+            ("git@example.com:repo.git@feature/branch", "git@example.com:repo.git", "feature/branch", None),
+            ("ssh://git@example.com/repo.git#plugins/hello", "ssh://git@example.com/repo.git", None, "plugins/hello"),
+            ("git@example.com:repo.git", "git@example.com:repo.git", None, None),
+        ]
+        for index, (target, url, ref, subpath) in enumerate(cases):
+            with self.subTest(target=target), mock.patch.object(installer, "_clone", side_effect=clone_source) as clone:
+                # The published installer owns URL parsing. Keep it real and
+                # intercept only acquisition so authentication is never treated
+                # as a ref and neither ref nor fragment reaches the Git URL.
+                result = plugins._acquire_source(target, self.work / f"download-{index}")
+                clone.assert_called_once()
+                self.assertEqual(clone.call_args.args[0], url)
+                self.assertEqual(clone.call_args.kwargs, {"ref": ref, "subpath": subpath})
+                metadata = plugins._manifest(result.path)
+                self.assertEqual(metadata["url"], url)
+                self.assertEqual(metadata["ref"], ref)
+                self.assertEqual(metadata["subpath"], subpath)
 
     def test_network_update_check_does_not_hold_the_writer_lock(self):
         from pymss.plugins import install as installer

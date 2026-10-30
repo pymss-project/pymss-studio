@@ -6,6 +6,19 @@ import ts from 'typescript'
 import { parse } from 'vue/compiler-sfc'
 import { reactive } from 'vue'
 
+const sdkContract = JSON.parse(readFileSync(new URL('../python/plugin-sdk.json', import.meta.url), 'utf8'))
+const sdkExports = {}
+vm.runInNewContext(ts.transpileModule(
+  readFileSync(new URL('../src/features/plugin-marketplace/sdkContract.ts', import.meta.url), 'utf8'),
+  { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } },
+).outputText, {
+  exports: sdkExports,
+  require: name => {
+    assert.equal(name, '../../../python/plugin-sdk.json')
+    return sdkContract
+  },
+})
+
 const descriptor = parse(readFileSync(new URL('../src/features/plugin-marketplace/PluginViewHost.vue', import.meta.url), 'utf8')).descriptor
 const source = ts.createSourceFile('host.ts', descriptor.scriptSetup.content, ts.ScriptTarget.Latest, true)
 const names = new Set([
@@ -17,7 +30,7 @@ const names = new Set([
 const snippets = source.statements.flatMap(node => {
   if (ts.isFunctionDeclaration(node) && names.has(node.name?.text)) return [node.getText(source)]
   if (ts.isClassDeclaration(node) && ['TaskCancelledError', 'WorkerRequestError'].includes(node.name?.text || '')) return [node.getText(source)]
-  if (ts.isVariableStatement(node) && node.declarationList.declarations.some(item => ['disposed', 'unregisterCloseGuard', 'MIN_VIEW_HEIGHT', 'MAX_VIEW_HEIGHT', 'THEME_TOKENS'].includes(item.name.getText(source)))) return [node.getText(source)]
+  if (ts.isVariableStatement(node) && node.declarationList.declarations.some(item => ['disposed', 'unregisterCloseGuard', 'MIN_VIEW_HEIGHT', 'MAX_VIEW_HEIGHT', 'THEME_TOKENS', 'sdkInfo'].includes(item.name.getText(source)))) return [node.getText(source)]
   if (ts.isExpressionStatement(node) && ts.isCallExpression(node.expression)) {
     const call = node.expression
     if (['onMounted', 'onBeforeUnmount'].includes(call.expression.getText(source))) {
@@ -33,8 +46,10 @@ function host(overrides = {}) {
   let closeGuard
   let closeGuardUnregistered = 0
   const state = {
+    ...sdkExports,
     disposed: false, runRequests: new Map(), unlistenWorker: undefined, themeObserver: undefined,
-    props: { pluginName: 'gain', pluginsRoot: '/plugins', view: { id: 'editor', entry: 'ui/index.html' } },
+    props: { pluginName: 'gain', pluginsRoot: '/plugins', view: { id: 'editor', entry: 'ui/index.html', sdkVersion: sdkContract.version } },
+    t: (key, params) => `${key}: ${JSON.stringify(params)}`,
     permissions: () => ['operations'],
     frame: { value: { contentWindow: { postMessage: value => messages.push(structuredClone(value)) } } },
     src: { value: '' }, status: { value: 'loading' }, errorText: { value: '' }, measuredHeight: { value: 640 }, overlayOpen: { value: false },
@@ -86,7 +101,8 @@ test('file, application, and fixed-namespace settings SDK calls use validated ho
   assert.equal(JSON.stringify(await controller.handleCall(3, 'files.scanAudio', { paths: ['/a.wav'], recursive: false })), JSON.stringify({ files: ['/a.wav'] }))
   await controller.handleCall(4, 'files.reveal', { path: '/a.wav' })
   assert.equal(JSON.stringify(await controller.handleCall(5, 'app.info', {})), JSON.stringify({
-    studio: 'pymss-studio', version: '1.2.3', locale: 'zh-CN', defaultOutputDir: '/exports',
+    studio: 'pymss-studio', version: '1.2.3', locale: 'zh-CN',
+    sdkVersion: sdkContract.version, capabilities: sdkContract.capabilities, defaultOutputDir: '/exports',
     runtimeInfo: { platform: 'win32', packages: { pymss: '2.1.12' } },
   }))
   assert.equal(JSON.stringify(await controller.handleCall(6, 'settings.read', {})), JSON.stringify({ previous: true }))
@@ -95,6 +111,28 @@ test('file, application, and fixed-namespace settings SDK calls use validated ho
     'save_plugin_tool_settings', { pluginName: 'gain', viewId: 'editor', data: { mode: 'fast' } },
   ]))
   await assert.rejects(controller.handleCall(8, 'files.scanAudio', { paths: [''] }), /INVALID_PATHS|INVALID_PATH/)
+})
+
+test('unknown SDK capabilities stay unavailable even when the view grants their family', async () => {
+  const calls = []
+  const { controller } = host({
+    permissions: () => ['files', 'files.delete'],
+    invoke: async (...args) => { calls.push(args) },
+  })
+  await assert.rejects(controller.handleCall(1, 'files.delete', { path: '/a.wav' }), /UNSUPPORTED_CAPABILITY: files\.delete/)
+  await assert.rejects(controller.handleCall(2, 'operations.describe', { operation: 'plugin.convert' }), /PERMISSION_DENIED: operations\.describe/)
+  assert.deepEqual(calls, [])
+})
+
+test('unsupported required capabilities prevent mounting before native setup', async () => {
+  const calls = []
+  const { state, controller } = host({ invoke: async (...args) => { calls.push(args) } })
+  state.props.view.requiredCapabilities = ['files.delete']
+  await controller.mount()
+  assert.equal(state.status.value, 'error')
+  assert.match(state.errorText.value, /sdkCapabilitiesUnavailable.*files\.delete/)
+  assert.equal(state.src.value, '')
+  assert.deepEqual(calls, [])
 })
 
 test('app.info initialization replies transport reactive runtime packages across the iframe boundary', async () => {

@@ -44,9 +44,10 @@ class RuntimeAudioProbeTests(unittest.TestCase):
 
     def test_audio_decode_and_resampling_keep_both_channels(self) -> None:
         completed = subprocess.run(
-            [sys.executable, str(_worker_test_bootstrap.WORKER_DIR / "runtime_audio_probe.py")],
+            [sys.executable, "-X", "utf8", str(_worker_test_bootstrap.WORKER_DIR / "runtime_audio_probe.py")],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=60,
             check=True,
         )
@@ -68,9 +69,10 @@ from runtime_audio_probe import verify_audio_runtime
 verify_audio_runtime()
 """
         result = subprocess.run(
-            [sys.executable, "-c", script],
+            [sys.executable, "-X", "utf8", "-c", script],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=60,
             env={**os.environ, "PYTHONPATH": str(python_dir), "PYTHONNOUSERSITE": "1"},
         )
