@@ -2305,10 +2305,16 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
         from worker_protocol import emit_error
         return emit_error(
             "RUNTIME_MANIFEST_INCOMPATIBLE",
-            "The runtime manifest is newer than this application or has an unknown version. "
-            "Use a compatible application version or reinstall the runtime before updating core packages.",
+            "This Studio version cannot recognize the current runtime's dependency information. "
+            "Update Pymss Studio first, then retry the core update. "
+            "If Studio is already up to date, recheck the environment and include the technical details in a bug report.",
             task_id=task_id,
             recoverable=True,
+            extra={
+                "manifestStatus": manifest_status,
+                "runtimeManifestVersion": state.get("manifestVersion"),
+                "appManifestVersion": manifest.get("manifestVersion"),
+            },
         )
     mirror, index_url = ("pypi", PYPI_MIRROR_URLS["pypi"]) if mirror == "auto" else _resolve_pypi_mirror(mirror, locale)
     package_versions = state.get("packageVersions") if isinstance(state.get("packageVersions"), dict) else {}

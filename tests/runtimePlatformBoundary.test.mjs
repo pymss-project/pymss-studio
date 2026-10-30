@@ -4,6 +4,7 @@ import test from 'node:test'
 import vm from 'node:vm'
 import ts from 'typescript'
 import { detectRuntimePlatform } from '../src/utils/runtime.ts'
+import { runtimeErrorSummary, runtimeOperationError } from '../src/utils/runtimeErrors.ts'
 
 function componentFunction(file, name, scope) {
   const source = readFileSync(new URL(file, import.meta.url), 'utf8').match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
@@ -25,6 +26,50 @@ function componentComputed(file, name, scope) {
   const code = ts.transpileModule(`const ${name} = ${declaration.initializer.getText(parsed)}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
   return vm.runInNewContext(`${code}\n${name}`, { computed: fn => fn(), ...scope })
 }
+
+test('official macOS release exposes application maintenance using its published target', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/release-macos.yml', import.meta.url), 'utf8')
+  const target = workflow.match(/PYMSS_BUILD_TARGET:\s*([^\s]+)/)?.[1]
+  assert.ok(target)
+  const visible = componentComputed('../src/views/SettingsView.vue', 'applicationMaintenanceVisible', {
+    updateSupported: { value: true }, buildInfo: { value: { target } },
+  })
+  assert.equal(visible, true)
+})
+
+test('unsupported builds do not expose macOS application maintenance', () => {
+  for (const [target, supported] of [['macos-arm64', false], ['windows-x64', true], ['linux-x64', true], ['dev', false]]) {
+    const visible = componentComputed('../src/views/SettingsView.vue', 'applicationMaintenanceVisible', {
+      updateSupported: { value: supported }, buildInfo: { value: { target } },
+    })
+    assert.equal(visible, false, `${target}/${supported}`)
+  }
+})
+
+test('manual upgrade opens its release even when an earlier repair failed', async () => {
+  const opened = []
+  const url = 'https://github.com/pymss-project/pymss-studio/releases/tag/v0.0.17'
+  const scope = {
+    updates: { repairing: true, manualInstallUrl: url }, app: { buildInfoVersion: '0.0.16' },
+    manualUpdateError: { value: 'previous failure' }, manualUpdateModalVisible: { value: true },
+    open: async value => opened.push(value),
+  }
+  await componentFunction('../src/App.vue', 'openManualUpdate', scope)()
+  assert.deepEqual(opened, [url])
+  assert.equal(scope.manualUpdateError.value, '')
+  assert.equal(scope.manualUpdateModalVisible.value, false)
+})
+
+test('repair failure opens the current release instead of an offered upgrade', async () => {
+  const opened = []
+  const scope = {
+    updates: { repairing: true, manualInstallUrl: 'https://github.com/pymss-project/pymss-studio/releases/tag/v0.0.17' },
+    app: { buildInfoVersion: '0.0.16' }, manualUpdateError: { value: '' }, manualUpdateModalVisible: { value: false },
+    open: async value => opened.push(value),
+  }
+  await componentFunction('../src/App.vue', 'openManualUpdate', scope)(true)
+  assert.deepEqual(opened, ['https://github.com/pymss-project/pymss-studio/releases/tag/v0.0.16'])
+})
 
 test('deferred update preflight keeps busy feedback visible', async () => {
   const scope = {
@@ -201,6 +246,29 @@ for (const confirmed of [false, true]) {
     assert.equal(scope.runtimeCoreActionPending.value, false)
     if (confirmed) assert.equal(calls[1][3].planId, plan.id)
     else assert.equal(scope.app.runtimeCoreUpdateStatus, 'idle')
+  })
+}
+
+for (const locale of ['zh-CN', 'en']) {
+  test(`settings shows a localized ${locale} summary when plan preparation rejects`, async () => {
+    const translations = JSON.parse(readFileSync(new URL(`../src/i18n/${locale}.json`, import.meta.url), 'utf8')).settings
+    const failure = runtimeOperationError({ code: 'RUNTIME_MANIFEST_INCOMPATIBLE', message: 'Raw worker incompatibility error' })
+    const errors = []
+    const scope = {
+      app: { runtimeCoreUpdateSupported: true, runtimeCoreUpdateStatus: 'error', prepareRuntimeCoreUpdate: async () => { throw failure } },
+      runtimeBusy: { value: false }, runtimeCoreActionPending: { value: false },
+      runtimeMirror: { value: 'auto' }, currentLocale: { value: locale },
+      runtimeErrorSummary,
+      t: key => translations[key.replace('settings.', '')],
+      message: { error: text => errors.push(text) },
+    }
+    await componentFunction('../src/views/SettingsView.vue', 'runRuntimeCoreOperation', scope)({ backend: 'cuda' }, 'update')
+    assert.deepEqual(errors, [translations.runtimeCoreManifestIncompatible])
+    assert.equal(scope.runtimeCoreActionPending.value, false)
+    scope.app.runtimeCoreUpdateStatus = 'cancelled'
+    errors.length = 0
+    await componentFunction('../src/views/SettingsView.vue', 'runRuntimeCoreOperation', scope)({ backend: 'cuda' }, 'update')
+    assert.deepEqual(errors, [])
   })
 }
 

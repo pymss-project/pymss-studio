@@ -57,6 +57,11 @@ export function pluginToolEntries(plugins: readonly PluginToolPlugin[]): PluginT
       .filter(view => Array.isArray(view.placements) && view.placements.includes('tool'))
       .map(view => {
         const category = normalizePluginCategory(view.category) || normalizePluginCategory(plugin.toolCategory)
+        const locales = view.id === 'tool' ? plugin.locales : view.operation
+          ? Object.fromEntries(Object.entries(plugin.locales || {}).map(([locale, text]) => {
+            const title = text.operations?.[view.operation!]
+            return [locale, title ? { title } : {}]
+          })) : undefined
         return {
           key: pluginToolKey(plugin.name, view.id),
           routeId: pluginToolRouteId(plugin.name, view.id),
@@ -64,7 +69,7 @@ export function pluginToolEntries(plugins: readonly PluginToolPlugin[]): PluginT
           view,
           category,
           icon: view.icon || plugin.toolIcon,
-          locales: view.id === 'tool' ? plugin.locales : undefined,
+          locales,
         }
       }))
 }

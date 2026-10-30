@@ -117,8 +117,19 @@ function sdkHarness() {
   })
   const deliver = (data, source = parent) => listeners.forEach(listener => listener({ data, source }))
   const respond = (id, result) => deliver({ jsonrpc: '2.0', id, result })
-  return { sdk: window.pymss, sent, deliver, respond, parent }
+  return { sdk: window.pymss, sent, deliver, respond, parent, root }
 }
+
+test('published SDK matches its document color scheme to the host frame', () => {
+  const { deliver, root } = sdkHarness()
+  for (const mode of ['dark', 'light']) {
+    deliver({ jsonrpc: '2.0', method: 'host.theme', params: { colorMode: mode } })
+    assert.equal(root.dataset.mode, mode)
+    assert.equal(root.style.colorScheme, mode)
+  }
+  deliver({ jsonrpc: '2.0', method: 'host.theme', params: { colorMode: 'invalid' } })
+  assert.equal(root.style.colorScheme, 'light')
+})
 
 test('published SDK exposes the extended methods with operation ids and exact payloads', async () => {
   const { sdk, sent, respond } = sdkHarness()

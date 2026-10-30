@@ -1136,9 +1136,88 @@ for (const terminal of ['error', 'task_cancelled']) {
     await within(rejected, 'plan rejection')
     await within(app.checkRuntimeInfo(), 'query after plan rejection')
     assert.equal(app.runtimeCoreUpdateTaskId, null)
+    if (terminal === 'task_cancelled') {
+      assert.equal(app.runtimeCoreUpdateStatus, 'cancelled')
+      assert.equal(app.runtimeCoreUpdateError, null)
+      assert.equal(app.runtimeCoreUpdateMessage, '')
+    }
     app.$dispose()
   })
 }
+
+for (const diagnostics of [{}, { detail: 'Original traceback', manifestStatus: 'newer', runtimeManifestVersion: 'future' }, { details: { manifestStatus: 'unknown' }, extra: { appManifestVersion: '2026-10' } }]) {
+  test(`planning preserves worker error codes and diagnostics: ${JSON.stringify(diagnostics)}`, async () => {
+    const dispatched = deferred()
+    const app = appStore(async command => {
+      if (command === 'start_runtime_core_update') { dispatched.resolve(); return true }
+      if (command === 'runtime_info') return { ready: true }
+      throw new Error(`unexpected ${command}`)
+    })
+    const preparation = app.prepareRuntimeCoreUpdate('cpu', 'auto', 'zh-CN', { mode: 'update' })
+    const rejected = assert.rejects(preparation, error => {
+      assert.equal(error.code, 'RUNTIME_MANIFEST_INCOMPATIBLE')
+      assert.equal(error.message, 'Manifest is newer or unknown')
+      assert.deepEqual(error.diagnostics, diagnostics)
+      assert.equal(error, app.runtimeCoreUpdateError)
+      return true
+    })
+    await within(dispatched.promise, 'manifest error dispatch')
+    app.handleRuntimeEvent({ type: 'error', taskId: app.runtimeCoreUpdateTaskId, payload: {
+      code: 'RUNTIME_MANIFEST_INCOMPATIBLE', message: 'Manifest is newer or unknown', ...diagnostics,
+    } })
+    await within(rejected, 'manifest error rejection')
+    assert.equal(app.runtimeCoreUpdateStatus, 'error')
+    await app.checkRuntimeInfo()
+    app.$dispose()
+  })
+}
+
+test('structured IPC failure is retained when the start command cannot dispatch', async () => {
+  const app = appStore(async () => { throw { code: 'RUNTIME_PERMISSION_DENIED', message: 'Access denied', detail: 'Cannot write state file' } })
+  await assert.rejects(app.updateRuntimeCore('cpu'), error => {
+    assert.equal(error.code, 'RUNTIME_PERMISSION_DENIED')
+    assert.equal(error.diagnostics.detail, 'Cannot write state file')
+    return true
+  })
+  assert.equal(app.runtimeCoreUpdateError.code, 'RUNTIME_PERMISSION_DENIED')
+  assert.equal(app.runtimeCoreUpdateTaskId, null)
+  app.$dispose()
+})
+
+test('late start failure cannot replace an earlier worker error or the next core operation', async () => {
+  const firstDispatched = deferred()
+  const secondDispatched = deferred()
+  const firstAck = deferred()
+  let calls = 0
+  const app = appStore(async command => {
+    if (command === 'start_runtime_core_update') {
+      if (++calls === 1) { firstDispatched.resolve(); return firstAck.promise }
+      secondDispatched.resolve()
+      return true
+    }
+    if (command === 'runtime_info') return { ready: true }
+    throw new Error(`unexpected ${command}`)
+  })
+  const first = app.prepareRuntimeCoreUpdate('cpu', 'auto', '', { mode: 'update' })
+  const rejected = assert.rejects(first, error => error.code === 'RUNTIME_MANIFEST_INCOMPATIBLE')
+  await firstDispatched.promise
+  const firstTaskId = app.runtimeCoreUpdateTaskId
+  app.handleRuntimeEvent({ type: 'error', taskId: firstTaskId, payload: { code: 'RUNTIME_MANIFEST_INCOMPATIBLE', message: 'Manifest incompatible' } })
+  await rejected
+  const second = app.prepareRuntimeCoreUpdate('cpu', 'auto', '', { mode: 'sync' })
+  const secondTaskId = app.runtimeCoreUpdateTaskId
+  firstAck.reject(new Error('late IPC failure'))
+  await within(secondDispatched.promise, 'next operation after late ACK failure')
+  app.handleRuntimeEvent({ type: 'error', taskId: firstTaskId, payload: { code: 'RUNTIME_CORE_UPDATE_FAILED', message: 'late worker failure' } })
+  assert.equal(app.runtimeCoreUpdateTaskId, secondTaskId)
+  assert.equal(app.runtimeCoreUpdateStatus, 'preparing')
+  assert.equal(app.runtimeCoreUpdateError, null)
+  assert.equal(app.runtimeCoreUpdateMessage, '')
+  app.handleRuntimeEvent({ type: 'runtime_core_update_plan', taskId: secondTaskId, payload: preparedCorePlan })
+  await within(second, 'second core plan')
+  await app.checkRuntimeInfo()
+  app.$dispose()
+})
 
 test('channel changes invalidate discovery and late replies cannot overwrite the new channel', async () => {
   const stable = deferred()

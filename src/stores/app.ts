@@ -5,6 +5,7 @@ import { computed, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { createRuntimeQueryQueue, createRuntimeReadCache } from '@/utils/runtimeQueries'
 import { activeRuntimeEnvironment, supportsRuntimeCoreUpdate, supportsRuntimeManagement } from '@/utils/runtime'
+import { runtimeOperationError, type RuntimeOperationError } from '@/utils/runtimeErrors'
 import { isTauriRuntime } from '@/utils/appStore'
 import { registerWindowCloseGuard } from '@/utils/windowCloseGuards'
 import { useSettingsStore } from '@/stores/settings'
@@ -172,6 +173,7 @@ export const useAppStore = defineStore('app', () => {
   const runtimeCoreUpdateTaskId = ref<string | null>(null)
   const runtimeCoreUpdateStatus = ref<'idle' | 'preparing' | 'prepared' | 'updating' | 'success' | 'error' | 'cancelled'>('idle')
   const runtimeCoreUpdateMessage = ref('')
+  const runtimeCoreUpdateError = ref<RuntimeOperationError | null>(null)
   const runtimeCoreUpdateMode = ref<RuntimeCoreMode>('update')
   const runtimeCoreUpdateStage = ref('')
   const corePlanWaiters = new Map<string, { resolve: (plan: RuntimeCorePlan) => void; reject: (error: Error) => void }>()
@@ -626,15 +628,21 @@ export const useAppStore = defineStore('app', () => {
     runtimeCoreUpdateTaskId.value = taskId
     runtimeCoreUpdateStatus.value = 'updating'
     runtimeCoreUpdateMessage.value = ''
+    runtimeCoreUpdateError.value = null
     runtimeCoreUpdateStage.value = ''
     runtimeCoreUpdateMode.value = target.mode || (target.repairDependencies ? 'repair' : 'update')
     if (target.prepareOnly) runtimeCoreUpdateStatus.value = 'preparing'
     try {
       await startRuntimeBackground('start_runtime_core_update', taskId, { taskId, backend, mirror, locale, channel: settings.updateChannel, ...target }, target.prepareOnly ? 'runtime_core_update_plan' : 'runtime_core_update_finished')
     } catch (error) {
-      runtimeCoreUpdateStatus.value = 'error'
-      runtimeCoreUpdateMessage.value = error instanceof Error ? error.message : String(error)
-      throw error
+      const failure = runtimeOperationError(error)
+      if (runtimeCoreUpdateTaskId.value === taskId) {
+        runtimeCoreUpdateStatus.value = 'error'
+        runtimeCoreUpdateError.value = failure
+        runtimeCoreUpdateMessage.value = failure.message
+        runtimeCoreUpdateTaskId.value = null
+      }
+      throw error instanceof Error ? error : failure
     }
     return taskId
   }
@@ -656,15 +664,20 @@ export const useAppStore = defineStore('app', () => {
     runtimeCoreUpdateStatus.value = 'preparing'
     runtimeCoreUpdateMode.value = target.mode
     runtimeCoreUpdateMessage.value = ''
+    runtimeCoreUpdateError.value = null
     runtimeCoreUpdateStage.value = ''
     void startRuntimeBackground('start_runtime_core_update', taskId, {
       taskId, backend, mirror, locale, ...target, channel: settings.updateChannel, prepareOnly: true,
     }, 'runtime_core_update_plan').catch(error => {
+      const failure = runtimeOperationError(error)
       corePlanWaiters.delete(taskId)
-      runtimeCoreUpdateStatus.value = 'error'
-      runtimeCoreUpdateMessage.value = error instanceof Error ? error.message : String(error)
-      runtimeCoreUpdateTaskId.value = null
-      rejectPlan(error instanceof Error ? error : new Error(String(error)))
+      if (runtimeCoreUpdateTaskId.value === taskId) {
+        runtimeCoreUpdateStatus.value = 'error'
+        runtimeCoreUpdateError.value = failure
+        runtimeCoreUpdateMessage.value = failure.message
+        runtimeCoreUpdateTaskId.value = null
+      }
+      rejectPlan(failure)
     })
     return completion
   }
@@ -820,16 +833,20 @@ export const useAppStore = defineStore('app', () => {
         if (event?.type === 'runtime_core_update_stage') runtimeCoreUpdateStage.value = event.payload?.stage || ''
         runtimeCoreUpdateMessage.value = event.payload?.message || event.payload?.stage || ''
       } else if (event?.type === 'error') {
+        const failure = runtimeOperationError(event.payload || 'Runtime core update failed')
         runtimeCoreUpdateStatus.value = 'error'
-        runtimeCoreUpdateMessage.value = event.payload?.message || 'Runtime core update failed'
+        runtimeCoreUpdateError.value = failure
+        runtimeCoreUpdateMessage.value = failure.message
         runtimeCoreUpdateTaskId.value = null
         corePlanWaiters.delete(taskId)
-        waiter?.reject(new Error(runtimeCoreUpdateMessage.value))
+        waiter?.reject(failure)
       } else if (event?.type === 'task_cancelled') {
         runtimeCoreUpdateStatus.value = 'cancelled'
+        runtimeCoreUpdateError.value = null
+        runtimeCoreUpdateMessage.value = ''
         runtimeCoreUpdateTaskId.value = null
         corePlanWaiters.delete(taskId)
-        waiter?.reject(new Error('Runtime operation cancelled'))
+        waiter?.reject(runtimeOperationError({ code: 'TASK_CANCELLED', message: 'Runtime operation cancelled' }))
         void checkRuntimeInfo().catch(() => {})
       }
       return
@@ -903,6 +920,7 @@ export const useAppStore = defineStore('app', () => {
     runtimeCoreUpdateTaskId,
     runtimeCoreUpdateStatus,
     runtimeCoreUpdateMessage,
+    runtimeCoreUpdateError,
     runtimeCoreUpdateMode,
     runtimeCoreUpdateStage,
     prepareRuntimeCoreUpdate,

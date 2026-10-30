@@ -28,6 +28,20 @@ pub fn metadata_name(channel: &str, generation: &str) -> String {
     format!("{channel}-{generation}-{}-update.json", platform_slug())
 }
 
+pub fn repair_manifest_endpoints(version: &str, filename: &str, provider: UpdateProvider) -> AppResult<Vec<Url>> {
+    Version::parse(version)
+        .map_err(|error| AppError::Worker(format!("Invalid repair version: {error}")))?;
+    match provider {
+        UpdateProvider::Github => [format!("v{version}"), version.to_string()]
+            .into_iter()
+            .map(|tag| Url::parse(&format!("{GITHUB_ROOT}/{tag}/{filename}"))
+                .map_err(|error| AppError::Worker(error.to_string())))
+            .collect(),
+        UpdateProvider::Modelscope => Ok(vec![mirror_url(version, filename)]),
+        UpdateProvider::Custom => Err(AppError::Worker("Application repair requires an official release source".into())),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateSource {
@@ -246,6 +260,18 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn repair_metadata_is_pinned_to_the_official_installed_release() {
+        let name = "stable-v1-macos-arm64-update.json";
+        let github = repair_manifest_endpoints("1.2.3", name, UpdateProvider::Github).unwrap();
+        assert_eq!(github[0].as_str(), format!("{GITHUB_ROOT}/v1.2.3/{name}"));
+        assert_eq!(github[1].as_str(), format!("{GITHUB_ROOT}/1.2.3/{name}"));
+        let mirror = repair_manifest_endpoints("1.2.3", name, UpdateProvider::Modelscope).unwrap();
+        assert_eq!(mirror[0], mirror_url("1.2.3", name));
+        assert!(repair_manifest_endpoints("../updater", name, UpdateProvider::Github).is_err());
+        assert!(repair_manifest_endpoints("1.2.3", name, UpdateProvider::Custom).is_err());
+    }
 
     #[test]
     fn macos_update_sources_require_the_matching_archive_and_architecture() {

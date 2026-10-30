@@ -112,6 +112,101 @@ pub struct ManagedUpdateInfo {
     pub source: UpdateProvider,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationIntegrity {
+    pub supported: bool,
+    pub valid: Option<bool>,
+    pub repair_supported: bool,
+    pub detail: Option<String>,
+}
+
+pub fn check_application_integrity() -> ApplicationIntegrity {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        let result = crate::macos_update::check_integrity();
+        return ApplicationIntegrity {
+            supported: true,
+            valid: Some(result.is_ok()),
+            repair_supported: !cfg!(feature = "vst-lab") && update_supported(),
+            detail: result.err().map(|error| error.to_string()),
+        };
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    ApplicationIntegrity { supported: false, valid: None, repair_supported: false, detail: None }
+}
+
+fn validate_repair_version(installed: &str, offered: &str) -> AppResult<()> {
+    Version::parse(installed)
+        .map_err(|error| AppError::Worker(format!("Invalid installed version: {error}")))?;
+    if installed != offered {
+        return Err(AppError::Worker("The repair package does not match the installed application version".into()));
+    }
+    Ok(())
+}
+
+pub async fn repair(app: &AppHandle, source: UpdateSource) -> AppResult<()> {
+    if cfg!(feature = "vst-lab") || !cfg!(all(target_os = "macos", target_arch = "aarch64")) || !update_supported() {
+        return Err(AppError::Worker("Application repair is available only for official macOS installations".into()));
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        ensure_update_idle(&app.state::<AppState>(), app.webview_windows().keys().any(|label| label != "main"))?;
+        let checked = check_repair_sources(app, source).await?;
+        validate_repair_version(env!("CARGO_PKG_VERSION"), &checked.update.version)?;
+        // This is the complete, signed bundle for the running version. The
+        // cross-version capability flag must not prevent restoring that bundle.
+        return crate::macos_update::start(app, &checked.update, checked.provider, source).await;
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    {
+        let _ = (app, source);
+        Err(AppError::Worker("Application repair is unavailable on this platform".into()))
+    }
+}
+
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
+async fn check_repair_sources(app: &AppHandle, source: UpdateSource) -> AppResult<CheckedUpdate> {
+    let version = env!("CARGO_PKG_VERSION");
+    // Every release publishes this manifest, including numeric versions marked
+    // as prereleases. The exact version check still prevents channel switching.
+    let channel = UpdateChannel::Prerelease;
+    let filename = update_sources::metadata_name(channel.endpoint_name(), UPDATE_GENERATION);
+    let mut requests = Vec::new();
+    for provider in source.providers() {
+        let app = app.clone();
+        let provider = *provider;
+        let endpoints = update_sources::repair_manifest_endpoints(version, &filename, provider)?;
+        requests.push(tauri::async_runtime::spawn(async move {
+            let mut errors = Vec::new();
+            for endpoint in endpoints {
+                match check_endpoint(&app, endpoint, channel, provider, Some(version), true).await {
+                    Ok(Some(checked)) => return Ok(checked),
+                    Ok(None) => errors.push("The current release package is unavailable".to_string()),
+                    Err(error) => errors.push(error.to_string()),
+                }
+            }
+            Err(AppError::Worker(errors.join("; ")))
+        }));
+    }
+    let mut best: Option<CheckedUpdate> = None;
+    let mut errors = Vec::new();
+    for request in requests {
+        match request.await {
+            Ok(Ok(checked)) => {
+                if best.as_ref().map_or(true, |current| checked.elapsed < current.elapsed) {
+                    best = Some(checked);
+                }
+            }
+            Ok(Err(error)) => errors.push(error.to_string()),
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+    best.ok_or_else(|| AppError::Worker(format!(
+        "APPLICATION_REPAIR_UNAVAILABLE: The signed package for the installed version could not be retrieved. Install it from its release page. {}", errors.join("; ")
+    )))
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct UpdateTransaction {
     backup_dir: String,
@@ -405,7 +500,7 @@ async fn check_sources(
 ) -> AppResult<Option<CheckedUpdate>> {
     let endpoint = resolve_update_endpoint(channel, endpoint_override.clone())?;
     if endpoint_override.as_deref().is_some_and(|value| !value.trim().is_empty()) {
-        return check_endpoint(app, endpoint, channel, UpdateProvider::Custom, None).await;
+        return check_endpoint(app, endpoint, channel, UpdateProvider::Custom, None, false).await;
     }
     let mut requests = Vec::new();
     for provider in source.providers() {
@@ -418,9 +513,9 @@ async fn check_sources(
                 let client = source_client(&app)?;
                 let filename = update_sources::metadata_name(channel.endpoint_name(), UPDATE_GENERATION);
                 let manifest = update_sources::modelscope_manifest(&client, &filename).await?;
-                check_endpoint(&app, manifest.endpoint, channel, provider, Some(&manifest.version)).await?
+                check_endpoint(&app, manifest.endpoint, channel, provider, Some(&manifest.version), false).await?
             } else {
-                check_endpoint(&app, github, channel, provider, None).await?
+                check_endpoint(&app, github, channel, provider, None, false).await?
             };
             Ok::<_, AppError>(checked.map(|mut checked| { checked.elapsed = started.elapsed(); checked }))
         }));
@@ -454,16 +549,23 @@ async fn check_endpoint(
     channel: UpdateChannel,
     provider: UpdateProvider,
     expected_version: Option<&str>,
+    repair: bool,
 ) -> AppResult<Option<CheckedUpdate>> {
-    let builder = app.updater_builder().endpoints(vec![endpoint])
+    let mut builder = app.updater_builder().endpoints(vec![endpoint])
         .map_err(|error| AppError::Worker(error.to_string()))?;
+    if repair {
+        builder = builder.version_comparator(|current, remote| current == remote.version);
+    }
     let updater = configure_updater(app, builder.timeout(UPDATE_CHECK_TIMEOUT))?
         .build().map_err(|error| AppError::Worker(error.to_string()))?;
     let started = Instant::now();
     let checked = updater.check().await.map_err(updater_request_error)?;
     checked.map(|mut update| {
+        if repair {
+            validate_repair_version(env!("CARGO_PKG_VERSION"), &update.version)?;
+        }
         if expected_version.is_some_and(|expected| expected != update.version) {
-            return Err(AppError::Worker("The ModelScope update manifest does not match its release directory".into()));
+            return Err(AppError::Worker("The update manifest does not match its release directory".into()));
         }
         if provider != UpdateProvider::Custom {
             validate_update_channel(channel, &update.version, &update.raw_json)?;
@@ -1710,6 +1812,14 @@ mod recovery_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn repair_rejects_upgrade_downgrade_and_build_substitution() {
+        assert!(super::validate_repair_version("1.2.3", "1.2.3").is_ok());
+        for offered in ["1.2.4", "1.2.2", "1.2.3+other", "1.2.3-rc.1", "invalid"] {
+            assert!(super::validate_repair_version("1.2.3", offered).is_err());
+        }
+    }
+
     #[test]
     fn application_update_rejects_native_tasks_and_additional_windows() {
         let state = crate::state::AppState::new();

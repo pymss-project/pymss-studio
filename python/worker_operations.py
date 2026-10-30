@@ -8,6 +8,7 @@ emits ``operation_result`` as its terminal event (Rust treats it like
 
 from __future__ import annotations
 
+import math
 import re
 import shutil
 import traceback
@@ -103,6 +104,10 @@ def _serialize_output(name: str, value: Any, output_dir: Path) -> Any:
         return {"kind": "audio_file", "path": str(path), "sampleRate": value.sample_rate}
     if isinstance(value, np.generic):
         value = value.item()
+    if isinstance(value, float) and not math.isfinite(value):
+        # Silence can legitimately measure -inf LUFS. JSON has no non-finite
+        # numbers, so preserve the meaning without breaking the native bridge.
+        value = "NaN" if math.isnan(value) else "Infinity" if value > 0 else "-Infinity"
     if value is None or isinstance(value, (str, int, float, bool)):
         return {"kind": "scalar", "value": value}
     if isinstance(value, np.ndarray):

@@ -445,9 +445,17 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
     def test_newer_or_unknown_manifest_is_rejected_without_repair(self):
         for value in ("2026.10.1", "legacy", ""):
             with self.subTest(value=value):
-                result, commands, *_ = self.run_update(manifest_version=value)
+                result, commands, _env, _python, events = self.run_update(manifest_version=value)
                 self.assertNotEqual(result, 0)
                 self.assertEqual(commands, [])
+                error = events[-1]["payload"]
+                self.assertEqual(error["code"], "RUNTIME_MANIFEST_INCOMPATIBLE")
+                self.assertTrue(error["recoverable"])
+                self.assertEqual(error["manifestStatus"], "newer" if value == "2026.10.1" else "unknown")
+                self.assertEqual(error["runtimeManifestVersion"], value)
+                self.assertEqual(error["appManifestVersion"], "2026.09.3")
+                self.assertIn("Update Pymss Studio first", error["message"])
+                self.assertEqual(json.loads(self.active.read_text(encoding="utf-8"))["manifestVersion"], value)
 
     def test_repair_accepts_legacy_manifest_and_rebuilds_overlay(self):
         result, commands, *_ = self.run_update(manifest_version="", repair=True)

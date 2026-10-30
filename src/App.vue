@@ -189,8 +189,10 @@ function showManualUpdatePrompt() {
   manualUpdateModalVisible.value = true
 }
 
-async function openManualUpdate() {
-  const url = updates.manualInstallUrl || 'https://github.com/pymss-project/pymss-studio/releases/latest'
+async function openManualUpdate(repair = false) {
+  const url = repair
+    ? `https://github.com/pymss-project/pymss-studio/releases/tag/v${encodeURIComponent(app.buildInfoVersion)}`
+    : updates.manualInstallUrl || 'https://github.com/pymss-project/pymss-studio/releases/latest'
   manualUpdateError.value = ''
   try {
     await open(url)
@@ -415,7 +417,7 @@ const themeOverrides = computed(() => {
             <n-button secondary @click="manualUpdateModalVisible = false">
               {{ t('common.close') }}
             </n-button>
-            <n-button type="primary" @click="openManualUpdate">
+            <n-button type="primary" @click="openManualUpdate()">
               {{ t('settings.updateOpenGitHub') }}
             </n-button>
           </template>
@@ -445,9 +447,9 @@ const themeOverrides = computed(() => {
           <div class="update-install-panel">
             <div class="update-install-panel__head">
               <strong>
-                {{ updates.status === 'restart-required' ? t('settings.updateRestartRequiredTitle') : updates.status === 'failed' ? t('settings.updateInstallFailed') : updates.status === 'installing' ? t('settings.updateInstalling') : t('settings.updateDownloading') }}
+                {{ updates.repairing ? t(updates.status === 'failed' ? 'settings.applicationRepairFailed' : 'settings.applicationRepairProgress') : updates.status === 'restart-required' ? t('settings.updateRestartRequiredTitle') : updates.status === 'failed' ? t('settings.updateInstallFailed') : updates.status === 'installing' ? t('settings.updateInstalling') : t('settings.updateDownloading') }}
               </strong>
-              <span>{{ updates.status === 'restart-required' ? t('settings.updateRestartRequiredHint') : updates.status === 'failed' ? t('settings.updateInstallFailedHint') : t('settings.updateInstallOverlayHint') }}</span>
+              <span>{{ updates.repairing ? t('settings.applicationRepairHint') : updates.status === 'restart-required' ? t('settings.updateRestartRequiredHint') : updates.status === 'failed' ? t('settings.updateInstallFailedHint') : t('settings.updateInstallOverlayHint') }}</span>
             </div>
             <n-progress
               v-if="updates.status !== 'failed' && updates.status !== 'restart-required'"
@@ -486,7 +488,7 @@ const themeOverrides = computed(() => {
             </section>
             <div v-if="updates.status === 'failed'" class="update-install-panel__actions">
               <n-button secondary @click="updates.dismissInstallError()">{{ t('common.close') }}</n-button>
-              <n-button type="primary" @click="openManualUpdate">{{ t('settings.updateOpenGitHub') }}</n-button>
+              <n-button type="primary" @click="openManualUpdate(updates.repairing)">{{ t('settings.updateOpenGitHub') }}</n-button>
             </div>
             <div v-else-if="updates.status === 'restart-required'" class="update-install-panel__actions">
               <n-button secondary @click="updates.closeForUpdate()">{{ t('settings.updateCloseApplication') }}</n-button>

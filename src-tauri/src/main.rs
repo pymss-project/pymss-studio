@@ -197,6 +197,8 @@ fn main() {
             commands::app_cmd::start_managed_update,
             commands::app_cmd::confirm_managed_update_startup,
             commands::app_cmd::get_managed_update_state,
+            commands::app_cmd::check_application_integrity,
+            commands::app_cmd::start_application_repair,
             commands::app_cmd::debug_runtime_override_active,
             commands::app_cmd::debug_runtime_pointers,
             commands::app_cmd::debug_runtime_restore_file,

@@ -65,7 +65,10 @@
     Object.keys(vars).forEach(function (key) {
       if (/^--[a-z0-9-]+$/i.test(key)) root.style.setProperty(key, vars[key])
     })
-    if (params.colorMode) root.dataset.mode = params.colorMode
+    if (params.colorMode === 'light' || params.colorMode === 'dark') {
+      root.dataset.mode = params.colorMode
+      root.style.colorScheme = params.colorMode
+    }
     if (params.fontFamily) root.style.setProperty('--font-sans', params.fontFamily)
     document.dispatchEvent(new CustomEvent('pymss:theme', { detail: params }))
   }

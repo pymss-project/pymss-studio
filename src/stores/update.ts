@@ -36,6 +36,13 @@ type ManagedUpdate = {
   source?: 'github' | 'modelscope' | 'custom'
 }
 
+type ApplicationIntegrity = {
+  supported: boolean
+  valid: boolean | null
+  repairSupported: boolean
+  detail?: string | null
+}
+
 type UpdateDownloadEvent =
   | { event: 'SourceSelected'; data: { source: 'github' | 'modelscope' | 'custom'; fallback?: boolean } }
   | { event: 'Started'; data: { contentLength?: number | null } }
@@ -76,6 +83,11 @@ export const useUpdateStore = defineStore('update', () => {
   const restartRequired = ref(false)
   const initialized = ref(false)
   const autoCheckCompleted = ref(false)
+  const integrity = ref<ApplicationIntegrity | null>(null)
+  const integrityChecking = ref(false)
+  const integrityError = ref('')
+  const repairing = ref(false)
+  let integrityInFlight: Promise<ApplicationIntegrity | null> | null = null
   let updateCheckInFlight: Promise<ManagedUpdate | null> | null = null
   let initializeInFlight: Promise<void> | null = null
   let unlistenProgress: UnlistenFn | undefined
@@ -85,7 +97,7 @@ export const useUpdateStore = defineStore('update', () => {
   let exitInFlight: Promise<boolean> | null = null
 
   const hasUpdate = computed(() => availableUpdate.value !== null)
-  const isBusy = computed(() => restartRequired.value || ['checking', 'downloading', 'installing'].includes(status.value))
+  const isBusy = computed(() => integrityChecking.value || restartRequired.value || ['checking', 'downloading', 'installing'].includes(status.value))
   const isInstallingUpdate = computed(() => restartRequired.value || ['downloading', 'installing'].includes(status.value))
   const isInstallOverlayVisible = computed(() => isInstallingUpdate.value || installErrorVisible.value)
   const installationBlockedReason = computed(() => {
@@ -276,6 +288,7 @@ export const useUpdateStore = defineStore('update', () => {
 
   async function checkForUpdates(manual = false) {
     if (!isMainTaskOwner()) return null
+    if (installInFlight || isInstallingUpdate.value) return availableUpdate.value
     if (restartRequired.value) return availableUpdate.value
     const app = useAppStore()
     const settings = useSettingsStore()
@@ -283,6 +296,8 @@ export const useUpdateStore = defineStore('update', () => {
     if (!updateCheckInFlight) {
       updateCheckInFlight = (async () => {
         try {
+          repairing.value = false
+          installErrorVisible.value = false
           if (!app.buildInfoUpdateSupported) {
             resetResult()
             status.value = 'idle'
@@ -291,6 +306,8 @@ export const useUpdateStore = defineStore('update', () => {
             return null
           }
           status.value = 'checking'
+          const platform = String(app.runtimeInfo?.platform || app.envInfo?.platform || (typeof navigator !== 'undefined' ? navigator.platform : ''))
+          if (/mac|darwin/i.test(platform)) void checkIntegrity()
           error.value = ''
           installFailed.value = false
           const endpointOverride = settings.developerMode ? settings.updateEndpointOverride.trim() : ''
@@ -380,17 +397,47 @@ export const useUpdateStore = defineStore('update', () => {
     return requestUpdateExit(true)
   }
 
-  async function downloadAndInstall() {
+  async function checkIntegrity() {
+    if (!isMainTaskOwner() || !isTauriRuntime() || isInstallingUpdate.value) return integrity.value
+    if (!integrityInFlight) {
+      integrityChecking.value = true
+      integrityError.value = ''
+      integrityInFlight = invoke<ApplicationIntegrity>('check_application_integrity')
+        .then(report => { integrity.value = report; return report })
+        .catch(err => {
+          integrityError.value = err instanceof Error ? err.message : String(err)
+          return null
+        })
+        .finally(() => { integrityChecking.value = false; integrityInFlight = null })
+    }
+    return integrityInFlight
+  }
+
+  function downloadAndInstall() {
+    return installApplication(false)
+  }
+
+  function repairApplication() {
+    return installApplication(true)
+  }
+
+  async function installApplication(repair: boolean) {
+    if (!isMainTaskOwner()) throw new Error('Application installation is available only in the main window.')
     if (restartRequired.value) return retryUpdateExit()
+    if (installInFlight || ['checking', 'downloading', 'installing'].includes(status.value) || integrityChecking.value) throw new Error('An application operation is already in progress.')
     if (installationBlockedReason.value) throw new Error(installationBlockedReason.value)
     const update = availableUpdate.value
-    if (!update) throw new Error('Update package is not available. Check for updates again.')
-    if (!update.autoUpdateSupported || update.requiresManualInstall) {
+    if (repair && (!useAppStore().buildInfoUpdateSupported || !integrity.value?.repairSupported)) {
+      throw new Error('Application repair is unavailable for this installation.')
+    }
+    if (!repair && !update) throw new Error('Update package is not available. Check for updates again.')
+    if (!repair && update && (!update.autoUpdateSupported || update.requiresManualInstall)) {
       throw new Error(update.updateMessage || 'This update requires manual installation from its release page.')
     }
+    repairing.value = repair
     status.value = 'downloading'
     resetDownloadProgress()
-    appendDownloadLog(`Preparing update ${update.currentVersion} -> ${update.version}`)
+    appendDownloadLog(repair ? `Preparing application repair ${useAppStore().buildInfoVersion}` : `Preparing update ${update!.currentVersion} -> ${update!.version}`)
     error.value = ''
     installErrorVisible.value = false
     installFailed.value = false
@@ -398,20 +445,21 @@ export const useUpdateStore = defineStore('update', () => {
     try {
       const settings = useSettingsStore()
       const endpointOverride = settings.developerMode ? settings.updateEndpointOverride.trim() : ''
-      await invoke('start_managed_update', {
+      if (repair) await invoke('start_application_repair', { source: settings.updateSource || 'auto' })
+      else await invoke('start_managed_update', {
         channel: settings.updateChannel,
         endpointOverride: endpointOverride || null,
-        expectedVersion: update.version,
+        expectedVersion: update!.version,
         source: settings.updateSource || 'auto',
       })
       status.value = 'installing'
-      if (update.distribution === 'macosApp' || update.distribution === 'appImage') {
+      if (repair || update!.distribution === 'macosApp' || update!.distribution === 'appImage') {
         // Unix updaters confirm the replacement has started before exiting this process.
         return true
       }
       appendDownloadLog('Update package staged; restarting application')
       restartRequired.value = true
-      lastAcceptedVersion.value = update.version
+      lastAcceptedVersion.value = update!.version
       deferredVersion.value = ''
       deferredAt.value = ''
       installErrorVisible.value = false
@@ -428,7 +476,11 @@ export const useUpdateStore = defineStore('update', () => {
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err)
       error.value = detail.includes('APPLICATION_UPDATE_BUSY:') ? String(i18n.global.t('settings.updateTasksBusy'))
-        : detail.includes('APPLICATION_UPDATE_WINDOWS:') ? String(i18n.global.t('settings.updateCloseEditors')) : detail
+        : detail.includes('APPLICATION_UPDATE_WINDOWS:') ? String(i18n.global.t('settings.updateCloseEditors'))
+        : detail.includes('MACOS_UPDATE_SIGNATURE_INVALID:') ? String(i18n.global.t('settings.updateMacosSignatureInvalid'))
+        : detail.includes('MACOS_UPDATE_ROLLBACK_FAILED:') ? String(i18n.global.t('settings.updateRollbackFailed'))
+        : detail.includes('MACOS_UPDATE_ROLLED_BACK:') ? String(i18n.global.t('settings.updateRolledBack'))
+        : detail.includes('APPLICATION_REPAIR_UNAVAILABLE:') ? String(i18n.global.t('settings.applicationRepairUnavailable')) : detail
       appendDownloadLog(`Update failed: ${detail}`)
       status.value = 'failed'
       installErrorVisible.value = true
@@ -442,6 +494,7 @@ export const useUpdateStore = defineStore('update', () => {
   function dismissInstallError() {
     if (restartRequired.value) return
     installErrorVisible.value = false
+    repairing.value = false
   }
 
   async function deferUntilNextLaunch() {
@@ -478,6 +531,12 @@ export const useUpdateStore = defineStore('update', () => {
   }
 
   return {
+    integrity,
+    integrityChecking,
+    integrityError,
+    repairing,
+    checkIntegrity,
+    repairApplication,
     status,
     currentVersion,
     latestVersion,

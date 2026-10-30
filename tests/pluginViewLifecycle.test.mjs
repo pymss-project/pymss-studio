@@ -25,7 +25,7 @@ const names = new Set([
   'allowed', 'handleCall', 'postToFrame', 'onWindowMessage', 'syncBusy',
   'pluginSettingsKey', 'plainObject', 'boundedPath', 'boundedPaths',
   'cancelOwned', 'settleRun', 'closeRunningOperations', 'startBackground', 'workerError', 'isAllowedExternalUrl',
-  'pushTheme',
+  'pushTheme', 'syncOverlayLayout',
 ])
 const snippets = source.statements.flatMap(node => {
   if (ts.isFunctionDeclaration(node) && names.has(node.name?.text)) return [node.getText(source)]
@@ -173,6 +173,26 @@ test('a closed host ignores late resize notifications', () => {
   controller.unmount()
   controller.onWindowMessage({ source: state.frame.value.contentWindow, data: { jsonrpc: '2.0', method: 'pymss.resize', params: { height: 960 } } })
   assert.equal(state.measuredHeight.value, 640)
+})
+
+test('authorized log overlays preserve the form position and track host layout changes', () => {
+  let bounds = { left: 304, top: 156, width: 910 }
+  const { state, controller, messages } = host({ permissions: () => ['ui.overlay'] })
+  state.frame.value.parentElement = { getBoundingClientRect: () => bounds }
+  const overlay = open => controller.onWindowMessage({ source: state.frame.value.contentWindow,
+    data: { jsonrpc: '2.0', method: 'pymss.overlay', params: { open } } })
+  overlay(true)
+  assert.equal(state.overlayOpen.value, true)
+  assert.deepEqual(messages.at(-1), { jsonrpc: '2.0', method: 'host.overlay', params: { open: true, bounds } })
+  bounds = { left: 240, top: 72, width: 600 }
+  overlay(true)
+  assert.deepEqual(messages.at(-1).params.bounds, bounds)
+  overlay(false)
+  assert.equal(state.overlayOpen.value, false)
+  assert.deepEqual(messages.at(-1).params, { open: false })
+  state.permissions = () => []
+  overlay(true)
+  assert.equal(state.overlayOpen.value, false)
 })
 
 test('theme forwarding includes the legacy tool panel tokens', () => {

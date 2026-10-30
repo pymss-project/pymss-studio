@@ -153,11 +153,15 @@ impl Session {
         loop {
             match read_status(&session.directory) {
                 Ok(Some(status)) if status == "installed" => return Ok(session),
-                Ok(Some(status)) if matches!(status.as_str(), "failed" | "aborted") => {
+                Ok(Some(status)) if matches!(status.as_str(), "failed" | "aborted" | "rollback-failed") => {
                     let _ = signal(&session.directory, "observed");
                     let _ = session.child.wait();
                     session.finished = true;
-                    return Err(session.error("macOS update authorization or installation failed"));
+                    return Err(session.error(if status == "rollback-failed" {
+                        "MACOS_UPDATE_ROLLBACK_FAILED: The previous application could not be restored; its backup has been retained"
+                    } else {
+                        "macOS update authorization or installation failed"
+                    }));
                 }
                 Ok(_) => (),
                 Err(error) => {
@@ -191,16 +195,18 @@ impl Session {
         let started = Instant::now();
         loop {
             if let Some(status) = read_status(&self.directory)? {
-                if matches!(status.as_str(), "committed" | "aborted" | "failed") {
+                if matches!(status.as_str(), "committed" | "aborted" | "failed" | "rollback-failed") {
                     let _ = signal(&self.directory, "observed");
                     let exit_status = self.child.wait()?;
                     self.finished = true;
                     return if status == expected && exit_status.success() {
                         Ok(())
                     } else {
-                        Err(self.error(
-                            "The authorized update could not complete the requested operation",
-                        ))
+                        Err(self.error(if status == "rollback-failed" {
+                            "MACOS_UPDATE_ROLLBACK_FAILED: The previous application could not be restored; its backup has been retained"
+                        } else {
+                            "The authorized update could not complete the requested operation"
+                        }))
                     };
                 }
             }

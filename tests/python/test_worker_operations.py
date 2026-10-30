@@ -320,6 +320,18 @@ class OperationOutputTests(unittest.TestCase):
             self.assertEqual(result["scores"], {"kind": "array", "shape": [3], "dtype": "float32"})
             self.assertEqual(result["metadata"], {"empty": None, "level": 0.5, "file": "audio.wav"})
 
+    def test_nonfinite_measurements_remain_valid_json_with_their_meaning_preserved(self):
+        import numpy as np
+
+        result = worker_operations._serialize_output("report", {
+            "integrated_lufs": float("-inf"),
+            "levels": [np.float32(float("inf")), float("nan"), -27.46],
+        }, Path("unused"))
+        wire = json.dumps(result, allow_nan=False)
+        self.assertEqual(json.loads(wire)["value"], {
+            "integrated_lufs": "-Infinity", "levels": ["Infinity", "NaN", -27.46],
+        })
+
     def test_repeated_and_concurrent_outputs_preserve_earlier_audio(self):
         import soundfile as sf
 

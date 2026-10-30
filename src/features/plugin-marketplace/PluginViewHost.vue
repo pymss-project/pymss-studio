@@ -358,6 +358,16 @@ function pushTheme() {
 
 watch(locale, pushTheme)
 
+function syncOverlayLayout() {
+  if (!overlayOpen.value) return
+  const bounds = frame.value?.parentElement?.getBoundingClientRect()
+  if (!bounds) return
+  postToFrame({ jsonrpc: '2.0', method: 'host.overlay', params: {
+    open: true,
+    bounds: { left: bounds.left, top: bounds.top, width: bounds.width },
+  } })
+}
+
 function onWindowMessage(event: MessageEvent) {
   if (disposed) return
   const frameWindow = frame.value?.contentWindow
@@ -365,7 +375,11 @@ function onWindowMessage(event: MessageEvent) {
   const data = event.data
   if (!data || typeof data !== 'object' || data.jsonrpc !== '2.0') return
   if (data.method === 'pymss.overlay') {
-    if (allowed('ui.overlay') && typeof data.params?.open === 'boolean') overlayOpen.value = data.params.open
+    if (allowed('ui.overlay') && typeof data.params?.open === 'boolean') {
+      overlayOpen.value = data.params.open
+      if (overlayOpen.value) syncOverlayLayout()
+      else postToFrame({ jsonrpc: '2.0', method: 'host.overlay', params: { open: false } })
+    }
     return
   }
   if (data.method === 'pymss.resize') {
@@ -403,6 +417,8 @@ let themeObserver: MutationObserver | undefined
 
 onMounted(async () => {
   window.addEventListener('message', onWindowMessage)
+  window.addEventListener('resize', syncOverlayLayout)
+  window.addEventListener('scroll', syncOverlayLayout, true)
   // theme.ts flips .dark-theme/.light-theme on <html> and rewrites token
   // properties via element style; observe class + inline style so plugin
   // pages follow light/dark and accent changes without reloading.
@@ -467,6 +483,8 @@ onBeforeUnmount(() => {
   unregisterCloseGuard()
   disposed = true
   window.removeEventListener('message', onWindowMessage)
+  window.removeEventListener('resize', syncOverlayLayout)
+  window.removeEventListener('scroll', syncOverlayLayout, true)
   unlistenWorker?.()
   themeObserver?.disconnect()
   for (const [requestId, handlers] of runRequests) {
@@ -497,4 +515,7 @@ onBeforeUnmount(() => {
 .plugin-view-host { min-width: 0; }
 .plugin-view-frame--overlay { position: fixed; inset: 0; z-index: 3000; width: 100vw !important; }
 .plugin-view-frame { display: block; width: 100%; border: 0; background: transparent; }
+/* Match the child document so the browser keeps its canvas transparent. */
+.plugin-view-frame { color-scheme: light; }
+:global(.dark-theme .plugin-view-frame) { color-scheme: dark; }
 </style>

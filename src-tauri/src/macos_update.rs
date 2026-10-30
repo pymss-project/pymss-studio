@@ -142,18 +142,27 @@ fn extract_bundle(archive: &Path, destination: &Path) -> AppResult<PathBuf> {
     Ok(bundle)
 }
 
-// Filesystems without directory exchange support still install the validated
-// staged bundle directly. No application backup or rollback is created.
+// Retain the original until startup succeeds, including on filesystems without
+// directory exchange support. A failed second rename restores the original.
 fn replace_bundle_with(
     target: &Path,
     staged: &Path,
+    backup: &Path,
     mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
 ) -> AppResult<()> {
     if !staged.is_dir() {
         return Err(failure("The staged application is unavailable"));
     }
-    fs::remove_dir_all(target)?;
-    rename(staged, target)?;
+    if backup.exists() {
+        return Err(failure("The application backup path is already occupied"));
+    }
+    rename(target, backup)?;
+    if let Err(error) = rename(staged, target) {
+        if let Err(recovery) = rename(backup, target) {
+            return Err(failure(format!("Application replacement failed: {error}; restoring the previous application failed: {recovery}. Backup retained at {}", backup.display())));
+        }
+        return Err(error.into());
+    }
     Ok(())
 }
 
@@ -314,7 +323,7 @@ mod platform {
         Ok(String::from_utf8_lossy(&result.stdout).trim().to_string())
     }
 
-    fn validate_bundle(bundle: &Path, version: Option<&str>) -> AppResult<()> {
+    fn validate_bundle_identity(bundle: &Path, version: Option<&str>) -> AppResult<()> {
         if fs::symlink_metadata(bundle)?.file_type().is_symlink()
             || plist(bundle, "CFBundleIdentifier")? != BUNDLE_ID
             || version.is_some_and(|version| {
@@ -345,15 +354,50 @@ mod platform {
                 "The application does not contain an Apple Silicon executable",
             ));
         }
+        Ok(())
+    }
+
+    fn verify_bundle_signature(bundle: &Path) -> AppResult<()> {
         let output = Command::new("/usr/bin/codesign")
-            .args(["--verify", "--deep", "--strict"])
+            .args(["--verify", "--deep", "--strict", "--verbose=4"])
             .arg(bundle)
             .output()?;
         if !output.status.success() {
+            let diagnostic: String = String::from_utf8_lossy(&output.stderr)
+                .trim()
+                .chars()
+                .take(8192)
+                .collect();
             return Err(failure(format!(
-                "The macOS application code signature is invalid: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                "The macOS application code signature is invalid: {diagnostic}"
             )));
+        }
+        Ok(())
+    }
+
+    fn validate_bundle(bundle: &Path, version: Option<&str>) -> AppResult<()> {
+        validate_bundle_identity(bundle, version)?;
+        verify_bundle_signature(bundle)
+    }
+
+    pub fn check_integrity() -> AppResult<()> {
+        validate_bundle(&current_bundle()?, Some(env!("CARGO_PKG_VERSION")))
+    }
+
+    fn validate_update_bundle(bundle: &Path, version: &str) -> AppResult<()> {
+        validate_bundle_identity(bundle, Some(version))?;
+        verify_bundle_signature(bundle)
+            .map_err(|error| failure(format!("MACOS_UPDATE_SIGNATURE_INVALID: {error}")))
+    }
+
+    fn validate_installed_bundle(bundle: &Path, version: &str) -> AppResult<()> {
+        validate_bundle_identity(bundle, Some(version))?;
+        // The installed resources are being replaced, not used as update input.
+        // A broken old resource seal must not prevent installing a verified release.
+        if let Err(error) = verify_bundle_signature(bundle) {
+            crate::session_log::early("WARN", "update.diagnostic", &format!(
+                "The installed application signature could not be verified; the replacement will require full verification: {error}"
+            ));
         }
         Ok(())
     }
@@ -466,12 +510,37 @@ mod platform {
         }
     }
 
+    #[derive(Debug)]
+    struct WritableInstallation {
+        target: PathBuf,
+        directory: PathBuf,
+        backup: PathBuf,
+    }
+
+    impl WritableInstallation {
+        fn commit(&self) -> AppResult<()> {
+            fs::remove_dir_all(&self.directory)?;
+            Ok(())
+        }
+
+        fn rollback(&self) -> AppResult<()> {
+            let rejected = self.directory.join("rejected.app");
+            replace_bundle_with(&self.target, &self.backup, &rejected, |from, to| fs::rename(from, to))
+                .map_err(|error| failure(format!("MACOS_UPDATE_ROLLBACK_FAILED: {error}. Previous application retained at {}", self.backup.display())))?;
+            // Restoration has succeeded. Cleanup must not turn it into failure.
+            if let Err(error) = fs::remove_dir_all(&self.directory) {
+                crate::session_log::early("WARN", "update.diagnostic", &format!("The previous application was restored, but staging cleanup failed: {error}"));
+            }
+            Ok(())
+        }
+    }
+
     fn install_writable(
         target: &Path,
         source: &Path,
         version: &str,
         size: u64,
-    ) -> AppResult<()> {
+    ) -> AppResult<WritableInstallation> {
         let parent = target.parent().unwrap();
         require_space(parent, size)?;
         // Check ownership before exchanging: deleting a root-owned old bundle
@@ -503,16 +572,26 @@ mod platform {
         if !status.success() {
             return Err(failure("Unable to stage the updated application"));
         }
-        validate_bundle(&staged, Some(version))?;
-        match atomic_exchange(target, &staged) {
-            Ok(()) => fs::remove_dir_all(&staged).map_err(|error| failure(format!(
-                "The application was replaced, but the old bundle could not be removed: {error}"
-            )))?,
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Err(error.into()),
-            Err(_) => replace_bundle_with(target, &staged, |from, to| fs::rename(from, to))?,
-        }
-        stage.close().map_err(|error| failure(format!("Unable to clean the macOS update staging directory: {error}")))?;
-        Ok(())
+        validate_update_bundle(&staged, version)?;
+        // TempDir must no longer own cleanup once it can contain the only copy
+        // of the old application, even when restoration itself fails.
+        let directory = stage.keep();
+        let backup = match atomic_exchange(target, &staged) {
+            Ok(()) => staged,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                let _ = fs::remove_dir_all(&directory);
+                return Err(error.into());
+            }
+            Err(_) => {
+                let backup = directory.join("obsolete.app");
+                if let Err(error) = replace_bundle_with(target, &staged, &backup, |from, to| fs::rename(from, to)) {
+                    if !backup.exists() { let _ = fs::remove_dir_all(&directory); }
+                    return Err(error);
+                }
+                backup
+            }
+        };
+        Ok(WritableInstallation { target: target.to_path_buf(), directory, backup })
     }
 
     pub fn confirm_startup(app: &AppHandle) -> AppResult<()> {
@@ -595,7 +674,9 @@ mod platform {
         }
         let target = current_bundle()?;
         check_location(&target)?;
-        check_runtime_contract(app, &update.raw_json)?;
+        validate_installed_bundle(&target, env!("CARGO_PKG_VERSION"))?;
+        let repairing = update.version == env!("CARGO_PKG_VERSION");
+        if !repairing { check_runtime_contract(app, &update.raw_json)?; }
         let size = unpacked_size(update)?;
         let root = storage::temp_dir(app)?;
         fs::create_dir_all(&root)?;
@@ -637,14 +718,14 @@ mod platform {
                 || !state.migrations.lock().map_err(|_| failure("Migration registry lock poisoned"))?.is_empty()
             { return Err(failure("Wait for running tasks and model migrations to finish before updating")); }
             check_location(&target)?;
-            validate_bundle(&target, None)?;
+            validate_bundle_identity(&target, Some(env!("CARGO_PKG_VERSION")))?;
             let extracted = staging.path().join("extracted");
             fs::create_dir(&extracted)?;
             let bundle = extract_bundle(&archive, &extracted)?;
-            validate_bundle(&bundle, Some(&version))?;
+            validate_update_bundle(&bundle, &version)?;
             // The channel JSON is unsigned. Recheck the contract inside the verified
             // archive so edited channel metadata cannot bypass runtime compatibility.
-            if bundled_contract(&bundle.join("Contents/Resources"))?
+            if !repairing && bundled_contract(&bundle.join("Contents/Resources"))?
                 != bundled_contract(&target.join("Contents/Resources"))?
             {
                 return Err(failure("The signed update changes the installed runtime contract and requires manual installation"));
@@ -659,8 +740,9 @@ mod platform {
             fs::create_dir_all(&log_directory)?;
             let log_path = log_directory.join("macos-update.log");
             let mut authorization = None;
+            let mut writable = None;
             match install_writable(&target, &bundle, &version, size) {
-                Ok(()) => (),
+                Ok(installation) => writable = Some(installation),
                 Err(AppError::Io(ref error)) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                     request.privileged = true;
                     authorization = Some(authorized::Session::begin(
@@ -675,10 +757,15 @@ mod platform {
                 startup::wait_for_acknowledgement(child.as_mut().unwrap(), startup_directory.path(), &request, Duration::from_secs(30))
             })();
             if let Err(error) = started {
-                if let Some(child) = child.as_mut() { startup::stop_child(child)?; }
+                if let Some(child) = child.as_mut() {
+                    if let Err(stop_error) = startup::stop_child(child) {
+                        return Err(failure(format!("Unable to stop the failed replacement: {stop_error}. The previous application backup has been retained.")));
+                    }
+                }
                 if let Some(session) = authorization.as_mut() { session.complete(false)?; }
+                if let Some(installation) = writable.as_mut() { installation.rollback()?; }
                 crate::session_log::append(&app, "ERROR", "update.restart", vec![("version", version.clone()), ("reason", error.to_string())]);
-                return Err(failure(format!("The updated application could not start: {error}. The installed update has not been reverted. See {} for details.", log_path.display())));
+                return Err(failure(format!("MACOS_UPDATE_ROLLED_BACK: The updated application could not start: {error}. The previous application has been restored. See {} for details.", log_path.display())));
             }
             if let Some(session) = authorization.as_mut() {
                 if let Err(error) = session.complete(true) {
@@ -686,6 +773,11 @@ mod platform {
                     return Err(error);
                 }
             } else {
+                if let Some(installation) = writable.as_ref() {
+                    if let Err(error) = installation.commit() {
+                        crate::session_log::early("WARN", "update.diagnostic", &format!("The updated application started, but backup cleanup failed: {error}"));
+                    }
+                }
                 cleanup_legacy_stages_with(target.parent().unwrap(), None, |pid| {
                     // The single-update guard excludes other transactions in this
                     // process; a different live updater retains its own stage.
@@ -767,20 +859,60 @@ mod platform {
         }
 
         #[test]
-        fn replacement_removes_previous_bundles_and_staging_directories() {
+        fn changed_installed_resources_do_not_block_a_verified_replacement() {
+            let root = tempfile::tempdir().unwrap();
+            let target = signed_bundle(root.path(), "Installed.app", "1.0.0");
+            let source = signed_bundle(root.path(), "New.app", "1.1.0");
+            fs::write(target.join("Contents/Resources/version"), "changed").unwrap();
+            assert!(validate_bundle(&target, Some("1.0.0")).is_err());
+            validate_installed_bundle(&target, "1.0.0").unwrap();
+            assert!(validate_installed_bundle(&target, "0.9.0").is_err());
+            install_writable(&target, &source, "1.1.0", 1024).unwrap();
+            validate_bundle(&target, Some("1.1.0")).unwrap();
+        }
+
+        #[test]
+        fn changed_replacement_resources_are_rejected_before_replacing_the_installation() {
+            let root = tempfile::tempdir().unwrap();
+            let target = signed_bundle(root.path(), "Installed.app", "1.0.0");
+            let source = signed_bundle(root.path(), "New.app", "1.1.0");
+            fs::write(source.join("Contents/Resources/version"), "changed").unwrap();
+            let error = install_writable(&target, &source, "1.1.0", 1024).unwrap_err();
+            assert!(error.to_string().contains("MACOS_UPDATE_SIGNATURE_INVALID:"));
+            assert!(error.to_string().contains("Contents/Resources/version"));
+            validate_bundle(&target, Some("1.0.0")).unwrap();
+        }
+
+        #[test]
+        fn replacement_retains_previous_bundle_until_startup_is_committed() {
             let root = tempfile::tempdir().unwrap();
             let target = signed_bundle(root.path(), "Installed.app", "1.0.0");
             let source = signed_bundle(root.path(), "New.app", "1.1.0");
             let previous = signed_bundle(root.path(), "Legacy.app", "0.9.0");
             fs::rename(previous, legacy_previous_bundle(&target)).unwrap();
-            install_writable(&target, &source, "1.1.0", 1024).unwrap();
+            let installed = install_writable(&target, &source, "1.1.0", 1024).unwrap();
+            validate_bundle(&installed.backup, Some("1.0.0")).unwrap();
+            installed.commit().unwrap();
             validate_bundle(&target, Some("1.1.0")).unwrap();
             assert!(!legacy_previous_bundle(&target).exists());
             assert!(!fs::read_dir(root.path()).unwrap().any(|entry| entry.unwrap().file_name().to_string_lossy().starts_with(".pymss-studio-update-")));
             let next = signed_bundle(root.path(), "Next.app", "1.2.0");
-            install_writable(&target, &next, "1.2.0", 1024).unwrap();
+            install_writable(&target, &next, "1.2.0", 1024).unwrap().commit().unwrap();
             validate_bundle(&target, Some("1.2.0")).unwrap();
             assert!(!legacy_previous_bundle(&target).exists());
+        }
+
+        #[test]
+        fn startup_failure_restores_original_resources_even_if_the_old_seal_was_invalid() {
+            let root = tempfile::tempdir().unwrap();
+            let target = signed_bundle(root.path(), "Installed.app", "1.0.0");
+            let source = signed_bundle(root.path(), "New.app", "1.1.0");
+            fs::write(target.join("Contents/Resources/version"), "original damaged resource").unwrap();
+            let installation = install_writable(&target, &source, "1.1.0", 1024).unwrap();
+            installation.rollback().unwrap();
+            validate_bundle_identity(&target, Some("1.0.0")).unwrap();
+            assert_eq!(fs::read_to_string(target.join("Contents/Resources/version")).unwrap(), "original damaged resource");
+            assert!(!installation.directory.exists());
         }
 
         #[test]
@@ -894,7 +1026,7 @@ mod platform {
         }
 
         #[test]
-        fn authorization_rejects_changed_archives_and_aborts_without_restoring() {
+        fn authorization_rejects_changed_archives_and_restores_on_abort() {
             let root = tempfile::tempdir().unwrap();
             let target = signed_bundle(root.path(), "Installed.app", "1.0.0");
             let source = signed_bundle(root.path(), "New.app", "1.1.0");
@@ -908,15 +1040,31 @@ mod platform {
                 &sha256_hex(&fs::read(&archive).unwrap()),
                 Some(false),
             );
-            validate_bundle(&target, Some("1.1.0")).unwrap();
+            validate_bundle(&target, Some("1.0.0")).unwrap();
             assert!(!legacy_previous_bundle(&target).exists());
+        }
+
+        #[test]
+        fn authorization_replaces_changed_installed_resources_but_rejects_changed_replacements() {
+            let root = tempfile::tempdir().unwrap();
+            let target = signed_bundle(root.path(), "Installed.app", "1.0.0");
+            let source = signed_bundle(root.path(), "New.app", "1.1.0");
+            fs::write(target.join("Contents/Resources/version"), "changed old resource").unwrap();
+            fs::write(source.join("Contents/Resources/version"), "changed new resource").unwrap();
+            let archive = archive_bundle(root.path(), &source);
+            run_authorization_script(&target, &archive, &sha256_hex(&fs::read(&archive).unwrap()), None);
+            assert_eq!(fs::read_to_string(target.join("Contents/Resources/version")).unwrap(), "changed old resource");
+            fs::write(source.join("Contents/Resources/version"), "1.1.0").unwrap();
+            let archive = archive_bundle(root.path(), &source);
+            run_authorization_script(&target, &archive, &sha256_hex(&fs::read(&archive).unwrap()), Some(true));
+            validate_bundle(&target, Some("1.1.0")).unwrap();
         }
     }
 }
 
 #[cfg(target_os = "macos")]
 pub use platform::{
-    check_location, check_runtime_contract, confirm_startup, current_bundle, start,
+    check_integrity, check_location, check_runtime_contract, confirm_startup, current_bundle, start,
 };
 
 #[cfg(test)]
@@ -999,12 +1147,12 @@ mod tests {
         let staged = root.path().join("missing");
         fs::create_dir(&target).unwrap();
         fs::write(target.join("version"), "old").unwrap();
-        assert!(replace_bundle_with(&target, &staged, |from, to| fs::rename(from, to)).is_err());
+        assert!(replace_bundle_with(&target, &staged, &root.path().join("backup"), |from, to| fs::rename(from, to)).is_err());
         assert_eq!(fs::read_to_string(target.join("version")).unwrap(), "old");
     }
 
     #[test]
-    fn direct_replacement_does_not_create_a_backup_or_undo_a_failed_move() {
+    fn direct_replacement_restores_on_failure_and_retains_backup_until_commit() {
         let root = tempfile::tempdir().unwrap();
         let target = root.path().join("app");
         let staged = root.path().join("staged");
@@ -1012,15 +1160,41 @@ mod tests {
         fs::create_dir(&staged).unwrap();
         fs::write(target.join("old-only"), "old").unwrap();
         fs::write(staged.join("version"), "new").unwrap();
-        let result = replace_bundle_with(&target, &staged, |_, _| Err(std::io::Error::other("move failed")));
+        let backup = root.path().join("backup");
+        let mut moves = 0;
+        let result = replace_bundle_with(&target, &staged, &backup, |from, to| {
+            moves += 1;
+            if moves == 2 { return Err(std::io::Error::other("move failed")); }
+            fs::rename(from, to)
+        });
         assert!(result.is_err());
-        assert!(!target.exists());
+        assert_eq!(fs::read_to_string(target.join("old-only")).unwrap(), "old");
         assert!(staged.join("version").exists());
-        assert!(!legacy_previous_bundle(&target).exists());
-        fs::create_dir(&target).unwrap();
-        replace_bundle_with(&target, &staged, |from, to| fs::rename(from, to)).unwrap();
+        assert!(!backup.exists());
+        replace_bundle_with(&target, &staged, &backup, |from, to| fs::rename(from, to)).unwrap();
         assert_eq!(fs::read_to_string(target.join("version")).unwrap(), "new");
         assert!(!target.join("old-only").exists());
+        assert_eq!(fs::read_to_string(backup.join("old-only")).unwrap(), "old");
+    }
+
+    #[test]
+    fn failed_restoration_preserves_the_only_previous_application() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("app");
+        let staged = root.path().join("staged");
+        let backup = root.path().join("backup");
+        fs::create_dir(&target).unwrap();
+        fs::create_dir(&staged).unwrap();
+        fs::write(target.join("version"), "old").unwrap();
+        let mut moves = 0;
+        let error = replace_bundle_with(&target, &staged, &backup, |from, to| {
+            moves += 1;
+            if moves > 1 { return Err(std::io::Error::other("blocked")); }
+            fs::rename(from, to)
+        }).unwrap_err();
+        assert!(error.to_string().contains("Backup retained at"));
+        assert_eq!(fs::read_to_string(backup.join("version")).unwrap(), "old");
+        assert!(staged.is_dir());
     }
 
     #[test]

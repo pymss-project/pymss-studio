@@ -1,9 +1,26 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { pluginToolEntries, pluginToolKey, pluginToolCategories } from '../src/features/plugin-marketplace/toolEntries.ts'
+import { pluginLocale } from '../src/features/plugin-marketplace/presentation.ts'
 
 const view = (id: string, extra = {}) => ({
   id, title: id, entry: 'ui/index.html', placements: ['tool'], permissions: ['operations'], ...extra,
+})
+
+test('operation views use their own translated name without reusing the main tool title', () => {
+  const entries = pluginToolEntries([{ name: 'analysis', managed: true, loaded: true,
+    locales: {
+      en: { title: 'Audio analysis', operations: { 'pymss.analysis.spectrum': 'Spectrum analysis' } },
+      'zh-CN': { title: '音频分析', operations: { 'pymss.analysis.spectrum': '频谱分析' } },
+      de: { title: 'Audioanalyse' },
+    }, contributions: { views: [view('tool'), view('spectrum', { operation: 'pymss.analysis.spectrum' }), view('extra')] },
+  }])
+  assert.equal(pluginLocale(entries[0].locales, 'zh-CN').title, '音频分析')
+  assert.equal(pluginLocale(entries[1].locales, 'zh-CN').title, '频谱分析')
+  assert.equal(pluginLocale(entries[1].locales, 'en').title, 'Spectrum analysis')
+  assert.equal(pluginLocale(entries[1].locales, 'fr').title, 'Spectrum analysis')
+  assert.equal(pluginLocale(entries[1].locales, 'de').title, 'Spectrum analysis')
+  assert.equal(entries[2].locales, undefined)
 })
 
 test('plugin tool entries require managed, loaded, enabled views and are keyed by plugin id', () => {

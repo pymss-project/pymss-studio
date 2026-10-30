@@ -14,6 +14,7 @@ import appLogo from '@/assets/app-logo-symbol-canvas.png'
 import { SYSTEM_LOCALE, setLocale, type LocaleSetting } from '@/i18n'
 import { useSettingsStore } from '@/stores/settings'
 import { useAppStore, type InstalledRuntime, type RuntimeBackend, type RuntimeCoreMode } from '@/stores/app'
+import { runtimeErrorDetails, runtimeErrorSummary } from '@/utils/runtimeErrors'
 import { useUpdateStore } from '@/stores/update'
 import {
   detectRuntimePlatform,
@@ -190,6 +191,8 @@ watch(() => app.runtimeInstallLogs.at(-1), () => {
 const runtimeInstalling = computed(() => app.runtimeInstallStatus === 'installing')
 const runtimeCoreActionPending = ref(false)
 const runtimeCoreUpdating = computed(() => app.runtimeCoreUpdateStatus === 'updating' || app.runtimeCoreUpdateStatus === 'preparing')
+const runtimeCoreErrorSummary = computed(() => runtimeErrorSummary(app.runtimeCoreUpdateError || app.runtimeCoreUpdateMessage, t))
+const runtimeCoreErrorDetails = computed(() => runtimeErrorDetails(app.runtimeCoreUpdateError || app.runtimeCoreUpdateMessage))
 // Runtime detection and install/switch/delete all access the runtime state, so only one may run at a time.
 const runtimeBusy = computed(() => runtimeDetecting.value || runtimeInstalling.value || runtimeCoreUpdating.value || runtimeCoreActionPending.value || runtimeActivating.value !== null || runtimeDeleting.value !== null)
 const runtimeCurrentError = computed(() => {
@@ -608,7 +611,7 @@ async function runRuntimeCoreOperation(card: { backend: RuntimeBackend; env?: In
       planId: plan.id,
     })
   } catch (error) {
-    if (app.runtimeCoreUpdateStatus !== 'cancelled') message.error(error instanceof Error ? error.message : String(error))
+    if (app.runtimeCoreUpdateStatus !== 'cancelled') message.error(runtimeErrorSummary(error, t))
   } finally {
     runtimeCoreActionPending.value = false
   }
@@ -850,6 +853,7 @@ const updateBadgeTone = computed(() => {
 const updateSupported = computed(() => {
   return buildInfo.value?.updateSupported === true || app.buildInfoUpdateSupported
 })
+const applicationMaintenanceVisible = computed(() => updateSupported.value && buildInfo.value?.target === 'macos-arm64')
 const updateOverviewEmphasized = computed(() => {
   return updates.requiresManualInstall
     || updates.shouldShowDeferred
@@ -921,6 +925,21 @@ async function changeUpdateChannel(value: 'stable' | 'prerelease') {
   updateChannel.value = value
   updates.dismiss()
   if (updateSupported.value) await checkForUpdates(true)
+}
+
+async function repairApplication() {
+  if (updates.isBusy || updates.installationBlockedReason || !updates.integrity?.repairSupported) return
+  const confirmed = await confirmRuntimeAction(
+    t('settings.applicationRepairTitle'),
+    t('settings.applicationRepairContent', { version: appVersion.value }),
+    t('settings.applicationRepairConfirm'),
+  )
+  if (!confirmed) return
+  try {
+    await updates.repairApplication()
+  } catch (error) {
+    if (!updates.installFailed) message.error(error instanceof Error ? error.message : String(error))
+  }
 }
 
 async function changeUpdateSource(value: 'auto' | 'github' | 'modelscope') {
@@ -1189,6 +1208,7 @@ async function resolveModelDirConflict(action: 'overwrite' | 'skip' | 'abort') {
 
 onMounted(async () => {
   await loadBuildInfo()
+  if (applicationMaintenanceVisible.value) void updates.checkIntegrity()
   if (updateSupported.value) {
     void checkForUpdates(false)
   }
@@ -1408,6 +1428,26 @@ onMounted(async () => {
                   </summary>
                   <p class="update-panel__notes">{{ updates.releaseNotes }}</p>
                 </details>
+                <n-space v-if="applicationMaintenanceVisible" vertical :size="12">
+                  <n-space>
+                    <n-button size="small" :loading="updates.integrityChecking" :disabled="updates.isBusy" @click="updates.checkIntegrity()">
+                      {{ t('settings.applicationIntegrityCheck') }}
+                    </n-button>
+                    <n-button size="small" :disabled="updates.isBusy || Boolean(updates.installationBlockedReason) || !updates.integrity?.repairSupported" :title="updates.installationBlockedReason" @click="repairApplication">
+                      {{ t('settings.applicationRepair') }}
+                    </n-button>
+                  </n-space>
+                  <n-alert v-if="updates.integrityError" type="error" :show-icon="false">
+                    {{ t('settings.applicationIntegrityFailed') }} {{ updates.integrityError }}
+                  </n-alert>
+                  <n-alert v-else-if="updates.integrity?.supported" :type="updates.integrity.valid ? 'success' : 'warning'" :show-icon="false">
+                    {{ t(updates.integrity.valid ? 'settings.applicationIntegrityValid' : 'settings.applicationIntegrityInvalid') }}
+                    <details v-if="updates.integrity.detail">
+                      <summary>{{ t('settings.applicationIntegrityDetails') }}</summary>
+                      <p>{{ updates.integrity.detail }}</p>
+                    </details>
+                  </n-alert>
+                </n-space>
               </template>
             </div>
           </article>
@@ -1884,10 +1924,7 @@ onMounted(async () => {
               </div>
             </div>
             </Transition>
-            <n-alert v-if="app.runtimeCoreUpdateStatus === 'error'" type="error" :bordered="false">
-              {{ app.runtimeCoreUpdateMessage }}
-            </n-alert>
-            <n-alert v-else-if="app.runtimeCoreUpdateStatus === 'success' || app.runtimeCoreUpdateStatus === 'cancelled'" :type="app.runtimeCoreUpdateStatus === 'success' ? 'success' : 'info'" :bordered="false">
+            <n-alert v-if="app.runtimeCoreUpdateStatus === 'success' || app.runtimeCoreUpdateStatus === 'cancelled'" :type="app.runtimeCoreUpdateStatus === 'success' ? 'success' : 'info'" :bordered="false">
               {{ t(app.runtimeCoreUpdateStatus === 'success' ? 'settings.runtimeCoreOperationSuccess' : 'settings.runtimeCoreOperationCancelled') }}
             </n-alert>
 
@@ -1931,8 +1968,15 @@ onMounted(async () => {
 
             <n-alert v-if="app.runtimeCoreUpdateStatus === 'error'" type="error" :show-icon="true">
               <div class="runtime-install-error">
-                <div class="runtime-install-error__message">{{ app.runtimeCoreUpdateMessage }}</div>
+                <div class="runtime-install-error__message">{{ runtimeCoreErrorSummary }}</div>
+                <details class="runtime-error-details">
+                  <summary>{{ t('settings.runtimeErrorDetails') }}</summary>
+                  <pre>{{ runtimeCoreErrorDetails }}</pre>
+                </details>
                 <div class="runtime-install-error__actions">
+                  <n-button v-if="app.runtimeCoreUpdateError?.code === 'RUNTIME_MANIFEST_INCOMPATIBLE'" size="small" tertiary @click="selectSettingsSection('about')">
+                    {{ t('settings.runtimeCoreOpenAppUpdate') }}
+                  </n-button>
                   <n-button v-if="app.runtimeInfo?.logPath" size="small" tertiary @click="revealPath(app.runtimeInfo.logPath)">
                     {{ t('settings.runtimeOpenInstallLog') }}
                   </n-button>
@@ -3350,6 +3394,22 @@ onMounted(async () => {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.runtime-error-details {
+  min-width: 0;
+
+  summary {
+    cursor: pointer;
+  }
+
+  pre {
+    max-height: 240px;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 12px;
+  }
 }
 
 .settings-card {

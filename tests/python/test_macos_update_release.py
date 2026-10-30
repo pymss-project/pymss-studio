@@ -31,34 +31,102 @@ MANIFEST = json.loads((ROOT / "python/runtime-manifest.json").read_text(encoding
 
 
 class MacosUpdateReleaseTests(unittest.TestCase):
+    @unittest.skipUnless(BASH_EXECUTABLE, "Bash is required for application verification checks")
+    def test_installer_verifies_replacement_resources_and_installed_identity_separately(self):
+        installer = (ROOT / "scripts/install-macos-update.sh").read_text(encoding="utf-8")
+        functions = "validate_bundle_identity() {" + installer.split("validate_bundle_identity() {", 1)[1].split("replace_application() {", 1)[0]
+        checks = installer.split('validate_bundle "$source"', 1)[1].split('/bin/kill -0 "$parent_pid"', 1)[0]
+        checks = 'validate_bundle "$source"' + checks
+        command = '''set -eu
+source=$1
+target=$2
+checks=$3
+identifier=studio.pymss.desktop
+version=1.1.0
+plist() {
+    directory=$(dirname "$3")
+    case "$2" in
+        'Print :CFBundleIdentifier') cat "$directory/identifier" ;;
+        'Print :CFBundleShortVersionString') cat "$directory/version" ;;
+        *) return 1 ;;
+    esac
+}
+verify_signature() {
+    for bundle; do :; done
+    printf '%s\\n' "$bundle" >> "$checks"
+    [ "$(cat "$bundle/valid-signature")" = valid ]
+}
+'''
+        command += (functions + checks).replace("/usr/libexec/PlistBuddy", "plist").replace("/usr/bin/codesign", "verify_signature")
+        cases = [("invalid", "valid", "studio.pymss.desktop", True),
+                 ("valid", "invalid", "studio.pymss.desktop", False),
+                 ("invalid", "valid", "another.application", False)]
+        for old_seal, new_seal, old_id, success in cases:
+            with self.subTest(old_seal=old_seal, new_seal=new_seal, old_id=old_id), tempfile.TemporaryDirectory() as value:
+                root = Path(value)
+                source, target = root / "New app", root / "Installed app"
+                for bundle, seal, identity in [(source, new_seal, "studio.pymss.desktop"), (target, old_seal, old_id)]:
+                    (bundle / "Contents").mkdir(parents=True)
+                    (bundle / "Contents/identifier").write_text(identity)
+                    (bundle / "Contents/version").write_text("1.1.0")
+                    (bundle / "valid-signature").write_text(seal)
+                verification_log = root / "checks"
+                result = subprocess.run(
+                    [BASH_EXECUTABLE, "-c", command, "verification-test", source.as_posix(), target.as_posix(), verification_log.as_posix()],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode == 0, success, result.stderr)
+                self.assertEqual(verification_log.read_text().splitlines(), [source.as_posix()])
+                if new_seal == "invalid":
+                    self.assertIn("Application code signature verification failed:", result.stderr)
+
     @unittest.skipUnless(BASH_EXECUTABLE, "Bash is required for application replacement checks")
-    def test_installer_replaces_the_application_without_retaining_a_previous_bundle(self):
-        installer = (ROOT / 'scripts/install-macos-update.sh').read_text(encoding='utf-8')
-        replacement = installer.split('phase=exchanging\n', 1)[1].split('phase=installed\n', 1)[0]
-        for mode in ['swapped', 'failed']:
+    def test_installer_retains_backup_and_restores_on_replacement_or_startup_failure(self):
+        installer = (ROOT / "scripts/install-macos-update.sh").read_text(encoding="utf-8")
+        functions = "replace_application() {" + installer.split("replace_application() {", 1)[1].split("cleanup_legacy_stages() {", 1)[0]
+        for mode in ["success", "replacement-failed", "startup-failed", "rollback-failed"]:
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as value:
                 root = Path(value)
-                target, staged = root / 'Installed app', root / 'Stage app'
-                target.mkdir(); staged.mkdir()
-                (target / 'version').write_text('old')
-                (target / 'removed-resource').write_text('obsolete')
-                (staged / 'version').write_text('new')
-                exchange = '''exchange() {
-                    if [ "$mode" = swapped ]; then
-                        /bin/mv "$1" "$1-swap"
-                        /bin/mv "$2" "$1"
-                        /bin/mv "$1-swap" "$2"
-                    fi
-                    printf '%s' "$mode"
-                }
-                '''
-                command = 'set -eu\ntarget=$1\nstaged=$2\nmode=$3\n' + exchange + replacement
-                result = subprocess.run([BASH_EXECUTABLE, '-c', command, 'replace-test', target.as_posix(), staged.as_posix(), mode], capture_output=True, text=True)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual((target / 'version').read_text(), 'new')
-                self.assertFalse((target / 'removed-resource').exists())
-                self.assertFalse(staged.exists())
-                self.assertEqual([p.name for p in root.iterdir()], ['Installed app'])
+                target, stage = root / "Installed app", root / "Stage"
+                staged = stage / "Pymss Studio.app"
+                target.mkdir()
+                staged.mkdir(parents=True)
+                (target / "version").write_text("old")
+                (target / "damaged-resource").write_text("retain original bytes")
+                (staged / "version").write_text("new")
+                setup = """set -eu
+target=$1
+stage=$2
+staged="$stage/Pymss Studio.app"
+mode=$3
+backup=
+phase=preparing
+moves=0
+move() {
+    moves=$((moves + 1))
+    if [ "$mode" = replacement-failed ] && [ "$moves" -eq 2 ]; then return 1; fi
+    if [ "$mode" = rollback-failed ] && [ "$moves" -ge 3 ]; then return 1; fi
+    /bin/mv "$1" "$2"
+}
+"""
+                action = """
+if ! replace_application; then
+    rollback
+    exit 0
+fi
+[ "$(cat "$backup/version")" = old ]
+if [ "$mode" != success ]; then rollback; fi
+"""
+                command = setup + functions.replace("/bin/mv", "move") + action
+                result = subprocess.run([BASH_EXECUTABLE, "-c", command, "replace-test", target.as_posix(), stage.as_posix(), mode], capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, mode != "rollback-failed", result.stderr)
+                if mode in ["success", "rollback-failed"]:
+                    self.assertEqual((target / "version").read_text(), "new")
+                    self.assertEqual((stage / "obsolete.app/version").read_text(), "old")
+                else:
+                    self.assertEqual((target / "version").read_text(), "old")
+                    self.assertEqual((target / "damaged-resource").read_text(), "retain original bytes")
+                    self.assertFalse((stage / "obsolete.app").exists())
 
     @unittest.skipUnless(BASH_EXECUTABLE, "Bash is required for application cleanup checks")
     def test_legacy_stage_cleanup_preserves_active_unknown_and_invalid_directories(self):
@@ -96,18 +164,54 @@ validate_bundle() { [ -f "$1/valid-signature" ]; }
             self.assertTrue((unknown / 'user-file').exists())
             self.assertTrue(invalid.exists())
 
-    def test_macos_startup_failure_aborts_without_a_rollback_protocol(self):
-        installer = (ROOT / 'scripts/install-macos-update.sh').read_text(encoding='utf-8')
-        authorized = (ROOT / 'src-tauri/src/macos_update/authorized.rs').read_text(encoding='utf-8')
-        updater = (ROOT / 'src-tauri/src/macos_update.rs').read_text(encoding='utf-8')
-        confirmation = updater.split('pub fn confirm_startup(app: &AppHandle)', 1)[1].split('\n    fn start_replacement(', 1)[0]
-        self.assertIn('authorized::report_ready(&token)?', confirmation)
-        self.assertIn('startup::acknowledge(&directory, &request, std::process::id())?', confirmation)
-        self.assertNotIn('rollback', installer)
-        self.assertNotIn('rolledback', authorized)
+    def test_macos_startup_failure_uses_the_existing_confirmation_and_rolls_back(self):
+        installer = (ROOT / "scripts/install-macos-update.sh").read_text(encoding="utf-8")
+        authorized = (ROOT / "src-tauri/src/macos_update/authorized.rs").read_text(encoding="utf-8")
+        updater = (ROOT / "src-tauri/src/macos_update.rs").read_text(encoding="utf-8")
+        confirmation = updater.split("pub fn confirm_startup(app: &AppHandle)", 1)[1].split("    fn start_replacement(", 1)[0]
+        self.assertIn("authorized::report_ready(&token)?", confirmation)
+        self.assertIn("startup::acknowledge(&directory, &request, std::process::id())?", confirmation)
+        self.assertIn("installation.rollback()?", updater)
         self.assertIn('"abort"', authorized)
-        self.assertIn('aborted', installer)
-        self.assertIn('/bin/rm -rf "$stage"', installer)
+        self.assertIn("rollback || { phase=rollback-failed; exit 1; }", installer)
+        self.assertIn('[ "$phase" != rollback-failed ]', installer)
+
+    @unittest.skipUnless(BASH_EXECUTABLE, "Bash is required for rollback cleanup checks")
+    def test_exit_trap_restores_on_failure_and_never_deletes_an_unrestored_backup(self):
+        installer = (ROOT / "scripts/install-macos-update.sh").read_text(encoding="utf-8")
+        rollback = "rollback() {" + installer.split("rollback() {", 1)[1].split("cleanup_legacy_stages() {", 1)[0]
+        finish = "finish() {" + installer.split("finish() {", 1)[1].split("trap finish 0", 1)[0]
+        for blocked in [False, True]:
+            with self.subTest(blocked=blocked), tempfile.TemporaryDirectory() as value:
+                root = Path(value)
+                target, stage, control = root / "Installed app", root / "Stage", root / "Control"
+                target.mkdir()
+                (stage / "obsolete.app").mkdir(parents=True)
+                (control / "private").mkdir(parents=True)
+                (target / "version").write_text("new")
+                (stage / "obsolete.app/version").write_text("old")
+                (control / "outcome").write_text("observed")
+                setup = """set -eu
+target=$1
+stage=$2
+control=$3
+backup="$stage/obsolete.app"
+phase=installed
+"""
+                if blocked:
+                    setup += "move() { return 1; }\n"
+                    rollback = rollback.replace("/bin/mv", "move")
+                result = subprocess.run(
+                    [BASH_EXECUTABLE, "-c", setup + rollback + finish + "\nfinish\n", "trap-test", target.as_posix(), stage.as_posix(), control.as_posix()],
+                    capture_output=True, text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                if blocked:
+                    self.assertEqual((stage / "obsolete.app/version").read_text(), "old")
+                    self.assertIn("Previous application retained at", result.stderr)
+                else:
+                    self.assertEqual((target / "version").read_text(), "old")
+                    self.assertFalse(stage.exists())
 
     @unittest.skipUnless(BASH_EXECUTABLE, "Bash is required for the installer snapshot check")
     def test_authorized_snapshot_rejects_changed_bytes_and_ignores_later_source_changes(self):

@@ -139,12 +139,37 @@ pub async fn start_managed_update(
     if cfg!(feature = "vst-lab") {
         return Err(AppError::Worker("Updates are disabled in VST Lab".into()));
     }
-    update_manager::start(&app, channel, endpoint_override, expected_version, source.unwrap_or_default()).await
+    let result = update_manager::start(&app, channel, endpoint_override, expected_version.clone(), source.unwrap_or_default()).await;
+    if let Err(error) = &result {
+        session_log::append(&app, "ERROR", "update.install", vec![
+            ("version", expected_version), ("reason", error.to_string()),
+        ]);
+    }
+    result
 }
 
 #[tauri::command]
 pub fn get_managed_update_state() -> Value {
     serde_json::json!({ "restartRequired": update_manager::restart_required() })
+}
+
+#[tauri::command]
+pub async fn check_application_integrity(app: AppHandle) -> AppResult<update_manager::ApplicationIntegrity> {
+    let report = tauri::async_runtime::spawn_blocking(update_manager::check_application_integrity)
+        .await.map_err(|error| AppError::Worker(error.to_string()))?;
+    if let Some(detail) = &report.detail {
+        session_log::append(&app, "WARN", "update.integrity", vec![("reason", detail.clone())]);
+    }
+    Ok(report)
+}
+
+#[tauri::command]
+pub async fn start_application_repair(app: AppHandle, source: Option<update_manager::UpdateSource>) -> AppResult<()> {
+    let result = update_manager::repair(&app, source.unwrap_or_default()).await;
+    if let Err(error) = &result {
+        session_log::append(&app, "ERROR", "update.repair", vec![("reason", error.to_string())]);
+    }
+    result
 }
 
 #[tauri::command]

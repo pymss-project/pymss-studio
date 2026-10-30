@@ -30,17 +30,42 @@ printf '%64s' '' > "$control/outcome"
 /bin/chmod 600 "$control/outcome"
 stage=
 staged=
+backup=
 phase=preparing
 
-validate_bundle() {
+validate_bundle_identity() {
     [ ! -L "$1" ] || return 1
     [ -d "$1" ] || return 1
     [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$1/Contents/Info.plist")" = "$identifier" ] || return 1
-    /usr/bin/codesign --verify --deep --strict "$1"
 }
 
-exchange() {
-    /usr/bin/osascript -l JavaScript -e 'function run(argv) { ObjC.import("stdio"); return $.renamex_np(argv[0], argv[1], 2) === 0 ? "swapped" : "failed"; }' "$1" "$2"
+validate_bundle() {
+    validate_bundle_identity "$1" || return 1
+    /usr/bin/codesign --verify --deep --strict --verbose=4 "$1" || {
+        echo "Application code signature verification failed: $1" >&2
+        return 1
+    }
+}
+
+replace_application() {
+    backup="$stage/obsolete.app"
+    /bin/mv "$target" "$backup" || return 1
+    /bin/mv "$staged" "$target" || return 1
+}
+
+rollback() {
+    [ -n "$backup" ] && [ -d "$backup" ] && [ ! -L "$backup" ] || return 1
+    if [ -e "$target" ] || [ -L "$target" ]; then
+        /bin/mv "$target" "$stage/rejected.app" || return 1
+    fi
+    /bin/mv "$backup" "$target" || {
+        if [ ! -e "$target" ] && [ -d "$stage/rejected.app" ]; then
+            /bin/mv "$stage/rejected.app" "$target" || :
+        fi
+        echo "Unable to restore the previous application. Backup retained at $backup" >&2
+        return 1
+    }
+    phase=aborted
 }
 
 cleanup_legacy_stages() {
@@ -81,17 +106,31 @@ finish() {
     trap - 0 HUP INT TERM
     case "$phase" in
         committed|aborted) ;;
-        *) phase=failed; printf 'failed' > "$control/status" || : ;;
+        *)
+            if [ -n "$backup" ] && [ -d "$backup" ]; then
+                if ! rollback; then phase=rollback-failed; fi
+            fi
+            status=1
+            ;;
     esac
-    if [ -n "$stage" ]; then /bin/rm -rf "$stage" || status=1; fi
-    /bin/rm -rf "$control/private" || status=1
-    if [ "$status" -ne 0 ]; then printf 'failed' > "$control/status" || :; fi
+    if [ -n "$stage" ] && [ "$phase" != rollback-failed ]; then
+        /bin/rm -rf "$stage" || echo "Unable to clean update directory: $stage" >&2
+    fi
+    /bin/rm -rf "$control/private" || echo "Unable to clean private update files: $control/private" >&2
+    if [ "$status" -ne 0 ]; then
+        if [ "$phase" = rollback-failed ]; then
+            echo "Rollback failed. Previous application retained at $backup" >&2
+            printf 'rollback-failed' > "$control/status" || :
+        else
+            printf 'failed' > "$control/status" || :
+        fi
+    fi
     i=0
     while [ "$i" -lt 25 ]; do
         [ "$(/usr/bin/head -c 64 "$control/outcome" | /usr/bin/awk '{print $1}')" != observed ] || break
         i=$((i + 1)); /bin/sleep 0.2
     done
-    /bin/rm -rf "$control" || status=1
+    /bin/rm -rf "$control" || echo "Unable to clean update control directory: $control" >&2
     exit "$status"
 }
 trap finish 0
@@ -106,7 +145,9 @@ actual_digest=$(/usr/bin/shasum -a 256 "$control/private/update.app.tar.gz" | /u
 source="$control/private/extracted/Pymss Studio.app"
 validate_bundle "$source"
 [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$source/Contents/Info.plist")" = "$version" ]
-validate_bundle "$target"
+# Only the replacement supplies trusted bytes. An invalid resource seal on the
+# installed application must not block replacing it with the verified release.
+validate_bundle_identity "$target"
 /bin/kill -0 "$parent_pid" 2>/dev/null || exit 1
 if [ -e "$legacy" ] || [ -L "$legacy" ]; then
     validate_bundle "$legacy"
@@ -119,15 +160,7 @@ staged="$stage/Pymss Studio.app"
 validate_bundle "$staged"
 
 phase=exchanging
-result=$(exchange "$staged" "$target") || exit 1
-case "$result" in
-    swapped) /bin/rm -rf "$staged" ;;
-    failed)
-        /bin/rm -rf "$target"
-        /bin/mv "$staged" "$target"
-        ;;
-    *) exit 1 ;;
-esac
+replace_application || exit 1
 phase=installed
 printf 'installed' > "$control/status"
 
@@ -143,7 +176,7 @@ while [ "$i" -lt 600 ]; do
             exit 0
             ;;
         abort)
-            phase=aborted
+            rollback || { phase=rollback-failed; exit 1; }
             printf 'aborted' > "$control/status"
             exit 0
             ;;

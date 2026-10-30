@@ -76,7 +76,7 @@ function browserStorage(raw = JSON.stringify(persisted016)) {
   return { values, writes }
 }
 
-function desktopStorage({ update = offeredUpdate, checkError, checkRequest, installError, installRequest, exitError, destroyError, closeError, exitRequest, restartPending = false, loadError, onSave, windowLabel = 'main' } = {}) {
+function desktopStorage({ update = offeredUpdate, checkError, checkRequest, installError, installRequest, integrityReport = { supported: false, valid: null, repairSupported: false }, integrityError, integrityRequest, repairError, repairRequest, exitError, destroyError, closeError, exitRequest, restartPending = false, loadError, onSave, windowLabel = 'main' } = {}) {
   let payload = structuredClone(persisted016)
   const writes = []
   const commands = []
@@ -117,6 +117,14 @@ function desktopStorage({ update = offeredUpdate, checkError, checkRequest, inst
           return null
         }
         if (command === 'get_managed_update_state') return { restartRequired: restartPending }
+        if (command === 'check_application_integrity') {
+          if (integrityError) throw integrityError
+          return integrityRequest ? integrityRequest() : structuredClone(integrityReport)
+        }
+        if (command === 'start_application_repair') {
+          if (repairError) throw repairError
+          return repairRequest ? repairRequest() : null
+        }
         if (command === 'plugin:process|exit') { if (exitError) throw exitError; return exitRequest ? exitRequest() : null }
         if (command === 'plugin:window|destroy') { if (destroyError) throw destroyError; return null }
         if (command === 'close_current_window') { if (closeError) throw closeError; return null }
@@ -517,6 +525,21 @@ test('a backend busy rejection does not exit the application or record acceptanc
   assert.ok(!store.error.includes('APPLICATION_UPDATE_BUSY:'))
 })
 
+test('macOS update signature failures show a localized summary and retain the diagnostic in the log', async () => {
+  const detail = 'worker error: MACOS_UPDATE_SIGNATURE_INVALID: a sealed resource is missing or invalid\nfile modified: Contents/Resources/version'
+  const storage = desktopStorage({ update: { ...offeredUpdate, distribution: 'macosApp' }, installError: new Error(detail) })
+  const store = newStore()
+  await store.initialize()
+  await store.checkForUpdates(true)
+  await assert.rejects(store.downloadAndInstall(), { message: detail })
+  assert.equal(store.error, 'settings.updateMacosSignatureInvalid')
+  assert.equal(store.status, 'failed')
+  assert.equal(store.installFailed, true)
+  assert.ok(store.downloadLogs.some(entry => entry.message.includes(detail)))
+  assert.equal(storage.commands.includes('plugin:process|exit'), false)
+  assert.equal(storage.writes.length, 0)
+})
+
 test('Windows exit rejection falls back to closing the main window', async () => {
   const storage = desktopStorage({ exitError: new Error('exit rejected') })
   const store = newStore()
@@ -677,4 +700,166 @@ test('an active installation saves acceptance before handling its staged exit', 
   assert.equal(await installation, true)
   assert.deepEqual(storage.payload(), { lastAcceptedVersion: offeredUpdate.version })
   assert.equal(storage.commands.at(-1), 'plugin:process|exit')
+})
+
+const damagedApplication = { supported: true, valid: false, repairSupported: true, detail: 'Contents/Resources/python/worker.py: resource missing' }
+
+test('integrity diagnostics do not change update availability or install state', async () => {
+  desktopStorage({ integrityReport: damagedApplication })
+  const store = newStore()
+  await store.initialize()
+  await store.checkIntegrity()
+  assert.deepEqual(store.integrity, damagedApplication)
+  assert.equal(store.status, 'idle')
+  assert.equal(store.hasUpdate, false)
+  assert.equal(store.isInstallOverlayVisible, false)
+})
+
+test('repair uses the official current-version command and preserves an offered upgrade', async () => {
+  settings.developerMode = true
+  settings.updateEndpointOverride = 'https://example.com/custom.json'
+  const storage = desktopStorage({ integrityReport: damagedApplication })
+  const store = newStore()
+  await store.initialize()
+  await store.checkIntegrity()
+  store.availableUpdate = { ...offeredUpdate }
+  try {
+    assert.equal(await store.repairApplication(), true)
+    assert.deepEqual(storage.argumentsList.find(call => call.command === 'start_application_repair').args, { source: 'auto' })
+    assert.equal(storage.commands.includes('start_managed_update'), false)
+    assert.equal(storage.commands.includes('plugin:process|exit'), false)
+    assert.deepEqual(storage.writes, [])
+    assert.equal(store.availableUpdate.version, offeredUpdate.version)
+    assert.equal(store.repairing, true)
+    assert.equal(store.status, 'installing')
+  } finally {
+    settings.developerMode = false
+    settings.updateEndpointOverride = ''
+  }
+})
+
+test('failed repair releases its lock, retains diagnostics, and permits a retry', async () => {
+  let attempts = 0
+  const storage = desktopStorage({ integrityReport: damagedApplication, repairRequest: () => {
+    attempts += 1
+    throw new Error('MACOS_UPDATE_ROLLED_BACK: startup timed out')
+  } })
+  const store = newStore()
+  await store.initialize()
+  await store.checkIntegrity()
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await assert.rejects(store.repairApplication(), /startup timed out/)
+    assert.equal(store.error, 'settings.updateRolledBack')
+    assert.equal(store.status, 'failed')
+    assert.equal(store.isBusy, false)
+    assert.equal(store.installErrorVisible, true)
+    assert.ok(store.downloadLogs.some(entry => entry.message.includes('startup timed out')))
+    store.dismissInstallError()
+  }
+  assert.equal(attempts, 2)
+  assert.equal(storage.commands.filter(command => command === 'start_application_repair').length, 2)
+})
+
+test('closing a repair failure clears its presentation mode', async () => {
+  desktopStorage({ integrityReport: damagedApplication, repairError: new Error('Download interrupted') })
+  const store = newStore()
+  await store.checkIntegrity()
+  await assert.rejects(store.repairApplication(), /Download interrupted/)
+  assert.equal(store.repairing, true)
+  store.dismissInstallError()
+  assert.equal(store.installErrorVisible, false)
+  assert.equal(store.repairing, false)
+})
+
+for (const outcome of ['manual-upgrade', 'no-update', 'check-error']) {
+  test(`a normal ${outcome} check clears the previous repair context`, async () => {
+    desktopStorage({
+      integrityReport: damagedApplication, repairError: new Error('Download interrupted'),
+      update: outcome === 'no-update' ? null : { ...offeredUpdate, requiresManualInstall: true, autoUpdateSupported: false },
+      checkError: outcome === 'check-error' ? new Error('Check interrupted') : undefined,
+    })
+    const store = newStore()
+    await store.initialize()
+    await store.checkIntegrity()
+    await assert.rejects(store.repairApplication(), /Download interrupted/)
+    assert.equal(store.repairing, true)
+    assert.equal(store.installErrorVisible, true)
+    const check = store.checkForUpdates(true)
+    assert.equal(store.repairing, false)
+    assert.equal(store.installErrorVisible, false)
+    if (outcome === 'check-error') await assert.rejects(check, /Check interrupted/)
+    else await check
+    assert.equal(store.repairing, false)
+    assert.equal(store.hasUpdate, outcome === 'manual-upgrade')
+    assert.equal(store.requiresManualInstall, outcome === 'manual-upgrade')
+  })
+}
+
+test('repair blocks concurrent repair, upgrade, and update checks', async () => {
+  let rejectRepair
+  const pending = new Promise((_resolve, reject) => { rejectRepair = reject })
+  const storage = desktopStorage({ integrityReport: damagedApplication, repairRequest: () => pending })
+  const store = newStore()
+  await store.initialize()
+  await store.checkIntegrity()
+  const repair = store.repairApplication()
+  try {
+    await assert.rejects(store.repairApplication(), /already in progress/)
+    await assert.rejects(store.downloadAndInstall(), /already in progress/)
+    await store.checkForUpdates(true)
+    await store.checkIntegrity()
+    assert.equal(storage.commands.includes('check_managed_update'), false)
+    assert.equal(storage.commands.filter(command => command === 'check_application_integrity').length, 1)
+    await assert.rejects(runWindowCloseGuards(), /update is in progress/)
+  } finally {
+    rejectRepair(new Error('Download interrupted'))
+    await assert.rejects(repair, /Download interrupted/)
+  }
+})
+
+test('integrity checks share the request and allow retry after an inspection error', async () => {
+  let failCheck
+  let attempts = 0
+  const pending = new Promise((_resolve, reject) => { failCheck = reject })
+  const storage = desktopStorage({ integrityRequest: () => ++attempts === 1 ? pending : damagedApplication })
+  const store = newStore()
+  const first = store.checkIntegrity()
+  const duplicate = store.checkIntegrity()
+  await assert.rejects(store.repairApplication(), /already in progress/)
+  failCheck(new Error('Unable to launch verifier'))
+  assert.equal(await first, null)
+  assert.equal(await duplicate, null)
+  assert.equal(store.integrity, null)
+  assert.match(store.integrityError, /Unable to launch verifier/)
+  assert.equal(store.status, 'idle')
+  await store.checkIntegrity()
+  assert.deepEqual(store.integrity, damagedApplication)
+  assert.equal(store.integrityError, '')
+  assert.equal(storage.commands.filter(command => command === 'check_application_integrity').length, 2)
+})
+
+test('unsupported installations cannot start application repair', async () => {
+  const storage = desktopStorage()
+  const store = newStore()
+  await store.checkIntegrity()
+  await assert.rejects(store.repairApplication(), /unavailable/)
+  assert.equal(storage.commands.includes('start_application_repair'), false)
+})
+
+test('runtime maintenance blocks application repair', async () => {
+  const storage = desktopStorage({ integrityReport: damagedApplication })
+  const store = newStore()
+  await store.checkIntegrity()
+  application.runtimeCoreUpdateStatus = 'updating'
+  await assert.rejects(store.repairApplication(), /settings.updateTasksBusy/)
+  assert.equal(storage.commands.includes('start_application_repair'), false)
+})
+
+test('editor windows cannot inspect or repair the application', async () => {
+  const storage = desktopStorage({ windowLabel: 'workflow-editor-1' })
+  const store = newStore()
+  assert.equal(await store.checkIntegrity(), null)
+  await assert.rejects(store.repairApplication(), /main window/)
+  assert.equal(storage.commands.includes('check_application_integrity'), false)
+  assert.equal(storage.commands.includes('start_application_repair'), false)
 })
