@@ -31,13 +31,62 @@ class ReleaseCoreResolutionTests(unittest.TestCase):
         })
         self.path.write_text(json.dumps(self.manifest), encoding="utf-8")
 
-    def test_default_core_requirements_are_unversioned(self):
-        self.assertEqual(MANIFEST["common"]["pymss"], "pymss[proxy]")
-        self.assertEqual(MANIFEST["common"]["pymss-core"], "pymss-core")
+    def test_default_core_requirements_preserve_the_v2_compatibility_floor(self):
+        self.assertEqual(MANIFEST["common"]["pymss"], "pymss[proxy]>=2.2.0")
+        self.assertEqual(MANIFEST["common"]["pymss-core"], "pymss-core>=0.1.14")
         for filename in ("requirements.txt", "requirements-ci.txt"):
             lines = (ROOT / "python" / filename).read_text(encoding="utf-8").splitlines()
-            self.assertIn("pymss[proxy]", lines)
-            self.assertIn("pymss-core", lines)
+            self.assertIn("pymss[proxy]>=2.2.0", lines)
+            self.assertIn("pymss-core>=0.1.14", lines)
+
+    def test_minimum_versions_resolve_newer_stable_releases_and_keep_extras(self):
+        self.manifest["common"].update({
+            "pymss": "pymss[proxy]>=2.2.0", "pymss-core": "pymss-core>=0.1.14",
+        })
+        self.path.write_text(json.dumps(self.manifest), encoding="utf-8")
+        report = {"version": "1", "install": [
+            {"metadata": {"name": "pymss", "version": "2.3.0"}},
+            {"metadata": {"name": "pymss-core", "version": "0.2.0"}},
+        ]}
+
+        def resolve(command, **_kwargs):
+            self.assertEqual(command[-2:], ["pymss[proxy]>=2.2.0", "pymss-core>=0.1.14"])
+            Path(command[command.index("--report") + 1]).write_text(json.dumps(report), encoding="utf-8")
+
+        with mock.patch.object(CORE.subprocess, "run", side_effect=resolve):
+            self.assertEqual(CORE.resolve_manifest(self.path), {"pymss": "2.3.0", "pymss-core": "0.2.0"})
+        resolved = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(resolved["common"]["pymss"], "pymss[proxy]==2.3.0")
+        self.assertEqual(resolved["common"]["pymss-core"], "pymss-core==0.2.0")
+
+    def test_minimum_version_rejects_older_report_without_changing_manifest(self):
+        self.manifest["common"]["pymss"] = "pymss[proxy]>=2.2.0"
+        self.path.write_text(json.dumps(self.manifest), encoding="utf-8")
+        original = self.path.read_bytes()
+
+        def resolve(command, **_kwargs):
+            report = {"version": "1", "install": [
+                {"metadata": {"name": "pymss", "version": "2.1.8"}},
+                {"metadata": {"name": "pymss-core", "version": "0.1.11"}},
+            ]}
+            Path(command[command.index("--report") + 1]).write_text(json.dumps(report), encoding="utf-8")
+
+        with mock.patch.object(CORE.subprocess, "run", side_effect=resolve) as run:
+            with self.assertRaisesRegex(ValueError, "Invalid stable release core"):
+                CORE.resolve_manifest(self.path)
+        run.assert_called_once()
+        self.assertEqual(self.path.read_bytes(), original)
+
+    def test_requirement_validation_keeps_release_sources_and_version_forms_restricted(self):
+        for requirement in (
+            "other==2.2.0", "pymss @ https://example.com/pymss.whl",
+            'pymss>=2.2.0; python_version >= "3.11"', "pymss==2.*",
+            "pymss>=2.2.0,<3", "pymss<=2.2.0", "pymss~=2.2.0",
+        ):
+            with self.subTest(requirement=requirement):
+                self.manifest["common"]["pymss"] = requirement
+                with self.assertRaises(ValueError):
+                    CORE.core_requirements(self.manifest)
 
     def test_unversioned_resolution_keeps_extras_and_records_resolved_versions(self):
         self.manifest["common"].update({"pymss": "pymss[proxy]", "pymss-core": "pymss-core"})
@@ -58,10 +107,12 @@ class ReleaseCoreResolutionTests(unittest.TestCase):
         self.assertEqual(resolved["common"]["pymss-core"], "pymss-core==0.2.0")
 
     def test_bundle_verification_requires_a_resolved_version(self):
-        self.manifest["common"]["pymss"] = "pymss[proxy]"
-        self.path.write_text(json.dumps(self.manifest), encoding="utf-8")
-        with self.assertRaises(ValueError):
-            CORE.verify_installed(self.path)
+        for requirement in ("pymss[proxy]", "pymss[proxy]>=2.2.0"):
+            with self.subTest(requirement=requirement):
+                self.manifest["common"]["pymss"] = requirement
+                self.path.write_text(json.dumps(self.manifest), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    CORE.verify_installed(self.path)
 
     def test_real_resolver_selects_newest_stable_python_compatible_wheels(self):
         for name, versions in (

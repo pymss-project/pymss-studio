@@ -274,8 +274,11 @@ impl SessionSpec {
                     source.id
                 ));
             }
-            if !(1..=2).contains(&source.channels) {
-                return Err(format!("Audio source {} must be mono or stereo", source.id));
+            if !(1..=64).contains(&source.channels) {
+                return Err(format!(
+                    "Audio source {} has missing or unsupported channel-count metadata",
+                    source.id
+                ));
             }
         }
         let slots = self.slots();
@@ -357,7 +360,8 @@ struct ChunkKey {
 struct DecodeSource {
     path: PathBuf,
     id: String,
-    channels: u32,
+    // Original metadata controls mono duplication; decoded chunks are always stereo.
+    source_channels: u32,
     frames: u64,
 }
 
@@ -466,7 +470,7 @@ fn compile_sources(spec: &SessionSpec, sample_rate: u32) -> Vec<Arc<DecodeSource
             Arc::new(DecodeSource {
                 path: PathBuf::from(&source.path),
                 id: source.id.clone(),
-                channels: source.channels,
+                source_channels: source.channels,
                 frames: frame_at(source.duration, sample_rate),
             })
         })
@@ -1054,7 +1058,7 @@ fn decode_chunk(
         .arg(&job.source.path)
         .args(["-map", "0:a:0", "-vn", "-sn", "-dn"]);
     let mut filter = String::new();
-    if job.source.channels == 1 {
+    if job.source.source_channels == 1 {
         // The default FFmpeg mono upmix attenuates both channels. The editor
         // treats mono as duplicated unity-gain left/right samples instead.
         filter.push_str("pan=stereo|c0=c0|c1=c0,");
@@ -1065,6 +1069,8 @@ fn decode_chunk(
     command
         .arg("-af")
         .arg(filter)
+        // Match the editor preview downmix for multichannel files. Keep the
+        // original channel count in the session; cached PCM has a stereo stride.
         .args(["-ac", "2", "-ar"])
         .arg(sample_rate.to_string())
         .arg("-t")
@@ -1372,7 +1378,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_blocks_active_offline_or_multichannel_sources() {
+    fn validation_blocks_active_offline_sources_or_invalid_audio_metadata() {
         let (_directory, mut spec) = fixture(1.0);
         spec.sources[0].missing = true;
         assert!(spec.validate().unwrap_err().contains("offline"));
@@ -1380,14 +1386,44 @@ mod tests {
         assert!(spec.validate().is_ok());
         spec.tracks[0].muted = false;
         spec.sources[0].missing = false;
-        spec.sources[0].channels = 6;
-        assert!(spec.validate().unwrap_err().contains("mono or stereo"));
+        for channels in [0, 65] {
+            spec.sources[0].channels = channels;
+            assert!(spec.validate().unwrap_err().contains("channel-count"));
+        }
         spec.sources[0].channels = 2;
         spec.sources[0].sample_rate = 0;
         assert!(spec.validate().unwrap_err().contains("sample-rate"));
         spec.sources[0].sample_rate = 8000;
         spec.sources[0].path = "relative.wav".into();
         assert!(spec.validate().unwrap_err().contains("absolute file path"));
+    }
+
+    #[test]
+    fn multichannel_source_metadata_survives_compile_and_invalidates_changed_cache() {
+        let (_directory, mut spec) = fixture(0.01);
+        spec.sources[0].channels = 6;
+        let mut timeline = cached(spec.clone(), 0.25, -0.5);
+        assert_eq!(timeline.spec().sources[0].channels, 6);
+        assert_eq!(timeline.sources[0].source_channels, 6);
+        spec.tracks[0].volume = 0.5;
+        timeline
+            .apply_mix_update(prepare_mix_update(spec.clone(), 8000).unwrap())
+            .unwrap();
+        let mut buses = output(1, 8);
+        assert!(timeline.render_dry(0, 8, &mut buses).unwrap());
+        assert_eq!(buses[0][0], vec![0.125; 8]);
+        assert_eq!(buses[0][1], vec![-0.25; 8]);
+        assert_eq!(timeline.ready.len(), 1);
+        spec.sources[0].channels = 8;
+        assert!(timeline
+            .apply_mix_update(prepare_mix_update(spec.clone(), 8000).unwrap())
+            .is_err());
+        timeline.update(spec).unwrap();
+        assert_eq!(timeline.spec().sources[0].channels, 8);
+        assert_eq!(timeline.sources[0].source_channels, 8);
+        assert!(timeline.ready.is_empty());
+        assert!(timeline.pending.is_empty());
+        assert_eq!(timeline.generation.load(Ordering::Acquire), 1);
     }
 
     #[test]
@@ -1740,6 +1776,78 @@ mod tests {
         assert!(timeline.render_dry(16, 16, &mut buses).unwrap());
         assert!(timeline.pending.is_empty());
         assert_eq!(timeline.ready.len(), 1);
+    }
+
+    #[test]
+    fn ffmpeg_multichannel_decode_matches_stereo_downmix_across_chunk_boundary() {
+        let ffmpeg = std::env::var_os("PYMSS_TEST_FFMPEG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("ffmpeg"));
+        if Command::new(&ffmpeg)
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("FFmpeg is unavailable; skipping multichannel decoder coverage");
+            return;
+        }
+        for (channels, layout) in [(6, "5.1(side)"), (8, "7.1")] {
+            let (_directory, mut spec) = fixture(4.01);
+            spec.sources[0].channels = channels;
+            spec.sources[0].sample_rate = 48000;
+            let expressions = (0..channels)
+                .map(|channel| format!("0.04*sin(2*PI*{}*t)", 233 + channel * 71))
+                .collect::<Vec<_>>()
+                .join("|");
+            let created = Command::new(&ffmpeg)
+                .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+                .arg(format!("aevalsrc={expressions}:s=48000:d=4.01:c={layout}"))
+                .args(["-c:a", "pcm_f32le"])
+                .arg(&spec.sources[0].path)
+                .output()
+                .unwrap();
+            assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+            let reference = Command::new(&ffmpeg)
+                .args(["-v", "error", "-i"])
+                .arg(&spec.sources[0].path)
+                .args(["-ac", "2", "-ar", "48000", "-f", "f32le", "pipe:1"])
+                .output()
+                .unwrap();
+            assert!(reference.status.success());
+            let reference = reference.stdout
+                .chunks_exact(4)
+                .map(|word| f32::from_le_bytes(word.try_into().unwrap()))
+                .collect::<Vec<_>>();
+            let mut timeline = Timeline::new(spec.clone(), ffmpeg.clone(), 48000).unwrap();
+            let mut buses = output(1, 16);
+            for frame in [0, 4 * 48000 - 8] {
+                let deadline = Instant::now() + Duration::from_secs(15);
+                while !timeline.render_dry(frame, 16, &mut buses).unwrap() {
+                    assert!(Instant::now() < deadline, "Multichannel decode timed out");
+                    thread::sleep(Duration::from_millis(10));
+                }
+                for channel in 0..2 {
+                    for offset in 0..16 {
+                        let expected = reference[(frame as usize + offset) * 2 + channel];
+                        assert!((buses[0][channel][offset] - expected).abs() < 1e-6,
+                            "Incorrect {layout} downmix at frame {frame}, channel {channel}");
+                    }
+                }
+            }
+            assert_eq!(timeline.spec().sources[0].channels, channels);
+            assert_eq!(timeline.ready.len(), 2);
+            spec.tracks[0].volume = 0.5;
+            timeline.apply_mix_update(prepare_mix_update(spec, 48000).unwrap()).unwrap();
+            assert!(timeline.render_dry(0, 16, &mut buses).unwrap());
+            assert!(timeline.pending.is_empty());
+            for channel in 0..2 {
+                for offset in 0..16 {
+                    assert!((buses[0][channel][offset] - reference[offset * 2 + channel] * 0.5).abs() < 1e-6);
+                }
+            }
+        }
     }
 
     #[test]

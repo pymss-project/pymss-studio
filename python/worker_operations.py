@@ -9,6 +9,7 @@ emits ``operation_result`` as its terminal event (Rust treats it like
 from __future__ import annotations
 
 import re
+import shutil
 import traceback
 from pathlib import Path
 from typing import Any
@@ -89,14 +90,16 @@ def _serialize_output(name: str, value: Any, output_dir: Path) -> Any:
     from pymss.graph.core import AudioArtifact
 
     if isinstance(value, AudioArtifact):
-        from pymss.audio_io import save_audio
-        from pymss.plugins.kit import render_output
+        from pymss.plugins.kit import materialize_audio, render_output
 
         filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(name))[:48].rstrip(" .") or "output"
-        path = render_output(
-            output_dir / f"operation_output_{filename}.wav",
-            lambda target: save_audio(str(target), value.audio.T, value.sample_rate, "wav", {}),
-        )
+        # Materialize the current float samples with their channel layout, then
+        # publish atomically without replacing a previous operation's output.
+        with materialize_audio(value) as temporary:
+            path = render_output(
+                output_dir / f"operation_output_{filename}.wav",
+                lambda target: shutil.copyfile(temporary, target),
+            )
         return {"kind": "audio_file", "path": str(path), "sampleRate": value.sample_rate}
     if isinstance(value, np.generic):
         value = value.item()

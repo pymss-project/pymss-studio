@@ -37,6 +37,14 @@ def manifest(version: str = "2026.09.3") -> dict:
     }
 
 
+def current_core_manifest() -> dict:
+    shipped = json.loads(worker_bootstrap.MANIFEST_PATH.read_text(encoding="utf-8"))
+    value = manifest(shipped["manifestVersion"])
+    for name in ("pymss", "pymss-core"):
+        value["common"][name] = shipped["common"][name]
+    return value
+
+
 def probe(backend: str, *, pymss: str = "2.1.4", core: str = "0.1.6", graph: bool = True) -> dict:
     torch_backend = "cpu" if backend == "mlx" else backend
     torch_version = {"cpu": "2.7.1", "cuda": "2.7.1+cu128", "mlx": "2.7.1"}[backend]
@@ -65,6 +73,13 @@ def probe(backend: str, *, pymss: str = "2.1.4", core: str = "0.1.6", graph: boo
 
 
 class RuntimeCoreVersionTests(unittest.TestCase):
+    def test_previous_manifest_sync_is_detected_as_outdated_and_incompatible(self):
+        current = current_core_manifest()
+        self.assertEqual(worker_bootstrap._runtime_manifest_status("2026.10.3", current["manifestVersion"]), "older")
+        self.assertEqual(worker_bootstrap._runtime_health("cpu", probe("cpu", pymss="2.1.8", core="0.1.11"), current), "degraded")
+        self.assertEqual(worker_bootstrap._runtime_health("cpu", probe("cpu", pymss="2.2.0", core="0.1.14"), current), "ready")
+        self.assertEqual(worker_bootstrap._runtime_health("cpu", probe("cpu", pymss="3.0.0", core="1.0.0"), current), "ready")
+
     def test_version_queries_use_pypi_even_when_release_versions_are_pinned(self):
         pinned = manifest()
         pinned["common"].update({"pymss": "pymss[proxy]==2.1.4", "pymss-core": "pymss-core==0.1.6"})
@@ -167,6 +182,7 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
         channel="stable",
         rollback_after=False,
         state_overrides=None,
+        expected_resolution_cores=None,
     ):
         bundled_root, env, python = self.make_env(backend, manifest_version=manifest_version, bundled=bundled, platform=platform, bootstrap=bootstrap)
         if state_overrides:
@@ -188,6 +204,8 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
         def popen(command, **kwargs):
             command_status = 0 if "--dry-run" in command else pip_status
             if "--dry-run" in command:
+                for requirement in expected_resolution_cores or ():
+                    self.assertIn(requirement, command)
                 self.assertNotIn("--target", command)
                 self.assertNotIn("--no-deps", command)
                 constraints = Path(command[command.index("--constraint") + 1]).read_text(encoding="utf-8")
@@ -285,6 +303,44 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
         result, commands, *_ = self.run_update(mode="sync", installed_probe=current, overlay_probe=current)
         self.assertEqual(result, 0)
         self.assertIn("pymss[proxy]==2.2.0", commands[0])
+
+    def test_current_manifest_sync_upgrades_an_old_v1_core_to_the_v2_baseline(self):
+        old = probe("cpu", pymss="2.1.8", core="0.1.11")
+        current = current_core_manifest()
+        result, commands, _env, _python, _events = self.run_update(
+            mode="sync", manifest_value=current, manifest_version="2026.10.3",
+            installed_probe=old, state_overrides=old,
+            overlay_probe=probe("cpu", pymss="2.2.0", core="0.1.14"),
+            latest_versions={"pymss": None, "pymss-core": None},
+            expected_resolution_cores=("pymss[proxy]==2.2.0", "pymss-core==0.1.14"),
+        )
+        self.assertEqual(result, 0)
+        self.assertIn("pymss[proxy]==2.2.0", commands[0])
+        self.assertIn("pymss-core==0.1.14", commands[0])
+        active = json.loads(self.active.read_text(encoding="utf-8"))
+        self.assertEqual(active["manifestVersion"], current["manifestVersion"])
+        self.assertEqual(active["pymssVersion"], "2.2.0")
+
+    def test_current_manifest_sync_preserves_a_newer_installed_core(self):
+        installed = probe("cpu", pymss="3.0.0", core="1.0.0")
+        result, commands, *_ = self.run_update(
+            mode="sync", manifest_value=current_core_manifest(), installed_probe=installed,
+            overlay_probe=installed, latest_versions={"pymss": None, "pymss-core": None},
+            expected_resolution_cores=("pymss[proxy]==3.0.0", "pymss-core==1.0.0"),
+        )
+        self.assertEqual(result, 0)
+        self.assertIn("pymss[proxy]==3.0.0", commands[0])
+        self.assertIn("pymss-core==1.0.0", commands[0])
+
+    def test_current_manifest_updates_beyond_the_minimum_version(self):
+        result, commands, *_ = self.run_update(
+            mode="update", manifest_value=current_core_manifest(),
+            latest_versions={"pymss": "2.3.0", "pymss-core": "0.2.0"},
+            overlay_probe=probe("cpu", pymss="2.3.0", core="0.2.0"),
+        )
+        self.assertEqual(result, 0)
+        self.assertIn("pymss[proxy]==2.3.0", commands[0])
+        self.assertIn("pymss-core==0.2.0", commands[0])
 
     def test_accelerator_dependency_resolution_failure_preserves_active_environment(self):
         result, commands, *_ = self.run_update(resolved_packages={"torch": "2.8.0"})

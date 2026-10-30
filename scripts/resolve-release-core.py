@@ -22,14 +22,17 @@ def core_requirements(manifest: dict, *, require_pins: bool = False) -> dict[str
     requirements = {}
     for name in CORE_PACKAGES:
         requirement = Requirement(manifest["common"][name])
-        pins = list(requirement.specifier)
+        bounds = list(requirement.specifier)
         if (
             canonicalize_name(requirement.name) != name
             or requirement.url or requirement.marker
-            or (pins and (len(pins) != 1 or pins[0].operator != "==" or "*" in pins[0].version))
-            or (require_pins and not pins)
+            or (bounds and (len(bounds) != 1 or bounds[0].operator not in {"==", ">="} or "*" in bounds[0].version))
+            or (require_pins and (not bounds or bounds[0].operator != "=="))
         ):
-            raise ValueError(f"Release core must be unversioned or have an exact version; bundle verification requires a version: {name}")
+            raise ValueError(
+                "Release core must be unversioned or have one exact version or minimum version; "
+                f"bundle verification requires an exact version: {name}"
+            )
         requirements[name] = requirement
     return requirements
 
@@ -40,9 +43,9 @@ def resolve_manifest(path: Path) -> dict[str, str]:
     candidates = []
     baselines = {}
     for name, requirement in requirements.items():
-        pins = list(requirement.specifier)
-        if pins:
-            baselines[name] = Version(pins[0].version)
+        bounds = list(requirement.specifier)
+        if bounds:
+            baselines[name] = Version(bounds[0].version)
             requirement.specifier = type(requirement.specifier)(f">={baselines[name]}")
         candidates.append(str(requirement))
 

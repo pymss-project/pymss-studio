@@ -846,6 +846,78 @@ fn legacy_effect_fields_are_ignored_and_export_updates_preserve_the_session() {
 }
 
 #[test]
+fn multichannel_exports_downmix_before_plugins_and_master_limiter() {
+    let ffmpeg = std::env::var_os("PYMSS_TEST_FFMPEG").map(PathBuf::from).or_else(|| {
+        std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths)
+            .map(|path| path.join(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" }))
+            .find(|path| path.is_file()))
+    });
+    let Some(ffmpeg) = ffmpeg else {
+        eprintln!("FFmpeg unavailable; skipping multichannel export coverage");
+        return;
+    };
+    let ffmpeg = ffmpeg.canonicalize().unwrap();
+    std::fs::create_dir_all(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let directory = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let bundle = fixture_bundle(directory.path());
+    let scanned = Command::new(env!("CARGO_BIN_EXE_pymss-audio-host"))
+        .arg("--plugin-scan").arg(&bundle).output().unwrap();
+    assert!(scanned.status.success());
+    let catalog: Value = serde_json::from_slice(&scanned.stdout).unwrap();
+    let effect = catalog["plugins"].as_array().unwrap().iter()
+        .find(|plugin| plugin["isInstrument"] == false).unwrap();
+    let mut host = Host::with_behavior("delay");
+    for (channels, layout) in [(1, "mono"), (2, "stereo"), (6, "5.1(side)"), (8, "7.1")] {
+        let source = directory.path().join(format!("source-{channels}.wav"));
+        let expressions = (0..channels)
+            .map(|channel| format!("0.04*sin(2*PI*{}*t)", 233 + channel * 71))
+            .collect::<Vec<_>>().join("|");
+        let created = Command::new(&ffmpeg)
+            .args(["-v", "error", "-f", "lavfi", "-i"])
+            .arg(format!("aevalsrc={expressions}:s=48000:d=0.1:c={layout}"))
+            .args(["-c:a", "pcm_f32le"]).arg(&source).output().unwrap();
+        assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+        let mut reference = Command::new(&ffmpeg);
+        reference.args(["-v", "error", "-i"]).arg(&source);
+        if channels == 1 {
+            reference.args(["-af", "pan=stereo|c0=c0|c1=c0"]);
+        }
+        let reference = reference.args(["-ac", "2", "-ar", "48000", "-f", "f32le", "pipe:1"])
+            .output().unwrap();
+        assert!(reference.status.success());
+        let reference: Vec<_> = reference.stdout.chunks_exact(4)
+            .map(|word| f32::from_le_bytes(word.try_into().unwrap())).collect();
+        assert_eq!(reference.len(), 4800 * 2);
+        assert!(reference.iter().any(|sample| sample.abs() > 0.01));
+        for (plugin, limiter) in [(false, true), (true, false), (true, true)] {
+            let mut project = json!({"id":"multichannel-export","name":"Audio",
+                "sources":[{"id":"source","path":source,"duration":0.1,"channels":channels,"sampleRate":48000}],
+                "tracks":[{"id":"voice","sourceId":"source"}],
+                "masterLimiter":{"enabled":limiter,"gainDb":0.0,"ceilingDb":-1.0,"attackMs":3.0}});
+            if plugin {
+                project["pluginChain"] = json!([{"id":"effect","format":"vst3","pluginId":effect["id"],
+                    "name":"Gain","path":bundle}]);
+            }
+            host.request(json!({"op":"load","project":project,"ffmpeg":ffmpeg,"offline":true,"sampleRate":48000}));
+            if plugin {
+                host.request(json!({"op":"param","slotId":"effect","paramId":"7","value":0.5}));
+            }
+            let output = directory.path().join(format!("render-{channels}-{plugin}-{limiter}.wav"));
+            host.render(&output);
+            let reader = hound::WavReader::open(output).unwrap();
+            assert_eq!(reader.duration(), 4800, "{layout} must retain source timing");
+            let samples: Vec<_> = reader.into_samples::<f32>().map(Result::unwrap).collect();
+            let gain = if plugin { 0.5 } else { 1.0 };
+            for (index, (actual, expected)) in samples.iter().zip(&reference).enumerate() {
+                assert!((actual - expected * gain).abs() < 1e-6,
+                    "Incorrect {layout} downmix at sample {index}, plugin={plugin}, limiter={limiter}");
+            }
+        }
+    }
+    host.finish();
+}
+
+#[test]
 fn master_limiter_exports_at_the_encoding_rate_without_losing_or_adding_frames() {
     let ffmpeg = std::env::var_os("PYMSS_TEST_FFMPEG").map(PathBuf::from).or_else(|| {
         std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths)

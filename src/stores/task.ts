@@ -106,7 +106,7 @@ export type SeparationTask = {
   files: string[]
   outputs: StemOutput[]
   /** Plugin graph leaf values (ASR text, measurements, MIDI paths) by node. */
-  nodeValues?: { nodeId: number; nodeType: string; slot: number; value: string }[]
+  nodeValues?: { nodeId: string | number; nodeType: string; slot: number; value: string }[]
   logs: LogEntry[]
   nodeLogs?: WorkflowNodeLogs
   error?: string
@@ -391,6 +391,19 @@ function resolveStageProgress(status: TaskStatus, current?: number, total?: numb
   return Math.round(clamp(current / total, 0, 1) * 100)
 }
 
+function normalizeNodeValues(value: unknown): SeparationTask['nodeValues'] {
+  if (!Array.isArray(value)) return undefined
+  const values = value.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object'
+      || !(typeof entry.nodeId === 'string' ? entry.nodeId.trim() : Number.isSafeInteger(entry.nodeId))
+      || typeof entry.nodeType !== 'string' || !entry.nodeType.trim()
+      || !Number.isSafeInteger(entry.slot) || entry.slot < 0
+      || typeof entry.value !== 'string') return []
+    return [{ nodeId: entry.nodeId, nodeType: entry.nodeType, slot: entry.slot, value: entry.value }]
+  })
+  return values.length ? values : undefined
+}
+
 function normalizeTask(task: Partial<SeparationTask>, windows = /^[A-Za-z]:|^\\\\/.test(task.output || task.jobOutput || '')): SeparationTask {
   let status = normalizeStatus(task.status)
   let interrupted = false
@@ -443,6 +456,7 @@ function normalizeTask(task: Partial<SeparationTask>, windows = /^[A-Za-z]:|^\\\
       ? clamp(task.lastProgressPercent, 0, 99) : undefined,
     files: normalizedFiles,
     outputs: normalizedOutputs,
+    nodeValues: normalizeNodeValues(task.nodeValues),
     logs: interrupted
       ? [...(task.logs || []), `${new Date().toLocaleTimeString()} 应用关闭或重启，任务已标记为中断。`].slice(-300)
       : (task.logs || []),
@@ -662,7 +676,7 @@ export const useTaskStore = defineStore('task', () => {
   // 任务页可见任务：排除已在任务页隐藏的记录（结果页隐藏不影响任务页）
   const taskBoardTasks = computed(() => tasks.value.filter((task) => !task.taskHidden))
   // 结果页可见结果：仅含有输出且未在结果页隐藏的任务（任务页隐藏不影响结果页）
-  const resultTasks = computed(() => completedTasks.value.filter((task) => !task.resultHidden && (task.outputs.length || task.files.length)))
+  const resultTasks = computed(() => tasks.value.filter(hasResultPresence))
   const queuedTasks = computed(() => tasks.value.filter((task) => task.status === 'queued'))
   const failedTasks = computed(() => tasks.value.filter((task) => task.status === 'failed'))
   const allJobs = computed(() => buildJobs(tasks.value))
@@ -1649,7 +1663,7 @@ export const useTaskStore = defineStore('task', () => {
       task.progressTotal = undefined
       task.progressDetail = undefined
       task.files = event.payload?.files || []
-      if (Array.isArray(event.payload?.nodeValues)) task.nodeValues = event.payload.nodeValues
+      task.nodeValues = normalizeNodeValues(event.payload?.nodeValues)
       if (event.payload?.outputDir) {
         task.output = event.payload.outputDir
       }
@@ -1860,7 +1874,7 @@ export const useTaskStore = defineStore('task', () => {
   function hasResultPresence(task: SeparationTask) {
     return task.status === 'done'
       && !task.resultHidden
-      && (task.outputs.length > 0 || task.files.length > 0)
+      && (task.outputs.length > 0 || task.files.length > 0 || Boolean(task.nodeValues?.length))
   }
 
   // 当一个任务在任务页与结果页都不再可见时，从底层数组彻底回收，避免无限堆积。

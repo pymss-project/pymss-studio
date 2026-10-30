@@ -163,4 +163,23 @@ describe('editor clip timeline helpers', () => {
       { id: 'right', start: 8, offset: 2, duration: 2 },
     ])
   })
+
+  it('keeps punch-in recording slices within their source at sample precision', () => {
+    const sampleRate = 48_000
+    const duration = 16_384 / sampleRate
+    const original: EditorClip = {
+      id: 'recording', assetId: source.id, start: 0, offset: 0, duration,
+      volume: 1, fadeIn: 0.1, fadeOut: 0.2, muted: false, locked: false,
+    }
+    const start = 0.05
+    const end = start + 8192 / sampleRate
+    const [left, right] = overwriteClipsInRange([original], start, end - start, () => 'right')
+    assert.equal(left.duration, start)
+    assert.equal(right.start, end)
+    assert.equal(right.offset, end)
+    assert.ok(right.offset + right.duration <= duration + Number.EPSILON)
+    assert.ok(Math.abs(right.start + right.duration - duration) < 1 / sampleRate)
+    assert.ok(left.fadeIn <= left.duration)
+    assert.ok(right.fadeOut <= right.duration)
+  })
 })

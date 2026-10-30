@@ -342,20 +342,45 @@ class OperationOutputTests(unittest.TestCase):
             output = worker_operations._serialize_output("../lead\\voice", self.audio(0.1), root)
             self.assertTrue(Path(output["path"]).parent.samefile(root))
 
-    def test_failed_audio_write_does_not_publish_or_leave_a_partial(self):
+    def test_multichannel_output_roundtrip_preserves_layout_and_current_float_samples(self):
+        import numpy as np
+        from pymss.graph.core import AudioArtifact
+
         with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scratch = root / "scratch"
+            scratch.mkdir()
+            for layout, channels in [("5.1(side)", 6), ("5.1", 6), ("7.1", 8), ("quad", 4)]:
+                with self.subTest(layout=layout), mock.patch.dict(os.environ, {"PYMSS_SCRATCH_DIR": str(scratch)}):
+                    wave = np.linspace(-1.25, 1.25, 1000, dtype=np.float32)
+                    samples = np.stack([wave * (1 - channel * 0.05) for channel in range(channels)])
+                    audio = AudioArtifact(samples, 48000, source_path="missing-original.wav", channel_layout=layout)
+                    exported = worker_operations._serialize_output("surround", audio, root)
+                    loaded = worker_operations._resolve_input({"kind": "file", "path": exported["path"]})
+                    self.assertEqual(loaded.channel_layout, layout)
+                    self.assertEqual(loaded.sample_rate, 48000)
+                    np.testing.assert_allclose(loaded.audio, samples, rtol=0, atol=1e-7)
+                    self.assertEqual(list(scratch.iterdir()), [])
+
+    def test_failed_audio_write_does_not_publish_or_leave_a_partial(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as scratch:
             root = Path(directory)
             previous = root / "operation_output_audio.wav"
             previous.write_bytes(b"previous export")
 
-            def fail(path, *args):
-                Path(path).write_bytes(b"partial")
+            def fail(source, target):
+                Path(target).write_bytes(b"partial")
                 raise OSError("disk failure")
 
-            with mock.patch("pymss.audio_io.save_audio", side_effect=fail), self.assertRaisesRegex(OSError, "disk failure"):
+            with (
+                mock.patch.dict(os.environ, {"PYMSS_SCRATCH_DIR": scratch}),
+                mock.patch.object(worker_operations.shutil, "copyfile", side_effect=fail),
+                self.assertRaisesRegex(OSError, "disk failure"),
+            ):
                 worker_operations._serialize_output("audio", self.audio(0.1), root)
             self.assertEqual(list(root.iterdir()), [previous])
             self.assertEqual(previous.read_bytes(), b"previous export")
+            self.assertEqual(list(Path(scratch).iterdir()), [])
 
 
 if __name__ == "__main__":

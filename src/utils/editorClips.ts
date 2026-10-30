@@ -70,18 +70,24 @@ export function overwriteClipsInRange(
     if (leftDuration >= 0.01) {
       result.push({
         ...clip,
-        duration: roundTime(leftDuration),
+        duration: leftDuration,
+        fadeIn: Math.min(clip.fadeIn, leftDuration),
         fadeOut: 0,
       })
     }
     if (rightDuration >= 0.01) {
+      // Recording boundaries follow the sample clock. Millisecond rounding
+      // can extend the remaining slice beyond its original source samples.
+      const offset = clip.offset + Math.max(0, rangeEnd - clipStart)
+      const duration = Math.min(rightDuration, Math.max(0, clip.offset + clip.duration - offset))
       result.push({
         ...clip,
         id: leftDuration >= 0.01 ? createClipId() : clip.id,
-        start: roundTime(rangeEnd),
-        offset: roundTime(clip.offset + Math.max(0, rangeEnd - clipStart)),
-        duration: roundTime(rightDuration),
+        start: rangeEnd,
+        offset,
+        duration,
         fadeIn: 0,
+        fadeOut: Math.min(clip.fadeOut, duration),
       })
     }
   }
