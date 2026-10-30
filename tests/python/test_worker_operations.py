@@ -105,7 +105,7 @@ class ListOperationsTests(unittest.TestCase):
         ids = [op["id"] for op in event["payload"]["operations"]]
         self.assertIn("pymss.loudnorm.normalize", ids)
 
-    def test_reports_unavailable_when_pymss_missing(self) -> None:
+    def test_reports_incompatible_when_required_plugin_apis_are_missing(self) -> None:
         output = io.StringIO()
         with (
             mock.patch.dict("sys.modules", {"pymss": None, "pymss.plugins": None}),
@@ -113,8 +113,10 @@ class ListOperationsTests(unittest.TestCase):
         ):
             code = worker_operations.cmd_list_operations({})
         event = _read_event(output)
-        self.assertEqual(code, 0)
-        self.assertFalse(event["payload"]["pymssOperationsAvailable"])
+        self.assertEqual(code, 1)
+        self.assertEqual(event["type"], "error")
+        self.assertEqual(event["payload"]["code"], "OPERATIONS_LIST_FAILED")
+        self.assertIn("required plugin APIs", event["payload"]["message"])
 
 
 class RunOperationTests(unittest.TestCase):

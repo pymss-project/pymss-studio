@@ -146,7 +146,14 @@ function createWidgets(node: AnyNode, specs: WidgetSpec[]) {
       spec.name,
       spec.default,
       widgetCallback(node, spec),
-      spec.options ? { values: spec.options } : undefined,
+      {
+        ...(spec.options ? { values: spec.options } : {}),
+        ...(spec.type === 'number' ? {
+          min: spec.min, max: spec.max,
+          // LiteGraph's legacy `step` is scaled by 0.1; `step2` uses value units.
+          step2: spec.step,
+        } : {}),
+      },
     )
     if (widget) widget.value = spec.default
   }

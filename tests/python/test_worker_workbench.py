@@ -70,6 +70,46 @@ class WorkbenchNativeTests(unittest.TestCase):
         self.assertEqual((payload['nodeId'], payload['nodeProgress']), ('4', .5))
         self.assertEqual(payload['overallFraction'], .25)
 
+    def test_plugin_files_are_published_and_string_paths_follow_the_final_destination(self):
+        from pymss.graph import AUDIO, STRING, DAGOutputRecord, NodeResult, NodeSignature, PortSpec, StringArtifact
+        from pymss.plugins import get_registry
+
+        registry = get_registry()
+        node_type = 'StudioTestMidiOutput'
+
+        def execute(ctx, inputs):
+            target = ctx.output_dir / 'voice.mid'
+            target.write_bytes(b'MThd')
+            record = DAGOutputRecord(str(target), node_id=2, node_type=node_type, format='mid')
+            return NodeResult(outputs={0: StringArtifact(str(target))}, saved_paths=[str(target)], saved_records=[record])
+
+        registry.register_node(node_type, execute, source='plugin:studio.test', signature=lambda node: NodeSignature(
+            inputs=[PortSpec('audio', AUDIO)], output_names=['path'], output_types=[STRING], is_output_node=True,
+        ))
+        self.addCleanup(registry.nodes.pop, node_type, None)
+        definition = {'nodes': [
+            {'id': 1, 'type': 'pymss_load_audio', 'widgets_values': ['', 'lead'], 'inputs': []},
+            {'id': 2, 'type': node_type, 'inputs': [{'name': 'audio', 'type': 'AUDIO', 'link': 1}]},
+        ], 'links': [[1, 1, 0, 2, 0, 'AUDIO']]}
+        for targets, directory in [({}, self.root / 'default'), ({'2': str(self.root / 'chosen')}, self.root / 'chosen')]:
+            with self.subTest(targets=targets), patch('worker_nodes.collect_plugin_nodes', return_value=[]):
+                result = self.run_graph(definition, targets)
+            output = Path(result['files'][0])
+            self.assertEqual(output.parent, directory.resolve())
+            self.assertEqual(output.read_bytes(), b'MThd')
+            midi_value = next(value for value in result['nodeValues'] if str(value['nodeId']) == '2')
+            self.assertEqual(midi_value['value'], str(output))
+            self.assertEqual(result['outputs'][0]['nodeId'], '2')
+            self.assertFalse(list((self.root / 'default').glob('.pymss-workflow-*')))
+
+    def test_unavailable_plugin_is_reported_before_graph_execution(self):
+        declarations = [{'type': 'UnavailableAsr', 'pluginId': 'pymss.asr', 'registered': False,
+                         'unavailableReason': 'Missing plugin dependency: funasr'}]
+        definition = {'nodes': [{'id': 1, 'type': 'UnavailableAsr', 'inputs': []}], 'links': []}
+        with patch('worker_nodes.collect_plugin_nodes', return_value=declarations), \
+             self.assertRaisesRegex(RuntimeError, 'pymss.asr.*funasr'):
+            self.run_graph(definition, {})
+
     def test_builtin_save_nodes_keep_dynamic_prefixes_and_separate_same_named_outputs(self):
         definition = {
             'nodes': [

@@ -30,7 +30,77 @@ const {
   SEPARATE_NODE_MIN_WIDTH,
 } = await vite.ssrLoadModule('/src/litegraph/registerNodes.ts')
 const adapter = await vite.ssrLoadModule('/src/litegraph/graphAdapter.ts')
+const { pluginNodeSpec, selectPluginNodeDeclarations } = await vite.ssrLoadModule('/src/litegraph/nodeSpecs.ts')
 registerPymssNodes()
+
+test('plugin numeric widgets preserve manifest bounds and actual step units in LiteGraph', () => {
+  const type = 'test_plugin_bounded_number'
+  try {
+    registerPluginNodeSpecs([pluginNodeSpec({
+      type,
+      widgets: [
+        { name: 'ratio', type: 'number', default: 0.5, min: 0, max: 1, step: 0.25 },
+        { name: 'frequency', type: 'number', default: 100, min: 0, max: 200, step: 10 },
+      ],
+    })])
+    const graph = new LGraph()
+    const node = LiteGraph.createNode(type)
+    graph.add(node)
+    const options = { e: undefined, node, canvas: { graph_mouse: [0, 0] } }
+    const [ratio, frequency] = node.widgets
+    ratio.incrementValue(options)
+    assert.equal(ratio.value, 0.75)
+    ratio.decrementValue(options)
+    assert.equal(ratio.value, 0.5)
+    ratio.setValue(-1, options)
+    assert.equal(ratio.value, 0)
+    ratio.setValue(2, options)
+    assert.equal(ratio.value, 1)
+    frequency.incrementValue(options)
+    assert.equal(frequency.value, 110)
+    assert.deepEqual(adapter.litegraphToComfy(graph.serialize()).nodes[0].widgets_values, [1, 110])
+  } finally {
+    registerPluginNodeSpecs([])
+  }
+})
+
+test('a conflicting inactive declaration cannot replace the live node owner', () => {
+  const active = { type: 'SharedNode', pluginId: 'example.owner', registered: true, title: 'Active' }
+  const blocked = { type: 'SharedNode', pluginId: 'example.other', registered: false, title: 'Blocked' }
+  for (const declarations of [[active, blocked], [blocked, active]]) {
+    assert.deepEqual(selectPluginNodeDeclarations(declarations), [active])
+  }
+})
+
+test('plugin slider values remain numeric after editing and graph round-trips', () => {
+  const type = 'test_plugin_slider'
+  try {
+    registerPluginNodeSpecs([pluginNodeSpec({
+      type, widgets: [{ name: 'gain', type: 'slider', default: 0.5, min: 0, max: 1, step: 0.25 }],
+    })])
+    const graph = new LGraph()
+    const node = LiteGraph.createNode(type)
+    graph.add(node)
+    const gain = node.widgets[0]
+    const options = { e: undefined, node, canvas: { graph_mouse: [0, 0] } }
+    gain.incrementValue(options)
+    assert.equal(gain.value, 0.75)
+    const saved = graph.serialize()
+    assert.deepEqual(adapter.litegraphToComfy(saved).nodes[0].widgets_values, [0.75])
+    const restored = new LGraph()
+    restored.configure(saved)
+    const restoredNode = restored.getNodeById(node.id)
+    assert.equal(typeof restoredNode.widgets[0].value, 'number')
+    const restoredOptions = { ...options, node: restoredNode }
+    restoredNode.widgets[0].incrementValue(restoredOptions)
+    restoredNode.widgets[0].incrementValue(restoredOptions)
+    assert.equal(restoredNode.widgets[0].value, 1)
+    restoredNode.widgets[0].setValue(-1, restoredOptions)
+    assert.equal(restoredNode.widgets[0].value, 0)
+  } finally {
+    registerPluginNodeSpecs([])
+  }
+})
 
 test('plugin node declarations update new instances and remove stale creation entries', () => {
   const type = 'test_plugin_gain'

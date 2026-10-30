@@ -157,7 +157,7 @@ def cmd_run_operation(payload: dict[str, Any]) -> int:
             operation_id,
             inputs=inputs,
             params=params,
-            context=OperationContext(progress=_progress),
+            context=OperationContext(workdir=str(output_dir), progress=_progress),
         )
         serialized = {
             name: _serialize_output(name, value, output_dir)

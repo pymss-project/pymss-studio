@@ -216,6 +216,14 @@ fn acquire_runtime_access<'a>(
     Ok(Some(RuntimeAccessGuard { access, updating, installing_plugins }))
 }
 
+fn worker_scratch(command: &str) -> std::io::Result<Option<tempfile::TempDir>> {
+    if matches!(command, "run_operation" | "infer_workflow") {
+        tempfile::Builder::new().prefix("pymss-worker-audio-").tempdir().map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 fn runtime_access_command<'a>(command: &'a str, payload: &Value) -> &'a str {
     if command == "manage_plugin" && payload.get("action").and_then(Value::as_str) == Some("install") {
         "install_plugin"
@@ -1464,6 +1472,7 @@ fn run_worker_with_payload_inner(
 ) -> AppResult<Value> {
     let _application_access = acquire_application_operation()?;
     let _runtime_access = acquire_runtime_access(&RUNTIME_ACCESS, runtime_access_command(command, payload.as_ref().unwrap_or(&Value::Null)))?;
+    let scratch = worker_scratch(command)?;
     let payload_file = match payload {
         Some(value) => Some(make_payload_file(command, None, value)?),
         None => None,
@@ -1477,6 +1486,7 @@ fn run_worker_with_payload_inner(
             return Err(error);
         }
     };
+    if let Some(scratch) = &scratch { cmd.env("PYMSS_SCRATCH_DIR", scratch.path()); }
     let started_at = std::time::Instant::now();
     session_log::append(
         app,
@@ -1652,6 +1662,7 @@ fn spawn_worker_background_inner(
     }
 
     let command_name = command.to_string();
+    let scratch = worker_scratch(command)?;
     let mut audio_scope = if command == "run_operation" {
         let directory = operation_output_directory(&payload, &default_output_dir(&app)?)?;
         payload.as_object_mut()
@@ -1678,6 +1689,7 @@ fn spawn_worker_background_inner(
         }
     };
     if let Some(scope) = &audio_scope { scope.configure(&mut cmd); }
+    if let Some(scratch) = &scratch { cmd.env("PYMSS_SCRATCH_DIR", scratch.path()); }
     let started_at = std::time::Instant::now();
     session_log::append(
         &app,
@@ -1824,6 +1836,9 @@ fn spawn_worker_background_inner(
             // Dropping here also handles a failed wait while both leases are held.
             if exit_status.is_some() { scope.finish(); }
         }
+        // The parent owns scratch so forced worker cancellation also removes
+        // temporary AUDIO files, even when Python cannot execute its finally.
+        drop(scratch);
         drop(runtime_access.take());
         drop(application_access.take());
         // Finish Python cleanup before the terminal event starts the UI's environment refresh.
@@ -1944,6 +1959,21 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::path::Path;
+
+    #[test]
+    fn worker_scratch_is_scoped_and_cleans_orphaned_child_files() {
+        let first = super::worker_scratch("infer_workflow").unwrap().unwrap();
+        let second = super::worker_scratch("run_operation").unwrap().unwrap();
+        assert_ne!(first.path(), second.path());
+        assert!(super::worker_scratch("list_nodes").unwrap().is_none());
+        let path = first.path().to_path_buf();
+        let nested = path.join("pymss-audio-aborted");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("vocals.wav"), b"partial audio").unwrap();
+        drop(first);
+        assert!(!path.exists());
+        assert!(second.path().exists());
+    }
 
     #[test]
     fn cancelled_task_ids_survive_logging_for_supervisor_notification() {

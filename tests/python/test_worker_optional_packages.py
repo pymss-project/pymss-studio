@@ -441,8 +441,21 @@ class OptionalRuntimePackageTests(unittest.TestCase):
         with mock.patch.object(optional_packages, "_is_apple_silicon", return_value=True):
             status = optional_packages.optional_package_status("funasr", runtime)
         self.assertEqual(status["source"], "managed")
-        self.assertEqual(status["requirement"], "funasr-mlx>=0.2")
+        self.assertEqual(status["requirement"], "funasr-mlx>=0.2.2")
         self.assertTrue(status["canUninstall"])
+
+    def test_apple_silicon_requires_the_ctc_tokenizer_for_installed_status(self) -> None:
+        runtime = optional_packages._runtime_context()
+        for tokenizer_version, expected in [(None, False), ("0.1.99", False), ("0.2.1", True)]:
+            with self.subTest(tokenizer=tokenizer_version), \
+                 mock.patch.object(optional_packages, "_is_apple_silicon", return_value=True), \
+                 mock.patch.object(optional_packages, "_sidecar_version", side_effect=lambda name, path: {
+                     "funasr-mlx": "0.2.3", "sentencepiece": tokenizer_version,
+                 }.get(name)), \
+                 mock.patch.object(optional_packages, "_environment_version", return_value=None):
+                status = optional_packages.optional_package_status("funasr", runtime)
+            self.assertEqual(status["installed"], expected)
+            self.assertEqual(status["issue"], None if expected else "version_mismatch")
 
     def test_apple_silicon_uninstall_removes_only_mlx_sidecar(self) -> None:
         runtime = optional_packages._runtime_context()
@@ -460,11 +473,11 @@ class OptionalRuntimePackageTests(unittest.TestCase):
 
     def test_mlx_base_component_is_read_only_and_checks_supported_versions(self):
         runtime = optional_packages._runtime_context()
-        for version, installed in [("0.2.1", True), ("0.1.9", False), ("0.2rc1", False)]:
+        for version, installed in [("0.2.3", True), ("0.2.1", False), ("0.1.9", False), ("0.2rc1", False)]:
             with self.subTest(version=version), \
                  mock.patch.object(optional_packages, "_is_apple_silicon", return_value=True), \
                  mock.patch.object(optional_packages, "_sidecar_version", return_value=None), \
-                 mock.patch.object(optional_packages, "_environment_version", return_value=version):
+                 mock.patch.object(optional_packages, "_environment_version", side_effect=lambda name, runtime: "0.2.1" if name == "sentencepiece" else version):
                 status = optional_packages.optional_package_status("funasr", runtime)
             self.assertEqual(status["installed"], installed)
             self.assertEqual(status["source"], "environment")
@@ -488,6 +501,7 @@ class OptionalRuntimePackageTests(unittest.TestCase):
         report = self.root / "mlx-plan.json"
         def process(command, *_args, **_kwargs):
             self.assertIn("https://mirror.example/simple", command)
+            self.assertIn("sentencepiece>=0.2", command)
             constraints = Path(command[command.index("--constraint") + 1]).read_text()
             self.assertIn("mlx==0.30.0", constraints)
             self.assertNotIn("torch", constraints)
@@ -499,7 +513,7 @@ class OptionalRuntimePackageTests(unittest.TestCase):
              mock.patch.object(optional_packages, "_environment_version", side_effect=lambda name, runtime: "0.30.0" if name == "mlx" else None), \
              mock.patch.object(optional_packages, "_run_process", side_effect=process):
             result = optional_packages._resolve_install_requirements("funasr-mlx>=0.2", "https://mirror.example/simple", report, "funasr", runtime=runtime)
-        self.assertEqual(result, ["funasr-mlx==0.2.1", "text-helper==1.0"])
+        self.assertEqual(result, ["funasr-mlx==0.2.1", "text-helper==1.0", "sentencepiece>=0.2"])
         self.assertFalse(report.with_suffix(".constraints.txt").exists())
 
 

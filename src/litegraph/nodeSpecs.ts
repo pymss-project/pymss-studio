@@ -31,6 +31,60 @@ export interface WidgetSpec {
   type: 'text' | 'combo' | 'number' | 'toggle'
   default: string | number | boolean
   options?: (string | number)[]
+  min?: number
+  max?: number
+  /** Numeric increment in the same units as the widget value. */
+  step?: number
+}
+
+export interface PluginNodeDecl {
+  type?: string
+  title?: string
+  category?: string
+  description?: string
+  registered?: boolean
+  pluginId?: string
+  unavailableReason?: string | null
+  inputs?: { name?: string; type?: string; widget?: string }[]
+  outputs?: { name?: string; type?: string }[]
+  widgets?: { name?: string; type?: string; default?: unknown; min?: number; max?: number; step?: number; options?: (string | number)[] }[]
+}
+
+/** A rejected plugin must not replace the active owner's palette declaration. */
+export function selectPluginNodeDeclarations(declarations: PluginNodeDecl[]): PluginNodeDecl[] {
+  const selected = new Map<string, PluginNodeDecl>()
+  for (const declaration of declarations) {
+    const type = String(declaration.type || '')
+    if (!type) continue
+    const current = selected.get(type)
+    if (!current || (current.registered !== true && declaration.registered === true)) selected.set(type, declaration)
+  }
+  return [...selected.values()]
+}
+
+export function pluginNodeSpec(declaration: PluginNodeDecl): NodeSpec {
+  const portValues: readonly string[] = Object.values(PORT)
+  const toPort = (value: unknown): PortType => portValues.includes(String(value)) ? String(value) as PortType : PORT.AUDIO
+  const finite = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) ? value : undefined
+  return {
+    type: String(declaration.type || ''),
+    title: String(declaration.title || declaration.type || ''),
+    category: String(declaration.category || 'pymss/plugins'),
+    inputs: (declaration.inputs || []).map(port => ({
+      name: String(port.name || ''), type: toPort(port.type),
+      widget: port.widget ? { name: String(port.widget) } : undefined,
+    })),
+    outputs: (declaration.outputs || []).map(port => ({ name: String(port.name || ''), type: toPort(port.type) })),
+    widgets: (declaration.widgets || []).map(widget => ({
+      name: String(widget.name || ''),
+      type: (widget.type === 'slider' ? 'number'
+        : ['toggle', 'combo', 'number'].includes(String(widget.type)) ? String(widget.type) : 'text') as WidgetSpec['type'],
+      default: widget.default as WidgetSpec['default'],
+      options: widget.options,
+      min: finite(widget.min), max: finite(widget.max),
+      step: finite(widget.step) !== undefined && widget.step! > 0 ? widget.step : undefined,
+    })),
+  }
 }
 
 export interface InputSlotSpec {

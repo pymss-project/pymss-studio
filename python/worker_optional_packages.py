@@ -34,8 +34,9 @@ OPTIONAL_PACKAGES: dict[str, dict[str, str]] = {
     },
 }
 
-_MLX_FUNASR_REQUIREMENT = "funasr-mlx>=0.2"
+_MLX_FUNASR_REQUIREMENT = "funasr-mlx>=0.2.2"
 _MLX_FUNASR_DISTRIBUTION = "funasr-mlx"
+_MLX_TOKENIZER_REQUIREMENT = "sentencepiece>=0.2"
 
 # Apple Silicon uses a dedicated writable funasr-mlx sidecar because the
 # immutable MLX base runtime does not include PyTorch.
@@ -53,19 +54,23 @@ def _apple_silicon_sidecar_status(runtime: RuntimeContext | None = None) -> dict
     environment_version = None if managed_version else _environment_version(_MLX_FUNASR_DISTRIBUTION, runtime)
     version = managed_version or environment_version
     from pip._vendor.packaging.requirements import Requirement
-    def supported(value: str | None) -> bool:
+    def supported(value: str | None, requirement: str) -> bool:
         try:
-            return bool(value) and Requirement(_MLX_FUNASR_REQUIREMENT).specifier.contains(value, prereleases=False)
+            return bool(value) and Requirement(requirement).specifier.contains(value, prereleases=False)
         except ValueError:
             return False
+    tokenizer_version = _sidecar_version("sentencepiece", _package_dir("funasr", runtime))
+    if version and not tokenizer_version:
+        tokenizer_version = _environment_version("sentencepiece", runtime)
+    installed = supported(version, _MLX_FUNASR_REQUIREMENT) and supported(tokenizer_version, _MLX_TOKENIZER_REQUIREMENT)
     return {
         "package": "funasr",
         "requirement": _MLX_FUNASR_REQUIREMENT,
-        "installed": supported(version),
+        "installed": installed,
         "present": bool(version),
         "version": version,
         "source": "managed" if managed_version else "environment" if environment_version else None,
-        "issue": None if not version or supported(version) else "version_mismatch",
+        "issue": None if not version or installed else "version_mismatch",
         "canUninstall": bool(managed_version),
         "runtimeIdentity": runtime.identity,
     }
@@ -148,7 +153,7 @@ def _package_spec(name: Any) -> tuple[str, dict[str, str]]:
     if not spec:
         raise ValueError(f"Unsupported optional runtime package: {normalized or 'missing'}")
     if normalized == "funasr" and _is_apple_silicon():
-        spec = {"requirement": _MLX_FUNASR_REQUIREMENT, "verifyCode": "from funasr_mlx.api import download_model, transcribe"}
+        spec = {"requirement": _MLX_FUNASR_REQUIREMENT, "verifyCode": "from funasr_mlx.api import download_model, transcribe; import sentencepiece"}
     return normalized, spec
 
 
@@ -353,6 +358,7 @@ def _resolve_install_requirements(
 ) -> list[str]:
     runtime = runtime or _runtime_context()
     mlx_only = name == "funasr" and _is_apple_silicon()
+    requirements = [requirement, _MLX_TOKENIZER_REQUIREMENT] if mlx_only else [requirement]
     fixed = {}
     audio_version = None
     if mlx_only:
@@ -384,7 +390,7 @@ def _resolve_install_requirements(
                 str(report_path),
                 "--index-url",
                 index_url,
-                requirement,
+                *requirements,
             ],
             name,
             "install",
@@ -416,15 +422,14 @@ def _resolve_install_requirements(
             raise RuntimeError(f"The component requires changing the runtime package {package_name}. The base runtime was preserved.")
         resolved.append(f"{package_name}=={version}")
     from pip._vendor.packaging.requirements import Requirement
-    required_name = canonicalize_name(Requirement(requirement).name)
     resolved_names = {
         canonicalize_name(value.partition("==")[0].strip())
         for value in resolved
     }
-    if required_name not in resolved_names:
-        # A broken copy may still satisfy pip's metadata check in the active environment. Install
-        # the requested distribution into the sidecar so it shadows that unusable copy.
-        resolved.append(requirement)
+    for requested in requirements:
+        if canonicalize_name(Requirement(requested).name) not in resolved_names:
+            # Reinstall requested components even if a broken base copy has matching metadata.
+            resolved.append(requested)
     return resolved
 
 

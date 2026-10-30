@@ -296,6 +296,12 @@ def _prepare_workbench_outputs(dag: Any, targets: dict[str, str]) -> dict[str, s
                     widgets.append("")
                 widgets[0] = folder + "/" + str(original or "audio")
         else:
+            from pymss.plugins import get_registry
+            registered = get_registry().nodes.get(node.type)
+            if registered and registered.source.startswith("plugin:") and node.signature.is_output_node:
+                # Plugin output nodes already obey ctx.output_dir. Routing is
+                # applied from their output records after execution.
+                continue
             raise RuntimeError(f"Unsupported workbench output node: {node.type}")
         node.data["widgets_values"] = widgets
     return dynamic_folders
@@ -1162,6 +1168,20 @@ def _workflow_graph() -> Any:
     return graph
 
 
+def _validate_workflow_plugin_nodes(definition: Any) -> None:
+    """Check declared plugin availability before the graph loader resolves types."""
+    if not isinstance(definition, dict):
+        return
+    nodes = definition.get("nodes")
+    if isinstance(nodes, list):
+        node_types = [str(node.get("type") or "") for node in nodes if isinstance(node, dict)]
+    else:
+        prompt = definition.get("prompt", definition)
+        node_types = [str(node.get("class_type") or "") for node in prompt.values() if isinstance(node, dict)] if isinstance(prompt, dict) else []
+    from worker_nodes import validate_plugin_node_types
+    validate_plugin_node_types(node_type for node_type in node_types if node_type)
+
+
 def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
                inputs: dict[str, str] | None, output_dir: str, output_layout: str,
                *, separator_cache: Any = None) -> dict[str, Any]:
@@ -1248,6 +1268,7 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
                 start_index=len(simple_output_metadata),
             ))
     else:
+        _validate_workflow_plugin_nodes(json.loads(workflow_path.read_text(encoding="utf-8")))
         dag = graph.load_comfy_file(workflow_path)
 
     _apply_runtime_device(dag, payload, simple=simple_definition is not None)
@@ -1320,6 +1341,13 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
         output_records = [record_map.get(Path(path).resolve()) for path in original_saved_paths]
         saved_paths = original_saved_paths
         if workbench:
+            # Plugin-owned persistent artifacts may not have an explicit UI
+            # directory binding. Publish them to the task's selected directory.
+            from pymss.plugins import get_registry
+            for record in output_records:
+                registration = get_registry().nodes.get(getattr(record, "node_type", ""))
+                if registration and registration.source.startswith("plugin:"):
+                    output_targets.setdefault(str(record.node_id), str(task_output_dir))
             saved_paths = _publish_workbench_outputs(
                 original_saved_paths, output_records, simple_output_metadata, output_targets, graph_output_dir, dynamic_folders,
             )
@@ -1360,6 +1388,7 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
     # Non-output leaf nodes (plugin STRING producers: ASR text, measurements,
     # MIDI paths) surface as nodeValues so the task result carries their work.
     node_values: list[dict[str, Any]] = []
+    published_paths = dict(zip(original_saved_paths, saved_paths))
     try:
         from pymss.graph.core import StringArtifact
 
@@ -1373,7 +1402,7 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
                         "nodeId": node.id,
                         "nodeType": str(node.type),
                         "slot": slot,
-                        "value": str(artifact.value),
+                        "value": published_paths.get(str(artifact.value), str(artifact.value)),
                     })
     except Exception:
         pass

@@ -38,7 +38,7 @@ import {
 } from '@/litegraph/history'
 import { parseModelStems } from '@/utils/workflowSimple'
 import type { ModelEntry } from '@/stores/model'
-import type { NodeSpec } from '@/litegraph/nodeSpecs'
+import { pluginNodeSpec, selectPluginNodeDeclarations, type NodeSpec, type PluginNodeDecl } from '@/litegraph/nodeSpecs'
 import { translateNodeCategory, translateNodeTitle, type NodeTranslator } from '@/litegraph/nodeLocalization'
 import { isGraphWorkflowDefinition } from '@/workflows/formats'
 import { applyGraphDefaultWidgets, type GraphDefaults } from '@/workflows/graphDefaults'
@@ -51,18 +51,6 @@ const studioLog = createLogger('ui.components.workflow.WorkflowNodeEditorLite')
 const ALL_SPECS = reactive<Record<string, NodeSpec>>({ ...NODE_SPECS, ...BUILTIN_SPECS })
 let disposed = false
 let pluginNodeLoadId = 0
-
-type PluginNodeDecl = {
-  type?: string
-  title?: string
-  category?: string
-  description?: string
-  registered?: boolean
-  pluginId?: string
-  inputs?: { name?: string; type?: string; widget?: string }[]
-  outputs?: { name?: string; type?: string }[]
-  widgets?: { name?: string; type?: string; default?: unknown; min?: number; max?: number; step?: number; options?: string[] }[]
-}
 
 /** Plugin node types the worker reports as not registered (plugin broken or
  *  its runtime missing). Nodes of these types on canvas are flagged. */
@@ -77,30 +65,9 @@ async function loadPluginNodeSpecs() {
   try {
     const response = await invoke<{ nodes?: PluginNodeDecl[] }>('list_nodes')
     if (disposed || request !== pluginNodeLoadId) return
-    const declarations = Array.isArray(response?.nodes) ? response.nodes : []
-    const PORT_VALUES = ['AUDIO', 'STRING', 'COMBO', 'BOOLEAN', 'PYMSS_MSS_PARAMS', 'PYMSS_VR_PARAMS'] as const
-    type PortName = typeof PORT_VALUES[number]
-    const toPort = (value: unknown): PortName => ((PORT_VALUES as readonly string[]).includes(String(value)) ? String(value) : 'AUDIO') as PortName
-    const specs: NodeSpec[] = declarations.map(decl => ({
-      type: String(decl.type || ''),
-      title: String(decl.title || decl.type || ''),
-      category: String(decl.category || 'pymss/plugins'),
-      inputs: (decl.inputs || []).map(port => ({
-        name: String(port.name || ''),
-        type: toPort(port.type),
-        widget: port.widget ? { name: String(port.widget) } : undefined,
-      })),
-      outputs: (decl.outputs || []).map(port => ({
-        name: String(port.name || ''),
-        type: toPort(port.type),
-      })),
-      widgets: (decl.widgets || []).map(widget => ({
-        name: String(widget.name || ''),
-        type: (['toggle', 'combo', 'number'].includes(String(widget.type)) ? String(widget.type) : 'text') as 'text',
-        default: widget.default as string | number | boolean,
-        options: widget.options,
-      })),
-    })).filter(spec => spec.type && !NODE_SPECS[spec.type] && !BUILTIN_SPECS[spec.type])
+    const declarations = selectPluginNodeDeclarations(Array.isArray(response?.nodes) ? response.nodes : [])
+    const specs = declarations.map(pluginNodeSpec)
+      .filter(spec => spec.type && !NODE_SPECS[spec.type] && !BUILTIN_SPECS[spec.type])
     registerPluginNodeSpecs(specs)
     const types = new Set(specs.map(spec => spec.type))
     const removed = Object.keys(ALL_SPECS).filter(type => !NODE_SPECS[type] && !BUILTIN_SPECS[type]
@@ -115,7 +82,9 @@ async function loadPluginNodeSpecs() {
       if (!types.has(type)) broken.set(type, type)
     }
     for (const decl of declarations) {
-      if (decl.type && decl.registered === false) broken.set(decl.type, decl.pluginId || decl.type)
+      if (decl.type && types.has(decl.type) && decl.registered === false) {
+        broken.set(decl.type, decl.unavailableReason || decl.pluginId || decl.type)
+      }
     }
     unregisteredPluginNodes.value = broken
     flagUnregisteredNodes()

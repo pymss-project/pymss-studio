@@ -19,6 +19,7 @@ const vite = await createServer({
 after(() => vite.close())
 const { LGraph } = await vite.ssrLoadModule('@comfyorg/litegraph')
 const registry = await vite.ssrLoadModule('/src/litegraph/registerNodes.ts')
+const { pluginNodeSpec, selectPluginNodeDeclarations } = await vite.ssrLoadModule('/src/litegraph/nodeSpecs.ts')
 const adapter = await vite.ssrLoadModule('/src/litegraph/graphAdapter.ts')
 const descriptor = parse(readFileSync(new URL('../src/components/workflow/WorkflowNodeEditorLite.vue', import.meta.url), 'utf8')).descriptor
 const source = ts.createSourceFile('editor.ts', descriptor.scriptSetup.content, ts.ScriptTarget.Latest, true)
@@ -33,11 +34,11 @@ const code = ts.transpileModule([
   `const mount = ${hook('onMounted')}`, `const unmount = ${hook('onBeforeUnmount')}`,
 ].join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
 
-function setup() {
+function setup(overrides = {}) {
   let resolve
   const response = new Promise(done => { resolve = done })
-  const type = 'test_async_plugin_node'
-  const spec = { type, title: 'Gain', category: 'pymss/plugins', inputs: [], outputs: [], widgets: [{ name: 'gain', type: 'number', default: 2 }], registered: true }
+  const type = overrides.type || 'test_async_plugin_node'
+  const spec = { type, title: 'Gain', category: 'pymss/plugins', inputs: [], outputs: [], widgets: [{ name: 'gain', type: 'number', default: 2 }], registered: true, ...overrides }
   let canvases = 0
   class Canvas {
     constructor() { canvases++; this.ds = { scale: 1, offset: [0, 0] } }
@@ -50,6 +51,7 @@ function setup() {
     disposed: false, pluginNodeLoadId: 0, invoke: () => response,
     ALL_SPECS: reactive({ ...registry.NODE_SPECS, ...registry.BUILTIN_SPECS }),
     NODE_SPECS: registry.NODE_SPECS, BUILTIN_SPECS: registry.BUILTIN_SPECS,
+    pluginNodeSpec, selectPluginNodeDeclarations,
     registerPymssNodes: registry.registerPymssNodes, registerPluginNodeSpecs: registry.registerPluginNodeSpecs,
     graphRef: shallowRef(null), canvasRef: shallowRef(null), canvasEl: ref(document.createElement('canvas')),
     definition: ref({ nodes: [{ id: 1, type, pos: [0, 0], size: [180, 80], flags: {}, order: 0, mode: 0, inputs: [], outputs: [], properties: {}, widgets_values: [7] }], links: [], version: 0.4 }),
@@ -105,4 +107,34 @@ test('closing while declarations load does not create a canvas or register stale
   assert.equal(canvases(), 0)
   assert.equal(state.graphRef.value, null)
   assert.ok(!registry.allNodeTypes().includes(type))
+})
+
+test('unavailable nodes retain the concrete diagnostic rather than replacing it with the plugin id', async () => {
+  const reason = 'Missing plugin dependency: funasr'
+  const { state, editor, resolve } = setup({ registered: false, pluginId: 'pymss.asr', unavailableReason: reason })
+  try {
+    const pending = editor.mount()
+    resolve()
+    await pending
+    const node = state.graphRef.value.nodes[0]
+    assert.equal(node.pymssMissingPlugin, reason)
+    assert.equal(node.color, '#5a2d2d')
+  } finally {
+    editor.unmount()
+    registry.registerPluginNodeSpecs([])
+  }
+})
+
+test('a failed plugin declaration cannot flag a builtin node as unavailable', async () => {
+  const { state, editor, resolve, type } = setup({ type: 'pymss_load_audio', registered: false, pluginId: 'example.invalid', unavailableReason: 'reserved node type' })
+  try {
+    const pending = editor.mount()
+    resolve()
+    await pending
+    assert.equal(state.unregisteredPluginNodes.value.has(type), false)
+    assert.equal(state.graphRef.value.nodes[0].pymssMissingPlugin, undefined)
+  } finally {
+    editor.unmount()
+    registry.registerPluginNodeSpecs([])
+  }
 })
