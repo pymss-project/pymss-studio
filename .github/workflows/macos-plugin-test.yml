@@ -95,6 +95,13 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$PWD/python-runtime" python-runtime/bin/python3 -m pip install --help > /dev/null
           PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$PWD/python-runtime" python-runtime/bin/python3 scripts/resolve-release-core.py python/runtime-manifest.json --verify
 
+      - name: Verify process supervision before compiling the desktop host
+        run: |
+          python3 -m pip install --disable-pip-version-check --target "$RUNNER_TEMP/pytest-deps-early" pytest
+          mkdir -p "$RUNNER_TEMP/core-tests-early"
+          cp -R .test-build/pymss/test "$RUNNER_TEMP/core-tests-early/test"
+          PYTHONHOME="$PWD/python-runtime" PYTHONDONTWRITEBYTECODE=1             PYTHONPATH="$RUNNER_TEMP/pytest-deps-early:$RUNNER_TEMP/core-tests-early"             "$PWD/python-runtime/bin/python3" -m pytest -x -q             "$RUNNER_TEMP/core-tests-early/test/test_command_process.py"
+
       - name: Install aria2 runtime libraries
         run: brew install --formula zlib expat sqlite c-ares
 
