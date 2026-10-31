@@ -31,6 +31,7 @@ def test_denied_group_signal_is_deferred_only_for_an_exited_darwin_gate(monkeypa
 
     monkeypatch.setattr(process_runner, "sys", SimpleNamespace(platform=platform))
     monkeypatch.setattr(process_runner, "os", SimpleNamespace(killpg=denied))
+    monkeypatch.setattr(process_runner, "signal", SimpleNamespace(SIGKILL=9))
     observer = SimpleNamespace(exited=lambda: late_exit) if late_exit is not None else None
     if allowed:
         process_runner._terminate_posix_group(SimpleNamespace(pid=37), observer, observed)
@@ -52,7 +53,7 @@ def test_a_denied_darwin_group_probe_does_not_claim_the_group_is_gone(monkeypatc
 
 
 def command(code):
-    return [sys.executable, "-I", "-c", code]
+    return [sys.executable, "-I", "-B", "-c", code]
 
 
 def process_alive(pid):
@@ -137,7 +138,7 @@ def descendant_code(tmp_path, *, exit_parent=False):
     marker = tmp_path / "child.json"
     child = (f'import os,time,json;from pathlib import Path;p=Path({str(marker)!r});'
              't=p.with_suffix(".partial");t.write_text(json.dumps(os.getpid()));os.replace(t,p);time.sleep(30)')
-    parent = f'import subprocess,sys,time;subprocess.Popen([sys.executable,"-I","-c",{child!r}]);'
+    parent = f'import subprocess,sys,time;subprocess.Popen([sys.executable,"-I","-B","-c",{child!r}]);'
     if exit_parent:
         parent += f'from pathlib import Path\np=Path({str(marker)!r})\nwhile not p.exists(): time.sleep(.01)'
     else:
@@ -186,7 +187,7 @@ def test_forced_worker_exit_closes_the_process_ownership_scope(tmp_path):
         f'run_command_process({command(child)!r},cwd=Path({str(tmp_path)!r}),context=OperationContext(),timeout=30)\n',
         encoding="utf-8",
     )
-    process = subprocess.Popen([sys.executable, "-I", str(worker)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen([sys.executable, "-I", "-B", str(worker)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         wait_for(marker.exists, seconds=15)
         pid = json.loads(marker.read_text())

@@ -99,7 +99,7 @@
         "pymss/modules/vocal_remover/vr_separator.py": "7eab1a5c3f097a21f9dce4bdfaac0fd5a554d23b402668413d18b4253361ade6",
         "pymss/operations/__init__.py": "0395c3637bdfa4249662db887edcd3e4a84c44438a4ea32c24772f33c73c45f8",
         "pymss/operations/_command_bootstrap.py": "11a83d59af991368e4e0b778a0e045f64faf87796c24f0405eb81f1a334aeca1",
-        "pymss/operations/_command_process.py": "6e13898b2ab414f9eaa5c2447d096991918149b2ce6dac5f2b437bb4898be418",
+        "pymss/operations/_command_process.py": "6ccbf010b41e2ab723b40283a0ae1f2f5682ef7be43b765708821df67597f9c0",
         "pymss/operations/_profile_lock.py": "5f18d294ce344b053f9f1d0ec099dcc01021c981fa4800f781ee0212af21f612",
         "pymss/operations/_python_entry.py": "065bfca673bf60714d091e705f014761088e2b6b709c8552d33ccfd42ea84949",
         "pymss/operations/_rpc_session.py": "d2f1ab8a3225c5d9e5fb6416456867ee543149be4ca7453bf0c09a9104108f31",
@@ -109,7 +109,7 @@
         "pymss/operations/graph_bridge.py": "94b0c9eadf2534d337bc9efcdc2afb96061d434b8f13f3937d403431b201c2e8",
         "pymss/operations/host_services.py": "5a1fcb03c53dbcd93d6dfd638367a322a678611405335f25aa4df84bedb6a0f6",
         "pymss/operations/kit_builtins.py": "32bdf714e63cda33614066658d6c557dba6c2a44e3bd6d8184822cf4d661c043",
-        "pymss/operations/python_profiles.py": "23d6f3fe98604c3fcfc73f17e9b39bc7d91cbd91919db2638b7616a6adcecd25",
+        "pymss/operations/python_profiles.py": "ac53ac5386596e0456e403b59b9d96a587cec0016f38efd9594081c9301137f5",
         "pymss/operations/rpc_process.py": "1bb11d4b2f2461d5d6c277feadffb2fc4608450a26563f7625e5c85a582d5671",
         "pymss/plugins/__init__.py": "39a9b61ed48cb3220ff41a28325945baa2f8065eef7c254740f324398dee2482",
         "pymss/plugins/builtins.py": "b1f975650a6a85e66efa5ed1e5378d162ddae8e85c5ad1bdc394ba3402d36365",
@@ -191,7 +191,7 @@
         "test/test_codec_capabilities.py": "753ac5800e74e3ff365f6c4199fdaa5c9e4ef9f8475cd8f52d9602f4d3c4130b",
         "test/test_command_bootstrap.py": "a8791973d8b7d9a340a796ea9a877effede2972aa8960bd649f326863e5097ee",
         "test/test_command_operations.py": "e08dff567248018d1ec1f89e960b6603793d23022a2b15eeb66ad7503bb9d429",
-        "test/test_command_process.py": "1834cbe38cff919537c01e6e3ef81226e9b9c9bd6ce564144e0d0491008dca68",
+        "test/test_command_process.py": "4afddbf9e44b979f02e0280b50289a19e112a7d7c736fd3c253e3e749a1dba3e",
         "test/test_core_shims.py": "a4313382df7347f86d0b20f0ed52b70e42a284391e23ac28ad4e5c892bc7d75f",
         "test/test_graph.py": "3ea7e067aa313948bca3e88c95f2089eade3f2aed03787b3d1e6d147656acea1",
         "test/test_graph_audio_merge.py": "b3ba1302a2b4919e446970e60e0f6c64e4f66ed4492e5c25e8006fbf4aa1a2bf",
@@ -219,9 +219,9 @@
         "test/test_plugins.py": "2893ed0bf0e1dbf8e0fa862c548d85dec9e3dc1ceedd15bcc7e94d250ba8235e",
         "test/test_polarformer.py": "67f15430f58d6f3d6925f32fb573542b30d330a52bd552bd0f94513b8c8e3b17",
         "test/test_progress.py": "84fbd87763772496707f2182596bf4c81d05c875cae51c791f71cffec5f33ed5",
-        "test/test_python_profiles.py": "39461772e049db59da4ab32dceb4878f67a64578c5b609d7f17044e1677c80d1",
+        "test/test_python_profiles.py": "2ea05f278ef4f291973f92888b3d5fe38dd283cf523b0c9be975d7961b9ef6eb",
         "test/test_rpc_declarations.py": "4977f406acdb9f5488834cb28d3c6bcbe78029b2dc41edfa505985bae2453893",
-        "test/test_rpc_process.py": "518c3780ecdb2b48a7ae1fa9ca0d2d07f1002426511f6bba401571753c2bc505",
+        "test/test_rpc_process.py": "acb9eb0237ca4e511fea4a08e6b31cb5963b7775bc03f6921950e29acad14bfb",
         "test/test_separator_channels.py": "cce67dc93c578a0d319ee57140c6a98ba86388ab31b39df2964fd9c52fe9c278",
         "test/test_separator_device_defaults.py": "bc2532549e6799cdb7616eb5c60790f40dcef4ded407b9652607c70774ecbdd3",
         "test/test_use_amp.py": "5bd83e2e2903347571a7eccba5994032df5d5ad57a47efcd53ddf58d8a96e9c2",
@@ -573,5 +573,5 @@
     }
   },
   "textNormalization": "LF for files without NUL bytes",
-  "snapshotDigest": "c410bf6592c479eb74694debe7f050107113d151afdb4bdb7950a8b008a4d315"
+  "snapshotDigest": "d249027fba7d96896ea911395a93cbb8cee67c734e4f5826272ef24c23b151b5"
 }

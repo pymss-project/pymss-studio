@@ -187,7 +187,7 @@ def run_command_process(
         raise CommandProcessError("COMMAND_ARGUMENTS_INVALID", "Plugin command arguments exceed the size limit")
     context.check_cancelled()
     process = subprocess.Popen(
-        [getattr(sys, "_base_executable", None) or sys.executable, "-I", "-S", str(Path(__file__).with_name("_command_bootstrap.py"))],
+        [getattr(sys, "_base_executable", None) or sys.executable, "-I", "-B", "-S", str(Path(__file__).with_name("_command_bootstrap.py"))],
         cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         start_new_session=os.name != "nt", close_fds=True, env=environment,
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,

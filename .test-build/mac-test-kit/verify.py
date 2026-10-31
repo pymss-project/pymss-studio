@@ -113,9 +113,18 @@ def main():
         value = next(event["payload"] for event in events if event["type"] == "operation_result")
         return Path(value["outputs"]["document"]["path"])
 
+    def signature():
+        child = subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(args.app.resolve())],
+                               capture_output=True, text=True, timeout=90)
+        if child.returncode:
+            raise RuntimeError("The application signature is invalid: " + child.stderr[-2000:])
+        results.append({"command": "codesign_verify", "status": "passed"})
+        print("PASS application signature", flush=True)
+
     status = "failed"
     failure = None
     try:
+        signature()
         probe = subprocess.run([str(python), "-c", "from importlib.metadata import version;from pymss.operations.python_profiles import prepare_python_environment;print(version('pymss'))"],
                                env=environment, capture_output=True, text=True, timeout=30)
         if probe.returncode or probe.stdout.strip() != metadata["pymssVersion"]:
@@ -150,6 +159,7 @@ def main():
         call("manage_plugin", {"action": "uninstall", "name": "validation.python_a", "defaultPolicy": "review"})
         if json.loads(output(run("validation.python_b.run")).read_text(encoding="utf-8"))["version"] != "2.0.0":
             raise RuntimeError("Removing one plugin changed its peer's dependencies")
+        signature()
         status = "passed"
     except Exception as error:
         failure = str(error)

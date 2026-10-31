@@ -224,7 +224,7 @@ def test_cancelling_a_prepared_python_process_reaps_its_child_and_releases_the_l
     root = make_package(tmp_path / "plugin")
     (root / "main.py").write_text('''import subprocess,sys,time
 from pathlib import Path
-child=subprocess.Popen([sys.executable,"-I","-c","import time;time.sleep(60)"])
+child=subprocess.Popen([sys.executable,"-I","-B","-c","import time;time.sleep(60)"])
 marker=Path(sys.argv[1]).with_suffix(".pid")
 partial=marker.with_suffix(".partial")
 partial.write_text(str(child.pid),encoding="ascii")

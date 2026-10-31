@@ -223,16 +223,17 @@ def prepare_python_environment(directory: str | Path, profiles: str | Path, *,
                 on_created(profile)
             base = getattr(sys, "_base_executable", None) or sys.executable
             context.report_progress(0, "Creating isolated Python environment")
-            run_command_process([base, "-I", "-m", "venv", "--copies", "--without-pip", str(profile)],
+            run_command_process([base, "-I", "-B", "-m", "venv", "--copies", "--without-pip", str(profile)],
                                 cwd=store, context=context, timeout=120)
             interpreter = _interpreter(profile)
             # pip is supplied by the host only to provision the empty target;
             # it is never added to the target's persistent import path.
-            pip = [sys.executable, "-I", "-c",
+            pip = [sys.executable, "-I", "-B", "-c",
                    "import os,runpy;os.dup2(2,1);runpy.run_module('pip',run_name='__main__')",
                    "--isolated", "--python", str(interpreter)]
             environment = {key: value for key, value in os.environ.items() if not key.startswith(("PIP_", "PYTHON"))}
             environment["PIP_CONFIG_FILE"] = os.devnull
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
             environment["PYTHONNOUSERSITE"] = "1"
             environment["PYTHONSAFEPATH"] = "1"
             if plan.wheels:
@@ -245,7 +246,7 @@ def prepare_python_environment(directory: str | Path, profiles: str | Path, *,
                 finally:
                     requirements.unlink(missing_ok=True)
             run_command_process([*pip, "check"], cwd=store, context=context, timeout=30, environment=environment)
-            probe = run_command_process([str(interpreter), "-I", "-c",
+            probe = run_command_process([str(interpreter), "-I", "-B", "-c",
                 "import json,sys;print(json.dumps({'prefix':sys.prefix,'base':sys.base_prefix,'paths':sys.path}))"],
                 cwd=store, context=context, timeout=30)
             facts = json.loads(probe.stdout)

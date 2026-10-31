@@ -18,7 +18,7 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 75
     env:
-      PYMSS_VERSION: '0.0.24-dev.plugins.20261031.c410bf65'
+      PYMSS_VERSION: '0.0.24-dev.plugins.20261031.d249027f'
       PYMSS_STUDIO_PLUGIN_TEST_BUILD: '1'
       PYMSS_STUDIO_PLUGINS_SOURCE: .test-build/pymss-plugins
       MACOSX_DEPLOYMENT_TARGET: '14.0'
@@ -292,7 +292,7 @@ jobs:
           python3 scripts/prepare-macos-plugin-test.py kit --destination "$RUNNER_TEMP/mac-plugin-test-kit"
           PY="$APP/Contents/Resources/python-runtime/bin/python3"
           PYTHONHOME="$APP/Contents/Resources/python-runtime" PYTHONDONTWRITEBYTECODE=1 "$PY"             "$RUNNER_TEMP/mac-plugin-test-kit/verify.py" --app "$APP"             --kit "$RUNNER_TEMP/mac-plugin-test-kit" --report "$RUNNER_TEMP/mac-plugin-selfcheck"
-          codesign --verify --deep --strict "$APP"
+          codesign --verify --deep --strict --verbose=4 "$APP"
 
       - name: Run bundled interpreter process and isolation regressions
         run: |
@@ -302,6 +302,11 @@ jobs:
           cp -R .test-build/pymss/test "$RUNNER_TEMP/core-tests/test"
           PY="$APP/Contents/Resources/python-runtime/bin/python3"
           PYTHONHOME="$APP/Contents/Resources/python-runtime" PYTHONDONTWRITEBYTECODE=1             PYTHONPATH="$RUNNER_TEMP/pytest-deps:$RUNNER_TEMP/core-tests" "$PY" -m pytest -q             "$RUNNER_TEMP/core-tests/test/test_python_profiles.py"             "$RUNNER_TEMP/core-tests/test/test_command_process.py"             "$RUNNER_TEMP/core-tests/test/test_command_bootstrap.py"             "$RUNNER_TEMP/core-tests/test/test_rpc_process.py"
+
+      - name: Verify the application remains sealed after all regressions
+        run: |
+          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio Plugin Test.app' | head -n 1)
+          codesign --verify --deep --strict --verbose=4 "$APP"
 
       - name: Package the test app and companion kit
         run: |

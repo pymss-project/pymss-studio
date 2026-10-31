@@ -34,7 +34,7 @@ def session(tmp_path, *, host=ReadonlyHost("test"), permissions=ALL, timeout=.3,
 
 
 def run(protocol, scenario, tmp_path, *, timeout=5):
-    run_command_process([getattr(sys, "_base_executable", None) or sys.executable, "-I", str(PEER), scenario], cwd=tmp_path,
+    run_command_process([getattr(sys, "_base_executable", None) or sys.executable, "-I", "-B", str(PEER), scenario], cwd=tmp_path,
                         context=protocol.context, timeout=timeout, protocol=protocol)
     return json.loads((tmp_path / "output.txt").read_text(encoding="utf-8"))
 
@@ -307,10 +307,10 @@ def test_hard_killed_host_reaps_a_peer_that_stops_reading_its_protocol_input(tmp
         f'root=Path({str(tmp_path)!r});context=OperationContext()\n'
         'protocol=RpcSession(context=context,plugin_id="alice.convert",operation_id="alice.convert.run",\n'
         ' inputs={},params={"value":"x"*200000},output_name="document",output=root/"output.txt",permissions=frozenset())\n'
-        f'runner.run_command_process([sys.executable,"-I",{str(peer)!r}],cwd=root,context=context,timeout=30,protocol=protocol)\n',
+        f'runner.run_command_process([sys.executable,"-I","-B",{str(peer)!r}],cwd=root,context=context,timeout=30,protocol=protocol)\n',
         encoding="utf-8",
     )
-    process = subprocess.Popen([sys.executable, "-I", str(worker)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen([sys.executable, "-I", "-B", str(worker)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     pid = group = None
     try:
         wait_for(lambda: marker.exists() and writing.exists(), seconds=15)
