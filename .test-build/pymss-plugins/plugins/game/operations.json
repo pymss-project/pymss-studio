@@ -1,0 +1,86 @@
+{
+  "formatVersion": 1,
+  "operations": [
+    {
+      "description": "File-based audio tool with progress and structured results",
+      "id": "pymss.game.tool",
+      "inputs": {
+        "request": {
+          "type": "object"
+        }
+      },
+      "outputs": {
+        "report": {
+          "type": "object"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Vocal to MIDI"
+    },
+    {
+      "description": "OpenVPI GAME vocal to MIDI transcription",
+      "id": "pymss.game.vocal_to_midi",
+      "inputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "outputs": {
+        "report": {
+          "type": "object"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "language": {
+            "type": "string"
+          },
+          "model_alias": {
+            "default": "medium",
+            "enum": [
+              "small",
+              "medium",
+              "large"
+            ],
+            "type": "string"
+          },
+          "model_path": {
+            "description": "optional .pt checkpoint or local gamemlx dir; empty on Apple Silicon = auto-download",
+            "type": "string"
+          },
+          "output_dir": {
+            "type": "string"
+          },
+          "precision": {
+            "default": "fp32",
+            "description": "gamemlx precision (Apple Silicon only)",
+            "enum": [
+              "fp32",
+              "fp16"
+            ],
+            "type": "string"
+          },
+          "tempo": {
+            "default": 120.0,
+            "maximum": 300.0,
+            "minimum": 30.0,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Vocal to MIDI (GAME)"
+    }
+  ],
+  "pluginApiVersion": 2,
+  "pluginId": "pymss.game",
+  "pluginVersion": "1.2.0",
+  "sourceDigest": "5df447d187fcde234be7d1d0e9bdd0bc37add29ea3bcf67cb59199667d9e3d0f"
+}

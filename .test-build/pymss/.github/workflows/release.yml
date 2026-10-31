@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          path: pymss
+
+      - name: Check out WebUI repository
+        uses: actions/checkout@v4
+        with:
+          repository: pymss-project/pymss-webui
+          path: pymss-webui
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: pymss-webui/package-lock.json
+
+      - name: Install WebUI dependencies
+        run: npm ci
+        working-directory: pymss-webui
+
+      - name: Build WebUI static assets
+        run: npm run build
+        working-directory: pymss-webui
+
+      - name: Vendor WebUI static assets
+        run: |
+          rm -rf pymss/pymss/server/webui_static
+          mkdir -p pymss/pymss/server/webui_static
+          cp -R pymss-webui/dist/. pymss/pymss/server/webui_static/
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Build source and wheel distributions
+        run: python -m build
+        working-directory: pymss
+
+      - name: Check distributions
+        run: python -m twine check dist/*
+        working-directory: pymss
+
+      - name: Upload distribution artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: pymss/dist/
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/pymss/
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download distribution artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: Create GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download distribution artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Create release and upload distributions
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

@@ -1,0 +1,48 @@
+[project]
+name = "pymss-plugin-tempo_key"
+version = "0.2.0"
+description = "Studio tempo_key audio tool"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.pymss.plugin]
+id = "pymss.tempo_key"
+api_version = 2
+requires_pymss = ">=2.2"
+
+[tool.pymss.studio]
+
+sdk_version = 1
+required_capabilities = [
+    "app.info",
+    "audio.analyze",
+    "clipboard.writeText",
+    "files.pickAudio",
+    "files.pickDirectory",
+    "files.scanAudio",
+    "operations.cancel",
+    "settings.read",
+    "settings.write",
+    "ui.overlay",
+]
+tags = ["audio", "tempo_key"]
+category = "analyze"
+icon = "PulseOutline"
+
+[tool.pymss.studio.locales."en"]
+title = "Tempo and key"
+description = "Detect tempo and musical key for beat and tonal analysis."
+
+[tool.pymss.studio.locales."zh-CN"]
+title = "BPM 与调性检测"
+description = "检测音频速度与调性，辅助节拍和调式分析。"
+tags = ["速度", "调性", "BPM"]
+
+[[tool.pymss.studio.views]]
+id = "tool"
+title = "Tempo Key"
+entry = "ui/dist/index.html"
+component = "ui/src/TempoKeyTool.vue"
+placements = ["tool"]
+permissions = ["ui.overlay", "files", "settings", "app.info", "clipboard.writeText", "audio.analyze", "operations.cancel"]
+file_tool = "tempo_key"

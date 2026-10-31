@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-plugins:
+    name: ${{ matrix.name }}
+    runs-on: macos-15
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.12"
+            name: macOS plugin and audio contracts
+          - python: "3.11"
+            name: macOS plugin and audio contracts (Python 3.11)
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install audio tools
+        run: command -v ffmpeg && command -v ffprobe || brew install ffmpeg
+      - name: Install package and test dependencies
+        run: python -m pip install --disable-pip-version-check --prefer-binary -e . pytest soundfile
+      - name: Verify plugins, graph execution, symbolic links and audio operations
+        env:
+          PYMSS_PLUGINS_DIR: ${{ runner.temp }}/pymss-ci-plugins
+        run: |
+          python -m pytest -q test/test_plugin_protocol.py test/test_plugin_protocol_posix.py \
+            test/test_plugins.py test/test_operations.py test/test_operation_graph_bridge.py \
+            test/test_kit_builtins.py test/test_model_download_progress.py test/test_plugin_kit.py \
+            test/test_plugin_sources.py test/test_audio_materialization.py \
+            test/test_operation_invocation.py test/test_plugin_node_contract.py test/test_graph.py

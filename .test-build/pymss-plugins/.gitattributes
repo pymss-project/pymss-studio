@@ -1,0 +1,2 @@
+# Keep generated plugin pages and bundle checksums deterministic on all platforms.
+* text=auto eol=lf

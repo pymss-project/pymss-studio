@@ -1,0 +1,329 @@
+name: macOS Plugin Test
+
+on:
+  push:
+    branches: ['test/macos-plugins-20261031-c389a37c']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-plugin-test-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos-plugin-test:
+    name: Apple Silicon plugin test package
+    runs-on: macos-14
+    timeout-minutes: 75
+    env:
+      PYMSS_VERSION: '0.0.24-dev.plugins.20261031.c389a37c'
+      PYMSS_STUDIO_PLUGIN_TEST_BUILD: '1'
+      PYMSS_STUDIO_PLUGINS_SOURCE: .test-build/pymss-plugins
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+    steps:
+      - name: Verify Apple Silicon runner
+        run: test "$(uname -m)" = arm64
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare snapshot frontend and bundled plugin resources
+        run: |
+          pnpm install --frozen-lockfile
+          python3 -m pip install --disable-pip-version-check 'setuptools>=77' wheel
+          python3 scripts/prepare-preinstalled-plugins.py --source .test-build/pymss-plugins
+          python3 .test-build/pymss-plugins/examples/rust_rpc_text/scripts/build.py
+
+      - name: Sync build version metadata
+        run: |
+          VERSION="${PYMSS_VERSION#v}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "Invalid semantic version: $PYMSS_VERSION" >&2
+            exit 1
+          fi
+          python3 - "$VERSION" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          for name in ("package.json", "src-tauri/tauri.conf.json"):
+              path = Path(name)
+              data = json.loads(path.read_text(encoding="utf-8"))
+              data["version"] = version
+              path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+          cargo = Path("src-tauri/Cargo.toml")
+          text = cargo.read_text(encoding="utf-8")
+          text = re.sub(r'(?m)^(version\s*=\s*)"[^"]+"', rf'\1"{version}"', text, count=1)
+          cargo.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Pin the bootstrap core pair
+        run: python3 scripts/prepare-macos-plugin-test.py pin-bootstrap
+
+      - name: Prepare bootstrap and MLX runtime environment
+        working-directory: .
+        env:
+          INITIAL_BACKEND: mlx
+        run: bash scripts/prepare-python-runtime.sh mlx
+
+      - name: Install the unpublished core snapshot
+        run: python3 scripts/prepare-macos-plugin-test.py install
+
+      - name: Verify prepared macOS runtime
+        run: |
+          test -f python-runtime/bin/python3
+          test -d python-runtime/lib/python3.12
+          if otool -L python-runtime/bin/python3 | grep -q '/Library/Frameworks/Python.framework/Versions/'; then
+            echo "Standalone runtime unexpectedly links system Python framework"
+            otool -L python-runtime/bin/python3
+            exit 1
+          fi
+          PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$PWD/python-runtime" python-runtime/bin/python3 -c "import importlib.util, sys, ssl, venv, xmlrpc.client, pip, pymss, pymss_core, torch; assert importlib.util.find_spec('mlx') is not None; assert torch.version.cuda is None; print(sys.prefix); print('bundled MLX runtime ok')"
+          PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$PWD/python-runtime" python-runtime/bin/python3 -m pip install --help > /dev/null
+          PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$PWD/python-runtime" python-runtime/bin/python3 scripts/resolve-release-core.py python/runtime-manifest.json --verify
+
+      - name: Install aria2 runtime libraries
+        run: brew install --formula zlib expat sqlite c-ares
+
+      - name: Copy clean resources for Tauri bundling
+        env:
+          PYMSS_MACOS_TOOLS_ARCH: arm64
+        run: |
+          mkdir -p src-tauri/resources
+          rm -rf src-tauri/resources/python src-tauri/resources/python-runtime src-tauri/resources/bin
+          mkdir -p src-tauri/resources/python
+          rsync -a --exclude '__pycache__' --exclude '*.pyc' python/ src-tauri/resources/python/
+          cp -R python-runtime src-tauri/resources/python-runtime
+          bash scripts/prepare-macos-bundled-tools.sh src-tauri/resources/bin
+          test -s src-tauri/resources/bin/THIRD_PARTY_TOOLS.txt
+          PREPARED_ARIA2=src-tauri/resources/bin/aria2c
+          while IFS= read -r DEP; do
+            case "$DEP" in
+              /usr/lib/*|/System/Library/*) ;;
+              @loader_path/*)
+                RESOLVED="$(dirname "$PREPARED_ARIA2")/${DEP#@loader_path/}"
+                if [ ! -f "$RESOLVED" ]; then
+                  echo "Prepared aria2c dependency is missing: $DEP" >&2
+                  exit 1
+                fi
+                ;;
+              *)
+                echo "Prepared aria2c still has a non-relocatable dependency: $DEP" >&2
+                exit 1
+                ;;
+            esac
+          done < <(otool -L "$PREPARED_ARIA2" | tail -n +2 | awk '{print $1}')
+
+      - name: Build Tauri app bundle
+        working-directory: .
+        env:
+          PYMSS_BUILD_GIT_COMMIT: ${{ github.sha }}
+          PYMSS_BUILD_GIT_TAG: ${{ env.PYMSS_VERSION }}
+          PYMSS_BUILD_GIT_REF: ${{ github.ref_name }}
+          PYMSS_BUILD_RUN_ID: ${{ github.run_id }}
+          PYMSS_BUILD_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PYMSS_BUILD_REPOSITORY: ${{ github.repository }}
+          PYMSS_BUILD_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          PYMSS_BUILD_UPDATE_SUPPORTED: 'false'
+          PYMSS_BUILD_TARGET: macos-arm64
+          PYMSS_BUILD_VARIANT: macos-arm64-plugin-test
+          PYMSS_BUILD_OFFICIAL: 'false'
+          MACOSX_DEPLOYMENT_TARGET: "14.0.0"
+        run: |
+          python3 - <<'PY' > src-tauri/tauri.bundle.resources.json
+          import json
+          from pathlib import Path
+
+          root = Path.cwd()
+          print(json.dumps({
+              "bundle": {
+                  "resources": {
+                      str((root / "src-tauri" / "resources" / "python").resolve()): "python",
+                      str((root / "src-tauri" / "resources" / "python-runtime").resolve()): "python-runtime",
+                      str((root / "src-tauri" / "resources" / "bin").resolve()): "bin",
+                      str((root / "src-tauri" / "resources" / "plugin-sdk").resolve()): "resources/plugin-sdk",
+                  }
+              }
+          }))
+          PY
+          pnpm plugins:build --bundles app --config src-tauri/tauri.bundle.resources.json
+
+      - name: Re-sign bundled macOS app after embedding runtime
+        run: |
+          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio Plugin Test.app' | head -n 1)
+          if [ -z "$APP" ]; then
+            echo "Pymss Studio.app not found"
+            exit 1
+          fi
+          RES="$APP/Contents/Resources"
+          RESOURCE_ROOT="$RES"
+          if [ ! -f "$RESOURCE_ROOT/python-runtime/runtime-envs/active-runtime.json" ]; then RESOURCE_ROOT="$RES/resources"; fi
+          PYTHON_RUNTIME="$RESOURCE_ROOT/python-runtime"
+          PYTHON="$PYTHON_RUNTIME/bin/python3"
+          ACTIVE="$PYTHON_RUNTIME/runtime-envs/active-runtime.json"
+          if [ ! -f "$ACTIVE" ] || [ ! -f "$PYTHON" ]; then
+            echo "Bundled MLX runtime state or bootstrap Python is missing"
+            exit 1
+          fi
+          if [ "$(python3 -c 'import json, sys; s=json.load(open(sys.argv[1])); assert s.get("backend")=="mlx" and s.get("source")=="bundled" and s.get("torchBackend")=="cpu" and s.get("packages",{}).get("mlx") and s.get("packages",{}).get("pymss") and s.get("packages",{}).get("pymss-core"); print(s.get("pythonPath"))' "$ACTIVE")" != "../bin/python3" ]; then
+            echo "Bundled MLX active runtime does not point to the bootstrap Python"
+            exit 1
+          fi
+          bash scripts/resign-macos-app.sh "$APP"
+
+      - name: Verify bundled macOS resources
+        run: |
+          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio Plugin Test.app' | head -n 1)
+          if [ -z "$APP" ]; then
+            echo "Pymss Studio.app not found"
+            exit 1
+          fi
+
+          RES="$APP/Contents/Resources"
+          RESOURCE_ROOT="$RES"
+          if [ ! -f "$RESOURCE_ROOT/python-runtime/runtime-envs/active-runtime.json" ]; then RESOURCE_ROOT="$RES/resources"; fi
+          test -f "$RES/python/worker.py" || test -f "$RES/resources/python/worker.py"
+          test -s "$RES/resources/plugin-sdk/pymss-sdk.js"
+          test -s "$RES/resources/plugin-sdk/pymss-sdk.css"
+          test -d "$RESOURCE_ROOT/python-runtime"
+          test -f "$RESOURCE_ROOT/python-runtime/runtime-envs/active-runtime.json"
+          test -x "$RES/bin/ffmpeg" || test -x "$RES/resources/bin/ffmpeg"
+          test -x "$RES/bin/aria2c" || test -x "$RES/resources/bin/aria2c"
+          PY="$RESOURCE_ROOT/python-runtime/bin/python3"
+          ENV_PY="$RESOURCE_ROOT/python-runtime/bin/python3"
+          WORKER="$RES/python/worker.py"
+          if [ ! -f "$WORKER" ]; then
+            WORKER="$RES/resources/python/worker.py"
+          fi
+          BIN="$RES/bin"
+          if [ ! -x "$BIN/ffmpeg" ]; then
+            BIN="$RES/resources/bin"
+          fi
+          test -f "$PY"
+          test -f "$ENV_PY"
+          test "$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["pythonPath"])' "$RESOURCE_ROOT/python-runtime/runtime-envs/active-runtime.json")" = "../bin/python3"
+          test -f "$WORKER"
+          test -x "$BIN/ffmpeg"
+          test -x "$BIN/ffprobe"
+          test -x "$BIN/aria2c"
+          while IFS= read -r -d '' MACHO; do
+            if ! file -b "$MACHO" | grep -q 'Mach-O'; then
+              continue
+            fi
+            while IFS= read -r DEP; do
+              case "$DEP" in
+                /usr/lib/*|/System/Library/*) ;;
+                @loader_path/*)
+                  RESOLVED="$(dirname "$MACHO")/${DEP#@loader_path/}"
+                  if [ ! -f "$RESOLVED" ]; then
+                    echo "Missing bundled dependency: $MACHO -> $DEP" >&2
+                    exit 1
+                  fi
+                  ;;
+                *)
+                  echo "Non-relocatable bundled dependency: $MACHO -> $DEP" >&2
+                  exit 1
+                  ;;
+              esac
+            done < <(otool -L "$MACHO" | tail -n +2 | awk '{print $1}')
+            while IFS= read -r RPATH; do
+              case "$RPATH" in
+                /opt/homebrew/*|/usr/local/*)
+                  echo "Host-specific LC_RPATH remains: $MACHO -> $RPATH" >&2
+                  exit 1
+                  ;;
+              esac
+            done < <(otool -l "$MACHO" | awk '$1 == "cmd" && $2 == "LC_RPATH" { expect_path = 1; next } expect_path && $1 == "path" { print $2; expect_path = 0 }')
+          done < <(find "$BIN" -type f -print0)
+          ISOLATED_PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin"
+          PATH="$ISOLATED_PATH" "$BIN/ffmpeg" -version
+          PATH="$ISOLATED_PATH" "$BIN/ffprobe" -version
+          PATH="$ISOLATED_PATH" "$BIN/aria2c" --version
+          ARIA2_SMOKE_DIR="$(mktemp -d)"
+          ARIA2_SMOKE_SOURCE="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/raw/$GITHUB_SHA/LICENSE"
+          env -u DYLD_LIBRARY_PATH -u DYLD_FALLBACK_LIBRARY_PATH -u DYLD_FRAMEWORK_PATH \
+            PATH="$ISOLATED_PATH" "$BIN/aria2c" \
+            --allow-overwrite=true \
+            --auto-file-renaming=false \
+            --dir="$ARIA2_SMOKE_DIR" \
+            --out=LICENSE \
+            "$ARIA2_SMOKE_SOURCE"
+          test "$(shasum -a 256 LICENSE | awk '{print $1}')" = "$(shasum -a 256 "$ARIA2_SMOKE_DIR/LICENSE" | awk '{print $1}')"
+          test -d "$RESOURCE_ROOT/python-runtime/lib/python3.12"
+          if otool -L "$PY" | grep -q '/Library/Frameworks/Python.framework/Versions/'; then
+            echo "Bundled app runtime unexpectedly links system Python framework: $PY"
+            otool -L "$PY"
+            exit 1
+          fi
+          PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$PY" -c "import importlib.util, sys, ssl, venv, xmlrpc.client, pip, pymss, pymss_core, pymss.graph, torch; assert importlib.util.find_spec('mlx') is not None; assert torch.version.cuda is None; print(sys.prefix); print('bundled MLX runtime ok')"
+          PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$PY" -m pip install --help > /dev/null
+          PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$PY" scripts/resolve-release-core.py "$(dirname "$WORKER")/runtime-manifest.json" --verify
+          PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$PY" -c "from pathlib import Path; import shutil; expected=Path('$BIN'); assert Path(shutil.which('ffmpeg')).resolve().parent == expected.resolve(); assert Path(shutil.which('aria2c')).resolve().parent == expected.resolve(); print('bundled tools ok')"
+          PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" -c "from pathlib import Path; from pymss.model_download import ARIA2C_PATH; assert ARIA2C_PATH and Path(ARIA2C_PATH).resolve() == Path('$BIN/aria2c').resolve(), 'pymss did not select the bundled aria2c'; print('aria2 resolver ok:', ARIA2C_PATH)"
+          PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" "$WORKER" env_info
+          PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" "$WORKER" list_models --payload "{}"
+          PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" "$(dirname "$WORKER")/runtime_audio_probe.py" --check-core
+          codesign --verify --deep --strict --verbose=4 "$APP"
+          python3 scripts/verify-native-plugins.py "$APP" --platform macos
+
+      - name: Verify the signed application plugin runtime
+        run: |
+          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio Plugin Test.app' | head -n 1)
+          python3 scripts/prepare-macos-plugin-test.py kit --destination "$RUNNER_TEMP/mac-plugin-test-kit"
+          PY="$APP/Contents/Resources/python-runtime/bin/python3"
+          PYTHONHOME="$APP/Contents/Resources/python-runtime" PYTHONDONTWRITEBYTECODE=1 "$PY"             "$RUNNER_TEMP/mac-plugin-test-kit/verify.py" --app "$APP"             --kit "$RUNNER_TEMP/mac-plugin-test-kit" --report "$RUNNER_TEMP/mac-plugin-selfcheck"
+          codesign --verify --deep --strict "$APP"
+
+      - name: Run bundled interpreter process and isolation regressions
+        run: |
+          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio Plugin Test.app' | head -n 1)
+          python3 -m pip install --disable-pip-version-check --target "$RUNNER_TEMP/pytest-deps" pytest
+          mkdir -p "$RUNNER_TEMP/core-tests"
+          cp -R .test-build/pymss/test "$RUNNER_TEMP/core-tests/test"
+          PY="$APP/Contents/Resources/python-runtime/bin/python3"
+          PYTHONHOME="$APP/Contents/Resources/python-runtime" PYTHONDONTWRITEBYTECODE=1             PYTHONPATH="$RUNNER_TEMP/pytest-deps:$RUNNER_TEMP/core-tests" "$PY" -m pytest -q             "$RUNNER_TEMP/core-tests/test/test_python_profiles.py"             "$RUNNER_TEMP/core-tests/test/test_command_process.py"             "$RUNNER_TEMP/core-tests/test/test_command_bootstrap.py"             "$RUNNER_TEMP/core-tests/test/test_rpc_process.py"
+
+      - name: Package the test app and companion kit
+        run: |
+          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio Plugin Test.app' | head -n 1)
+          mkdir -p release
+          STAGE=$(mktemp -d)
+          cp -R "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname 'Pymss Studio Plugin Test' -srcfolder "$STAGE" -ov -format UDZO             "release/Pymss-Studio-Plugin-Test-${PYMSS_VERSION}-macos-arm64.dmg"
+          ditto -c -k --keepParent "$RUNNER_TEMP/mac-plugin-test-kit" release/mac-plugin-test-kit.zip
+          cp "$RUNNER_TEMP/mac-plugin-test-kit/README.zh-CN.md" release/README.zh-CN.md
+          cp python/plugin-test-build.json release/build-info.json
+          (cd release && shasum -a 256 *.dmg *.zip > SHA256SUMS.txt)
+
+      - name: Upload the macOS test package
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-plugin-test-arm64
+          path: release/*
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-plugin-test-diagnostics
+          path: |
+            ${{ runner.temp }}/mac-plugin-selfcheck/summary.json
+            python/plugin-test-build.json
+          if-no-files-found: ignore
+          retention-days: 14

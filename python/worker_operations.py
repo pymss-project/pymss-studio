@@ -17,6 +17,7 @@ from typing import Any
 
 from worker_protocol import emit, emit_error
 from worker_paths import normalize_output_dir
+import worker_operation_metadata as operation_metadata
 
 
 def _runtime():
@@ -55,7 +56,13 @@ def cmd_describe_operation(payload: dict[str, Any]) -> int:
     if not operation_id:
         return emit_error("OPERATION_INVALID", "Missing operation id")
     try:
-        spec = _runtime().describe_operation(operation_id)
+        context = operation_metadata.capture_context(operation_id)
+        spec = operation_metadata.cached_description(context, operation_id) if payload.get("refresh") is not True else None
+        if spec is None:
+            runtime = _runtime()
+            actual = runtime.describe_operation(operation_id)
+            operation_metadata.remember_description(context, actual)
+            spec = operation_metadata.with_digest(actual)
         emit("operation_spec", spec)
         return 0
     except ImportError as exc:
@@ -89,6 +96,13 @@ def _serialize_output(name: str, value: Any, output_dir: Path) -> Any:
     import numpy as np
 
     from pymss.graph.core import AudioArtifact
+
+    try:
+        from pymss.operations.files import FileArtifact
+    except ImportError:
+        FileArtifact = None  # Existing pymss v2 runtimes do not expose file artifacts.
+    if FileArtifact is not None and isinstance(value, FileArtifact):
+        return value.to_dict()
 
     if isinstance(value, AudioArtifact):
         from pymss.plugins.kit import materialize_audio, render_output
@@ -138,17 +152,35 @@ def cmd_run_operation(payload: dict[str, Any]) -> int:
         raw_inputs = {}
     if not isinstance(raw_inputs, dict):
         return emit_error("OPERATION_INVALID", "inputs must be an object", request_id=request_id)
+    expected_digest = payload.get("expectedSpecDigest")
+    if expected_digest is not None and (not isinstance(expected_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_digest)):
+        return emit_error("OPERATION_INVALID", "expectedSpecDigest must be a SHA-256 digest", request_id=request_id)
 
     try:
-        output_dir = Path(normalize_output_dir(payload.get("outputDir")))
         runtime = _runtime()
-        input_specs = runtime.describe_operation(operation_id).get("inputs", {})
+        spec = runtime.describe_operation(operation_id)
+        if expected_digest is not None:
+            actual_digest = operation_metadata.spec_digest(spec)
+            if actual_digest != expected_digest:
+                return emit_error(
+                    "OPERATION_SPEC_CHANGED", "The operation definition changed. Review its parameters and try again.",
+                    request_id=request_id, recoverable=True,
+                    extra={"operation": operation_id, "expectedSpecDigest": expected_digest, "actualSpecDigest": actual_digest},
+                )
+        output_dir = Path(normalize_output_dir(payload.get("outputDir")))
+        input_specs = spec.get("inputs", {})
         inputs = {
             name: _resolve_input(value) if str(input_specs.get(name, {}).get("type", "")).lower() == "audio" else value
             for name, value in raw_inputs.items()
         }
 
         from pymss.operations import OperationContext
+        try:
+            from pymss.operations.host_services import ReadonlyHost
+        except ImportError:
+            host_options = {}
+        else:
+            host_options = {"host_request": ReadonlyHost("studio-worker", operation_id)}
 
         def _progress(fraction, message="", event=None):
             emit("operation_progress", {
@@ -165,7 +197,7 @@ def cmd_run_operation(payload: dict[str, Any]) -> int:
             operation_id,
             inputs=inputs,
             params=params,
-            context=OperationContext(workdir=str(output_dir), progress=_progress),
+            context=OperationContext(workdir=str(output_dir), progress=_progress, **host_options),
         )
         serialized = {
             name: _serialize_output(name, value, output_dir)

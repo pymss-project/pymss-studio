@@ -1,0 +1,45 @@
+{
+  "common": {
+    "browse": "浏览",
+    "cancel": "取消"
+  },
+  "pluginTools": {
+    "audio": "输入音频",
+    "cancelled": "操作已取消。",
+    "completed": "已完成",
+    "description": "配置输入和操作参数。",
+    "failed": "处理失败",
+    "invalid": "请输入有效值。",
+    "invalidSpec": "操作元数据不受支持。",
+    "loading": "正在加载操作元数据…",
+    "operation": "处理操作",
+    "operationMismatch": "操作返回的结果不匹配。",
+    "ready": "就绪",
+    "retry": "重试",
+    "run": "运行操作",
+    "running": "正在处理…",
+    "statusHint": "输出文件与分析结果。",
+    "statusTitle": "处理结果",
+    "definitionChanged": "操作定义已更新。请核对刷新后的参数，然后重新运行。"
+  },
+  "tools": {
+    "activityLog": "运行记录",
+    "chooseAudio": "选择音频文件",
+    "logButton": "日志",
+    "noActivityLog": "任务开始后将在这里显示处理记录",
+    "openOutputLocation": "打开输出位置"
+  },
+  "plugin": {
+    "title": "均衡与滤波",
+    "operations": {
+      "highpass": "高通滤波",
+      "lowpass": "低通滤波",
+      "peak_eq": "峰值均衡器"
+    }
+  },
+  "parameters": {
+    "f0": "频率（Hz）",
+    "Q": "Q 值",
+    "gain_db": "增益（dB）"
+  }
+}

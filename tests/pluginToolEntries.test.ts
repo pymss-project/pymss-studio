@@ -44,6 +44,19 @@ test('view metadata overrides plugin metadata', () => {
   assert.equal(entry.icon, 'SearchOutline')
 })
 
+test('unprepared tools keep their entry and source choices without becoming a runnable view', () => {
+  const bindings = [{ runtime: 'cpu-py312', version: '1.0.0', content: null }]
+  const [entry] = pluginToolEntries([
+    { name: 'hello', managed: true, loaded: false, enabled: true, availability: 'not_prepared',
+      availableBindings: bindings, sourceSelectionRequired: true, contributions: { views: [view('tool')] } },
+    { name: 'legacy.failed', managed: true, loaded: false, contributions: { views: [view('tool')] } },
+  ])
+  assert.equal(entry.routeId, 'hello/tool')
+  assert.equal(entry.availability, 'not_prepared')
+  assert.deepEqual(entry.availableBindings, bindings)
+  assert.equal(entry.sourceSelectionRequired, true)
+})
+
 test('unknown tool categories remain visible in the ungrouped section', () => {
   const [entry] = pluginToolEntries([
     { name: 'custom', managed: true, loaded: true, contributions: { views: [view('extra', { category: 'custom-category' })] } },

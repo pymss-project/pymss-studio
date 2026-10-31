@@ -62,9 +62,9 @@ def main():
               window.__inventory={installed:rows,pluginsDir:'C:/plugins',runtime:{identity:'cpu',pythonPath:'C:/python.exe'},catalog:[],catalogError:null};
               const callbacks=new Map(), listeners=new Map();let sequence=0;
               window.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener(_event,id){listeners.delete(id)}};
-              window.__descriptions=[];window.__heldDescriptions=[];
-              const describe=operation=>({id:operation,inputs:{audio:{type:'audio'}},
-                params:{type:'object',properties:operation.endsWith('.spectrum')?{n_fft:{type:'integer',default:2048,minimum:64,maximum:32768}}:{}},outputs:{report:{type:'object'}}});
+              window.__descriptions=[];window.__descriptionRequests=[];window.__heldDescriptions=[];window.__operationStarts=[];window.__definitionVersion=1;
+              const describe=operation=>({id:operation,specDigest:(window.__definitionVersion===1?'a':'b').repeat(64),inputs:{audio:{type:'audio'}},
+                params:{type:'object',properties:operation.endsWith('.spectrum')?{n_fft:{type:'integer',default:window.__definitionVersion===1?2048:4096,minimum:64,maximum:32768}}:{}},outputs:{report:{type:'object'}}});
               window.__releaseDescriptions=()=>{window.__holdDescriptions=false;window.__heldDescriptions.splice(0).forEach(({resolve,operation})=>resolve(describe(operation)))};
               window.__TAURI_INTERNALS__={metadata:{currentWindow:{label:'main'},currentWebview:{label:'main'}},
                 convertFileSrc:(path,protocol)=>`http://${protocol}.localhost/${path}`,
@@ -80,12 +80,19 @@ def main():
                   if(command==='load_app_store')return null;
                   if(command==='save_plugin_tool_settings')return args.data;
                   if(command==='describe_operation'){
+                    window.__descriptionRequests.push(structuredClone(args.payload));
                     const operation=args.payload.operation;window.__descriptions.push(operation);
                     if(window.__holdDescriptions)return new Promise(resolve=>window.__heldDescriptions.push({resolve,operation}));
                     return describe(operation);
                   }
                   if(command==='plugin:dialog|open')return 'C:/audio/source.wav';
                   if(command==='start_operation_task'){
+                    window.__operationStarts.push(structuredClone(args.payload));
+                    if(window.__changeDefinitionOnRun){
+                      window.__changeDefinitionOnRun=false;window.__definitionVersion=2;
+                      setTimeout(()=>{for(const callback of listeners.values())callbacks.get(callback)?.({event:'pymss://worker-event',payload:{type:'error',requestId:args.payload.requestId,taskId:args.payload.requestId,payload:{code:'OPERATION_SPEC_CHANGED',message:'The operation definition changed.',recoverable:true}}})},40);
+                      return {taskId:args.payload.requestId,started:true};
+                    }
                     const operation=args.payload.operation;
                     const value=operation.endsWith('.spectrum')?{freqs:[0,1000,2000,3000,4000],magnitudes_db:[-80,-12,-50,-60,-80]}:
                       operation.endsWith('.measure_lufs')?{lufs:'-Infinity'}:{sample_peak_dbfs:-27.467469,true_peak_dbtp:-27.461275};
@@ -165,8 +172,21 @@ def main():
             page.evaluate(await_route)
             expect(tool.get_by_role("heading", name="频谱分析", exact=True)).to_be_visible()
             tool.get_by_role("button", name="浏览", exact=True).click()
+            field = tool.locator("#param-n_fft input")
+            field.fill("1536")
+            field.press("Tab")
+            page.evaluate("window.__changeDefinitionOnRun=true")
+            count = page.evaluate("window.__operationStarts.length")
+            tool.locator("#run").click()
+            expect(tool.locator("#error")).to_contain_text("请核对刷新后的参数")
+            expect(field).to_have_value("4096")
+            expect(tool.locator("#input-audio input")).to_have_value("C:/audio/source.wav")
+            assert page.evaluate("window.__operationStarts.length") == count + 1
+            assert page.evaluate("window.__operationStarts.at(-1).expectedSpecDigest") == "a" * 64
+            assert page.evaluate("window.__descriptionRequests.at(-1).refresh") is True
             tool.locator("#run").click()
             expect(tool.locator(".analysis-spectrum polyline")).to_have_attribute("points", re.compile(r"\d"))
+            assert page.evaluate("window.__operationStarts.at(-1).expectedSpecDigest") == "b" * 64
             expect(tool.locator(".analysis-hint")).to_contain_text("FFT")
             page.screenshot(path=str(output / "spectrum.png"), full_page=True)
             assert not errors, errors

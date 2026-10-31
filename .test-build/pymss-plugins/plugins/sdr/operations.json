@@ -1,0 +1,30 @@
+{
+  "formatVersion": 1,
+  "operations": [
+    {
+      "description": "File-based audio tool with progress and structured results",
+      "id": "pymss.sdr.tool",
+      "inputs": {
+        "request": {
+          "type": "object"
+        }
+      },
+      "outputs": {
+        "report": {
+          "type": "object"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "SDR evaluation"
+    }
+  ],
+  "pluginApiVersion": 2,
+  "pluginId": "pymss.sdr",
+  "pluginVersion": "0.2.0",
+  "sourceDigest": "ee16e6e674cfa0a65aa24e41fde0b9af151ea94680714f298283981e82c39b8a"
+}

@@ -1,0 +1,17 @@
+{
+  "titleKey": "plugin.title",
+  "operations": [
+    {
+      "id": "pymss.dynamics.compressor",
+      "titleKey": "plugin.operations.compressor"
+    },
+    {
+      "id": "pymss.dynamics.limiter",
+      "titleKey": "plugin.operations.limiter"
+    },
+    {
+      "id": "pymss.dynamics.deesser",
+      "titleKey": "plugin.operations.deesser"
+    }
+  ]
+}

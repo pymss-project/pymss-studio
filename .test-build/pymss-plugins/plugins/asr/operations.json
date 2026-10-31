@@ -1,0 +1,76 @@
+{
+  "formatVersion": 1,
+  "operations": [
+    {
+      "description": "File-based audio tool with progress and structured results",
+      "id": "pymss.asr.tool",
+      "inputs": {
+        "request": {
+          "type": "object"
+        }
+      },
+      "outputs": {
+        "report": {
+          "type": "object"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Speech recognition"
+    },
+    {
+      "description": "Transcribe audio to text (funasr-mlx on Apple Silicon, funasr elsewhere)",
+      "id": "pymss.asr.transcribe",
+      "inputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "outputs": {
+        "report": {
+          "type": "object"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "language": {
+            "default": "auto",
+            "enum": [
+              "auto",
+              "zh",
+              "en",
+              "yue",
+              "ja",
+              "ko"
+            ],
+            "type": "string"
+          },
+          "model": {
+            "default": "sensevoice-small",
+            "enum": [
+              "sensevoice-small",
+              "paraformer-zh",
+              "paraformer-en"
+            ],
+            "type": "string"
+          },
+          "model_dir": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Speech to Text"
+    }
+  ],
+  "pluginApiVersion": 2,
+  "pluginId": "pymss.asr",
+  "pluginVersion": "0.3.0",
+  "sourceDigest": "50bb2b7f5ba48dc99bfc693bf9e0f28f25121861ff7e239efa3049be244bd616"
+}

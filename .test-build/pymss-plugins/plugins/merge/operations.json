@@ -1,0 +1,30 @@
+{
+  "formatVersion": 1,
+  "operations": [
+    {
+      "description": "File-based audio tool with progress and structured results",
+      "id": "pymss.merge.tool",
+      "inputs": {
+        "request": {
+          "type": "object"
+        }
+      },
+      "outputs": {
+        "report": {
+          "type": "object"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Audio merge"
+    }
+  ],
+  "pluginApiVersion": 2,
+  "pluginId": "pymss.merge",
+  "pluginVersion": "0.2.0",
+  "sourceDigest": "9b998bfd9f1df401330963d5e982483bd0a7dce676460b4b70a12a7013767f96"
+}

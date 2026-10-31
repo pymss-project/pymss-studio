@@ -1,0 +1,59 @@
+[project]
+name = "pymss-plugin-slicer"
+version = "0.2.0"
+description = "Studio slicer audio tool"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.pymss.plugin]
+id = "pymss.slicer"
+api_version = 2
+requires_pymss = ">=2.2"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.slicer.tool"
+title = "Audio slicing"
+
+[tool.pymss.studio]
+
+sdk_version = 1
+required_capabilities = [
+    "app.info",
+    "files.pickAudio",
+    "files.pickDirectory",
+    "files.reveal",
+    "files.scanAudio",
+    "operations.cancel",
+    "operations.start",
+    "settings.read",
+    "settings.write",
+    "ui.overlay",
+]
+tags = ["audio", "slicer"]
+category = "edit"
+icon = "CutOutline"
+
+[tool.pymss.studio.locales."en"]
+title = "Audio slicing"
+description = "Split audio at silent regions and export individual segments."
+
+[tool.pymss.studio.locales."en".operations]
+"pymss.slicer.tool" = "Audio slicing"
+
+[tool.pymss.studio.locales."zh-CN"]
+title = "音频切片"
+description = "按静音区间分割音频，批量导出独立片段。"
+tags = ["切片", "静音检测", "分段"]
+
+[tool.pymss.studio.locales."zh-CN".operations]
+"pymss.slicer.tool" = "音频切片"
+
+[[tool.pymss.studio.views]]
+id = "tool"
+title = "Slicer"
+entry = "ui/dist/index.html"
+component = "ui/src/SlicerTool.vue"
+placements = ["tool"]
+operation = "pymss.slicer.tool"
+permissions = ["ui.overlay", "files", "settings", "app.info", "clipboard.writeText", "operations"]
+file_tool = "slicer"

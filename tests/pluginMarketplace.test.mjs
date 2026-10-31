@@ -17,6 +17,7 @@ const vite = await createServer({
       return code
         .replace("import { invoke } from '@tauri-apps/api/core'", 'const invoke = (...args) => globalThis.__pluginInvoke(...args)')
         .replace("import { listen, type UnlistenFn } from '@tauri-apps/api/event'", 'type UnlistenFn = () => void; const listen = (...args) => globalThis.__pluginListen(...args)')
+        .replace("import { useSettingsStore } from '@/stores/settings'", 'const useSettingsStore = () => globalThis.__pluginSettings')
     },
   }],
 })
@@ -25,6 +26,7 @@ const { usePluginMarketplace, pluginRevision } = await vite.ssrLoadModule('/src/
 const market = usePluginMarketplace()
 let callback
 let requests = []
+globalThis.__pluginSettings = { pluginDefaultsPolicy: 'review', initialize() {} }
 const empty = (identity = 'cpu-runtime') => ({
   catalog: [{ name: 'hello', url: 'https://example.com/hello', description: 'Test', tags: ['audio'] }],
   catalogError: null, installed: [], pluginsDir: '/plugins',
@@ -232,6 +234,7 @@ test('out-of-order refresh responses cannot replace a newer runtime', async () =
   globalThis.__pluginInvoke = () => new Promise(resolve => responses.push(resolve))
   const first = market.refresh()
   const second = market.refresh()
+  await nextTurn()
   responses[1](empty('new-runtime'))
   await second
   responses[0](empty('old-runtime'))
@@ -251,6 +254,27 @@ test('a runtime switch refreshes plugin consumers exactly once', async () => {
   assert.equal(pluginRevision.value, before + 1)
 })
 
+test('inventory waits for the persisted default tool policy before querying', async () => {
+  await reset()
+  requests = []
+  let release
+  globalThis.__pluginSettings = {
+    pluginDefaultsPolicy: 'review',
+    initialize: () => new Promise(resolve => { release = () => {
+      globalThis.__pluginSettings.pluginDefaultsPolicy = 'auto'
+      resolve()
+    } }),
+  }
+  try {
+    const loading = market.refreshInventory()
+    await nextTurn()
+    assert.equal(requests.length, 0)
+    release()
+    await loading
+    assert.equal(requests[0].payload.defaultPolicy, 'auto')
+  } finally { globalThis.__pluginSettings = { pluginDefaultsPolicy: 'review', initialize() {} } }
+})
+
 test('inventory-only refresh preserves the catalog without requesting it again', async () => {
   await reset()
   requests = []
@@ -260,7 +284,7 @@ test('inventory-only refresh preserves the catalog without requesting it again',
   }
   await market.refreshInventory()
   assert.equal(market.snapshot.value.catalog.length, 1)
-  assert.deepEqual(requests, [{ command: 'plugin_marketplace', payload: { includeCatalog: false } }])
+  assert.deepEqual(requests, [{ command: 'plugin_marketplace', payload: { includeCatalog: false, defaultPolicy: 'review' } }])
 })
 
 test('first inventory preparation runs once and finishes without a refresh loop', async () => {
@@ -319,6 +343,7 @@ test('simultaneous page entries share one inventory request', async () => {
   }
   const first = market.ensureInventory()
   const second = market.ensureInventory()
+  await nextTurn()
   assert.equal(requests.length, 1)
   resolve(empty())
   await Promise.all([first, second])
@@ -349,7 +374,9 @@ test('runtime changes supersede an inventory request from the previous runtime',
     ? Promise.resolve(empty('new-runtime'))
     : new Promise(resolve => responses.push(resolve))
   const previous = market.openMarketplace()
+  await nextTurn()
   const changed = market.openMarketplace(true)
+  await nextTurn()
   assert.equal(responses.length, 2)
   responses[1](empty('new-runtime'))
   await changed

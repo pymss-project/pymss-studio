@@ -1,0 +1,11 @@
+GAME inference source attribution
+
+The model architecture, decoding, feature extraction, and slicing modules in
+this directory are adapted from OpenVPI GAME v1.0.0:
+https://github.com/openvpi/GAME/tree/v1.0.0
+
+Upstream commit: e66c31251605e334b1bf0f565252d4987a9065c0
+License: MIT (see LICENSE in this directory)
+
+The desktop integration replaces the upstream Lightning inference runner,
+Mido writer, and configuration framework with a focused native PyTorch runner.

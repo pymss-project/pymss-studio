@@ -1,0 +1,71 @@
+{
+  "formatVersion": 1,
+  "operations": [
+    {
+      "description": "Shift pitch by fractional semitones (duration preserved)",
+      "id": "pymss.timing.pitch_shift",
+      "inputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "outputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "bins_per_octave": {
+            "default": 12,
+            "maximum": 36,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "n_steps": {
+            "default": 0.0,
+            "maximum": 24.0,
+            "minimum": -24.0,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Pitch Shift"
+    },
+    {
+      "description": "Time-stretch by rate without pitch change",
+      "id": "pymss.timing.time_stretch",
+      "inputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "outputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "rate": {
+            "default": 1.0,
+            "maximum": 4.0,
+            "minimum": 0.25,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Time Stretch"
+    }
+  ],
+  "pluginApiVersion": 2,
+  "pluginId": "pymss.timing",
+  "pluginVersion": "0.2.0",
+  "sourceDigest": "92a7cead8237d1e9a0db56c80f073bff35f25e75c84fe2b7a5f54df020ab52d0"
+}

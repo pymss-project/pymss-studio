@@ -1,0 +1,58 @@
+{
+  "formatVersion": 1,
+  "operations": [
+    {
+      "description": "Normalize audio to a target integrated loudness in LUFS.",
+      "id": "pymss.loudnorm.normalize",
+      "inputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "outputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "target_lufs": {
+            "default": -14.0,
+            "maximum": -5.0,
+            "minimum": -70.0,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Normalize Loudness (LUFS)"
+    },
+    {
+      "description": "File-based audio tool with progress and structured results",
+      "id": "pymss.loudnorm.tool",
+      "inputs": {
+        "request": {
+          "type": "object"
+        }
+      },
+      "outputs": {
+        "report": {
+          "type": "object"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Loudness matching"
+    }
+  ],
+  "pluginApiVersion": 2,
+  "pluginId": "pymss.loudnorm",
+  "pluginVersion": "0.4.0",
+  "sourceDigest": "196a8bf5fb5bfcd29f934b75fdf92c992474daa514b4fa7ea221b9f100df5f5f"
+}

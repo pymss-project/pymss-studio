@@ -1,0 +1,44 @@
+{
+  "common": {
+    "browse": "Browse",
+    "cancel": "Cancel"
+  },
+  "pluginTools": {
+    "audio": "Input audio",
+    "cancelled": "Operation cancelled.",
+    "completed": "Completed",
+    "description": "Configure inputs and operation parameters.",
+    "failed": "Operation failed",
+    "invalid": "Enter a valid value.",
+    "invalidSpec": "Operation metadata is unsupported.",
+    "loading": "Loading operation metadata…",
+    "operation": "Operation",
+    "operationMismatch": "The operation returned a mismatched result.",
+    "ready": "Ready",
+    "retry": "Retry",
+    "run": "Run operation",
+    "running": "Processing…",
+    "statusHint": "Output files and analysis results.",
+    "statusTitle": "Results",
+    "definitionChanged": "The operation definition was updated. Review the refreshed parameters, then run it again."
+  },
+  "tools": {
+    "activityLog": "Activity log",
+    "chooseAudio": "Choose an audio file",
+    "logButton": "Log",
+    "noActivityLog": "Processing events will appear here after a task starts",
+    "openOutputLocation": "Open output location"
+  },
+  "plugin": {
+    "title": "Pitch and Time",
+    "operations": {
+      "pitch_shift": "Pitch shift",
+      "time_stretch": "Time stretch"
+    }
+  },
+  "parameters": {
+    "n_steps": "Pitch shift (semitones)",
+    "bins_per_octave": "Steps per octave",
+    "rate": "Speed ratio"
+  }
+}

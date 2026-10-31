@@ -1,0 +1,57 @@
+[project]
+name = "pymss-plugin-inspect"
+version = "0.2.0"
+description = "Studio inspect audio tool"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.pymss.plugin]
+id = "pymss.inspect"
+api_version = 2
+requires_pymss = ">=2.2"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.inspect.tool"
+title = "Audio information"
+
+[tool.pymss.studio]
+
+sdk_version = 1
+required_capabilities = [
+    "app.info",
+    "clipboard.writeText",
+    "files.pickAudio",
+    "operations.cancel",
+    "operations.start",
+    "settings.read",
+    "settings.write",
+    "ui.overlay",
+]
+tags = ["audio", "inspect"]
+category = "analyze"
+icon = "InformationCircleOutline"
+
+[tool.pymss.studio.locales."en"]
+title = "Audio information"
+description = "Inspect duration, sample rate, channels and audio encoding."
+
+[tool.pymss.studio.locales."en".operations]
+"pymss.inspect.tool" = "Audio information"
+
+[tool.pymss.studio.locales."zh-CN"]
+title = "音频信息"
+description = "查看时长、采样率、声道与音频编码信息。"
+tags = ["音频信息", "采样率", "编码"]
+
+[tool.pymss.studio.locales."zh-CN".operations]
+"pymss.inspect.tool" = "音频信息"
+
+[[tool.pymss.studio.views]]
+id = "tool"
+title = "Inspect"
+entry = "ui/dist/index.html"
+component = "ui/src/InspectTool.vue"
+placements = ["tool"]
+operation = "pymss.inspect.tool"
+permissions = ["ui.overlay", "files", "settings", "app.info", "clipboard.writeText", "operations"]
+file_tool = "inspect"

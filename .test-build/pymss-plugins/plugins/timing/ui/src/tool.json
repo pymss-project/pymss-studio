@@ -1,0 +1,13 @@
+{
+  "titleKey": "plugin.title",
+  "operations": [
+    {
+      "id": "pymss.timing.pitch_shift",
+      "titleKey": "plugin.operations.pitch_shift"
+    },
+    {
+      "id": "pymss.timing.time_stretch",
+      "titleKey": "plugin.operations.time_stretch"
+    }
+  ]
+}

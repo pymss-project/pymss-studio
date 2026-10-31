@@ -1,0 +1,108 @@
+[project]
+name = "pymss-plugin-analysis"
+version = "0.2.0"
+description = "pymss plugin: audio analysis and measurement (LUFS, true peak, RMS, DR, spectrum)"
+requires-python = ">=3.10"
+dependencies = ["pyloudnorm", "scipy"]
+
+[tool.pymss.plugin]
+id = "pymss.analysis"
+api_version = 2
+requires_pymss = ">=2.2"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.analysis.measure_lufs"
+title = "Measure Loudness (LUFS)"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.analysis.measure_true_peak"
+title = "Measure True Peak"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.analysis.measure_rms"
+title = "Measure RMS"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.analysis.spectrum"
+title = "Spectrum Analyze"
+
+[tool.pymss.studio]
+
+sdk_version = 1
+required_capabilities = [
+    "app.info",
+    "files.pickAudio",
+    "operations.cancel",
+    "operations.describe",
+    "operations.start",
+    "settings.read",
+    "settings.write",
+    "ui.overlay",
+]
+tags = ["analysis", "measurement", "lufs", "spectrum"]
+category = "analyze"
+
+[tool.pymss.studio.locales."en"]
+title = "Audio analysis"
+description = "Measure LUFS, true peak and RMS and analyze the spectrum."
+
+[tool.pymss.studio.locales."en".operations]
+"pymss.analysis.measure_lufs" = "Measure Loudness (LUFS)"
+"pymss.analysis.measure_true_peak" = "Measure True Peak"
+"pymss.analysis.measure_rms" = "Measure RMS"
+"pymss.analysis.spectrum" = "Spectrum Analyze"
+
+[tool.pymss.studio.locales."zh-CN"]
+title = "音频分析"
+description = "测量 LUFS、真峰值、RMS 并分析音频频谱。"
+tags = ["响度测量", "频谱", "真峰值"]
+
+[tool.pymss.studio.locales."zh-CN".operations]
+"pymss.analysis.measure_lufs" = "LUFS 响度测量"
+"pymss.analysis.measure_true_peak" = "真峰值测量"
+"pymss.analysis.measure_rms" = "RMS 电平测量"
+"pymss.analysis.spectrum" = "频谱分析"
+
+[[tool.pymss.studio.views]]
+id = "tool"
+title = "Audio Analysis"
+entry = "ui/dist/index.html"
+component = "ui/src/Tool.vue"
+placements = ["tool"]
+permissions = ["ui.overlay", "operations", "files", "settings", "app.info"]
+
+[[tool.pymss.studio.views]]
+id = "spectrum"
+title = "Spectrum analysis"
+entry = "views/spectrum/index.html"
+component = "ui/src/SpectrumTool.vue"
+placements = ["tool"]
+operation = "pymss.analysis.spectrum"
+permissions = ["ui.overlay", "operations", "files", "settings", "app.info"]
+
+[[tool.pymss.plugin.contributions.nodes]]
+type = "AnalysisMeasureLUFS"
+title = "Measure Loudness (LUFS)"
+category = "pymss/plugins"
+description = "Integrated loudness measurement (ITU-R BS.1770-4)"
+inputs = [{ name = "audio", type = "AUDIO" }]
+outputs = [{ name = "value", type = "STRING" }]
+widgets = []
+
+[[tool.pymss.plugin.contributions.nodes]]
+type = "AnalysisTruePeak"
+title = "Measure True Peak"
+category = "pymss/plugins"
+description = "True-peak level measurement (dBTP)"
+inputs = [{ name = "audio", type = "AUDIO" }]
+outputs = [{ name = "value", type = "STRING" }]
+widgets = []
+
+[[tool.pymss.plugin.contributions.nodes]]
+type = "AnalysisRMS"
+title = "Measure RMS"
+category = "pymss/plugins"
+description = "RMS level measurement (dB)"
+inputs = [{ name = "audio", type = "AUDIO" }]
+outputs = [{ name = "value", type = "STRING" }]
+widgets = []

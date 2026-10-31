@@ -1,0 +1,30 @@
+{
+  "formatVersion": 1,
+  "operations": [
+    {
+      "description": "File-based audio tool with progress and structured results",
+      "id": "pymss.inspect.tool",
+      "inputs": {
+        "request": {
+          "type": "object"
+        }
+      },
+      "outputs": {
+        "report": {
+          "type": "object"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Audio information"
+    }
+  ],
+  "pluginApiVersion": 2,
+  "pluginId": "pymss.inspect",
+  "pluginVersion": "0.2.0",
+  "sourceDigest": "e17645e564222bae1b42f38229623efefa1c34cdc4c8ca857bbaed945d660204"
+}

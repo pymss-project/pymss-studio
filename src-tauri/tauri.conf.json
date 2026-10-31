@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Pymss Studio",
+  "productName": "Pymss Studio Plugin Test",
   "version": "0.0.12",
-  "identifier": "studio.pymss.desktop",
+  "identifier": "studio.pymss.desktop.plugintest",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Pymss Studio",
+        "title": "Pymss Studio Plugin Test",
         "width": 1280,
         "height": 820,
         "minWidth": 980,

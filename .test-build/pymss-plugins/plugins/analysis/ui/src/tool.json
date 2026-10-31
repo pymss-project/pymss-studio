@@ -1,0 +1,33 @@
+{
+  "titleKey": "plugin.title",
+  "operations": [
+    {
+      "id": "pymss.analysis.measure_lufs",
+      "titleKey": "plugin.operations.measure_lufs",
+      "inputs": [
+        "audio"
+      ]
+    },
+    {
+      "id": "pymss.analysis.measure_true_peak",
+      "titleKey": "plugin.operations.measure_true_peak",
+      "inputs": [
+        "audio"
+      ]
+    },
+    {
+      "id": "pymss.analysis.measure_rms",
+      "titleKey": "plugin.operations.measure_rms",
+      "inputs": [
+        "audio"
+      ]
+    },
+    {
+      "id": "pymss.analysis.spectrum",
+      "titleKey": "plugin.operations.spectrum",
+      "inputs": [
+        "audio"
+      ]
+    }
+  ]
+}

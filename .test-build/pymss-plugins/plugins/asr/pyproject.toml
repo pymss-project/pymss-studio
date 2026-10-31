@@ -1,0 +1,98 @@
+[project]
+name = "pymss-plugin-asr"
+version = "0.3.0"
+description = "pymss plugin: speech-to-text transcription (FunASR on CUDA/CPU, funasr-mlx on Apple Silicon)"
+requires-python = ">=3.10"
+# Backend packages are platform-conditional: MLX only ships macOS arm64 wheels,
+# torch/funasr cover everything else. The pip resolver picks per-platform.
+dependencies = [
+    "numpy",
+    "funasr-mlx>=0.2.2; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sentencepiece>=0.2; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "funasr>=1.2; sys_platform != 'darwin' or platform_machine != 'arm64'",
+    "torch>=2.1; sys_platform != 'darwin' or platform_machine != 'arm64'",
+    "torchaudio>=2.1; sys_platform != 'darwin' or platform_machine != 'arm64'",
+]
+
+[tool.pymss.plugin]
+id = "pymss.asr"
+api_version = 2
+requires_pymss = ">=2.2"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.asr.transcribe"
+title = "Speech to Text"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.asr.tool"
+title = "Speech recognition"
+
+[tool.pymss.studio]
+
+sdk_version = 1
+required_capabilities = [
+    "app.info",
+    "files.pickAudio",
+    "files.pickDirectory",
+    "files.reveal",
+    "models.deleteTool",
+    "operations.cancel",
+    "operations.start",
+    "runtime.managePackage",
+    "runtime.packageStatus",
+    "settings.read",
+    "settings.write",
+    "shell.openExternal",
+    "ui.overlay",
+]
+backends = ["torch", "mlx"]
+tags = ["asr", "transcription", "speech", "funasr", "mlx"]
+category = "recognize"
+icon = "MicOutline"
+runtime_packages = ["funasr"]
+deferred_dependency_operations = ["pymss.asr.tool"]
+
+[tool.pymss.studio.locales."en"]
+title = "Speech recognition"
+description = "Transcribe speech to text with timestamps and subtitle output."
+
+[tool.pymss.studio.locales."en".operations]
+"pymss.asr.transcribe" = "Speech to Text"
+"pymss.asr.tool" = "Speech recognition"
+
+[tool.pymss.studio.locales."zh-CN"]
+title = "语音识别"
+description = "将语音转成文本，支持时间戳与字幕输出。"
+tags = ["语音", "转写", "字幕"]
+
+[tool.pymss.studio.locales."zh-CN".operations]
+"pymss.asr.transcribe" = "语音转写"
+"pymss.asr.tool" = "语音识别"
+
+[[tool.pymss.studio.views]]
+id = "tool"
+title = "Asr"
+entry = "ui/dist/index.html"
+component = "ui/src/AsrTool.vue"
+placements = ["tool"]
+operation = "pymss.asr.tool"
+permissions = ["ui.overlay", "files", "settings", "app.info", "clipboard.writeText", "operations", "runtime", "models.deleteTool", "shell.openExternal"]
+file_tool = "asr"
+
+[[tool.pymss.plugin.contributions.nodes]]
+type = "AsrTranscribe"
+title = "Speech to Text"
+category = "pymss/plugins"
+description = "Transcribe speech to text (funasr-mlx on Apple Silicon, funasr elsewhere)"
+inputs = [
+  { name = "audio", type = "AUDIO" },
+]
+outputs = [
+  { name = "text", type = "STRING" },
+  { name = "backend", type = "STRING" },
+]
+widgets = [
+  { name = "model", type = "combo", default = "sensevoice-small", options = ["sensevoice-small", "paraformer-zh", "paraformer-en"] },
+  { name = "language", type = "combo", default = "auto", options = ["auto", "zh", "en", "yue", "ja", "ko"] },
+  { name = "model_dir", type = "text", default = "" },
+]

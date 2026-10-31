@@ -135,6 +135,15 @@ operation = "hello.hello"
         self.assertEqual(self.manage("install_preinstalled", name="example.convert")[0], 0)
         self.assertTrue((self.root / "installed/example.convert").is_dir())
 
+    def test_explicit_restore_moves_disabled_bundle_and_records_the_enabled_path(self):
+        self.bundle()
+        self.assertEqual(self.manage("prepare_preinstalled")[0], 0)
+        self.assertEqual(self.manage("disable", name="example.convert")[0], 0)
+        code, events = self.manage("install_preinstalled", name="example.convert")
+        self.assertEqual(code, 0, events)
+        self.assertTrue(events[-1]["payload"]["installed"][0]["loaded"])
+        self.assertFalse((self.root / "disabled/example.convert").exists())
+
     def test_update_of_disabled_plugin_preserves_disabled_state(self):
         self.install(self.source())
         self.assertEqual(self.manage("disable", name="hello")[0], 0)

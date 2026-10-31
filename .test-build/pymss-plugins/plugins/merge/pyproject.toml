@@ -1,0 +1,57 @@
+[project]
+name = "pymss-plugin-merge"
+version = "0.2.0"
+description = "Studio merge audio tool"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.pymss.plugin]
+id = "pymss.merge"
+api_version = 2
+requires_pymss = ">=2.2"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.merge.tool"
+title = "Audio merge"
+
+[tool.pymss.studio]
+
+sdk_version = 1
+required_capabilities = [
+    "app.info",
+    "files.pickDirectory",
+    "files.reveal",
+    "operations.cancel",
+    "operations.start",
+    "settings.read",
+    "settings.write",
+    "ui.overlay",
+]
+tags = ["audio", "merge"]
+category = "edit"
+icon = "GitMergeOutline"
+
+[tool.pymss.studio.locales."en"]
+title = "Audio merge"
+description = "Concatenate audio files in order with shared output settings."
+
+[tool.pymss.studio.locales."en".operations]
+"pymss.merge.tool" = "Audio merge"
+
+[tool.pymss.studio.locales."zh-CN"]
+title = "音频合并"
+description = "按顺序拼接多个音频文件，统一输出设置。"
+tags = ["拼接", "排序", "合并"]
+
+[tool.pymss.studio.locales."zh-CN".operations]
+"pymss.merge.tool" = "音频合并"
+
+[[tool.pymss.studio.views]]
+id = "tool"
+title = "Merge"
+entry = "ui/dist/index.html"
+component = "ui/src/MergeTool.vue"
+placements = ["tool"]
+operation = "pymss.merge.tool"
+permissions = ["ui.overlay", "files", "settings", "app.info", "clipboard.writeText", "operations"]
+file_tool = "merge"

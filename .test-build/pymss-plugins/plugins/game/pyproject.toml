@@ -1,0 +1,100 @@
+[project]
+name = "pymss-plugin-game"
+version = "1.2.0"
+description = "pymss plugin: OpenVPI GAME vocal to MIDI transcription"
+requires-python = ">=3.10"
+dependencies = [
+    "gamemlx>=0.2; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mido>=1.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "click>=8; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "huggingface-hub>=0.24,<1; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "hf-xet>=1.1.3,<2; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "safetensors>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "packaging>=20.9; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "torch; sys_platform != 'darwin' or platform_machine != 'arm64'",
+    "librosa",
+    "numpy",
+    "soundfile",
+    "pyyaml",
+]
+
+[tool.pymss.plugin]
+id = "pymss.game"
+api_version = 2
+requires_pymss = ">=2.2"
+# Reuse Studio's NumPy instead of gamemlx's conservative numpy<2 constraint.
+dependency_mode = "declared-only"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.game.vocal_to_midi"
+title = "Vocal to MIDI (GAME)"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.game.tool"
+title = "Vocal to MIDI"
+
+[tool.pymss.studio]
+
+sdk_version = 1
+required_capabilities = [
+    "app.info",
+    "audio.analyze",
+    "files.pickAudio",
+    "files.pickDirectory",
+    "files.pickModel",
+    "files.reveal",
+    "operations.cancel",
+    "operations.start",
+    "settings.read",
+    "settings.write",
+    "shell.openExternal",
+    "ui.overlay",
+]
+backends = ["torch", "mlx"]
+tags = ["midi", "transcription", "vocal", "openvpi", "game"]
+category = "recognize"
+icon = "MusicalNoteOutline"
+
+[tool.pymss.studio.locales."en"]
+title = "Vocal to MIDI"
+description = "Extract vocal pitch and note timing and export MIDI."
+
+[tool.pymss.studio.locales."en".operations]
+"pymss.game.vocal_to_midi" = "Vocal to MIDI (GAME)"
+"pymss.game.tool" = "Vocal to MIDI"
+
+[tool.pymss.studio.locales."zh-CN"]
+title = "歌声转 MIDI"
+description = "提取独唱音高与音符时值，导出 MIDI。"
+tags = ["歌声", "音符", "MIDI"]
+
+[tool.pymss.studio.locales."zh-CN".operations]
+"pymss.game.vocal_to_midi" = "歌声音符转写"
+"pymss.game.tool" = "歌声转 MIDI"
+
+[[tool.pymss.studio.views]]
+id = "tool"
+title = "Midi"
+entry = "ui/dist/index.html"
+component = "ui/src/MidiTool.vue"
+placements = ["tool"]
+operation = "pymss.game.tool"
+permissions = ["ui.overlay", "files", "settings", "app.info", "clipboard.writeText", "operations", "audio.analyze", "shell.openExternal"]
+file_tool = "midi"
+
+[[tool.pymss.plugin.contributions.nodes]]
+type = "GameVocalToMidi"
+title = "Vocal to MIDI (GAME)"
+category = "pymss/plugins"
+description = "Transcribe vocals to a MIDI file; outputs the file path"
+inputs = [
+  { name = "audio", type = "AUDIO" },
+]
+outputs = [
+  { name = "midi_path", type = "STRING" },
+]
+widgets = [
+  { name = "tempo", type = "number", default = 120.0, min = 30.0, max = 300.0, step = 1.0 },
+  { name = "language", type = "combo", default = "", options = ["", "zh", "yue", "ja", "en"] },
+  { name = "model_path", type = "text", default = "medium" },
+]

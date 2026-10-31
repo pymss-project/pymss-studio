@@ -1,4 +1,8 @@
-export type StemOutput = { stem: string; path: string; nodeId?: string }
+export type StemOutput = { stem: string; path: string; nodeId?: string; kind?: 'file'; mediaType?: string }
+
+export function isAudioOutput(output: StemOutput) {
+  return output.kind !== 'file' || output.mediaType?.startsWith('audio/') === true
+}
 
 function fileName(path: string, windows: boolean) {
   return String(path || '').split(windows ? /[/\\]/ : /[/]/).pop() || ''
@@ -43,6 +47,7 @@ export function normalizeStemOutputs(value: unknown, inputPath?: string, windows
       stem: explicitStem || stemFromOutputPath(nameHint || path, inputPath, windows ?? (/^[A-Za-z]:|^\\\\/.test(path) || /^[A-Za-z]:|^\\\\/.test(inputPath || ''))),
       path,
       ...(typeof raw.nodeId === 'string' ? { nodeId: raw.nodeId } : {}),
+      ...(raw.kind === 'file' ? { kind: 'file' as const, ...(typeof raw.mediaType === 'string' ? { mediaType: raw.mediaType } : {}) } : {}),
     }]
   })
 }

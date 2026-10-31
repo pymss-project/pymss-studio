@@ -1,0 +1,57 @@
+[project]
+name = "pymss-plugin-audio-gain"
+version = "0.2.0"
+description = "Audio gain adjustment with optional peak protection"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[tool.pymss.plugin]
+id = "example.audio_gain"
+api_version = 2
+requires_pymss = ">=2.2"
+
+[[tool.pymss.plugin.operations]]
+id = "example.audio_gain.apply"
+title = "Apply gain"
+
+[tool.pymss.studio]
+
+sdk_version = 1
+required_capabilities = [
+    "app.info",
+    "files.pickAudio",
+    "files.pickDirectory",
+    "files.reveal",
+    "operations.cancel",
+    "operations.start",
+    "settings.read",
+    "settings.write",
+    "ui.overlay",
+]
+build_script = "scripts/build.mjs"
+category = "edit"
+tags = ["gain", "audio", "volume"]
+
+[tool.pymss.studio.locales.en]
+title = "Audio gain"
+description = "Adjust audio gain while preserving sample rate and channel layout."
+
+[tool.pymss.studio.locales.en.operations]
+"example.audio_gain.apply" = "Apply gain"
+
+[tool.pymss.studio.locales."zh-CN"]
+title = "音频增益"
+description = "调整音频增益，保留采样率和声道布局。"
+tags = ["增益", "音量", "音频"]
+
+[tool.pymss.studio.locales."zh-CN".operations]
+"example.audio_gain.apply" = "调整增益"
+
+[[tool.pymss.studio.views]]
+id = "tool"
+title = "Audio gain"
+entry = "ui/dist/index.html"
+component = "ui/src/App.vue"
+placements = ["tool"]
+operation = "example.audio_gain.apply"
+permissions = ["operations.start", "operations.cancel", "files.pickAudio", "files.pickDirectory", "files.reveal", "settings.read", "settings.write", "app.info", "ui.overlay"]

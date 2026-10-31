@@ -1,0 +1,92 @@
+[project]
+name = "pymss-plugin-timing"
+version = "0.2.0"
+description = "pymss plugin: pitch-shift and time-stretch (librosa)"
+requires-python = ">=3.10"
+dependencies = ["librosa"]
+
+[tool.pymss.plugin]
+id = "pymss.timing"
+api_version = 2
+requires_pymss = ">=2.2"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.timing.pitch_shift"
+title = "Pitch Shift"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.timing.time_stretch"
+title = "Time Stretch"
+
+[tool.pymss.studio]
+
+sdk_version = 1
+required_capabilities = [
+    "app.info",
+    "files.pickAudio",
+    "files.reveal",
+    "operations.cancel",
+    "operations.describe",
+    "operations.start",
+    "settings.read",
+    "settings.write",
+    "ui.overlay",
+]
+tags = ["pitch", "time", "stretch"]
+category = "edit"
+
+[tool.pymss.studio.locales."en"]
+title = "Pitch and time"
+description = "Change pitch or stretch time while preserving the other."
+
+[tool.pymss.studio.locales."en".operations]
+"pymss.timing.pitch_shift" = "Pitch Shift"
+"pymss.timing.time_stretch" = "Time Stretch"
+
+[tool.pymss.studio.locales."zh-CN"]
+title = "音高与速度"
+description = "独立调整音高与播放速度，保持另一项不变。"
+tags = ["变调", "变速", "时间拉伸"]
+
+[tool.pymss.studio.locales."zh-CN".operations]
+"pymss.timing.pitch_shift" = "音高调整"
+"pymss.timing.time_stretch" = "时间拉伸"
+
+[[tool.pymss.studio.views]]
+id = "tool"
+title = "Pitch and Time"
+entry = "ui/dist/index.html"
+component = "ui/src/Tool.vue"
+placements = ["tool"]
+permissions = ["ui.overlay", "operations", "files", "settings", "app.info"]
+
+[[tool.pymss.plugin.contributions.nodes]]
+type = "TimingPitchShift"
+title = "Pitch Shift"
+category = "pymss/plugins"
+description = "Pitch Shift (audio -> audio)"
+inputs = [
+  { name = "audio", type = "AUDIO" },
+]
+outputs = [
+  { name = "audio", type = "AUDIO" },
+]
+widgets = [
+  { name = "n_steps", type = "number", default = 0.0, min = -24.0, max = 24.0, step = 0.5 },
+  { name = "bins_per_octave", type = "number", default = 12.0, min = 1.0, max = 36.0, step = 1.0 }
+]
+
+[[tool.pymss.plugin.contributions.nodes]]
+type = "TimingTimeStretch"
+title = "Time Stretch"
+category = "pymss/plugins"
+description = "Time Stretch (audio -> audio)"
+inputs = [
+  { name = "audio", type = "AUDIO" },
+]
+outputs = [
+  { name = "audio", type = "AUDIO" },
+]
+widgets = [
+  { name = "rate", type = "number", default = 1.0, min = 0.25, max = 4.0, step = 0.05 }
+]

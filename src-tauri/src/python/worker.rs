@@ -833,6 +833,10 @@ fn build_worker_command(
             dir.to_string_lossy().to_string(),
         );
     }
+    let test_root = storage::data_root_dir(app)?;
+    cmd.env("PYMSS_PLUGINS_DIR", test_root.join("manual-plugins"))
+        .env("PYMSS_USER_MODELS", test_root.join("settings/user-models.json"))
+        .env("PYMSS_MODEL_DIR", test_root.join("models"));
     apply_proxy_env(app, &mut cmd);
     let mut tool_dirs = rocm_native_tool_dirs(app)?;
     tool_dirs.extend(bundled_bin_dirs(app)?);

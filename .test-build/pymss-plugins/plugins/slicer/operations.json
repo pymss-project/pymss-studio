@@ -1,0 +1,30 @@
+{
+  "formatVersion": 1,
+  "operations": [
+    {
+      "description": "File-based audio tool with progress and structured results",
+      "id": "pymss.slicer.tool",
+      "inputs": {
+        "request": {
+          "type": "object"
+        }
+      },
+      "outputs": {
+        "report": {
+          "type": "object"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Audio slicing"
+    }
+  ],
+  "pluginApiVersion": 2,
+  "pluginId": "pymss.slicer",
+  "pluginVersion": "0.2.0",
+  "sourceDigest": "66d9ccea01c60dfc6268cbd50aa4b4a1b19b514ff9a503e08ba35590b2c44ead"
+}

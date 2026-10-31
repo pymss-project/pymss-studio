@@ -1,0 +1,85 @@
+[project]
+name = "pymss-plugin-rust-text"
+version = "0.1.0"
+description = "Normalize text line endings using a native command"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pymss.plugin]
+id = "example.rust_text"
+api_version = 2
+requires_pymss = ">=2.2"
+
+[[tool.pymss.plugin.operations]]
+id = "example.rust_text.normalize"
+title = "Normalize text line endings"
+
+[[tool.pymss.plugin.contributions.nodes]]
+type = "example_rust_text_normalize"
+title = "Normalize text line endings"
+category = "files/text"
+inputs = [{name = "source", type = "STRING"}, {name = "line_ending", type = "STRING"}]
+outputs = [{name = "document", type = "STRING"}]
+
+[tool.pymss.commands]
+format_version = 1
+
+[[tool.pymss.commands.operations]]
+id = "example.rust_text.normalize"
+title = "Normalize text line endings"
+description = "Convert UTF-8 text to LF or CRLF line endings"
+node_type = "example_rust_text_normalize"
+timeout = 30
+max_output_bytes = 134217728
+arguments = ["--input", {input = "source"}, "--output", {output = "document"}, "--line-ending", {param = "line_ending"}]
+
+[tool.pymss.commands.operations.inputs.source]
+type = "file"
+title = "Input text file"
+extensions = ["txt", "csv", "md", "json", "srt", "lrc"]
+
+[tool.pymss.commands.operations.params]
+type = "object"
+additionalProperties = false
+
+[tool.pymss.commands.operations.params.properties.line_ending]
+type = "string"
+title = "Line endings"
+enum = ["lf", "crlf"]
+default = "lf"
+
+[tool.pymss.commands.operations.outputs.document]
+type = "file"
+filename = "normalized.txt"
+media_type = "text/plain"
+
+[tool.pymss.commands.operations.targets]
+win32-x86_64 = "bin/win32-x86_64/text-normalize.exe"
+win32-arm64 = "bin/win32-arm64/text-normalize.exe"
+darwin-x86_64 = "bin/darwin-x86_64/text-normalize"
+darwin-arm64 = "bin/darwin-arm64/text-normalize"
+linux-x86_64 = "bin/linux-x86_64/text-normalize"
+linux-arm64 = "bin/linux-arm64/text-normalize"
+
+[tool.pymss.studio]
+sdk_version = 1
+category = "convert"
+platforms = ["win32", "darwin", "linux"]
+architectures = ["x86_64", "arm64"]
+required_capabilities = ["app.info", "files.pickFile", "files.pickDirectory", "files.reveal", "operations.describe", "operations.start", "operations.cancel"]
+
+[tool.pymss.studio.locales.en]
+title = "Text line endings"
+description = "Convert UTF-8 text to LF or CRLF line endings."
+
+[tool.pymss.studio.locales."zh-CN"]
+title = "文本换行转换"
+description = "将 UTF-8 文本转换为 LF 或 CRLF 换行。"
+
+[[tool.pymss.studio.views]]
+id = "tool"
+title = "Text line endings"
+entry = "ui/index.html"
+placements = ["tool"]
+operation = "example.rust_text.normalize"
+permissions = ["app.info", "files.pickFile", "files.pickDirectory", "files.reveal", "operations.describe", "operations.start", "operations.cancel"]

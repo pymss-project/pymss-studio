@@ -1,0 +1,56 @@
+[project]
+name = "pymss-plugin-sdr"
+version = "0.2.0"
+description = "Studio sdr audio tool"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.pymss.plugin]
+id = "pymss.sdr"
+api_version = 2
+requires_pymss = ">=2.2"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.sdr.tool"
+title = "SDR evaluation"
+
+[tool.pymss.studio]
+
+sdk_version = 1
+required_capabilities = [
+    "app.info",
+    "files.pickAudio",
+    "operations.cancel",
+    "operations.start",
+    "settings.read",
+    "settings.write",
+    "ui.overlay",
+]
+tags = ["audio", "sdr"]
+category = "analyze"
+icon = "AnalyticsOutline"
+
+[tool.pymss.studio.locales."en"]
+title = "SDR evaluation"
+description = "Align reference and estimated audio and evaluate SDR and SI-SDR."
+
+[tool.pymss.studio.locales."en".operations]
+"pymss.sdr.tool" = "SDR evaluation"
+
+[tool.pymss.studio.locales."zh-CN"]
+title = "SDR 评估"
+description = "对齐参考音频与估计音频，评估 SDR 和 SI-SDR。"
+tags = ["音质评估", "SDR", "SI-SDR"]
+
+[tool.pymss.studio.locales."zh-CN".operations]
+"pymss.sdr.tool" = "SDR 评估"
+
+[[tool.pymss.studio.views]]
+id = "tool"
+title = "Sdr"
+entry = "ui/dist/index.html"
+component = "ui/src/SdrTool.vue"
+placements = ["tool"]
+operation = "pymss.sdr.tool"
+permissions = ["ui.overlay", "files", "settings", "app.info", "clipboard.writeText", "operations"]
+file_tool = "sdr"

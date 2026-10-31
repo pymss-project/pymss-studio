@@ -1,0 +1,7 @@
+{
+  "formatVersion": 1,
+  "requiresPython": ">=3.11",
+  "targets": {
+    "any": []
+  }
+}

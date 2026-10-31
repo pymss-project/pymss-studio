@@ -113,6 +113,38 @@ test('file, application, and fixed-namespace settings SDK calls use validated ho
   await assert.rejects(controller.handleCall(8, 'files.scanAudio', { paths: [''] }), /INVALID_PATHS|INVALID_PATH/)
 })
 
+test('generic file picking validates extension filters before opening a native dialog', async () => {
+  const dialogs = []
+  const { controller } = host({
+    permissions: () => ['files.pickFile'],
+    open: async options => { dialogs.push(options); return '/input/subtitles.srt' },
+  })
+  assert.equal(JSON.stringify(await controller.handleCall(1, 'files.pickFile', { title: 'Subtitles', extensions: ['srt', 'lrc'] })),
+    JSON.stringify({ path: '/input/subtitles.srt' }))
+  assert.equal(JSON.stringify(dialogs[0].filters), JSON.stringify([{ name: 'Subtitles', extensions: ['srt', 'lrc'] }]))
+  for (const extensions of ['wav', ['../srt'], ['*.txt'], Array(33).fill('txt')]) {
+    await assert.rejects(controller.handleCall(2, 'files.pickFile', { extensions }), /INVALID_FILE_EXTENSIONS/)
+  }
+  assert.equal(dialogs.length, 1)
+})
+
+test('descriptions refresh and expected contract digests reach the native worker', async () => {
+  const calls = []
+  const failure = new Error('worker unavailable')
+  const { controller } = host({ invoke: async (command, args) => {
+    calls.push({ command, args })
+    if (command === 'start_operation_task') throw failure
+    return {}
+  } })
+  await controller.handleCall(1, 'operations.describe', { operation: 'alice.tool.process', refresh: true })
+  assert.equal(calls[0].args.payload.refresh, true)
+  const digest = 'a'.repeat(64)
+  await assert.rejects(controller.handleCall(2, 'operations.start', { operation: 'alice.tool.process', expectedSpecDigest: digest }), error => error === failure)
+  assert.equal(calls[1].args.payload.expectedSpecDigest, digest)
+  await assert.rejects(controller.handleCall(3, 'operations.start', { expectedSpecDigest: 'invalid' }), /INVALID_OPERATION_DIGEST/)
+  assert.equal(calls.length, 2)
+})
+
 test('unknown SDK capabilities stay unavailable even when the view grants their family', async () => {
   const calls = []
   const { controller } = host({
@@ -496,6 +528,11 @@ test('the actual SDK correlates concurrent progress and waits for terminal respo
   await new Promise(setImmediate)
   assert.deepEqual(progress, [[0.25], [0.75]])
   assert.equal(state.runRequests.size, 0)
+  const failed = sdkWindow.pymss.startOperation('test.failed', {}, {})
+  const rejected = assert.rejects(failed, error => error.code === 'COMMAND_FAILED' && error.data.stderr === 'Invalid UTF-8')
+  await new Promise(setImmediate)
+  emit(2, 'error', { code: 'COMMAND_FAILED', message: 'Plugin command exited with status 2', stderr: 'Invalid UTF-8' })
+  await rejected
   controller.unmount()
 })
 

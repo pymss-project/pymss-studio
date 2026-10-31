@@ -1,0 +1,33 @@
+{
+  "name": "pymss-plugin-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.2",
+  "scripts": {
+    "build:tools": "node scripts/build_tool_views.mjs",
+    "check:tools": "vue-tsc --noEmit -p frontend/tsconfig.json",
+    "test:frontend": "node --test tests/frontend/*.test.mjs",
+    "catalog": "python scripts/generate_registry.py",
+    "catalog:check": "python scripts/generate_registry.py --check",
+    "metadata": "python scripts/generate_operation_metadata.py",
+    "metadata:check": "python scripts/generate_operation_metadata.py --check",
+    "build": "pnpm check:tools && pnpm build:tools && pnpm catalog",
+    "build:example": "pnpm --dir ../examples/audio_gain build",
+    "test:example": "python -m unittest discover -s ../examples/audio_gain/tests -v",
+    "test:python": "cd .. && python -m unittest discover -s tooling/tests -v"
+  },
+  "dependencies": {
+    "vue": "3.5.35",
+    "vue-i18n": "11.4.4",
+    "naive-ui": "2.44.1",
+    "@vicons/ionicons5": "0.13.0"
+  },
+  "devDependencies": {
+    "vite": "7.3.3",
+    "@vitejs/plugin-vue": "6.0.7",
+    "typescript": "5.9.3",
+    "vue-tsc": "3.3.2",
+    "unplugin-vue-components": "32.1.0"
+  }
+}

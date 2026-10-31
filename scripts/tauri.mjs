@@ -14,7 +14,7 @@ if (command === 'dev' && process.stderr.isTTY
 
 if ((command === 'dev' || command === 'build') && !process.argv.some(arg => ['--help', '-h', '--version', '-V'].includes(arg))) {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-  const release = command === 'build' && !process.argv.includes('--debug')
+  const release = command === 'build' && !process.argv.includes('--debug') && process.env.PYMSS_STUDIO_PLUGIN_TEST_BUILD !== '1'
   const result = spawnSync('python', ['-X', 'utf8', path.join(root, 'scripts/prepare-preinstalled-plugins.py'), ...(release ? ['--release'] : [])], { cwd: root, stdio: 'inherit' })
   if (result.error) { console.error(result.error.message); process.exit(1) }
   if (result.status !== 0) process.exit(result.status || 1)

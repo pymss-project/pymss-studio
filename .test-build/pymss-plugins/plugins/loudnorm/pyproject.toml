@@ -1,0 +1,83 @@
+[project]
+name = "pymss-plugin-loudnorm"
+version = "0.4.0"
+description = "pymss plugin: LUFS loudness normalization"
+requires-python = ">=3.10"
+dependencies = [
+    "pyloudnorm",
+]
+
+[tool.pymss.plugin]
+id = "pymss.loudnorm"
+api_version = 2
+requires_pymss = ">=2.2"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.loudnorm.normalize"
+title = "Normalize Loudness (LUFS)"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.loudnorm.tool"
+title = "Loudness matching"
+
+[tool.pymss.studio]
+
+sdk_version = 1
+required_capabilities = [
+    "app.info",
+    "files.pickAudio",
+    "files.pickDirectory",
+    "files.reveal",
+    "files.scanAudio",
+    "operations.cancel",
+    "operations.start",
+    "settings.read",
+    "settings.write",
+    "ui.overlay",
+]
+tags = ["loudness", "normalize", "lufs"]
+category = "edit"
+icon = "VolumeHighOutline"
+deferred_dependency_operations = ["pymss.loudnorm.tool"]
+
+[tool.pymss.studio.locales."en"]
+title = "Loudness matching"
+description = "Match a reference loudness or normalize to a target LUFS level."
+
+[tool.pymss.studio.locales."en".operations]
+"pymss.loudnorm.normalize" = "Normalize Loudness (LUFS)"
+"pymss.loudnorm.tool" = "Loudness matching"
+
+[tool.pymss.studio.locales."zh-CN"]
+title = "响度匹配"
+description = "匹配参考音频响度，或规范化到目标 LUFS。"
+tags = ["响度", "匹配", "LUFS"]
+
+[tool.pymss.studio.locales."zh-CN".operations]
+"pymss.loudnorm.normalize" = "LUFS 响度标准化"
+"pymss.loudnorm.tool" = "响度匹配"
+
+[[tool.pymss.studio.views]]
+id = "tool"
+title = "Loudness"
+entry = "ui/dist/index.html"
+component = "ui/src/LoudnessTool.vue"
+placements = ["tool"]
+operation = "pymss.loudnorm.tool"
+permissions = ["ui.overlay", "files", "settings", "app.info", "clipboard.writeText", "operations"]
+file_tool = "loudness"
+
+[[tool.pymss.plugin.contributions.nodes]]
+type = "NormalizeLUFS"
+title = "Normalize Loudness (LUFS)"
+category = "pymss/plugins"
+description = "LUFS integrated-loudness normalization (broadcast/streaming standard)"
+inputs = [
+  { name = "audio", type = "AUDIO" },
+]
+outputs = [
+  { name = "audio", type = "AUDIO" },
+]
+widgets = [
+  { name = "target_lufs", type = "number", default = -14.0, min = -70.0, max = -5.0, step = 0.5 },
+]

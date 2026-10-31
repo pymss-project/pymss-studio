@@ -53,6 +53,7 @@
     pending.delete(data.id)
     if (data.error) {
       var error = new Error(String(data.error.message || 'RPC error'))
+      if (data.error.data && typeof data.error.data === 'object') error.data = data.error.data
       if (data.error.data && typeof data.error.data.code === 'string') error.code = data.error.data.code
       entry.reject(error)
     }
@@ -102,14 +103,20 @@
     },
     // Convenience wrappers over the SDK surface
     appInfo: function () { return call('app.info') },
-    describeOperation: function (operation) { return call('operations.describe', { operation: operation }) },
+    describeOperation: function (operation, options) {
+      var params = { operation: operation }
+      if (options && options.refresh === true) params.refresh = true
+      return call('operations.describe', params)
+    },
     startOperation: function (operation, params, inputs, onProgress, options) {
       var payload = { operation: operation, params: params || {}, inputs: inputs || {} }
       if (options && typeof options.outputDir === 'string' && options.outputDir) payload.outputDir = options.outputDir
+      if (options && options.expectedSpecDigest !== undefined) payload.expectedSpecDigest = options.expectedSpecDigest
       return call('operations.start', payload, { onProgress: onProgress })
     },
     cancelOperation: function (id) { return call('operations.cancel', { id: id }) },
     pickAudio: function (options) { return call('files.pickAudio', options || {}) },
+    pickFile: function (options) { return call('files.pickFile', options || {}) },
     pickDirectory: function () { return call('files.pickDirectory', {}) },
     scanAudio: function (paths, recursive) {
       return call('files.scanAudio', { paths: paths || [], recursive: recursive !== false })

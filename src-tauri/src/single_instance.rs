@@ -99,7 +99,7 @@ pub fn acquire_or_focus() -> Result<Option<InstanceMutex>, String> {
 #[cfg(unix)]
 fn instance_lock_path() -> PathBuf {
     let user_id = unsafe { libc::geteuid() };
-    let instance = if cfg!(feature = "vst-lab") { "vstlab" } else { "main" };
+    let instance = if cfg!(feature = "vst-lab") { "vstlab" } else { "plugin-test" };
     Path::new("/tmp").join(format!("pymss-studio-{instance}-{user_id}.lock"))
 }
 

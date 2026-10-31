@@ -17,6 +17,7 @@ import { useTaskStore, type SeparationJob, type SeparationTask } from '@/stores/
 import { useEditorStore, type OrphanedEditorProject } from '@/stores/editor'
 import { usePagedSelection } from '@/composables/usePagedSelection'
 import { resultType, RESULT_TYPE_KEYS, type ResultType } from '@/utils/resultType'
+import { isAudioOutput } from '@/utils/stemOutputs'
 import { NCheckbox, useDialog, useMessage } from 'naive-ui'
 
 type ResultSort = 'time_desc' | 'time_asc' | 'name_asc' | 'name_desc'
@@ -891,7 +892,7 @@ function formatDurationMs(value: number | undefined) {
                   <span>{{ result.outputs.length }} {{ t('results.stemUnit') }} · {{ formatDurationMs(taskDurationMs(result)) }}</span>
                 </div>
                 <div class="result-detail-card__actions">
-                  <n-button size="tiny" secondary @click.stop="openInEditor(result)">
+                  <n-button v-if="result.outputs.some(isAudioOutput)" size="tiny" secondary @click.stop="openInEditor(result)">
                     <template #icon><n-icon :component="ColorWandOutline" /></template>
                     {{ t('results.openInEditor') }}
                   </n-button>

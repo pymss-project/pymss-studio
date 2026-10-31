@@ -1,0 +1,117 @@
+{
+  "formatVersion": 1,
+  "operations": [
+    {
+      "description": "Remove low frequencies below a cutoff",
+      "id": "pymss.spectral.highpass",
+      "inputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "outputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "Q": {
+            "default": 0.707,
+            "maximum": 8.0,
+            "minimum": 0.1,
+            "type": "number"
+          },
+          "f0": {
+            "default": 80.0,
+            "maximum": 2000.0,
+            "minimum": 10.0,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Highpass Filter"
+    },
+    {
+      "description": "Remove high frequencies above a cutoff",
+      "id": "pymss.spectral.lowpass",
+      "inputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "outputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "Q": {
+            "default": 0.707,
+            "maximum": 8.0,
+            "minimum": 0.1,
+            "type": "number"
+          },
+          "f0": {
+            "default": 8000.0,
+            "maximum": 20000.0,
+            "minimum": 100.0,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Lowpass Filter"
+    },
+    {
+      "description": "Parametric peak filter at a frequency",
+      "id": "pymss.spectral.peak_eq",
+      "inputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "outputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "Q": {
+            "default": 1.0,
+            "maximum": 8.0,
+            "minimum": 0.1,
+            "type": "number"
+          },
+          "f0": {
+            "default": 1000.0,
+            "maximum": 20000.0,
+            "minimum": 20.0,
+            "type": "number"
+          },
+          "gain_db": {
+            "default": 0.0,
+            "maximum": 24.0,
+            "minimum": -24.0,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Peak EQ"
+    }
+  ],
+  "pluginApiVersion": 2,
+  "pluginId": "pymss.spectral",
+  "pluginVersion": "0.2.0",
+  "sourceDigest": "783255856a5164547e5f2bf912fed6e06bfc05e07f7f8e041987f9d819e49782"
+}

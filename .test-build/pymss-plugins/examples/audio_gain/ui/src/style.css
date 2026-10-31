@@ -1,0 +1,30 @@
+:root { --surface-1: #fafbff; --outline: #dcdfe8; --on-surface: #1d283b; --on-surface-muted: #66738b; --font-sans: system-ui, sans-serif; }
+html, body { margin: 0; padding: 0; background: transparent; color: var(--on-surface); font-family: var(--font-sans); }
+body { display: flow-root; }
+* { box-sizing: border-box; }
+.gain-tool { display: grid; gap: 16px; min-width: 0; }
+.gain-panel { padding: 22px; border: 1px solid var(--outline); border-radius: 14px; background: var(--surface-1); }
+.gain-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
+.gain-header h1 { margin: 0; font-size: 20px; line-height: 1.4; }
+.gain-header p, .gain-hint { margin: 6px 0 0; color: var(--on-surface-muted); font-size: 12px; line-height: 1.7; }
+.gain-field { display: grid; gap: 8px; min-width: 0; margin-top: 18px; }
+.gain-field label { font-size: 13px; font-weight: 600; }
+.gain-path { display: flex; gap: 8px; min-width: 0; }
+.gain-path > .n-input { flex: 1; min-width: 0; }
+.gain-options { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr); gap: 24px; align-items: end; }
+.gain-switch { display: flex; align-items: center; gap: 10px; min-height: 34px; font-size: 13px; }
+.gain-hint { margin-top: 14px; }
+.gain-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--outline); margin-top: 24px; padding-top: 16px; }
+.gain-status { display: flex; gap: 10px; align-items: center; color: var(--on-surface-muted); font-size: 12px; }
+.gain-results h2 { margin: 0; font-size: 15px; }
+.gain-results p { overflow-wrap: anywhere; }
+.gain-results dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 20px 0; }
+.gain-results dt { color: var(--on-surface-muted); font-size: 12px; }
+.gain-results dd { margin: 4px 0 0; font-size: 14px; }
+.gain-log { overflow: auto; max-height: min(50dvh, 440px); min-height: 160px; padding: 14px; border-radius: 8px; background: #0c1020; color: #dce6f5; font: 12px/1.8 ui-monospace, monospace; scrollbar-width: thin; }
+.gain-log > div { display: flex; align-items: baseline; gap: 12px; }
+.gain-log time { flex-shrink: 0; color: #99a8c1; }
+.gain-log span { overflow-wrap: anywhere; }
+.gain-panel > .n-alert { margin-bottom: 14px; }
+.gain-panel > .n-progress { margin-top: 16px; }
+@media (max-width: 560px) { .gain-panel { padding: 18px; }.gain-options { grid-template-columns: 1fr; gap: 16px; }.gain-results dl { grid-template-columns: 1fr; } }

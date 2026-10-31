@@ -1,0 +1,17 @@
+{
+  "titleKey": "plugin.title",
+  "operations": [
+    {
+      "id": "pymss.spectral.highpass",
+      "titleKey": "plugin.operations.highpass"
+    },
+    {
+      "id": "pymss.spectral.lowpass",
+      "titleKey": "plugin.operations.lowpass"
+    },
+    {
+      "id": "pymss.spectral.peak_eq",
+      "titleKey": "plugin.operations.peak_eq"
+    }
+  ]
+}

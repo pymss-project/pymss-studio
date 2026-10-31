@@ -1,0 +1,59 @@
+[project]
+name = "pymss-plugin-convert"
+version = "0.2.0"
+description = "Batch audio format conversion for pymss Studio"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.pymss.plugin]
+id = "pymss.convert"
+api_version = 2
+requires_pymss = ">=2.2"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.convert.batch"
+title = "Batch Audio Conversion"
+
+[tool.pymss.studio]
+
+sdk_version = 1
+required_capabilities = [
+    "app.info",
+    "files.pickAudio",
+    "files.pickDirectory",
+    "files.reveal",
+    "files.scanAudio",
+    "operations.cancel",
+    "operations.start",
+    "settings.read",
+    "settings.write",
+    "ui.overlay",
+]
+tags = ["convert", "format", "batch", "ffmpeg"]
+category = "convert"
+icon = "SwapHorizontalOutline"
+
+[tool.pymss.studio.locales."en"]
+title = "Audio conversion"
+description = "Convert audio files in batches with sample-rate, channel and encoding controls."
+
+[tool.pymss.studio.locales."en".operations]
+"pymss.convert.batch" = "Batch Audio Conversion"
+
+[tool.pymss.studio.locales."zh-CN"]
+title = "音频格式转换"
+description = "批量转换音频格式，调整采样率、声道和编码质量。"
+tags = ["格式转换", "批量处理", "编码"]
+
+[tool.pymss.studio.locales."zh-CN".operations]
+"pymss.convert.batch" = "批量音频转换"
+
+[[tool.pymss.studio.views]]
+id = "tool"
+title = "Audio Conversion"
+entry = "ui/dist/index.html"
+component = "ui/src/ConvertTool.vue"
+placements = ["tool"]
+operation = "pymss.convert.batch"
+permissions = ["ui.overlay", "operations", "files", "settings", "app.info"]
+file_tool = "convert"

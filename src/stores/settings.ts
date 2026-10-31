@@ -108,6 +108,7 @@ type StoredSettings = {
   m4aBitRate?: string
   m4aCodec?: string
   startupOnboardingSeen?: boolean
+  pluginDefaultsPolicy?: 'auto' | 'review'
   startupOnboardingSeenVersion?: string
   beginnerGuideInvitationSeen?: boolean
   beginnerGuideProgress?: BeginnerGuideProgress
@@ -270,6 +271,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const updateSource = ref<UpdateSource>('auto')
   const updateEndpointOverride = ref('')
   const startupOnboardingSeen = ref(false)
+  const pluginDefaultsPolicy = ref<'auto' | 'review'>('review')
   const beginnerGuideInvitationSeen = ref(false)
   const beginnerGuideProgress = ref(normalizeBeginnerGuideProgress(null))
   const modelDirMigrationState = ref<ModelDirMigrationState>(createEmptyModelDirMigrationState())
@@ -303,6 +305,7 @@ export const useSettingsStore = defineStore('settings', () => {
     m4aBitRate: m4aBitRate.value,
     m4aCodec: m4aCodec.value,
     startupOnboardingSeen: startupOnboardingSeen.value,
+    pluginDefaultsPolicy: pluginDefaultsPolicy.value,
     beginnerGuideInvitationSeen: beginnerGuideInvitationSeen.value,
     beginnerGuideProgress: beginnerGuideProgress.value,
     proxyMode: proxyMode.value,
@@ -379,11 +382,14 @@ export const useSettingsStore = defineStore('settings', () => {
     updateEndpointOverride.value = String(stored?.updateEndpointOverride || '').trim()
     startupOnboardingSeen.value = stored?.startupOnboardingSeen === true
       || String(stored?.startupOnboardingSeenVersion || '').trim().length > 0
+    pluginDefaultsPolicy.value = stored?.pluginDefaultsPolicy === 'auto' || stored?.pluginDefaultsPolicy === 'review'
+      ? stored.pluginDefaultsPolicy : stored ? 'review' : 'auto'
     beginnerGuideInvitationSeen.value = stored?.beginnerGuideInvitationSeen === true
     beginnerGuideProgress.value = normalizeBeginnerGuideProgress(stored?.beginnerGuideProgress)
     const shouldPersistNormalizedSettings =
       !stored
       || typeof stored.startupOnboardingSeen !== 'boolean'
+      || !['auto', 'review'].includes(stored.pluginDefaultsPolicy || '')
       || String(stored.startupOnboardingSeenVersion || '').trim().length > 0
       || (stored.mp3BitRate !== undefined && stored.mp3BitRate !== mp3BitRate.value)
 
@@ -445,6 +451,7 @@ export const useSettingsStore = defineStore('settings', () => {
       updateChannel,
       updateSource,
       updateEndpointOverride,
+      pluginDefaultsPolicy,
       beginnerGuideInvitationSeen,
       beginnerGuideProgress,
     ],
@@ -949,6 +956,7 @@ export const useSettingsStore = defineStore('settings', () => {
     updateSource,
     updateEndpointOverride,
     startupOnboardingSeen,
+    pluginDefaultsPolicy,
     beginnerGuideInvitationSeen,
     beginnerGuideProgress,
     modelDirMigrationState,

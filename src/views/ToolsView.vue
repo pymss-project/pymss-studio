@@ -14,6 +14,7 @@ import { pluginLocale } from '@/features/plugin-marketplace/presentation'
 import { recordFeatureVisit } from '@/utils/logger'
 import { useAppStore } from '@/stores/app'
 import { activeRuntimeEnvironment } from '@/utils/runtime'
+import { useSettingsStore } from '@/stores/settings'
 
 defineOptions({ name: 'ToolsView' })
 
@@ -22,6 +23,9 @@ const route = useRoute()
 const router = useRouter()
 const pluginMarket = usePluginMarketplace()
 const app = useAppStore()
+const settings = useSettingsStore()
+const preparingTool = ref(false)
+const selectedPreparationSource = ref<string | null>(null)
 
 const activePluginTool = ref('')
 const mountedPluginTool = ref<{ entry: PluginToolEntry; pluginsRoot: string } | null>(null)
@@ -127,6 +131,29 @@ function openPlugins() {
   void router.push('/plugins')
 }
 
+watch(activePluginTool, () => { selectedPreparationSource.value = null })
+
+async function prepareActiveTool() {
+  const entry = activePluginHost.value?.entry
+  if (!entry || preparingTool.value) return
+  const source = entry.sourceSelectionRequired ? entry.availableBindings?.find(item => item.runtime === selectedPreparationSource.value) : undefined
+  if (entry.sourceSelectionRequired && !source) return
+  preparingTool.value = true
+  try {
+    await pluginMarket.manage('prepare', {
+      name: entry.pluginName, expectedRuntime: pluginMarket.snapshot.value?.runtime.identity,
+      ...(source ? { sourceRuntime: source.runtime, sourceVersion: source.version, sourceContent: source.content } : {}),
+    })
+  } catch { /* The shared plugin activity retains the failure and its details. */ }
+  finally { preparingTool.value = false }
+}
+
+async function enableDefaultTools() {
+  settings.pluginDefaultsPolicy = 'auto'
+  try { await pluginMarket.manage('prepare_preinstalled', { expectedRuntime: pluginMarket.snapshot.value?.runtime.identity }) }
+  catch { /* The shared plugin activity retains the failure. */ }
+}
+
 function onPluginBusy(value: boolean) {
   pluginToolBusy.value = value
   if (value) return
@@ -145,6 +172,7 @@ function restoreStoredTool(stored: { activePluginTool?: string } | null) {
 
 watch([() => route.query.pluginView, pluginTools], () => {
   if (typeof route.query.pluginView === 'string') applyRequestedPluginView()
+  else if (unavailableToolId.value) markUnavailable('')
 }, { immediate: true })
 
 watch(pluginTools, entries => {
@@ -193,7 +221,10 @@ onMounted(async () => {
       <n-empty :description="t(hasInstalledPlugins ? 'tools.noAvailableTools' : 'tools.noInstalledTools')">
         <template #extra>
           <p>{{ t(hasInstalledPlugins ? 'tools.enableToolsHint' : 'tools.installToolsHint') }}</p>
-          <n-button type="primary" @click="openPlugins">{{ t('tools.browseOfficialPlugins') }}</n-button>
+          <n-space justify="center">
+            <n-button v-if="pluginMarket.snapshot.value?.preinstalledAvailable?.length" type="primary" :loading="pluginMarket.busy.value" @click="enableDefaultTools">{{ t('plugins.enableDefaultTools') }}</n-button>
+            <n-button :type="pluginMarket.snapshot.value?.preinstalledAvailable?.length ? 'default' : 'primary'" @click="openPlugins">{{ t('tools.browseOfficialPlugins') }}</n-button>
+          </n-space>
         </template>
       </n-empty>
     </div>
@@ -251,13 +282,27 @@ onMounted(async () => {
         <div v-show="!inventoryLoading && !unavailableToolId">
           <n-alert v-if="pluginMarket.error.value" type="warning" :bordered="false">{{ pluginMarket.error.value }}</n-alert>
           <PluginViewHost
-            v-if="activePluginHost"
+            v-if="activePluginHost && (!activePluginHost.entry.availability || activePluginHost.entry.availability === 'ready')"
             :key="`${activePluginHost.pluginsRoot}/${activePluginTool}/${activePluginHost.entry.view.revision || ''}`"
             :plugin-name="activePluginHost.entry.pluginName"
             :plugins-root="activePluginHost.pluginsRoot"
             :view="activePluginHost.entry.view"
             @busy-change="onPluginBusy"
           />
+          <section v-else-if="activePluginHost" class="plugin-tool-unavailable">
+            <h2>{{ toolLabel(activePluginHost.entry) }}</h2>
+            <p>{{ t(activePluginHost.entry.availability === 'not_prepared' ? 'plugins.prepareRuntimeHint' : 'plugins.unavailableRuntimeHint') }}</p>
+            <p v-if="activePluginHost.entry.error">{{ activePluginHost.entry.error }}</p>
+            <template v-if="activePluginHost.entry.availability === 'not_prepared' && activePluginHost.entry.availableBindings?.length">
+              <n-select v-if="activePluginHost.entry.sourceSelectionRequired" v-model:value="selectedPreparationSource"
+                :placeholder="t('plugins.chooseSourceVersion')" :disabled="preparingTool"
+                :options="activePluginHost.entry.availableBindings.map(item => ({ value: item.runtime, label: `${item.runtime} · ${item.version || '—'}` }))" />
+              <p>{{ t('plugins.prepareDependenciesHint') }}</p>
+              <n-button type="primary" :loading="preparingTool" :disabled="pluginMarket.busy.value || (activePluginHost.entry.sourceSelectionRequired && !selectedPreparationSource)" @click="prepareActiveTool">{{ t('plugins.prepareRuntime') }}</n-button>
+            </template>
+            <p v-else-if="activePluginHost.entry.availability === 'not_prepared'">{{ t('plugins.prepareSourceMissing') }}</p>
+            <n-button secondary @click="openPlugins">{{ t('nav.plugins') }}</n-button>
+          </section>
           <n-empty v-else :description="t('tools.pluginToolUnavailable')">
             <template #extra><n-button secondary @click="openPlugins">{{ t('nav.plugins') }}</n-button></template>
           </n-empty>

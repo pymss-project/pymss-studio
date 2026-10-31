@@ -1,0 +1,118 @@
+[project]
+name = "pymss-plugin-dynamics"
+version = "0.2.0"
+description = "pymss plugin: dynamics processing (pedalboard)"
+requires-python = ">=3.10"
+dependencies = ["pedalboard"]
+
+[tool.pymss.plugin]
+id = "pymss.dynamics"
+api_version = 2
+requires_pymss = ">=2.2"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.dynamics.compressor"
+title = "Compressor"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.dynamics.limiter"
+title = "Limiter"
+
+[[tool.pymss.plugin.operations]]
+id = "pymss.dynamics.deesser"
+title = "De-esser"
+
+[tool.pymss.studio]
+
+sdk_version = 1
+required_capabilities = [
+    "app.info",
+    "files.pickAudio",
+    "files.reveal",
+    "operations.cancel",
+    "operations.describe",
+    "operations.start",
+    "settings.read",
+    "settings.write",
+    "ui.overlay",
+]
+tags = ["dynamics", "compressor", "limiter", "mastering"]
+category = "edit"
+
+[tool.pymss.studio.locales."en"]
+title = "Dynamics"
+description = "Control dynamics with compression, peak limiting and de-essing."
+
+[tool.pymss.studio.locales."en".operations]
+"pymss.dynamics.compressor" = "Compressor"
+"pymss.dynamics.limiter" = "Limiter"
+"pymss.dynamics.deesser" = "De-esser"
+
+[tool.pymss.studio.locales."zh-CN"]
+title = "动态处理"
+description = "使用压缩、限幅和齿音消除控制音频动态。"
+tags = ["压缩", "限幅", "齿音消除"]
+
+[tool.pymss.studio.locales."zh-CN".operations]
+"pymss.dynamics.compressor" = "动态压缩"
+"pymss.dynamics.limiter" = "峰值限幅"
+"pymss.dynamics.deesser" = "齿音消除"
+
+[[tool.pymss.studio.views]]
+id = "tool"
+title = "Dynamics"
+entry = "ui/dist/index.html"
+component = "ui/src/Tool.vue"
+placements = ["tool"]
+permissions = ["ui.overlay", "operations", "files", "settings", "app.info"]
+
+[[tool.pymss.plugin.contributions.nodes]]
+type = "DynamicsCompressor"
+title = "Compressor"
+category = "pymss/plugins"
+description = "Compressor (audio -> audio)"
+inputs = [
+  { name = "audio", type = "AUDIO" },
+]
+outputs = [
+  { name = "audio", type = "AUDIO" },
+]
+widgets = [
+  { name = "threshold_db", type = "number", default = 0.0, min = -60.0, max = 0.0, step = 0.5 },
+  { name = "ratio", type = "number", default = 4.0, min = 1.0, max = 20.0, step = 0.5 },
+  { name = "attack_ms", type = "number", default = 1.0, min = 0.1, max = 100.0, step = 0.1 },
+  { name = "release_ms", type = "number", default = 100.0, min = 1.0, max = 1000.0, step = 1.0 }
+]
+
+[[tool.pymss.plugin.contributions.nodes]]
+type = "DynamicsLimiter"
+title = "Limiter"
+category = "pymss/plugins"
+description = "Limiter (audio -> audio)"
+inputs = [
+  { name = "audio", type = "AUDIO" },
+]
+outputs = [
+  { name = "audio", type = "AUDIO" },
+]
+widgets = [
+  { name = "threshold_db", type = "number", default = -3.0, min = -24.0, max = 0.0, step = 0.5 },
+  { name = "release_ms", type = "number", default = 100.0, min = 1.0, max = 1000.0, step = 1.0 }
+]
+
+[[tool.pymss.plugin.contributions.nodes]]
+type = "DynamicsDeEsser"
+title = "De-esser"
+category = "pymss/plugins"
+description = "De-esser (audio -> audio)"
+inputs = [
+  { name = "audio", type = "AUDIO" },
+]
+outputs = [
+  { name = "audio", type = "AUDIO" },
+]
+widgets = [
+  { name = "threshold_db", type = "number", default = 0.0, min = -60.0, max = 0.0, step = 0.5 },
+  { name = "ratio", type = "number", default = 3.0, min = 1.0, max = 10.0, step = 0.5 },
+  { name = "crossover_hz", type = "number", default = 6000.0, min = 2000.0, max = 12000.0, step = 100.0 }
+]

@@ -15,7 +15,7 @@ use std::os::windows::ffi::OsStrExt;
 use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
 
 const DATA_ROOT_ENV: &str = "PYMSS_STUDIO_DATA_ROOT";
-const DATA_ROOT_DIR_NAME: &str = ".pymss-studio";
+const DATA_ROOT_DIR_NAME: &str = ".pymss-studio-plugin-test";
 const LOCAL_DATA_ROOT_DIR_NAME: &str = "data";
 static JSON_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 // Multiple WebView windows can autosave the same store at once. Serialize the temporary-file

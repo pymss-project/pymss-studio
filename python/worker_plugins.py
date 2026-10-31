@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
@@ -27,6 +28,8 @@ from typing import Any, Iterator
 
 from worker_protocol import emit, emit_error, isolate_protocol_stdout
 from worker_runtime_lock import RuntimeLockBusy, runtime_lock
+import worker_plugin_inventory as application_inventory
+import worker_plugin_python as python_profiles
 from worker_plugin_contract import (
     PluginCompatibilityError, catalog_requirements, compatibility, read_requirements,
     require_compatible, runtime_profile,
@@ -42,7 +45,7 @@ _REGISTRY_URL: ContextVar[str | None] = ContextVar("plugin_registry_url", defaul
 _CATEGORIES = {"convert", "analyze", "recognize", "edit"}
 _RUNTIME_LOCK = RLock()
 _DEPENDENCY_HANDOFF = ".studio-deps-pending"
-_SOURCE_IGNORED_DIRS = {".studio-deps", "__pycache__", ".git", "node_modules", ".venv", "venv", ".tmp", ".cache", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+_SOURCE_IGNORED_DIRS = {".studio-deps", ".pymss-python.json", "__pycache__", ".git", "node_modules", ".venv", "venv", ".tmp", ".cache", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 
 
 class PluginRuntimeIncompatible(RuntimeError):
@@ -229,6 +232,14 @@ def _recover(root: Path) -> None:
                 continue
             target = root / store / backup.name
             target.parent.mkdir(parents=True, exist_ok=True)
+            opposite = root / ("disabled" if store == "installed" else "installed") / backup.name
+            if not target.exists() and opposite.exists():
+                previous = _manifest(backup).get("inventory", {}).get("revision", 0)
+                replacement = _manifest(opposite).get("inventory", {}).get("revision", 0)
+                if type(previous) is int and type(replacement) is int and replacement > previous:
+                    _finish_dependency_handoff(opposite, backup)
+                    shutil.rmtree(backup)
+                    continue
             if target.exists():
                 _finish_dependency_handoff(target, backup)
                 shutil.rmtree(backup)
@@ -323,9 +334,197 @@ def _mark_preinstalled_removed(root: Path, name: str, removed: bool) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def _prepare_preinstalled(root: Path, task_id: str | None, requested: str | None = None) -> None:
+def _intent_definition(manifest: dict) -> dict:
+    fields = {"sdk_version", "required_capabilities", "platforms", "architectures", "backends", "category", "icon", "locales", "views"}
+    definition = {
+        "description": manifest.get("description", ""), "operations": manifest.get("operations", []),
+        "studio": {key: value for key, value in manifest.get("studio", {}).items() if key in fields},
+    }
+    return json.loads(json.dumps(definition, ensure_ascii=False, allow_nan=False))
+
+
+def _application_bindings(root: Path) -> tuple[list[dict], set[str], list[str]]:
+    roots = [root]
+    warnings = []
+    if root.parent.is_dir():
+        roots.extend(path for path in sorted(root.parent.iterdir())
+                     if path != root and path.is_dir() and not path.is_symlink() and not path.name.startswith(".")
+                     and any((path / name).exists() for name in ("installed", "disabled", "preinstalled-removed.json")))
+    observations, removed = [], set()
+    for binding in roots:
+        if not application_inventory.valid_binding(binding.name):
+            warnings.append("A plugin runtime directory has an unsupported name and was skipped")
+            continue
+        try:
+            removed.update(_removed_preinstalled(binding))
+        except (OSError, ValueError, TypeError):
+            warnings.append(f"Plugin removal preferences are unavailable for runtime {binding.name}")
+        for enabled, directory in ((True, binding / "installed"), (False, binding / "disabled")):
+            try:
+                children = sorted(directory.iterdir()) if directory.is_dir() else []
+            except OSError:
+                warnings.append(f"Plugin records are unavailable for runtime {binding.name}")
+                continue
+            for package in children:
+                if not package.is_dir() or package.is_symlink() or package.name.startswith((".", "_")):
+                    continue
+                try:
+                    manifest, meta = _read_manifest(package), _manifest(package)
+                    if manifest["id"] != package.name:
+                        continue
+                    content = meta.get("inventoryContent")
+                    observations.append({
+                        "name": manifest["id"], "binding": binding.name, "path": str(package),
+                        "enabled": enabled, "version": manifest["version"], "definition": _intent_definition(manifest),
+                        "marker": meta.get("inventory", {}), "meta": meta,
+                        "content": content if isinstance(content, str) and re.fullmatch(r"[0-9a-f]{64}", content) else None,
+                    })
+                except (OSError, ValueError, TypeError, KeyError):
+                    continue
+    return observations, removed, warnings
+
+
+def _application_state(root: Path) -> tuple[dict, list[dict]]:
+    observations, removed, warnings = _application_bindings(root)
+    state = application_inventory.merge(root, observations, removed)
+    state["migrationWarnings"] = warnings
+    return state, observations
+
+
+def _execution_intents(root: Path) -> dict | None:
+    if root != _root():
+        return {}
+    try:
+        return _application_state(root)[0]["plugins"]
+    except (OSError, ValueError, TypeError, KeyError):
+        # Inventory corruption disables managed code; built-in operations remain usable.
+        return None
+
+
+def _binding_sources(observations: list[dict], name: str) -> list[dict]:
+    sources = [item for item in observations if item["name"] == name]
+    if len(sources) > 1:
+        sources = [{**item, "content": item.get("content") or _plugin_content_digest(Path(item["path"]))}
+                   for item in sources]
+    return sources
+
+
+def _binding_matches(package: Path, intent: dict) -> bool:
+    if intent.get("revision", 0) == 0:
+        return True
+    try:
+        manifest, meta = _read_manifest(package), _manifest(package)
+        return ((intent.get("version") is None or manifest["version"] == intent["version"])
+                and (intent.get("content") is None or meta.get("inventoryContent") == intent["content"]))
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+
+
+def _has_current_installation(root: Path, name: str) -> bool:
+    intent = _application_state(root)[0]["plugins"].get(name, {})
+    package = _location(root, name)
+    return package.exists() and intent.get("state") != "removed" and _binding_matches(package, intent)
+
+
+def _unprepared_row(root: Path, name: str, entry: dict, observations: list[dict], profile: dict) -> dict:
+    definition = entry.get("definition", {})
+    metadata = definition.get("studio", {})
+    presentation = _presentation(metadata)
+    sources = _binding_sources(observations, name)
+    versions = {(item.get("version"), item.get("content")) for item in sources}
+    selection_required = entry.get("sourceSelectionRequired", False) or (entry.get("revision", 0) == 0 and len(versions) > 1)
+    eligible = sources if entry.get("revision", 0) == 0 or selection_required else [
+        item for item in sources if (entry.get("version") is None or item.get("version") == entry["version"])
+        and (entry.get("content") is None or item.get("content") == entry["content"])
+    ]
+    requirements = read_requirements(metadata)
+    views = []
+    for view in metadata.get("views", []):
+        if not isinstance(view, dict) or not isinstance(view.get("id"), str) or not isinstance(view.get("entry"), str):
+            continue
+        views.append({**view, "title": str(view.get("title") or view["id"]), "permissions": view.get("permissions", []),
+                      "sdkVersion": requirements["sdkVersion"], "requiredCapabilities": requirements["requiredCapabilities"],
+                      "category": view.get("category") or presentation["category"], "pluginId": name})
+    preferred = next((item for item in sources if item["binding"] == entry.get("binding")), sources[0] if sources else None)
+    meta = preferred["meta"] if preferred else {}
+    operations = definition.get("operations", [])
+    return {
+        "name": name, "pluginId": name, "version": entry.get("version"), "source": meta.get("source", "recorded"),
+        "url": meta.get("url"), "path": "", "managed": True, "enabled": entry["state"] == "enabled", "loaded": False,
+        "prepared": False, "availability": "not_prepared", "error": None, "dependencyError": None,
+        "requirements": requirements, "compatibility": compatibility(requirements, profile),
+        "description": definition.get("description", ""), "locales": presentation["locales"],
+        "toolCategory": presentation["category"], "toolIcon": metadata.get("icon"),
+        "operations": [item["id"] for item in operations], "operationTitles": {item["id"]: item["title"] for item in operations},
+        "contributions": {"views": views}, "sourceSelectionRequired": selection_required,
+        "availableBindings": [{"runtime": item["binding"], "version": item.get("version"), "content": item.get("content")} for item in eligible],
+    }
+
+
+def _prepare_binding(root: Path, payload: dict, task_id: str | None, revision: int) -> None:
+    name = _name(payload.get("name"))
+    state, observations = _application_state(root)
+    entry = state["plugins"].get(name)
+    if entry is None:
+        raise ValueError("Plugin is not installed")
+    if entry["state"] == "removed":
+        raise ValueError("Plugin is removed; reinstall it to restore its availability")
+    sources = _binding_sources(observations, name)
+    requested = payload.get("sourceRuntime")
+    if requested is not None and not isinstance(requested, str):
+        raise ValueError("Invalid plugin source runtime")
+    if requested:
+        source = next((item for item in sources if item["binding"] == requested), None)
+        if source and "sourceVersion" in payload and payload["sourceVersion"] != source.get("version"):
+            raise ValueError("Plugin source changed; refresh its available versions")
+    elif entry.get("sourceSelectionRequired"):
+        raise ValueError("Select the plugin source version before preparing this runtime")
+    elif entry.get("revision", 0) > 0:
+        source = next((item for item in sources if item["binding"] == entry.get("binding")
+                       and (entry.get("version") is None or item.get("version") == entry["version"])
+                       and (entry.get("content") is None or item.get("content") == entry["content"])), None)
+        if source is None:
+            source = next((item for item in sources if item.get("version") == entry.get("version") and item.get("content") == entry.get("content")), None)
+    else:
+        if len({(item.get("version"), item.get("content")) for item in sources}) > 1:
+            raise ValueError("Select the plugin source version before preparing this runtime")
+        source = sources[0] if sources else None
+    if source is None:
+        raise ValueError("The selected plugin files are unavailable; reinstall the plugin from its original source")
+    path = Path(source["path"])
+    expected = payload.get("sourceContent") or source.get("content")
+    actual = _plugin_content_digest(path)
+    if expected is not None and (not isinstance(expected, str) or expected != actual):
+        raise ValueError("Plugin source files changed; repair the source installation before preparing another runtime")
+    _install(root, {**payload, "action": "install", "name": name}, task_id, intent_revision=revision,
+             prepared_binding={**source, "content": actual, "enabled": entry["state"] == "enabled" or payload.get("action") == "enable"})
+
+
+def _record_intent(root: Path, name: str, state: str, *, pending: str | None = None, revision: int | None = None) -> int:
+    observations, removed, _warnings = _application_bindings(root)
+    current = application_inventory.merge(root, observations, removed)["plugins"].get(name)
+    if current is None:
+        raise ValueError("Plugin is not installed")
+    if current.get("revision", 0) == 0:
+        active = next((item for item in observations if item["name"] == name and item["binding"] == root.name), None)
+        if active:
+            current = {**current, **active}
+        elif len({(item.get("version"), item.get("content")) for item in _binding_sources(observations, name)}) > 1:
+            current = {**current, "binding": None, "version": None, "content": None, "sourceSelectionRequired": True}
+    if revision is None:
+        revision = application_inventory.reserve(root, observations, removed)
+    application_inventory.commit(
+        root, name, state, revision, version=current.get("version"), content=current.get("content"),
+        definition=current.get("definition", {}), binding=current.get("binding"), pending=pending,
+        selection_required=current.get("sourceSelectionRequired", False),
+    )
+    return revision
+
+
+def _prepare_preinstalled(root: Path, task_id: str | None, requested: str | None = None, *, intent_revision: int | None = None) -> None:
     bundles = _bundled()
-    removed = _removed_preinstalled(root)
+    state, _observations = _application_state(root)
+    removed = _removed_preinstalled(root) | {name for name, entry in state["plugins"].items() if entry["state"] != "enabled"}
     if requested is not None and requested not in bundles:
         raise ValueError("Unknown preinstalled plugin")
     selected = [requested] if requested is not None else list(bundles)
@@ -333,9 +532,9 @@ def _prepare_preinstalled(root: Path, task_id: str | None, requested: str | None
         current = _location(root, name)
         if current.exists():
             if requested:
-                raise ValueError("Plugin is already installed")
+                _enable_binding(root, name, intent_revision)
             continue
-        if name in removed and requested is None:
+        if requested is None and (name in removed or name in state["plugins"]):
             continue
         row = bundles[name]
         source = _BUNDLED_ROOT / name
@@ -364,28 +563,49 @@ def _prepare_preinstalled(root: Path, task_id: str | None, requested: str | None
                 "subpath": row.get("subpath"), "ref": None, "preinstalled": True,
             }), encoding="utf-8")
             _stage(task_id, f"Preparing preinstalled plugin: {name}", "preparing", plugin_name=name)
+            python_profiles.prepare_python(staged, root, lambda message: _stage(task_id, message, "preparing"))
             _verify_candidate(root, staged, name)
             if requested:
                 _mark_preinstalled_removed(root, name, False)
-            _publish(staged, root, name)
+            _publish(staged, root, name, intent_revision=intent_revision)
 
 
-def _set_enabled(root: Path, name: str, enabled: bool) -> None:
+def _set_enabled(root: Path, name: str, enabled: bool, *, verify: bool = True) -> None:
     source = _location(root, name)
     if not source.is_dir():
         raise ValueError("Plugin is not installed in this runtime")
     target = root / ("installed" if enabled else "disabled") / name
-    if source == target:
-        return
-    if enabled:
+    if enabled and verify:
         require_compatible(_studio_metadata(source))
         _verify_candidate(root, source, name)
+    if source == target:
+        return
     target.parent.mkdir(parents=True, exist_ok=True)
     source.rename(target)
 
 
+def _enable_binding(root: Path, name: str, revision: int | None) -> None:
+    source = _location(root, name)
+    require_compatible(_studio_metadata(source))
+    _validate_dependency_publication(source, root, name)
+    _verify_candidate(root, source, name)
+    if revision is None:
+        observations, removed, _warnings = _application_bindings(root)
+        revision = application_inventory.reserve(root, observations, removed)
+    with application_inventory.mutation(root, name, revision):
+        _set_enabled(root, name, True, verify=False)
+        _commit_binding_intent(root, _location(root, name), name, "enabled", revision)
+
+
 def activate_plugin_dependencies(root: Path | None = None) -> None:
-    for plugin in _installed(root or _root()):
+    root = root or _root()
+    intents = _execution_intents(root)
+    if intents is None:
+        return
+    for plugin in _installed(root):
+        intent = intents.get(plugin.name, {})
+        if intent.get("state", "enabled") != "enabled" or not _binding_matches(plugin, intent):
+            continue
         deps = plugin / ".studio-deps"
         if deps.is_dir() and str(deps) not in sys.path:
             # The host wins if a later core update adds a formerly missing package.
@@ -407,8 +627,15 @@ def _load_runtime_plugins(runtime, root: Path) -> list[dict[str, Any]]:
 
     profile = runtime_profile()
     components: dict[Path, list[str]] = {}
+    intents = _execution_intents(root)
 
     def validate(plugin: Path) -> None:
+        if plugin.parent == root / "installed" and intents is None:
+            raise ValueError("Application plugin inventory is unavailable; managed plugins cannot run")
+        if plugin.parent == root / "installed" and intents.get(plugin.name, {}).get("state", "enabled") != "enabled":
+            raise ValueError("Plugin is disabled by the application configuration")
+        if plugin.parent == root / "installed" and not _binding_matches(plugin, intents.get(plugin.name, {})):
+            raise ValueError("Plugin version is not prepared for the selected runtime")
         metadata = _studio_metadata(plugin)
         require_compatible(metadata, profile)
         components[plugin] = _runtime_packages(metadata)
@@ -628,8 +855,14 @@ def _validate_requirements(plugin: Path, *, operation: str | None = None) -> Non
 def validate_operation(runtime, operation: str) -> None:
     for item in getattr(runtime, "_studio_reports", None) or []:
         if operation in _operation_ids(item):
-            if (_root() / "disabled" / item["plugin_id"]).is_dir():
+            intents = _execution_intents(_root())
+            if intents is None:
+                raise ValueError("Application plugin inventory is unavailable; managed plugins cannot run")
+            intent = intents.get(item["plugin_id"], {})
+            if (_root() / "disabled" / item["plugin_id"]).is_dir() or intent.get("state", "enabled") != "enabled":
                 raise ValueError("Plugin is disabled")
+            if not _binding_matches(_root() / "installed" / item["plugin_id"], intent):
+                raise ValueError("Plugin version is not prepared for the selected runtime")
             _validate_requirements(_root() / "installed" / item["plugin_id"], operation=operation)
 
 
@@ -678,12 +911,14 @@ def _manifest_contributions(plugin: Path) -> dict[str, Any]:
     return {"views": views}
 
 
-def _inventory(root: Path, *, verify: bool = False) -> dict[str, Any]:
+def _inventory(root: Path, *, verify: bool = False, default_policy: str | None = None) -> dict[str, Any]:
     """List installations from their manifests; ``verify`` also imports them in a child process."""
     _recover_for_read(root)
     installed = [*_installed(root), *_installed(root, disabled=True)]
     bundles = _bundled()
-    removed = _removed_preinstalled(root)
+    state, observations = _application_state(root)
+    legacy_preferences = bool(observations) or any(entry["revision"] == 0 for entry in state["plugins"].values()) or bool(_legacy_plugins(root))
+    policy = state["defaultPolicy"] or ("review" if legacy_preferences else default_policy or "auto")
     reports, verification_error = {}, None
     profile = runtime_profile()
     if verify and installed:
@@ -693,7 +928,15 @@ def _inventory(root: Path, *, verify: bool = False) -> dict[str, Any]:
             verification_error = str(error)
     rows = []
     for plugin in installed:
-        enabled = plugin.parent.name == "installed"
+        intent = state["plugins"].get(plugin.name, {})
+        pending = intent.get("pending", {})
+        if intent.get("state") == "removed" and not pending:
+            continue
+        if intent.get("state") == "enabled" and intent.get("revision", 0) > 0 and plugin.parent.name == "disabled":
+            continue
+        if intent.get("state") != "removed" and not _binding_matches(plugin, intent):
+            continue
+        enabled = plugin.parent.name == "installed" and intent.get("state", "enabled") == "enabled"
         meta, manifest, contributions, metadata = {}, None, {}, {}
         row_error = dependency_error = None
         requirements = None
@@ -735,6 +978,9 @@ def _inventory(root: Path, *, verify: bool = False) -> dict[str, Any]:
             "resolvedCommit": meta.get("resolved_commit"),
             "requirements": requirements, "compatibility": compatible,
             "path": str(plugin), "loaded": loaded, "enabled": enabled,
+            "prepared": True, "availability": "ready" if loaded else "unavailable",
+            "removalPending": intent.get("state") == "removed" and bool(pending),
+            "cleanupRuntime": pending.get("binding"),
             "preinstalled": plugin.name in bundles and meta.get("preinstalled", False),
             "toolCategory": presentation["category"],
             "toolIcon": metadata.get("icon") if isinstance(metadata.get("icon"), str) else None,
@@ -745,15 +991,27 @@ def _inventory(root: Path, *, verify: bool = False) -> dict[str, Any]:
             "operationTitles": {operation: titles.get(operation, operation) for operation in operations},
             "contributions": contributions,
         })
+    represented = {row["name"] for row in rows}
+    for name, entry in state["plugins"].items():
+        if name in represented or (entry["state"] == "removed" and not entry.get("pending")):
+            continue
+        row = _unprepared_row(root, name, entry, observations, profile)
+        row["preinstalled"] = name in bundles
+        row["removalPending"] = entry["state"] == "removed" and bool(entry.get("pending"))
+        row["cleanupRuntime"] = entry.get("pending", {}).get("binding")
+        rows.append(row)
     rows.extend(_directory_plugins())
+    available = [name for name in bundles if name not in state["plugins"] and not _location(root, name).exists()]
     return {
         "installed": rows, "pluginsDir": str(root / "installed"),
         "verificationError": verification_error,
         "legacyPlugins": _legacy_plugins(root),
         "runtime": {"identity": root.name, "pythonPath": sys.executable, **profile},
-        "preinstalled": [{"name": name, "version": row["version"], "installed": _location(root, name).is_dir()}
+        "preinstalled": [{"name": name, "version": row["version"], "installed": name in state["plugins"] and state["plugins"][name]["state"] != "removed"}
                          for name, row in bundles.items()],
-        "preinstalledPending": [name for name in bundles if name not in removed and not _location(root, name).exists()],
+        "preinstalledPending": available if policy == "auto" and not state["migrationWarnings"] else [],
+        "preinstalledAvailable": available,
+        "inventoryWarnings": state["migrationWarnings"],
     }
 
 
@@ -761,7 +1019,7 @@ def cmd_plugin_marketplace(payload: dict[str, Any]) -> int:
     try:
         root = _root()
         snapshot = ({"runtime": {"identity": root.name, "pythonPath": sys.executable}}
-                    if payload.get("catalogOnly") else _inventory(root, verify=payload.get("forceVerify") is True))
+                    if payload.get("catalogOnly") else _inventory(root, verify=payload.get("forceVerify") is True, default_policy=payload.get("defaultPolicy")))
         try:
             if payload.get("includeCatalog", True):
                 with _plugin_registry():
@@ -887,8 +1145,12 @@ def _dependency_versions(root: Path, exclude: str) -> dict[str, str]:
         name = distribution.metadata.get("Name")
         if name:
             versions[_canonical(name)] = distribution.version
+    intents = _application_state(root)[0]["plugins"]
     for other in _installed(root):
         if other.name == exclude:
+            continue
+        intent = intents.get(other.name, {})
+        if intent.get("state", "enabled") != "enabled" or not _binding_matches(other, intent):
             continue
         for distribution in importlib.metadata.distributions(path=[str(other / ".studio-deps")]):
             name = _canonical(distribution.metadata["Name"])
@@ -912,6 +1174,7 @@ def _validate_dependency_publication(plugin: Path, root: Path, name: str) -> Non
 def _install_dependencies(plugin: Path, root: Path, task_id: str | None, payload: dict) -> None:
     from pip._vendor.packaging.requirements import Requirement
 
+    python_profiles.prepare_python(plugin, root, lambda message: _stage(task_id, message, "preparing"))
     requirements = _plugin_requirements(plugin)
     project_file = plugin / "pyproject.toml"
     if not requirements:
@@ -968,43 +1231,101 @@ def _finish_dependency_handoff(target: Path, backup: Path) -> None:
         marker.unlink()
 
 
-def _publish(plugin: Path, root: Path, name: str, *, disabled: bool = False, preserve_dependencies: bool = False) -> None:
+def _commit_binding_intent(root: Path, package: Path, name: str, state: str, revision: int | None) -> None:
+    manifest, meta = _read_manifest(package), _manifest(package)
+    if revision is None:
+        observations, removed, _warnings = _application_bindings(root)
+        revision = application_inventory.reserve(root, observations, removed)
+    content = _plugin_content_digest(package)
+    meta.update({"inventory": {"revision": revision, "state": state}, "inventoryContent": content})
+    path = package / ".pymss-install.json"
+    temporary = package / ".pymss-install-intent.tmp"
+    try:
+        temporary.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    application_inventory.commit(
+        root, name, state, revision, version=manifest["version"], definition=_intent_definition(manifest), content=content,
+    )
+
+
+def _publish(plugin: Path, root: Path, name: str, *, disabled: bool = False, preserve_dependencies: bool = False,
+             intent_revision: int | None = None) -> None:
+    if intent_revision is None:
+        observations, removed, _warnings = _application_bindings(root)
+        intent_revision = application_inventory.reserve(root, observations, removed)
+    with application_inventory.mutation(root, name, intent_revision):
+        backup = _publish_locked(plugin, root, name, disabled=disabled, preserve_dependencies=preserve_dependencies, intent_revision=intent_revision)
+    if backup.exists():
+        # Deleting large sidecars must not block unrelated runtime publications.
+        shutil.rmtree(backup, ignore_errors=True)
+
+
+def _rename_plugin(source: Path, target: Path) -> None:
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            source.rename(target)
+            return
+        except OSError as error:
+            if getattr(error, "winerror", None) not in {5, 32} or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
+def _publish_locked(plugin: Path, root: Path, name: str, *, disabled: bool, preserve_dependencies: bool,
+                    intent_revision: int) -> Path:
     target = root / ("disabled" if disabled else "installed") / name
-    backup = root / ("disabled-backups" if disabled else "backups") / name
+    previous = _location(root, name)
+    backup = root / ("disabled-backups" if previous.parent.name == "disabled" else "backups") / name
     target.parent.mkdir(parents=True, exist_ok=True)
     backup.parent.mkdir(parents=True, exist_ok=True)
     marker = plugin / _DEPENDENCY_HANDOFF
     marker.unlink(missing_ok=True)
+    (plugin / ".pymss-install-intent.tmp").unlink(missing_ok=True)
     if preserve_dependencies:
-        if not (target / ".studio-deps").is_dir() or (plugin / ".studio-deps").exists():
+        if not (previous / ".studio-deps").is_dir() or (plugin / ".studio-deps").exists():
             raise ValueError("Cannot reuse plugin dependencies during publication")
         # Recovery completes this handoff if the worker stops between the two renames.
         marker.write_text("1", encoding="utf-8")
-    if target.exists():
-        target.rename(backup)
+    # The ordering marker travels with the atomically published package. A lost
+    # application-record write can be reconstructed from this committed binding.
+    meta = _manifest(plugin)
+    content = _plugin_content_digest(plugin)
+    meta.update({"inventory": {"revision": intent_revision, "state": "disabled" if disabled else "enabled"}, "inventoryContent": content})
+    (plugin / ".pymss-install.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    if previous.exists():
+        _rename_plugin(previous, backup)
     published = False
     try:
-        plugin.rename(target)
+        _rename_plugin(plugin, target)
         published = True
         _finish_dependency_handoff(target, backup)
     except BaseException:
         if published:
             if preserve_dependencies and (target / ".studio-deps").exists() and not (backup / ".studio-deps").exists():
                 (target / ".studio-deps").rename(backup / ".studio-deps")
-            target.rename(plugin)
+            _rename_plugin(target, plugin)
         if backup.exists():
-            backup.rename(target)
+            _rename_plugin(backup, previous)
         raise
-    if backup.exists():
-        # Publication has committed. A cleanup failure is retried on the next query.
-        shutil.rmtree(backup, ignore_errors=True)
+    manifest = _read_manifest(target)
+    application_inventory.commit(
+        root, name, "disabled" if disabled else "enabled", intent_revision,
+        version=manifest["version"], definition=_intent_definition(manifest), content=content,
+    )
+    return backup
 
 
 def _verify_candidate(root: Path, candidate: Path, name: str, *, candidate_dependencies: Path | None = None) -> None:
     """Validate activation without replacing a current plugin or breaking healthy peers."""
     transactions = root / "transactions"
     transactions.mkdir(parents=True, exist_ok=True)
-    peers = _installed(root)
+    state = _application_state(root)[0]
+    peers = [peer for peer in _installed(root)
+             if state["plugins"].get(peer.name, {}).get("state", "enabled") == "enabled"
+             and _binding_matches(peer, state["plugins"].get(peer.name, {}))]
     previous_failures = {row["name"] for row in _probe(root) if row.get("managed") and not row.get("loaded")} if peers else set()
     with tempfile.TemporaryDirectory(dir=transactions, prefix="install-verify-") as temporary:
         probe = Path(temporary)
@@ -1088,26 +1409,39 @@ def _acquire_source(target: str, directory: Path, subpath: str | None = None):
 
 @contextmanager
 def _installation_transaction(root: Path, *, concurrent: bool) -> Iterator[Path]:
-    # Publish the transaction and acquire its lease under the recovery lock.
-    # Other workers can then recover abandoned work without deleting this one.
-    with ExitStack() as resources:
+    # Keep a lease journal until source cleanup; profiles stay at stable paths.
+    try:
+        with ExitStack() as resources:
+            with runtime_lock(root / ".lock", timeout=180) if concurrent else nullcontext():
+                if concurrent:
+                    _recover(root)
+                transactions = root / "transactions"
+                transactions.mkdir(parents=True, exist_ok=True)
+                directory = Path(resources.enter_context(tempfile.TemporaryDirectory(dir=transactions, prefix="install-")))
+                resources.enter_context(runtime_lock(directory / ".lease", timeout=0))
+            yield directory
+    finally:
         with runtime_lock(root / ".lock", timeout=180) if concurrent else nullcontext():
-            if concurrent:
-                _recover(root)
-            transactions = root / "transactions"
-            transactions.mkdir(parents=True, exist_ok=True)
-            directory = Path(resources.enter_context(tempfile.TemporaryDirectory(dir=transactions, prefix="install-")))
-            resources.enter_context(runtime_lock(directory / ".lease", timeout=0))
-        yield directory
+            python_profiles.collect_python_profiles(root)
 
 
-def _install(root: Path, payload: dict, task_id: str | None) -> str:
+def _install(root: Path, payload: dict, task_id: str | None, *, intent_revision: int | None = None,
+             prepared_binding: dict | None = None) -> str:
 
     action = payload["action"]
     requested = _name(payload["name"]) if payload.get("name") else None
     current = _location(root, requested) if requested else None
-    disabled = current is not None and current.parent.name == "disabled"
-    if action in {"update", "repair"}:
+    prepared_source = Path(prepared_binding["path"]) if prepared_binding is not None else None
+    state = _application_state(root)[0]
+    desired = state["plugins"].get(requested, {})
+    disabled = (not prepared_binding["enabled"]) if prepared_binding is not None else action in {"update", "repair"} and (
+        desired.get("state") == "disabled" if desired.get("revision", 0) > 0 else current is not None and current.parent.name == "disabled"
+    )
+    if prepared_source is not None:
+        target = str(prepared_source)
+    elif action in {"update", "repair"}:
+        if desired.get("state") == "removed":
+            raise ValueError("Plugin is not installed")
         if current is None or not current.is_dir():
             raise ValueError("Plugin is not installed in this runtime")
         meta = _manifest(current)
@@ -1123,13 +1457,13 @@ def _install(root: Path, payload: dict, task_id: str | None) -> str:
         target = str(payload.get("target") or requested or "").strip()
         if not target:
             raise ValueError("Missing plugin source")
-    if action == "install":
+    if action == "install" and prepared_source is None:
         candidate = requested or (_read_manifest(Path(target))["id"] if Path(target).is_dir() else None)
-        if candidate and _location(root, _name(candidate)).exists():
+        if candidate and _has_current_installation(root, _name(candidate)):
             raise ValueError("Plugin is already installed; use update or repair")
     # pymss's clone helper also uses TemporaryDirectory; keep it inside this transaction.
     previous_tempdir = tempfile.tempdir
-    with _installation_transaction(root, concurrent=action == "install") as work:
+    with _installation_transaction(root, concurrent=action == "install" and prepared_source is None) as work:
         tempfile.tempdir = str(work)
         try:
             _stage(task_id, "Acquiring plugin source", "acquiring")
@@ -1140,10 +1474,19 @@ def _install(root: Path, payload: dict, task_id: str | None) -> str:
                 with _plugin_registry():
                     result = _acquire_source(target, work / "sources", subpath)
             name = _name(result.name)
+            if prepared_source is not None:
+                if _read_manifest(result.path)["version"] != prepared_binding.get("version") or _plugin_content_digest(result.path) != prepared_binding["content"]:
+                    raise ValueError("Plugin source changed while preparing the runtime; refresh and try again")
+                original = prepared_binding["meta"]
+                acquired = _manifest(result.path)
+                acquired.update({key: value for key, value in original.items() if key not in {"inventory", "inventoryContent", "installed_at"}})
+                if not original.get("source"):
+                    acquired.update({"source": "recorded", "url": None})
+                (result.path / ".pymss-install.json").write_text(json.dumps(acquired), encoding="utf-8")
             require_compatible(_studio_metadata(result.path))
-            if requested and action in {"update", "repair"} and name != requested:
+            if requested and (action in {"update", "repair"} or prepared_source is not None) and name != requested:
                 raise ValueError(f"The update source provides plugin {name}, not {requested}")
-            if action == "install" and _location(root, name).exists():
+            if action == "install" and prepared_source is None and _has_current_installation(root, name):
                 raise ValueError("Plugin is already installed; use update or repair")
             # A repair keeps the original update source rather than the staging-copy path.
             if action == "repair" and current:
@@ -1153,10 +1496,12 @@ def _install(root: Path, payload: dict, task_id: str | None) -> str:
                 meta["preinstalled"] = True
                 (result.path / ".pymss-install.json").write_text(json.dumps(meta), encoding="utf-8")
             shutil.rmtree(result.path / ".studio-deps", ignore_errors=True)
+            (result.path / python_profiles.BINDING).unlink(missing_ok=True)
             primary = next((view.get("operation") for view in _studio_views(result.path) if view.get("id") == "tool"), None)
             deferred = primary is not None and primary in _deferred_dependency_operations(result.path)
-            code_update = action == "update" and not payload.get("installDependencies", False)
-            deferred_install = action == "install" and deferred and not payload.get("installDependencies", False)
+            isolated_python = python_profiles.declares_python(result.path)
+            code_update = action == "update" and not isolated_python and not payload.get("installDependencies", False)
+            deferred_install = action == "install" and not isolated_python and deferred and not payload.get("installDependencies", False)
             preserved_dependencies = None
             if code_update:
                 _plugin_requirements(result.path)
@@ -1168,9 +1513,9 @@ def _install(root: Path, payload: dict, task_id: str | None) -> str:
                 _stage(task_id, "Optional backend dependencies are managed separately from the plugin files", "preserving")
             else:
                 _install_dependencies(result.path, root, task_id, payload)
-            with runtime_lock(root / ".lock", timeout=180) if action == "install" else nullcontext():
+            with runtime_lock(root / ".lock", timeout=180) if action == "install" and prepared_source is None else nullcontext():
                 # A competing installer may have committed this id during acquisition.
-                if action == "install" and _location(root, name).exists():
+                if action == "install" and prepared_source is None and _has_current_installation(root, name):
                     raise ValueError("Plugin is already installed; use update or repair")
                 if action == "install":
                     _validate_dependency_publication(result.path, root, name)
@@ -1180,7 +1525,7 @@ def _install(root: Path, payload: dict, task_id: str | None) -> str:
                 else:
                     _verify_candidate(root, result.path, name)
                 _stage(task_id, "Activating plugin", "activating")
-                _publish(result.path, root, name, disabled=disabled, preserve_dependencies=preserved_dependencies is not None)
+                _publish(result.path, root, name, disabled=disabled, preserve_dependencies=preserved_dependencies is not None, intent_revision=intent_revision)
             return name
         finally:
             tempfile.tempdir = previous_tempdir
@@ -1193,7 +1538,7 @@ def _plugin_content_digest(directory: Path) -> str:
         if any((Path(parent) / name).is_symlink() for name in subdirs):
             raise ValueError("Plugin sources with symbolic links cannot be compared")
         for name in sorted(files):
-            if name in {".pymss-install.json", ".DS_Store", ".env"} or name.startswith(".env.") or name.endswith((".pyc", ".pyo")):
+            if name in {".pymss-install.json", ".pymss-install-intent.tmp", ".pymss-python.json", _DEPENDENCY_HANDOFF, ".DS_Store", ".env"} or name.startswith(".env.") or name.endswith((".pyc", ".pyo")):
                 continue
             path = Path(parent) / name
             digest.update(path.relative_to(directory).as_posix().encode())
@@ -1301,10 +1646,12 @@ def cmd_manage_plugin(payload: dict[str, Any]) -> int:
     task_id = str(payload.get("taskId") or "").strip() or None
     action = str(payload.get("action") or "").strip()
     try:
-        if action not in {"install", "update", "repair", "uninstall", "check_updates", "enable", "disable", "prepare_preinstalled", "install_preinstalled"}:
+        if action not in {"install", "update", "repair", "uninstall", "check_updates", "enable", "disable", "prepare", "prepare_preinstalled", "install_preinstalled"}:
             raise ValueError("Unsupported plugin action")
         if "installDependencies" in payload and type(payload["installDependencies"]) is not bool:
             raise ValueError("installDependencies must be a boolean")
+        if payload.get("defaultPolicy") not in {None, "auto", "review"}:
+            raise ValueError("Invalid default plugin policy")
         if payload.get("expectedSource") is not None:
             expected = payload["expectedSource"]
             if not isinstance(expected, str) or len(expected) > 8192:
@@ -1317,41 +1664,85 @@ def cmd_manage_plugin(payload: dict[str, Any]) -> int:
         root = _root()
         if payload.get("expectedRuntime") is not None and payload["expectedRuntime"] != root.name:
             raise ValueError("Active runtime changed; read the catalog again before acquiring plugins")
-        if action in {"install", "update", "repair", "enable", "prepare_preinstalled", "install_preinstalled"}:
+        if action in {"install", "update", "repair", "enable", "prepare", "prepare_preinstalled", "install_preinstalled"}:
             _require_plugin_runtime()
         root.mkdir(parents=True, exist_ok=True)
+        revision = None
+        if action != "check_updates":
+            observations, removed, _warnings = _application_bindings(root)
+            revision = application_inventory.reserve(root, observations, removed)
         updates = {}
         if action == "check_updates":
             updates = _check_updates(root, task_id)
         elif action == "install":
-            _install(root, {**payload, "action": action}, task_id)
+            _install(root, {**payload, "action": action}, task_id, intent_revision=revision)
         else:
             with runtime_lock(root / ".lock"):
                 _recover(root)
                 if action == "uninstall":
                     name = _name(payload.get("name"))
                     target = _location(root, name)
-                    if not target.is_dir():
-                        raise ValueError("Plugin is not installed in this runtime")
-                    _stage(task_id, "Removing plugin and its additional dependencies", "removing")
-                    if name in _bundled():
-                        _mark_preinstalled_removed(root, name, True)
-                    # Rename first so interrupted cleanup never leaves a half-loaded plugin.
-                    trash = root / "transactions" / f"removed-{name}"
-                    trash.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.rmtree(trash, ignore_errors=True)
-                    target.rename(trash)
-                    shutil.rmtree(trash)
+                    state = _application_state(root)[0]
+                    entry = state["plugins"].get(name)
+                    if entry is None:
+                        raise ValueError("Plugin is not installed")
+                    if entry.get("pending", {}).get("binding", root.name) != root.name:
+                        raise ValueError("Switch to the source runtime to finish removing its plugin files")
+                    with application_inventory.mutation(root, name, revision):
+                        trash = root / "transactions" / f"removed-{name}"
+                        _record_intent(root, name, "removed", pending="uninstall" if target.is_dir() or trash.exists() else None, revision=revision)
+                        _stage(task_id, "Removing plugin and its additional dependencies", "removing")
+                        if name in _bundled():
+                            _mark_preinstalled_removed(root, name, True)
+                        # Rename under the intent lock; large sidecars are deleted after it.
+                        trash.parent.mkdir(parents=True, exist_ok=True)
+                        if target.exists() and not trash.exists():
+                            target.rename(trash)
+                    if trash.exists():
+                        shutil.rmtree(trash)
+                    if target.exists():
+                        # A previous failed removal occupied the trash directory.
+                        with application_inventory.mutation(root, name, revision):
+                            target.rename(trash)
+                        shutil.rmtree(trash)
+                    application_inventory.complete(root, name, revision)
                 elif action in {"enable", "disable"}:
                     _stage(task_id, "Changing plugin availability", "activating")
-                    _set_enabled(root, _name(payload.get("name")), action == "enable")
+                    name = _name(payload.get("name"))
+                    target = _location(root, name)
+                    entry = _application_state(root)[0]["plugins"].get(name)
+                    if entry is None:
+                        raise ValueError("Plugin is not installed")
+                    if action == "enable":
+                        if not target.is_dir() or not _binding_matches(target, entry):
+                            _prepare_binding(root, {**payload, "name": name}, task_id, revision)
+                        else:
+                            _enable_binding(root, name, revision)
+                    else:
+                        with application_inventory.mutation(root, name, revision):
+                            _record_intent(root, name, "disabled", pending="disable" if target.is_dir() else None, revision=revision)
+                            if target.is_dir():
+                                _set_enabled(root, name, False)
+                            application_inventory.complete(root, name, revision)
+                elif action == "prepare":
+                    _stage(task_id, "Preparing plugin for the selected runtime", "preparing")
+                    _prepare_binding(root, payload, task_id, revision)
                 elif action in {"prepare_preinstalled", "install_preinstalled"}:
                     name = _name(payload.get("name")) if action == "install_preinstalled" else None
-                    _prepare_preinstalled(root, task_id, name)
+                    if name is None:
+                        state, _observations = _application_state(root)
+                        if state["migrationWarnings"]:
+                            raise ValueError("Plugin removal preferences must be readable before preparing default tools")
+                        observations, removed, _warnings = _application_bindings(root)
+                        application_inventory.set_default_policy(root, "auto", observations, removed)
+                    _prepare_preinstalled(root, task_id, name, intent_revision=revision)
                 else:
-                    _install(root, {**payload, "action": action}, task_id)
+                    _install(root, {**payload, "action": action}, task_id, intent_revision=revision)
+        if action != "check_updates":
+            with runtime_lock(root / ".lock"):
+                python_profiles.collect_python_profiles(root)
         _stage(task_id, "Refreshing plugin status", "refreshing")
-        snapshot = _inventory(root)
+        snapshot = _inventory(root, default_policy=payload.get("defaultPolicy"))
         snapshot["updates"] = updates
         emit("plugin_manage_result", snapshot, task_id=task_id)
         return 0

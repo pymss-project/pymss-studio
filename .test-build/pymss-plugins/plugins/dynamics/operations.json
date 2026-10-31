@@ -1,0 +1,123 @@
+{
+  "formatVersion": 1,
+  "operations": [
+    {
+      "description": "Feed-forward compressor (pedalboard)",
+      "id": "pymss.dynamics.compressor",
+      "inputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "outputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "attack_ms": {
+            "default": 1.0,
+            "maximum": 100.0,
+            "minimum": 0.1,
+            "type": "number"
+          },
+          "ratio": {
+            "default": 4.0,
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "type": "number"
+          },
+          "release_ms": {
+            "default": 100.0,
+            "maximum": 1000.0,
+            "minimum": 1.0,
+            "type": "number"
+          },
+          "threshold_db": {
+            "default": 0.0,
+            "maximum": 0.0,
+            "minimum": -60.0,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Compressor"
+    },
+    {
+      "description": "High-band compressor for sibilance control",
+      "id": "pymss.dynamics.deesser",
+      "inputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "outputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "crossover_hz": {
+            "default": 6000.0,
+            "maximum": 12000.0,
+            "minimum": 2000.0,
+            "type": "number"
+          },
+          "ratio": {
+            "default": 3.0,
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "type": "number"
+          },
+          "threshold_db": {
+            "default": 0.0,
+            "maximum": 0.0,
+            "minimum": -60.0,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "De-esser"
+    },
+    {
+      "description": "Brick-wall peak limiter (guaranteed ceiling)",
+      "id": "pymss.dynamics.limiter",
+      "inputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "outputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "threshold_db": {
+            "default": -3.0,
+            "maximum": 0.0,
+            "minimum": -24.0,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Limiter"
+    }
+  ],
+  "pluginApiVersion": 2,
+  "pluginId": "pymss.dynamics",
+  "pluginVersion": "0.2.0",
+  "sourceDigest": "5ecc7f80eb7fb32d258f9c198e48bfaea504868f151e981135f1e1f189b8857f"
+}

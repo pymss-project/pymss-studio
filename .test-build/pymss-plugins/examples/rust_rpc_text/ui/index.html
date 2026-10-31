@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="stylesheet" href="../../../sdk/pymss-sdk.css">
+  <style>
+    html,body{padding:0;background:transparent}main{max-width:920px;padding:24px;box-sizing:border-box}
+    h1{font-size:20px;margin:0 0 8px;color:var(--on-surface-heading)}.hint{color:var(--on-surface-muted);margin:0 0 24px}
+    .path-row{display:flex;gap:8px}.path-row input{flex:1;min-width:0}.pymss-field{margin-bottom:18px}
+    .actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:24px}.status{margin:18px 0;color:var(--on-surface-muted)}
+    #result{padding-top:20px;border-top:1px solid var(--outline)}#resultPath{overflow-wrap:anywhere;display:block;margin:8px 0}
+    #error{margin-top:18px}details{margin-top:10px}pre{white-space:pre-wrap;overflow-wrap:anywhere}.pymss-input:disabled{opacity:.65}
+    .pymss-btn--primary{color:var(--on-primary,#fff)}
+    @media(max-width:540px){main{padding:16px}.path-row{flex-wrap:wrap}.path-row input{width:100%}}
+  </style>
+</head>
+<body>
+  <main>
+    <h1 data-text="title">Text line endings</h1>
+    <p class="hint" data-text="description">Convert UTF-8 text to LF or CRLF line endings.</p>
+    <form id="form">
+      <div class="pymss-field"><label class="pymss-label" for="source" data-text="source">Input text file</label>
+        <div class="path-row"><input class="pymss-input" id="source" autocomplete="off" spellcheck="false" required><button class="pymss-btn" type="button" id="pickSource" data-text="browse">Browse</button></div></div>
+      <div class="pymss-field"><label class="pymss-label" for="output" data-text="output">Output directory</label>
+        <div class="path-row"><input class="pymss-input" id="output" autocomplete="off" spellcheck="false" required><button class="pymss-btn" type="button" id="pickOutput" data-text="browse">Browse</button></div></div>
+      <div class="pymss-field"><label class="pymss-label" for="ending" data-text="ending">Line endings</label>
+        <select class="pymss-select" id="ending"><option value="lf">LF</option><option value="crlf">CRLF</option></select></div>
+      <div class="actions"><button class="pymss-btn pymss-btn--primary" id="run" type="submit" disabled data-text="run">Convert</button><button class="pymss-btn" id="cancel" type="button" hidden data-text="cancel">Cancel</button></div>
+    </form>
+    <p id="status" class="status" role="status" data-text="connecting">Connecting to Studio…</p>
+    <div id="error" class="pymss-alert pymss-alert--error" role="alert" hidden><span id="errorMessage"></span><details><summary data-text="details">Technical details</summary><pre id="errorDetails"></pre></details></div>
+    <section id="result" hidden><strong data-text="completed">Conversion completed</strong><span id="resultPath"></span><button class="pymss-btn" id="reveal" type="button" data-text="reveal">Show output file</button></section>
+  </main>
+  <script src="../../../sdk/pymss-sdk.js"></script>
+  <script>
+    (function () {
+      'use strict'
+      const operation = 'example.rust_rpc_text.normalize'
+      const words = {
+        en: { title:'Text conversion',description:'Convert UTF-8 text to LF or CRLF line endings. Existing files are preserved.',source:'Input text file',output:'Output directory',browse:'Browse',ending:'Line endings',run:'Convert',cancel:'Cancel',connecting:'Connecting to Studio…',ready:'Ready',running:'Converting…',publishing:'Saving output…',completed:'Conversion completed',cancelled:'Conversion cancelled',failed:'Conversion failed. Check the technical details and try again.',details:'Technical details',reveal:'Show output file',definition:'The operation changed. Review the refreshed settings and run it again.',unavailable:'This plugin requires a Studio and pymss runtime with command support.' },
+        zh: { title:'文本转换',description:'将 UTF-8 文本转换为 LF 或 CRLF 换行，保留已有文件。',source:'输入文本文件',output:'输出目录',browse:'浏览',ending:'换行格式',run:'转换',cancel:'取消',connecting:'正在连接 Studio…',ready:'就绪',running:'正在转换…',publishing:'正在保存结果…',completed:'转换完成',cancelled:'转换已取消',failed:'转换失败，请查看技术详情后重试。',details:'技术详情',reveal:'显示输出文件',definition:'操作定义已变化，请检查刷新后的设置，再次运行。',unavailable:'此插件需要支持命令执行的 Studio 和 pymss 运行环境。' }
+      }
+      let language = 'en', ready = false, busy = false, active = null, spec = null, resultPath = '', disposed = false
+      const element = id => document.getElementById(id)
+      const text = key => words[language][key]
+      function translate() { document.documentElement.lang = language === 'zh' ? 'zh-CN' : 'en';document.querySelectorAll('[data-text]').forEach(node => { node.textContent = text(node.dataset.text) }) }
+      function update() {
+        element('run').disabled = !ready || busy || !element('source').value.trim() || !element('output').value.trim()
+        for (const id of ['source','output','ending','pickSource','pickOutput']) element(id).disabled = busy
+        element('cancel').hidden = !busy
+      }
+      function failure(error, key = 'failed') { element('errorMessage').textContent = text(key);element('errorDetails').textContent = [error?.code,error?.message || String(error),typeof error?.data?.stderr === 'string' ? error.data.stderr : ''].filter(Boolean).join('\n');element('error').hidden = false }
+      async function description(refresh) {
+        const value = await pymss.describeOperation(operation, refresh ? { refresh:true } : {})
+        if (value?.id !== operation || value.inputs?.source?.type !== 'file' || !/^[0-9a-f]{64}$/.test(value.specDigest || '')) throw new Error(text('unavailable'))
+        spec = value
+        element('ending').value = value.params?.properties?.line_ending?.default || 'lf'
+      }
+      async function pick(method, id) {
+        if (busy) return
+        busy = true;update()
+        try {
+          const selected = method === 'file' ? await pymss.pickFile({title:text('source'),extensions:spec.inputs.source.extensions || []}) : await pymss.pickDirectory()
+          if (!disposed && selected?.path) element(id).value = selected.path
+        } catch (error) { failure(error) }
+        finally { busy = false;update() }
+      }
+      element('pickSource').onclick = () => pick('file','source')
+      element('pickOutput').onclick = () => pick('directory','output')
+      element('form').oninput = update
+      element('form').onsubmit = async event => {
+        event.preventDefault()
+        if (element('run').disabled || !spec) return
+        busy = true;update();element('error').hidden = true;element('result').hidden = true;element('status').textContent = text('running')
+        try {
+          const request = pymss.startOperation(operation, {line_ending:element('ending').value}, {source:{kind:'file',path:element('source').value.trim()}},
+            progress => { if (!disposed && progress.operation === operation) element('status').textContent = text(progress.event?.payload?.phase === 'publishing' ? 'publishing' : 'running') },
+            {outputDir:element('output').value.trim(),expectedSpecDigest:spec.specDigest})
+          active = request.id
+          const response = await request
+          if (response?.operation !== operation || response.outputs?.document?.kind !== 'file' || typeof response.outputs.document.path !== 'string') throw new Error('The operation returned an invalid file result')
+          resultPath = response.outputs.document.path;element('resultPath').textContent = resultPath;element('result').hidden = false;element('status').textContent = ''
+        } catch (error) {
+          if (error?.code === 'TASK_CANCELLED') element('status').textContent = text('cancelled')
+          else if (error?.code === 'OPERATION_SPEC_CHANGED') {
+            ready = false
+            try { await description(true);ready = true;failure(error,'definition') } catch (refreshError) { failure(refreshError) }
+          } else { failure(error);element('status').textContent = text('failed') }
+        } finally { active = null;busy = false;element('cancel').disabled = false;update() }
+      }
+      element('cancel').onclick = async () => {
+        if (active === null) return
+        element('cancel').disabled = true
+        try { if (!await pymss.cancelOperation(active)) element('cancel').disabled = false }
+        catch (error) { failure(error);element('cancel').disabled = false }
+      }
+      element('reveal').onclick = async () => { try { await pymss.revealPath(resultPath) } catch (error) { failure(error) } }
+      window.addEventListener('beforeunload', () => { disposed = true })
+      ;(async () => {
+        try {
+          await pymss.ready()
+          const info = await pymss.call('app.info')
+          language = String(info.locale || '').startsWith('zh') ? 'zh' : 'en';translate()
+          if (!info.capabilities?.includes('files.pickFile')) throw new Error(text('unavailable'))
+          element('output').value = info.defaultOutputDir || ''
+          await description(false);ready = true;element('status').textContent = text('ready');update()
+        } catch (error) { failure(error,'unavailable') }
+      })()
+    })()
+  </script>
+</body>
+</html>

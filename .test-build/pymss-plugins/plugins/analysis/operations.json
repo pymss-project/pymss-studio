@@ -1,0 +1,100 @@
+{
+  "formatVersion": 1,
+  "operations": [
+    {
+      "description": "Integrated loudness per ITU-R BS.1770-4",
+      "id": "pymss.analysis.measure_lufs",
+      "inputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "outputs": {
+        "report": {
+          "type": "object"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Measure Loudness (LUFS)"
+    },
+    {
+      "description": "RMS level in dBFS and linear",
+      "id": "pymss.analysis.measure_rms",
+      "inputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "outputs": {
+        "report": {
+          "type": "object"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Measure RMS"
+    },
+    {
+      "description": "True peak (dBTP) and sample peak (dBFS)",
+      "id": "pymss.analysis.measure_true_peak",
+      "inputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "outputs": {
+        "report": {
+          "type": "object"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Measure True Peak"
+    },
+    {
+      "description": "Average power spectrum (dB magnitudes)",
+      "id": "pymss.analysis.spectrum",
+      "inputs": {
+        "audio": {
+          "type": "audio"
+        }
+      },
+      "outputs": {
+        "report": {
+          "type": "object"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "n_fft": {
+            "default": 2048,
+            "maximum": 32768,
+            "minimum": 64,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Spectrum Analyze"
+    }
+  ],
+  "pluginApiVersion": 2,
+  "pluginId": "pymss.analysis",
+  "pluginVersion": "0.2.0",
+  "sourceDigest": "a24569d46689f6b94c3e2ac1e0ac3074e53a9dd7cc8c21f03334a17e1902abe0"
+}

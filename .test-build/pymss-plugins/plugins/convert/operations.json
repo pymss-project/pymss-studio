@@ -1,0 +1,100 @@
+{
+  "formatVersion": 1,
+  "operations": [
+    {
+      "description": "Convert audio files with independent sample-rate, channel and encoding settings",
+      "id": "pymss.convert.batch",
+      "inputs": {
+        "files": {
+          "type": "object"
+        }
+      },
+      "outputs": {
+        "report": {
+          "type": "object"
+        }
+      },
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "channels": {
+            "default": 2,
+            "enum": [
+              1,
+              2
+            ],
+            "type": "integer"
+          },
+          "flac_bit_depth": {
+            "default": "16-bit",
+            "enum": [
+              "16-bit",
+              "32-bit"
+            ],
+            "type": "string"
+          },
+          "format": {
+            "default": "wav",
+            "enum": [
+              "wav",
+              "flac",
+              "mp3",
+              "ogg"
+            ],
+            "type": "string"
+          },
+          "mp3_bit_rate": {
+            "default": "320k",
+            "enum": [
+              "192k",
+              "256k",
+              "320k"
+            ],
+            "type": "string"
+          },
+          "ogg_bit_rate": {
+            "default": "320k",
+            "enum": [
+              "192k",
+              "256k",
+              "320k",
+              "450k"
+            ],
+            "type": "string"
+          },
+          "output_dir": {
+            "type": "string"
+          },
+          "sample_rate": {
+            "default": 44100,
+            "enum": [
+              32000,
+              44100,
+              48000
+            ],
+            "type": "integer"
+          },
+          "wav_bit_depth": {
+            "default": "PCM-24",
+            "enum": [
+              "PCM-16",
+              "PCM-24",
+              "PCM-32"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "output_dir"
+        ],
+        "type": "object"
+      },
+      "schemaVersion": 1,
+      "title": "Batch Audio Conversion"
+    }
+  ],
+  "pluginApiVersion": 2,
+  "pluginId": "pymss.convert",
+  "pluginVersion": "0.2.0",
+  "sourceDigest": "41ebb4f75d645c3d01bf7c1fd41d8045347370eb3e3bf06bd95f007574440916"
+}
