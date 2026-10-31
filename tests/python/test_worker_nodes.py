@@ -17,7 +17,7 @@ import worker_plugins
 
 class WorkerNodesTests(unittest.TestCase):
     def list_node(self, *, source="plugin:example.nodes", status="activated", error=None,
-                  dependency_error=None, blocked_by=None, runtime_error=None):
+                  dependency_error=None, blocked_by=None, runtime_error=None, saves_output=False):
         from pymss.graph import core
         from pymss.plugins.registry import NodeRegistration
 
@@ -41,6 +41,8 @@ class WorkerNodesTests(unittest.TestCase):
             registrations = {} if source is None else {
                 "SharedNode": NodeRegistration("SharedNode", lambda *_: None, source=source),
             }
+            if source is not None:
+                registrations["SharedNode"].saves_output = saves_output
             with mock.patch.object(worker_plugins, "_root", return_value=root), \
                  mock.patch.object(worker_plugins, "operation_runtime", return_value=runtime, side_effect=runtime_error), \
                  mock.patch("pymss.plugins.get_last_report", return_value=None), \
@@ -68,6 +70,18 @@ class WorkerNodesTests(unittest.TestCase):
         self.assertFalse(node["registered"])
         self.assertEqual(node["status"], "source_mismatch")
         self.assertIn("example.other", node["unavailableReason"])
+
+    def test_only_available_owner_advertises_persistent_outputs(self):
+        self.assertTrue(self.list_node(saves_output=True)["savesOutput"])
+        self.assertFalse(self.list_node()["savesOutput"])
+        for kwargs in [
+            {"source": "plugin:example.other"},
+            {"status": "failed", "error": "setup failed"},
+            {"dependency_error": RuntimeError("missing dependency")},
+            {"runtime_error": RuntimeError("runtime unavailable")},
+        ]:
+            with self.subTest(kwargs=kwargs):
+                self.assertFalse(self.list_node(saves_output=True, **kwargs)["savesOutput"])
 
     def test_blocked_and_failed_plugins_expose_the_loading_error(self):
         for status in ("blocked", "failed"):

@@ -1988,7 +1988,8 @@
       "incompleteGraph": "Some nodes could not be restored in the editor. The original workflow has been preserved."
     },
     "workflowValidationTitle": "Workflow requires changes",
-    "workflowNoSaveOutputs": "The workflow has no valid saved output. Configure an output directory or save node for at least one stem.",
+    "workflowNoSaveOutputs": "The workflow has no saved output. Add a save node or a plugin node that writes an output file.",
+    "nodeMetadataUnavailable": "Unable to load workflow node information: {error}",
     "workflowFormatInvalid": "The workflow definition format is invalid.",
     "overviewEmptyTitle": "Select a workflow",
     "overviewEmptyDesc": "Pick a workflow from the list to edit it, or create a new one.",

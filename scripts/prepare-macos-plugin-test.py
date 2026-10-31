@@ -65,14 +65,22 @@ def pin_bootstrap():
 
 def kit(destination: Path):
     destination.mkdir(parents=True, exist_ok=False)
-    for name in ("verify.py", "Verify Plugin Runtime.command", "Open Plugin Test.command", "README.zh-CN.md"):
-        shutil.copyfile(ROOT / ".test-build/mac-test-kit" / name, destination / name)
+    for path in (ROOT / '.test-build/mac-test-kit').iterdir():
+        if path.is_file() and (path.suffix in {'.py', '.command'} or path.name == 'README.zh-CN.md'):
+            shutil.copyfile(path, destination / path.name)
     for path in destination.glob("*.command"):
         path.chmod(0o755)
     for name in ("python_rpc_text", "rust_rpc_text"):
         shutil.copytree(ROOT / ".test-build/pymss-plugins/examples" / name, destination / "plugins" / name,
                         ignore=shutil.ignore_patterns(".cache", "__pycache__", "native", "scripts", ".gitignore"))
+    shutil.copytree(ROOT / '.test-build/pymss-plugins/plugins/analysis', destination / 'plugins/analysis',
+                    ignore=shutil.ignore_patterns('.cache', '__pycache__', 'node_modules', '.gitignore'))
     shutil.copyfile(ROOT / "python/plugin-test-build.json", destination / "build-info.json")
+    checksums = []
+    for path in sorted(destination.rglob('*')):
+        if path.is_file():
+            checksums.append(hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + path.relative_to(destination).as_posix())
+    (destination / 'SHA256SUMS.txt').write_text('\n'.join(checksums) + '\n', encoding='utf-8')
 
 
 if __name__ == "__main__":

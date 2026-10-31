@@ -8,10 +8,12 @@ import { useSettingsStore } from '@/stores/settings'
 import { useModelStore, type ModelDefaultInferenceParams } from '@/stores/model'
 import { useAppStore } from '@/stores/app'
 import type { WorkflowEntry } from '@/stores/workflow'
+import { useWorkflowNodeStore } from '@/stores/workflowNodes'
 import { appendWorkflowNodeLogs, type WorkflowNodeLogs } from '@/workflows/nodeLogs'
 import { normalizeLogRecord, workerLogRecord, localLogRecord, type LogEntry } from '@/utils/logRecord'
 import { detectWorkflowFormat, WORKFLOW_FORMAT_VERSION } from '@/workflows/formats'
 import {
+  countWorkflowSaveOutputs,
   getWorkflowDefinitionIssue,
   prepareWorkflowDefinitionForRun,
   resolveWorkflowRuntimeDefaults,
@@ -617,6 +619,7 @@ function resolveTaskErrorMessage(code: unknown, message: unknown, input?: string
 export const useTaskStore = defineStore('task', () => {
   const initialized = ref(false)
   const tasks = ref<SeparationTask[]>([])
+  const workflowMetadataWaits = new Set<string>()
   const activeTaskId = ref<string | null>(null)
   // Session-only queue visibility. Persisted task/result history remains the
   // source for Results and recovery, while this set intentionally starts empty
@@ -1235,6 +1238,12 @@ export const useTaskStore = defineStore('task', () => {
     setTaskStatus(task.id, 'preparing', 'Preparing task')
     try {
       if (config.runMode === 'workflow') {
+        if (detectWorkflowFormat(config.workflowDefinition) === 'graph' && !countWorkflowSaveOutputs(config.workflowDefinition!)) {
+          workflowMetadataWaits.add(task.id)
+          try { await useWorkflowNodeStore().load() }
+          finally { workflowMetadataWaits.delete(task.id) }
+          if (tasks.value.find(item => item.id === task.id)?.status !== 'preparing') return false
+        }
         validateWorkflowRunConfig(config)
         await invoke<{ taskId: string; started: boolean }>('start_workflow_inference', {
           payload: {
@@ -1285,6 +1294,7 @@ export const useTaskStore = defineStore('task', () => {
       })
       return true
     } catch (err) {
+      if (isTerminalTaskStatus(task.status)) return false
       task.status = 'failed'
       task.error = err instanceof Error ? err.message : String(err)
       task.message = task.error
@@ -1365,6 +1375,19 @@ export const useTaskStore = defineStore('task', () => {
       setTaskStatus(task.id, 'preparing', 'Preparing workflow batch task')
     })
     try {
+      if (detectWorkflowFormat(config.workflowDefinition) === 'graph' && !countWorkflowSaveOutputs(config.workflowDefinition!)) {
+        for (const task of batchTasks) workflowMetadataWaits.add(task.id)
+        try { await useWorkflowNodeStore().load() }
+        finally { for (const task of batchTasks) workflowMetadataWaits.delete(task.id) }
+        if (batchTasks.some(task => task.status !== 'preparing')) {
+          for (const task of batchTasks) {
+            if (task.status === 'preparing') setTaskStatus(task.id, 'queued', 'Queued')
+          }
+          queuePersist()
+          scheduleQueue()
+          return false
+        }
+      }
       for (const task of batchTasks) validateWorkflowRunConfig(task.runConfig || config)
       await invoke<{ taskId: string; started: boolean }>('start_workflow_inference', {
         payload: {
@@ -1397,6 +1420,7 @@ export const useTaskStore = defineStore('task', () => {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       batchTasks.forEach((task) => {
+        if (isTerminalTaskStatus(task.status)) return
         task.status = 'failed'
         task.error = message
         task.message = message
@@ -2008,7 +2032,7 @@ export const useTaskStore = defineStore('task', () => {
   async function cancelTask(id: string) {
     const task = tasks.value.find((item) => item.id === id)
     if (!task) return false
-    if (task.status === 'queued') {
+    if (task.status === 'queued' || workflowMetadataWaits.has(id)) {
       task.status = 'cancelled'
       task.message = 'Cancelled'
       task.stageLabel = STAGE_META.cancelled.label
@@ -2238,7 +2262,7 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   function workflowDefinitionValidationError(definition: Record<string, unknown>): string {
-    const issue = getWorkflowDefinitionIssue(definition)
+    const issue = getWorkflowDefinitionIssue(definition, useWorkflowNodeStore().saveNodeTypes)
     if (issue === 'steps-required') return i18n.global.t('workflows.stepsRequired')
     if (issue === 'no-save-outputs') return i18n.global.t('workflows.workflowNoSaveOutputs')
     if (issue === 'invalid-definition') return i18n.global.t('workflows.workflowFormatInvalid')
@@ -2265,6 +2289,7 @@ export const useTaskStore = defineStore('task', () => {
     if (!workflow?.id) {
       throw new Error('Workflow is required')
     }
+    if (detectWorkflowFormat(workflow.definition) === 'graph' && !countWorkflowSaveOutputs(workflow.definition)) await useWorkflowNodeStore().load()
     const validationError = workflowDefinitionValidationError(workflow.definition)
     if (validationError) throw new Error(validationError)
     validateSeparateWorkflowInput(workflow.definition)
@@ -2290,6 +2315,7 @@ export const useTaskStore = defineStore('task', () => {
   }
   async function startWorkbenchInference(workflow: WorkflowEntry, bindings: WorkflowRuntimeBindings) {
     if (!isMainTaskOwner()) throw new Error('workbench.mainWindowOnly')
+    if (detectWorkflowFormat(workflow.definition) === 'graph' && !countWorkflowSaveOutputs(workflow.definition)) await useWorkflowNodeStore().load()
     const validationError = workflowDefinitionValidationError(workflow.definition)
     if (validationError) throw new Error(validationError)
     const nativeGraph = detectWorkflowFormat(workflow.definition) === 'graph'

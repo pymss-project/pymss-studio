@@ -400,7 +400,7 @@ class _RuntimePluginHandle:
 
         register_capability(name, func, source=self.source, description=description)
 
-    def register_node(self, node_type, func, *, description="", signature=None):
+    def register_node(self, node_type, func, *, description="", signature=None, saves_output=False):
         from functools import wraps
 
         from pymss.plugins import register_node
@@ -420,7 +420,10 @@ class _RuntimePluginHandle:
                 return func(ctx, inputs)
         else:
             execute = func
-        register_node(node_type, execute, source=self.source, description=description, signature=signature)
+        register_node(
+            node_type, execute, source=self.source, description=description,
+            signature=signature, saves_output=saves_output,
+        )
         self.registered_nodes.append(node_type)
 
     def register_cli(self, path, func, *, help="", add_arguments=None):

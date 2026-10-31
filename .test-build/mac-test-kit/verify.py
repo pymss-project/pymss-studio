@@ -125,6 +125,8 @@ def main():
     failure = None
     try:
         signature()
+        if json.loads((args.kit / 'build-info.json').read_text(encoding='utf-8')) != metadata:
+            raise RuntimeError('The application and companion kit belong to different builds')
         probe = subprocess.run([str(python), "-c", "from importlib.metadata import version;from pymss.operations.python_profiles import prepare_python_environment;print(version('pymss'))"],
                                env=environment, capture_output=True, text=True, timeout=30)
         if probe.returncode or probe.stdout.strip() != metadata["pymssVersion"]:
@@ -149,6 +151,33 @@ def main():
             source.write_bytes("第一行\r\nsecond\rthird\n".encode())
             if output(run(operation, params={"line_ending": "lf"})).read_bytes() != expected:
                 raise RuntimeError("The operation did not recover after invalid UTF-8 input")
+        declarations = call('list_nodes', {})[-1]['payload']['nodes']
+        expected_types = {'example_python_rpc_text_normalize', 'example_rust_rpc_text_normalize'}
+        persistent = {node['type'] for node in declarations if node.get('registered') and node.get('savesOutput') is True}
+        if not expected_types <= persistent:
+            raise RuntimeError('Live file-output node capabilities are missing')
+        results.append({'command': 'file_node_capabilities', 'status': 'passed', 'nodes': sorted(expected_types)})
+        print('PASS persistent file node capabilities', flush=True)
+        definition = {'nodes': [
+            {'id': 1, 'type': 'StringConstant', 'widgets_values': [str(source)]},
+            {'id': 2, 'type': 'StringConstant', 'widgets_values': ['lf']},
+            {'id': 3, 'type': 'StringConstant', 'widgets_values': ['crlf']},
+            {'id': 4, 'type': 'example_python_rpc_text_normalize', 'inputs': [
+                {'name': 'source', 'type': 'STRING', 'link': 1}, {'name': 'line_ending', 'type': 'STRING', 'link': 2}]},
+            {'id': 5, 'type': 'example_rust_rpc_text_normalize', 'inputs': [
+                {'name': 'source', 'type': 'STRING', 'link': 3}, {'name': 'line_ending', 'type': 'STRING', 'link': 4}]},
+        ], 'links': [[1, 1, 0, 4, 0, 'STRING'], [2, 2, 0, 4, 1, 'STRING'],
+            [3, 1, 0, 5, 0, 'STRING'], [4, 3, 0, 5, 1, 'STRING']]}
+        events = call('infer_workflow', {'taskId': 'mac-file-workflow', 'workflow': definition,
+            'output': str(work / 'workflow-outputs'), 'outputLayout': 'flat'})
+        graph = next(event['payload'] for event in events if event['type'] == 'task_done')
+        outputs = graph.get('outputs', [])
+        if len(outputs) != 2 or any(item.get('kind') != 'file' or item.get('mediaType') != 'text/plain' for item in outputs):
+            raise RuntimeError('The text graph did not return two generic file records')
+        if [Path(item['path']).read_bytes() for item in outputs] != [expected, expected.replace(b'\n', b'\r\n')]:
+            raise RuntimeError('The graph LF/CRLF results are incorrect')
+        results.append({'command': 'file_workflow_outputs', 'status': 'passed', 'outputs': outputs})
+        print('PASS file workflow LF/CRLF outputs', flush=True)
         for identifier, version in (("validation.python_a", "1.0.0"), ("validation.python_b", "2.0.0")):
             package = work / identifier
             dependency_plugin(package, identifier, version)

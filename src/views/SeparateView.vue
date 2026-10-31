@@ -35,6 +35,7 @@ import { useTaskStore, type ModelListSortMode, type OutputLayout, type Separatio
 import { resolveJobStatus } from '@/features/tasks/lifecycle'
 import { inferenceChunkSizeIssue, resolveInferenceChunkStep, resolveInferenceSampleStep } from '@/features/inference/sampleStep'
 import { useWorkflowStore, type WorkflowEntry } from '@/stores/workflow'
+import { useWorkflowNodeStore } from '@/stores/workflowNodes'
 import { WORKFLOW_FORMAT_VERSION } from '@/workflows/formats'
 import {
   getWorkflowDefinitionIssue,
@@ -69,6 +70,8 @@ const route = useRoute()
 const task = useTaskStore()
 const model = useModelStore()
 const workflow = useWorkflowStore()
+const workflowNodes = useWorkflowNodeStore()
+void workflowNodes.load().catch(() => undefined)
 const settings = useSettingsStore()
 const app = useAppStore()
 const beginnerGuide = useBeginnerGuideStore()
@@ -543,9 +546,13 @@ const outputNamingSummary = computed(() => outputNamingConfig.value.enabled
   : t('separate.namingDefaultSummary'))
 const usesIndexToken = computed(() => outputNamingTemplate.value.includes('%index%'))
 function workflowDefinitionError(definition: Record<string, unknown>): string {
-  const issue = getWorkflowDefinitionIssue(definition)
+  const issue = getWorkflowDefinitionIssue(definition, workflowNodes.saveNodeTypes)
   if (issue === 'steps-required') return t('workflows.stepsRequired')
-  if (issue === 'no-save-outputs') return t('workflows.workflowNoSaveOutputs')
+  if (issue === 'no-save-outputs') {
+    if (workflowNodes.loading) return t('common.loading')
+    if (workflowNodes.error) return t('workflows.nodeMetadataUnavailable', { error: workflowNodes.error })
+    return t('workflows.workflowNoSaveOutputs')
+  }
   if (issue === 'invalid-definition') return t('workflows.workflowFormatInvalid')
   if (issue === 'invalid-format') return t('workflows.workflowFormatInvalid')
   const inputIssue = getSeparateWorkflowInputIssue(definition)
@@ -582,7 +589,7 @@ function selectRunnableWorkflow(item: WorkflowEntry) {
 
 function workflowIssueSummary(item: WorkflowEntry): string {
   const inputIssue = getSeparateWorkflowInputIssue(item.definition)
-  if (inputIssue && !getWorkflowDefinitionIssue(item.definition)) return t(
+  if (inputIssue && !getWorkflowDefinitionIssue(item.definition, workflowNodes.saveNodeTypes)) return t(
     inputIssue.code === 'multiple-inputs' ? 'separate.workflowMultipleInputsSummary' : 'separate.workflowNoInputSummary',
     { count: inputIssue.count },
   )
@@ -2681,7 +2688,7 @@ async function retryCurrentTask() {
                     :class="{
                       'target-row--active': selectedWorkflowId === item.id,
                       'target-row--unavailable': Boolean(workflowIssue(item)),
-                      'workflow-target--restricted': Boolean(getSeparateWorkflowInputIssue(item.definition)) && !getWorkflowDefinitionIssue(item.definition),
+                      'workflow-target--restricted': Boolean(getSeparateWorkflowInputIssue(item.definition)) && !getWorkflowDefinitionIssue(item.definition, workflowNodes.saveNodeTypes),
                     }"
                     @click="selectRunnableWorkflow(item)"
                     @contextmenu.stop.prevent="openSeparateContextMenu($event, 'workflow', item)"
@@ -2691,7 +2698,7 @@ async function retryCurrentTask() {
                       <span class="target-row__heading">
                         <span class="target-row__name" :title="item.name">{{ item.name }}</span>
                         <span v-if="workflowIssue(item)" class="target-row__unavailable">
-                          {{ t(getSeparateWorkflowInputIssue(item.definition) && !getWorkflowDefinitionIssue(item.definition)
+                          {{ t(getSeparateWorkflowInputIssue(item.definition) && !getWorkflowDefinitionIssue(item.definition, workflowNodes.saveNodeTypes)
                             ? 'separate.workflowPageRequired' : 'separate.workflowUnavailable') }}
                         </span>
                       </span>

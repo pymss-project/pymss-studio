@@ -79,6 +79,7 @@ def collect_plugin_nodes() -> list[dict[str, Any]]:
                     "pluginId": manifest.plugin_id,
                     "registered": not bool(reason),
                     "registeredSource": source,
+                    "savesOutput": not bool(reason) and getattr(registration, "saves_output", False) is True,
                     "status": status,
                     "unavailableReason": reason,
                     "blockedBy": report.get("blocked_by") or [],

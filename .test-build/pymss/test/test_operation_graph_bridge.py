@@ -74,6 +74,22 @@ def test_operation_node_registers_and_produces_signature():
     assert sig.output_types == [AUDIO]
 
 
+def test_file_operation_advertises_persistent_output_for_live_registration():
+    from pymss.plugins.registry import PluginRegistration, get_registry
+
+    spec = OperationSpec(
+        id="test.file.write", schema_version=1, title="Write File",
+        inputs={}, params={"type": "object", "properties": {}},
+        outputs={"file": {"type": "file"}},
+    )
+    register_operation_node(spec=spec, run=lambda *_: {}, source="test.file")
+    assert get_registry().nodes["op.test.file.write"].saves_output is True
+    register_operation_node(spec=spec, run=lambda *_: {}, plugin=PluginRegistration("test.file"))
+    assert get_registry().nodes["op.test.file.write"].saves_output is True
+    register_operation_node(spec=_gain_spec(), run=_gain_run)
+    assert get_registry().nodes["op.test.gain.apply"].saves_output is False
+
+
 def test_operation_node_executes_with_named_params(tmp_path):
     register_operation_node(spec=_gain_spec(), run=_gain_run)
 

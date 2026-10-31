@@ -54,6 +54,8 @@ class NodeRegistration:
     For graph/workflow nodes, `signature` is a factory that takes a DAGNode and
     returns a NodeSignature (inputs/outputs/params). It is optional — simple
     plugin nodes may omit it.
+    ``saves_output`` marks executors that persist files and report them through
+    NodeResult.saved_paths; intermediate values and in-memory audio do not set it.
     """
 
     node_type: str
@@ -61,6 +63,7 @@ class NodeRegistration:
     source: str = "builtin"  # which plugin/package provided it
     description: str = ""
     signature: Callable[..., Any] | None = None  # (dag_node) -> NodeSignature
+    saves_output: bool = False  # executor persists files in NodeResult.saved_paths
 
 
 @dataclass
@@ -168,6 +171,7 @@ class PluginRegistry:
         description: str = "",
         allow_override_builtin: bool = False,
         signature: Callable[..., Any] | None = None,
+        saves_output: bool = False,
     ) -> None:
         builtin_source = source in {"builtin", "pymss.builtin"}
         # The legacy override flag remains accepted, but an owner label/flag
@@ -192,6 +196,7 @@ class PluginRegistry:
         self.nodes[node_type] = NodeRegistration(
             node_type=node_type, func=func, source=source, description=description,
             signature=signature,
+            saves_output=saves_output,
         )
 
     def get_node(self, node_type: str) -> Callable[..., Any] | None:
@@ -291,10 +296,12 @@ class PluginRegistration:
         *,
         description: str = "",
         signature: Callable[..., Any] | None = None,
+        saves_output: bool = False,
     ) -> None:
         _REGISTRY.register_node(
             node_type, func, source=self.source, description=description,
             signature=signature,
+            saves_output=saves_output,
         )
 
     def register_cli(
@@ -348,22 +355,26 @@ def register_node(
     source: str = "plugin",
     description: str = "",
     signature: Callable[..., Any] | None = None,
+    saves_output: bool = False,
 ):
     """Register a workflow node executor. See register_capability for decorator use.
 
     signature: optional factory (dag_node) -> NodeSignature for graph nodes.
+    saves_output: executor persists files and reports them in NodeResult.saved_paths.
     """
     if func is None:
         def decorator(f: Callable[..., Any]):
             _REGISTRY.register_node(
                 node_type, f, source=source, description=description,
                 signature=signature,
+                saves_output=saves_output,
             )
             return f
         return decorator
     _REGISTRY.register_node(
         node_type, func, source=source, description=description,
         signature=signature,
+        saves_output=saves_output,
     )
     return func
 

@@ -180,6 +180,7 @@ def register_alias(alias: str, canonical: str) -> None:
     _PLUGIN_REGISTRY.register_node(
         alias, target.func, source=target.source,
         description=target.description, signature=target.signature,
+        saves_output=target.saves_output,
     )
 
 

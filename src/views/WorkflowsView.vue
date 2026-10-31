@@ -20,6 +20,7 @@ import { storeToRefs } from 'pinia'
 import WorkflowCreateChooser from '@/components/workflow/WorkflowCreateChooser.vue'
 import WorkflowOverviewPreview from '@/components/workflow/WorkflowOverviewPreview.vue'
 import { useModelStore } from '@/stores/model'
+import { useWorkflowNodeStore } from '@/stores/workflowNodes'
 import {
   WorkflowRevisionConflictError,
   useWorkflowStore,
@@ -45,6 +46,8 @@ const message = useMessage()
 const dialog = useDialog()
 const workflow = useWorkflowStore()
 const model = useModelStore()
+const workflowNodes = useWorkflowNodeStore()
+void workflowNodes.load().catch(() => undefined)
 const { workflows, selectedWorkflowId, selectedWorkflow, simpleEditorOpenWorkflowId } = storeToRefs(workflow)
 const { downloadedModels } = storeToRefs(model)
 const editingId = ref('')
@@ -144,7 +147,7 @@ const workflowGroups = computed(() => [
 
 const workflowListMetaMap = computed(() => Object.fromEntries(workflows.value.map((item) => {
   if (isGraphWorkflowDefinition(item.definition)) {
-    const overview = analyzeComfyOverview(item.definition)
+    const overview = analyzeComfyOverview(item.definition, workflowNodes.saveNodeTypes)
     return [item.id, overview
       ? t('workflows.listMetaAdvanced', { nodes: overview.nodeCount, outputs: overview.outputCount })
       : t('workflows.typeAdvanced')]
@@ -154,7 +157,7 @@ const workflowListMetaMap = computed(() => Object.fromEntries(workflows.value.ma
     return [item.id, t('workflows.listMetaSimple', {
       steps: draft.steps.length,
       ensembles: draft.ensembles.length,
-      outputs: countWorkflowSaveOutputs(item.definition),
+      outputs: countWorkflowSaveOutputs(item.definition, workflowNodes.saveNodeTypes),
     })]
   }
   return [item.id, t('workflows.workflowValidationTitle')]
@@ -179,9 +182,13 @@ const isNodeEditorOpen = computed(() => Boolean(workflow.editorFor(selectedWorkf
 const isAnyEditorOpen = computed(() => workflow.hasAnyEditorOpen)
 
 function workflowDefinitionError(definition: Record<string, unknown>): string {
-  const issue = getWorkflowDefinitionIssue(definition)
+  const issue = getWorkflowDefinitionIssue(definition, workflowNodes.saveNodeTypes)
   if (issue === 'steps-required') return t('workflows.stepsRequired')
-  if (issue === 'no-save-outputs') return t('workflows.workflowNoSaveOutputs')
+  if (issue === 'no-save-outputs') {
+    if (workflowNodes.loading) return t('common.loading')
+    if (workflowNodes.error) return t('workflows.nodeMetadataUnavailable', { error: workflowNodes.error })
+    return t('workflows.workflowNoSaveOutputs')
+  }
   if (issue === 'invalid-definition') return t('workflows.workflowFormatInvalid')
   if (issue === 'invalid-format') return t('workflows.workflowFormatInvalid')
   return ''
@@ -226,7 +233,7 @@ const selectedDescriptionPreview = computed(() => selectedWorkflow.value?.descri
 
 // ---- Selected workflow overview data (simple-mode details; comfy graphs
 // show a read-only overview since their structure is free-form) ----
-const selectedComfyOverview = computed(() => analyzeComfyOverview(selectedWorkflow.value?.definition))
+const selectedComfyOverview = computed(() => analyzeComfyOverview(selectedWorkflow.value?.definition, workflowNodes.saveNodeTypes))
 const isComfyWorkflow = computed(() => isGraphWorkflowDefinition(selectedWorkflow.value?.definition))
 const isSimpleWorkflow = computed(() => isSimpleWorkflowDefinition(selectedWorkflow.value?.definition))
 const selectedWorkflowKind = computed<WorkflowKind>(() => selectedWorkflow.value

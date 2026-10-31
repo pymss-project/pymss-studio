@@ -49,6 +49,7 @@ function setup(overrides = {}) {
   const state = {
     computed, window, document, LGraph, LGraphCanvas: Canvas,
     disposed: false, pluginNodeLoadId: 0, invoke: () => response,
+    workflowNodes: { load: async () => selectPluginNodeDeclarations((await response).nodes || []) },
     ALL_SPECS: reactive({ ...registry.NODE_SPECS, ...registry.BUILTIN_SPECS }),
     NODE_SPECS: registry.NODE_SPECS, BUILTIN_SPECS: registry.BUILTIN_SPECS,
     pluginNodeSpec, selectPluginNodeDeclarations,

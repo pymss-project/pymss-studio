@@ -11,6 +11,6 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 REPORT="$HOME/Library/Logs/PymssStudioPluginTest/$(date +%Y%m%d-%H%M%S)-$$"
 mkdir -p "$REPORT"
-PYTHONHOME="$RES/python-runtime" PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$KIT/verify.py" \
+PYTHONHOME="$RES/python-runtime" PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -B "$KIT/verify.py" \
   --app "$APP" --kit "$KIT" --report "$REPORT" 2>&1 | tee "$REPORT/console.log"
 echo "Verification completed. Report: $REPORT"

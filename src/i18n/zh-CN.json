@@ -1988,7 +1988,8 @@
       "incompleteGraph": "部分节点无法在编辑器中还原，原始工作流已保留。"
     },
     "workflowValidationTitle": "工作流需要调整",
-    "workflowNoSaveOutputs": "工作流没有有效保存输出，请至少为一个音轨配置输出目录或保存节点。",
+    "workflowNoSaveOutputs": "工作流没有保存输出，请添加保存节点或可写出文件的插件节点。",
+    "nodeMetadataUnavailable": "无法读取工作流节点信息：{error}",
     "workflowFormatInvalid": "工作流定义格式无效。",
     "overviewEmptyTitle": "选择一个工作流",
     "overviewEmptyDesc": "从左侧列表选择工作流进行编辑，或新建一个。",

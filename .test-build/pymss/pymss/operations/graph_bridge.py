@@ -106,10 +106,13 @@ def register_operation_node(
             for value in files
         ])
 
+    saves_output = any(port.get("type") == "file" for port in spec.outputs.values())
     if plugin is None:
-        get_registry().register_node(node_type, _execute, signature=_signature, source=source)
+        get_registry().register_node(
+            node_type, _execute, signature=_signature, source=source, saves_output=saves_output,
+        )
     else:
-        plugin.register_node(node_type, _execute, signature=_signature)
+        plugin.register_node(node_type, _execute, signature=_signature, saves_output=saves_output)
     return node_type
 
 

@@ -38,6 +38,7 @@ export interface WidgetSpec {
 }
 
 export interface PluginNodeDecl {
+  savesOutput?: boolean
   type?: string
   title?: string
   category?: string

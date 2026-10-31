@@ -260,8 +260,9 @@ const WORKFLOW_SAVE_NODE_TYPES = new Set([
   'SaveAudioAdvanced',
 ])
 
-export function isWorkflowSaveNodeType(value: unknown): boolean {
-  return WORKFLOW_SAVE_NODE_TYPES.has(String(value || ''))
+export function isWorkflowSaveNodeType(value: unknown, additionalTypes?: ReadonlySet<string>): boolean {
+  const type = String(value || '')
+  return WORKFLOW_SAVE_NODE_TYPES.has(type) || additionalTypes?.has(type) === true
 }
 
 const LEGACY_SIMPLE_SAVE_FILENAME = /\.(?:wav|flac|mp3|m4a)$/iu

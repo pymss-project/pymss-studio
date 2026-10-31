@@ -87,8 +87,10 @@ installed and disabled directory does not move its environment. Moving the
 profile store itself requires explicit re-preparation.
 
 The base interpreter must provide `venv`; the host must provide pip with
-`--python` support. This has been validated with a standard Windows Python 3.12
-installation. Embedded/frozen release runtimes and other operating systems have
+`--python` support. This has been validated with standard Windows Python 3.12 and a bundled
+python-build-standalone 3.12.13 interpreter inside a signed macOS 14 arm64 test
+application. The application seal is checked again after plugin execution and
+process regressions. Linux, other architectures and frozen Python hosts have
 not been validated for this feature. Failure is explicit; there is no
 `system-site-packages` or shared-sidecar fallback.
 
@@ -129,3 +131,27 @@ and covers RPC callbacks, missing closure, hash failure, cancellation,
 descendant cleanup and interrupted retirement. Studio transaction tests cover
 updates, failed registration rollback, switching runtimes and uninstall.
 `examples/python_rpc_text` in pymss-plugins is a stdlib-only reference peer.
+
+
+## macOS signed application verification (2026-10-31)
+
+A real macOS 14 arm64 CI build exposed two issues that Windows-only validation
+could not cover. Darwin may return EPERM when killpg sees only zombie members;
+cleanup now defers that error only after observing the gate's exit, reaps it,
+and still requires the process group to disappear before success. A real denied
+signal to a live gate remains an error; persistent EPERM never proves cleanup.
+
+All runner-owned isolated Python invocations explicitly include `-B`, and pip's
+target-interpreter environment retains `PYTHONDONTWRITEBYTECODE=1`. `-I` ignores
+that environment flag, so the gate, venv creator, host pip and prefix probe must
+set their interpreter flag directly. Without this, stdlib imports can create
+bytecode inside a sealed application. Verification checks the same signed app
+before and after real Python/Rust callbacks and conflicting wheel environments,
+and checks it again after process tests. Re-signing after a task is not used to
+hide resource mutation.
+
+CI run 41175441669 passed 23 early process checks and 81 bundled-interpreter
+regressions, plus real Worker plugin checks and final codesign verification.
+The package is an isolated test build, not a public release or notarized app.
+macOS desktop interactions and model inference remain target-machine acceptance
+items. No Linux/Intel/frozen-host support claim follows from this result.

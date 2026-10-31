@@ -91,6 +91,8 @@ def main():
     managed_root = Path(row["path"])
     operation = plugin_id + ".normalize"
     spec = worker("describe_operation", {"operation": operation})[-1]["payload"]
+    nodes = worker("list_nodes", {})[-1]["payload"]["nodes"]
+    assert next(node for node in nodes if node["type"] == node_type)["savesOutput"] is True
     worker_events = worker("run_operation", {"operation": operation, "inputs": {"source": {"kind": "file", "path": str(source)}},
         "params": {"line_ending": "lf"}, "expectedSpecDigest": spec["specDigest"], "outputDir": str(work / "worker-out")})
     worker_result = worker_events[-1]["payload"]

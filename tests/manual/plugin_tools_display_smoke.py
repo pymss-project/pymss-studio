@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--url", default="http://127.0.0.1:1564")
     parser.add_argument("--plugins", type=Path, default=Path(__file__).resolve().parents[3] / "pymss-plugins")
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--animations", action="store_true")
     args = parser.parse_args()
     output = args.output_dir or Path(tempfile.mkdtemp(prefix="studio-plugin-display-"))
     output.mkdir(parents=True, exist_ok=True)
@@ -43,7 +44,7 @@ def main():
             page.add_init_script("""if(window===window.top)localStorage.setItem('pymss-studio:app-settings', JSON.stringify({
               startupOnboardingSeen:true,beginnerGuideInvitationSeen:true,locale:'zh-CN',
               themeMode:'light',animationsEnabled:false
-            }))""")
+            }))""".replace("animationsEnabled:false", f"animationsEnabled:{str(args.animations).lower()}"))
             def plugin_page(route):
                 from urllib.parse import urlparse
                 path = urlparse(route.request.url).path.removeprefix("/view")
@@ -111,10 +112,18 @@ def main():
             tool = page.frame_locator(".plugin-view-frame")
             expect(tool.locator(".tool-log-button")).to_be_visible()
             for mode in ["light", "dark"]:
-                page.evaluate("mode=>window.__settings.themeMode=mode", mode)
+                if args.animations:
+                    page.evaluate("async()=>document.querySelector('#app').__vue_app__.config.globalProperties.$router.push('/settings')")
+                    button = page.locator('.theme-switcher').get_by_role('button', name='深色' if mode == 'dark' else '浅色', exact=True)
+                    expect(button).to_be_visible()
+                    button.click()
+                    page.evaluate("async()=>document.querySelector('#app').__vue_app__.config.globalProperties.$router.push('/tools?pluginView=convert/tool')")
+                else:
+                    page.evaluate("mode=>window.__settings.themeMode=mode", mode)
                 expect(tool.locator("html")).to_have_attribute("data-mode", mode)
                 expect(page.locator(".plugin-view-frame")).to_have_css("color-scheme", mode)
                 expect(tool.locator("html")).to_have_css("color-scheme", mode)
+                expect(tool.locator('.n-input').first).to_have_css('--n-color', '#23272e' if mode == 'dark' else '#eef2f7')
                 before = tool.locator(".audio-tool-layout").bounding_box()
                 tool.locator(".tool-log-button").click()
                 expect(tool.locator("html")).to_have_class(re.compile("tool-overlay-anchored"))

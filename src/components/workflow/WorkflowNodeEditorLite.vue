@@ -38,14 +38,16 @@ import {
 } from '@/litegraph/history'
 import { parseModelStems } from '@/utils/workflowSimple'
 import type { ModelEntry } from '@/stores/model'
-import { pluginNodeSpec, selectPluginNodeDeclarations, type NodeSpec, type PluginNodeDecl } from '@/litegraph/nodeSpecs'
+import { pluginNodeSpec, type NodeSpec } from '@/litegraph/nodeSpecs'
 import { translateNodeCategory, translateNodeTitle, type NodeTranslator } from '@/litegraph/nodeLocalization'
 import { isGraphWorkflowDefinition } from '@/workflows/formats'
 import { applyGraphDefaultWidgets, type GraphDefaults } from '@/workflows/graphDefaults'
 import { registerPluginNodeSpecs } from '@/litegraph/registerNodes'
 import { pluginRevision } from '@/features/plugin-marketplace/composable'
+import { useWorkflowNodeStore } from '@/stores/workflowNodes'
 
 const studioLog = createLogger('ui.components.workflow.WorkflowNodeEditorLite')
+const workflowNodes = useWorkflowNodeStore()
 
 // All node specs the palette offers (pymss + ComfyUI builtin + plugin-contributed).
 const ALL_SPECS = reactive<Record<string, NodeSpec>>({ ...NODE_SPECS, ...BUILTIN_SPECS })
@@ -63,9 +65,8 @@ async function loadPluginNodeSpecs() {
   if (disposed || typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
   const request = ++pluginNodeLoadId
   try {
-    const response = await invoke<{ nodes?: PluginNodeDecl[] }>('list_nodes')
+    const declarations = await workflowNodes.load()
     if (disposed || request !== pluginNodeLoadId) return
-    const declarations = selectPluginNodeDeclarations(Array.isArray(response?.nodes) ? response.nodes : [])
     const specs = declarations.map(pluginNodeSpec)
       .filter(spec => spec.type && !NODE_SPECS[spec.type] && !BUILTIN_SPECS[spec.type])
     registerPluginNodeSpecs(specs)

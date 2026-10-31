@@ -18,7 +18,7 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 75
     env:
-      PYMSS_VERSION: '0.0.24-dev.plugins.20261031.d249027f'
+      PYMSS_VERSION: '0.0.24-dev.plugins.20261031.917d375e'
       PYMSS_STUDIO_PLUGIN_TEST_BUILD: '1'
       PYMSS_STUDIO_PLUGINS_SOURCE: .test-build/pymss-plugins
       MACOSX_DEPLOYMENT_TARGET: '14.0'
@@ -44,6 +44,10 @@ jobs:
           python3 -m pip install --disable-pip-version-check 'setuptools>=77' wheel
           python3 scripts/prepare-preinstalled-plugins.py --source .test-build/pymss-plugins
           python3 .test-build/pymss-plugins/examples/rust_rpc_text/scripts/build.py
+
+      - name: Verify file workflow frontend regressions
+        run: |
+          node --test tests/workflowFormats.test.mjs tests/workflowPluginLoading.test.mjs tests/workflowWorkbench.test.mjs tests/workflowPreview.test.mjs tests/stemOutputs.test.ts tests/separationOutputDirectory.test.mjs tests/workflowNodeCapabilities.test.mjs
 
       - name: Sync build version metadata
         run: |
@@ -301,7 +305,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/core-tests"
           cp -R .test-build/pymss/test "$RUNNER_TEMP/core-tests/test"
           PY="$APP/Contents/Resources/python-runtime/bin/python3"
-          PYTHONHOME="$APP/Contents/Resources/python-runtime" PYTHONDONTWRITEBYTECODE=1             PYTHONPATH="$RUNNER_TEMP/pytest-deps:$RUNNER_TEMP/core-tests" "$PY" -m pytest -q             "$RUNNER_TEMP/core-tests/test/test_python_profiles.py"             "$RUNNER_TEMP/core-tests/test/test_command_process.py"             "$RUNNER_TEMP/core-tests/test/test_command_bootstrap.py"             "$RUNNER_TEMP/core-tests/test/test_rpc_process.py"
+          PYTHONHOME="$APP/Contents/Resources/python-runtime" PYTHONDONTWRITEBYTECODE=1             PYTHONPATH="$RUNNER_TEMP/pytest-deps:$RUNNER_TEMP/core-tests" "$PY" -m pytest -q             "$RUNNER_TEMP/core-tests/test/test_python_profiles.py"             "$RUNNER_TEMP/core-tests/test/test_command_process.py"             "$RUNNER_TEMP/core-tests/test/test_command_bootstrap.py"             "$RUNNER_TEMP/core-tests/test/test_rpc_process.py" "$RUNNER_TEMP/core-tests/test/test_operation_graph_bridge.py" "$RUNNER_TEMP/core-tests/test/test_plugin_kit.py"
 
       - name: Verify the application remains sealed after all regressions
         run: |
@@ -318,8 +322,9 @@ jobs:
           hdiutil create -volname 'Pymss Studio Plugin Test' -srcfolder "$STAGE" -ov -format UDZO             "release/Pymss-Studio-Plugin-Test-${PYMSS_VERSION}-macos-arm64.dmg"
           ditto -c -k --keepParent "$RUNNER_TEMP/mac-plugin-test-kit" release/mac-plugin-test-kit.zip
           cp "$RUNNER_TEMP/mac-plugin-test-kit/README.zh-CN.md" release/README.zh-CN.md
+          cp "$RUNNER_TEMP/mac-plugin-test-kit/README.zh-CN.md" release/TESTING.zh-CN.md
           cp python/plugin-test-build.json release/build-info.json
-          (cd release && shasum -a 256 *.dmg *.zip > SHA256SUMS.txt)
+          (cd release && shasum -a 256 *.dmg *.zip README.zh-CN.md TESTING.zh-CN.md build-info.json > SHA256SUMS.txt)
 
       - name: Upload the macOS test package
         uses: actions/upload-artifact@v4
