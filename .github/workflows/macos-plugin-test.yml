@@ -18,7 +18,7 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 75
     env:
-      PYMSS_VERSION: '0.0.24-dev.plugins.20261031.c389a37c'
+      PYMSS_VERSION: '0.0.24-dev.plugins.20261031.c410bf65'
       PYMSS_STUDIO_PLUGIN_TEST_BUILD: '1'
       PYMSS_STUDIO_PLUGINS_SOURCE: .test-build/pymss-plugins
       MACOSX_DEPLOYMENT_TARGET: '14.0'

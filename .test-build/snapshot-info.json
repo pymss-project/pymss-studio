@@ -99,7 +99,7 @@
         "pymss/modules/vocal_remover/vr_separator.py": "7eab1a5c3f097a21f9dce4bdfaac0fd5a554d23b402668413d18b4253361ade6",
         "pymss/operations/__init__.py": "0395c3637bdfa4249662db887edcd3e4a84c44438a4ea32c24772f33c73c45f8",
         "pymss/operations/_command_bootstrap.py": "11a83d59af991368e4e0b778a0e045f64faf87796c24f0405eb81f1a334aeca1",
-        "pymss/operations/_command_process.py": "abc75cbaaa74186f0a8190ba6131115ecba27d402ee910749cfa4c41ffea755c",
+        "pymss/operations/_command_process.py": "6e13898b2ab414f9eaa5c2447d096991918149b2ce6dac5f2b437bb4898be418",
         "pymss/operations/_profile_lock.py": "5f18d294ce344b053f9f1d0ec099dcc01021c981fa4800f781ee0212af21f612",
         "pymss/operations/_python_entry.py": "065bfca673bf60714d091e705f014761088e2b6b709c8552d33ccfd42ea84949",
         "pymss/operations/_rpc_session.py": "d2f1ab8a3225c5d9e5fb6416456867ee543149be4ca7453bf0c09a9104108f31",
@@ -191,7 +191,7 @@
         "test/test_codec_capabilities.py": "753ac5800e74e3ff365f6c4199fdaa5c9e4ef9f8475cd8f52d9602f4d3c4130b",
         "test/test_command_bootstrap.py": "a8791973d8b7d9a340a796ea9a877effede2972aa8960bd649f326863e5097ee",
         "test/test_command_operations.py": "e08dff567248018d1ec1f89e960b6603793d23022a2b15eeb66ad7503bb9d429",
-        "test/test_command_process.py": "4b7d2662e2eeef036d80235523c41ca1e4accb95c3c8e3625a0ea992f30a0a53",
+        "test/test_command_process.py": "1834cbe38cff919537c01e6e3ef81226e9b9c9bd6ce564144e0d0491008dca68",
         "test/test_core_shims.py": "a4313382df7347f86d0b20f0ed52b70e42a284391e23ac28ad4e5c892bc7d75f",
         "test/test_graph.py": "3ea7e067aa313948bca3e88c95f2089eade3f2aed03787b3d1e6d147656acea1",
         "test/test_graph_audio_merge.py": "b3ba1302a2b4919e446970e60e0f6c64e4f66ed4492e5c25e8006fbf4aa1a2bf",
@@ -573,5 +573,5 @@
     }
   },
   "textNormalization": "LF for files without NUL bytes",
-  "snapshotDigest": "c389a37c71523918c196211e10f5905245c1756f88cb403c57c3f3f2516e98e0"
+  "snapshotDigest": "c410bf6592c479eb74694debe7f050107113d151afdb4bdb7950a8b008a4d315"
 }

@@ -100,6 +100,12 @@ def _posix_group_alive(group: int) -> bool:
         os.killpg(group, 0)
     except ProcessLookupError:
         return False
+    except PermissionError:
+        if sys.platform == "darwin":
+            # Darwin reports EPERM for a zombie-only group as well as a real
+            # permission denial. Keep waiting until ESRCH proves it is gone.
+            return True
+        raise
     # Orphan zombies have no runnable code or open files. Some headless Linux
     # init processes defer reaping them, so they do not block publication.
     if sys.platform.startswith("linux"):
@@ -114,6 +120,18 @@ def _posix_group_alive(group: int) -> bool:
                 continue
         return False
     return True
+
+
+def _terminate_posix_group(process, observer, exit_observed: bool) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # Do not swallow a denied signal to a live gate. A zombie-only Darwin
+        # group must first be reaped, then proven absent by the caller's check.
+        if sys.platform != "darwin" or not (exit_observed or observer is not None and observer.exited()):
+            raise
 
 
 class _ExitObserver:
@@ -176,6 +194,7 @@ def run_command_process(
     )
     job = None
     observer = None
+    exit_observed = False
     readers: list[threading.Thread] = []
     buffers = [bytearray(), bytearray()]
     failed_read = threading.Event()
@@ -218,6 +237,7 @@ def run_command_process(
             if protocol is not None:
                 protocol.update()
             if observer.exited():
+                exit_observed = True
                 break
             if write_error is not None:
                 raise CommandProcessError("COMMAND_IO_FAILED", "Plugin command startup request could not be sent") from write_error
@@ -234,10 +254,7 @@ def run_command_process(
             if job is not None:
                 job.close()
             elif os.name != "nt":
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                _terminate_posix_group(process, observer, exit_observed)
             elif process.poll() is None:
                 process.kill()
         except OSError as error:

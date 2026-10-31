@@ -18,6 +18,39 @@ from pymss.operations._command_process import CommandProcessError, run_command_p
 from pymss.operations import _command_process as process_runner
 
 
+@pytest.mark.parametrize("platform,observed,late_exit,allowed", [
+    ("darwin", True, False, True),
+    ("darwin", False, True, True),
+    ("darwin", False, False, False),
+    ("darwin", False, None, False),
+    ("linux", True, True, False),
+])
+def test_denied_group_signal_is_deferred_only_for_an_exited_darwin_gate(monkeypatch, platform, observed, late_exit, allowed):
+    def denied(*_):
+        raise PermissionError("The process group cannot be signalled")
+
+    monkeypatch.setattr(process_runner, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(process_runner, "os", SimpleNamespace(killpg=denied))
+    observer = SimpleNamespace(exited=lambda: late_exit) if late_exit is not None else None
+    if allowed:
+        process_runner._terminate_posix_group(SimpleNamespace(pid=37), observer, observed)
+    else:
+        with pytest.raises(PermissionError):
+            process_runner._terminate_posix_group(SimpleNamespace(pid=37), observer, observed)
+
+
+def test_a_denied_darwin_group_probe_does_not_claim_the_group_is_gone(monkeypatch):
+    results = iter([PermissionError("Zombie-only or denied group"), ProcessLookupError("No process group")])
+
+    def signal(*_):
+        raise next(results)
+
+    monkeypatch.setattr(process_runner, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(process_runner, "os", SimpleNamespace(killpg=signal))
+    assert process_runner._posix_group_alive(37) is True
+    assert process_runner._posix_group_alive(37) is False
+
+
 def command(code):
     return [sys.executable, "-I", "-c", code]
 
