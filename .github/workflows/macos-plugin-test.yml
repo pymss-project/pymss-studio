@@ -274,7 +274,7 @@ jobs:
           PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$PY" -c "from pathlib import Path; import shutil; expected=Path('$BIN'); assert Path(shutil.which('ffmpeg')).resolve().parent == expected.resolve(); assert Path(shutil.which('aria2c')).resolve().parent == expected.resolve(); print('bundled tools ok')"
           PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" -c "from pathlib import Path; from pymss.model_download import ARIA2C_PATH; assert ARIA2C_PATH and Path(ARIA2C_PATH).resolve() == Path('$BIN/aria2c').resolve(), 'pymss did not select the bundled aria2c'; print('aria2 resolver ok:', ARIA2C_PATH)"
           PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" "$WORKER" env_info
-          PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" "$WORKER" list_models --payload "{}"
+          PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" "$WORKER" list_models --payload "{}" > "$RUNNER_TEMP/plugin-test-models.json"
           PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" "$(dirname "$WORKER")/runtime_audio_probe.py" --check-core
           codesign --verify --deep --strict --verbose=4 "$APP"
           python3 scripts/verify-native-plugins.py "$APP" --platform macos

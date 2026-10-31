@@ -18,9 +18,9 @@ def executable_path(path: Path) -> Path:
     if path.is_dir() and path.suffix == ".app":
         with (path / "Contents/Info.plist").open("rb") as source:
             info = plistlib.load(source)
-        if info.get("CFBundleIdentifier") != "studio.pymss.desktop":
+        if info.get("CFBundleIdentifier") != "studio.pymss.desktop.plugintest":
             raise ValueError(
-                "The staged application does not use the production bundle identifier"
+                "The staged application does not use the plugin test bundle identifier"
             )
         name = info.get("CFBundleExecutable")
         if not isinstance(name, str) or not name or Path(name).name != name:
