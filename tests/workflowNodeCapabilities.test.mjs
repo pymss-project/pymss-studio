@@ -3,7 +3,7 @@ import test, { after } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
-import { nextTick } from 'vue'
+import { effectScope, nextTick } from 'vue'
 import { setupLitegraphEnvDom } from './_litegraphEnv.mjs'
 
 await setupLitegraphEnvDom()
@@ -99,7 +99,53 @@ test('first inventory prepares defaults before a live metadata reader reserves t
   }
 })
 
-test('disposing a metadata store cancels its inventory wait without leaving a reader', async () => {
+for (const waitReason of ['loading', 'busy']) {
+  test(`metadata loading survives its requesting component unmounting while inventory is ${waitReason}`, async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const market = usePluginMarketplace()
+    const commands = []
+    globalThis.window = { __TAURI_INTERNALS__: { invoke: async command => {
+      commands.push(command)
+      return { nodes: [{ type: 'file_writer', registered: true, savesOutput: true }] }
+    } } }
+    const component = effectScope()
+    let pending
+    try {
+      if (waitReason === 'loading') market.loading.value = true
+      else market.activities.value = [{ action: 'prepare_preinstalled', status: 'running' }]
+      let nodes
+      pending = component.run(() => {
+        nodes = useWorkflowNodeStore()
+        return nodes.load()
+      })
+      pending.catch(() => undefined)
+      assert.equal(nodes.loading, true)
+      assert.deepEqual(commands, [])
+      const revision = pluginRevision.value
+      component.stop()
+
+      market.loading.value = false
+      market.activities.value = []
+      await nextTick()
+      assert.equal(pluginRevision.value, revision)
+      assert.deepEqual(commands, ['list_nodes'])
+      await Promise.all([pending, nodes.load()])
+      assert.equal(nodes.loading, false)
+      assert.equal(nodes.error, '')
+      assert.deepEqual([...nodes.saveNodeTypes], ['file_writer'])
+      assert.deepEqual(commands, ['list_nodes'])
+    } finally {
+      component.stop()
+      market.loading.value = false
+      market.activities.value = []
+      disposePinia(pinia)
+      if (pending) await Promise.allSettled([pending])
+    }
+  })
+}
+
+test('disposing a metadata store cancels inventory waits after the requesting component unmounts', async () => {
   const pinia = createPinia()
   setActivePinia(pinia)
   const market = usePluginMarketplace()
@@ -107,7 +153,9 @@ test('disposing a metadata store cancels its inventory wait without leaving a re
   globalThis.window = { __TAURI_INTERNALS__: { invoke: async command => { commands.push(command); return { nodes: [] } } } }
   const nodes = useWorkflowNodeStore()
   market.loading.value = true
-  const pending = nodes.load()
+  const component = effectScope()
+  const pending = component.run(() => nodes.load())
+  component.stop()
   disposePinia(pinia)
   await assert.rejects(pending, /store is closed/)
   market.loading.value = false

@@ -1,4 +1,4 @@
-import { computed, onScopeDispose, ref, shallowRef, watch } from 'vue'
+import { computed, getCurrentScope, onScopeDispose, ref, shallowRef, watch } from 'vue'
 import { defineStore } from 'pinia'
 import { invoke } from '@tauri-apps/api/core'
 import { pluginRevision, usePluginMarketplace } from '@/features/plugin-marketplace/composable'
@@ -7,6 +7,7 @@ import { isTauriRuntime } from '@/utils/appStore'
 
 /** Live node capabilities belong to the active runtime, never the saved graph. */
 export const useWorkflowNodeStore = defineStore('workflowNodes', () => {
+  const storeScope = getCurrentScope()!
   const market = usePluginMarketplace()
   const declarations = shallowRef<PluginNodeDecl[]>([])
   const loading = ref(false)
@@ -68,9 +69,10 @@ export const useWorkflowNodeStore = defineStore('workflowNodes', () => {
   function waitForInventory(): Promise<void> {
     return new Promise((resolve, reject) => {
       const cancel = () => { stop(); idleWaits.delete(cancel); reject(new Error('Workflow node metadata store is closed')) }
-      const stop = watch([market.busy, market.loading], ([busy, loading]) => {
+      // Shared waits belong to the store even when load() is called from a component's setup.
+      const stop = storeScope.run(() => watch([market.busy, market.loading], ([busy, loading]) => {
         if (!busy && !loading) { stop(); idleWaits.delete(cancel); resolve() }
-      }, { flush: 'post' })
+      }, { flush: 'post' }))!
       idleWaits.add(cancel)
     })
   }
