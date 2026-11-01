@@ -57,25 +57,26 @@ export function mergeSimpleInferenceParams(
 
 export function getWorkflowDefinitionIssue(
   definition: Record<string, unknown>,
+  saveNodeTypes?: ReadonlySet<string>,
 ): WorkflowDefinitionIssue {
   const format = detectWorkflowFormat(definition)
   if (format === 'simple') {
     const steps = definition.steps as unknown[]
     if (hasInvalidSimpleStructure(definition)) return 'invalid-definition'
     if (!steps.length && !(Array.isArray(definition.ensembles) && definition.ensembles.length)) return 'steps-required'
-    return countWorkflowSaveOutputs(definition) ? null : 'no-save-outputs'
+    return countWorkflowSaveOutputs(definition, saveNodeTypes) ? null : 'no-save-outputs'
   }
 
   if (format === 'graph') {
     const nodes = definition.nodes as unknown[]
     if (!nodes.length) return 'steps-required'
-    return countWorkflowSaveOutputs(definition) ? null : 'no-save-outputs'
+    return countWorkflowSaveOutputs(definition, saveNodeTypes) ? null : 'no-save-outputs'
   }
 
   return 'invalid-format'
 }
 
-export function countWorkflowSaveOutputs(definition: Record<string, unknown>): number {
+export function countWorkflowSaveOutputs(definition: Record<string, unknown>, saveNodeTypes?: ReadonlySet<string>): number {
   const format = detectWorkflowFormat(definition)
   if (format === 'simple') {
     const stepOutputs = (definition.steps as unknown[]).reduce<number>((total, value) => {
@@ -103,7 +104,7 @@ export function countWorkflowSaveOutputs(definition: Record<string, unknown>): n
   }
   if (format === 'graph') {
     return (definition.nodes as unknown[]).filter(value => (
-      isRecord(value) && isWorkflowSaveNodeType(value.type)
+      isRecord(value) && isWorkflowSaveNodeType(value.type, saveNodeTypes)
     )).length
   }
   return 0

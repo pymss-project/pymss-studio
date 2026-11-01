@@ -7,6 +7,7 @@ import { NIcon, useDialog, useMessage, type DropdownOption, type DropdownDivider
 import { ExtensionPuzzleOutline, RefreshOutline, SearchOutline, FolderOpenOutline, EllipsisHorizontalOutline, TerminalOutline, ArrowUpCircleOutline, BuildOutline, TrashOutline, CheckmarkCircleOutline, PowerOutline } from '@vicons/ionicons5'
 import { usePluginMarketplace, type InstalledPlugin, type PluginAction, type PluginCompatibility } from '@/features/plugin-marketplace/composable'
 import { useAppStore } from '@/stores/app'
+import { useSettingsStore } from '@/stores/settings'
 import PluginLogDialog from '@/features/plugin-marketplace/PluginLogDialog.vue'
 import { normalizePluginCategory, pluginCategories, pluginLocale, pluginSearchText } from '@/features/plugin-marketplace/presentation'
 import { pluginToolCategories } from '@/features/plugin-marketplace/toolEntries'
@@ -16,6 +17,8 @@ const router = useRouter()
 const dialog = useDialog()
 const message = useMessage()
 const app = useAppStore()
+const settings = useSettingsStore()
+const preparationSources = ref<Record<string, string | null>>({})
 const { snapshot, updates, loading, catalogLoading, error, busy, exclusiveBusy, logs, logRecords, activity, activities, openMarketplace, refreshInventory, manage, cancel } = usePluginMarketplace()
 const tab = ref<'browse' | 'installed'>('browse')
 const search = ref('')
@@ -143,12 +146,13 @@ function operationLabels(plugin: InstalledPlugin) {
 function menuIcon(component: Component) { return () => h(NIcon, { component }) }
 function moreOptions(plugin: InstalledPlugin): (DropdownOption | DropdownDividerOption)[] {
   return [
-    { label: t(plugin.enabled === false ? 'plugins.enable' : 'plugins.disable'), key: plugin.enabled === false ? 'enable' : 'disable', icon: menuIcon(PowerOutline), disabled: disabled.value || (plugin.enabled === false && incompatible(plugin)) },
+    { label: t(plugin.enabled === false ? 'plugins.enable' : 'plugins.disable'), key: plugin.enabled === false ? 'enable' : 'disable', icon: menuIcon(PowerOutline), disabled: disabled.value || plugin.removalPending || (plugin.enabled === false && (incompatible(plugin) || plugin.prepared === false)) },
     { type: 'divider', key: 'availability-divider' },
-    { label: t('plugins.update'), key: 'update', icon: menuIcon(ArrowUpCircleOutline), disabled: disabled.value || !plugin.url },
-    { label: t('plugins.repair'), key: 'repair', icon: menuIcon(BuildOutline), disabled: disabled.value },
+    { label: t('plugins.update'), key: 'update', icon: menuIcon(ArrowUpCircleOutline), disabled: disabled.value || !plugin.url || plugin.prepared === false || plugin.removalPending },
+    { label: t('plugins.repair'), key: 'repair', icon: menuIcon(BuildOutline), disabled: disabled.value || plugin.prepared === false || plugin.removalPending },
+    ...(plugin.preinstalled && plugin.prepared === false && !plugin.removalPending ? [{ label: t('plugins.restorePreinstalled'), key: 'install_preinstalled', icon: menuIcon(BuildOutline), disabled: disabled.value }] : []),
     { type: 'divider', key: 'divider' },
-    { label: () => h('span', { style: { color: 'var(--danger, #d86262)' } }, t('plugins.uninstall')), key: 'uninstall', icon: menuIcon(TrashOutline), disabled: disabled.value },
+    { label: () => h('span', { style: { color: 'var(--danger, #d86262)' } }, t('plugins.uninstall')), key: 'uninstall', icon: menuIcon(TrashOutline), disabled: disabled.value || (plugin.removalPending && plugin.cleanupRuntime !== snapshot.value?.runtime.identity) },
   ]
 }
 function selectMore(key: string, plugin: { name: string }) {
@@ -165,7 +169,24 @@ function selectMore(key: string, plugin: { name: string }) {
       onPositiveClick: () => perform('repair', plugin.name, undefined, { expectedRuntime }),
     })
   } else if (key === 'uninstall') uninstall(plugin.name)
+  else if (key === 'install_preinstalled') void perform('install_preinstalled', plugin.name)
   else if (key === 'enable' || key === 'disable') void perform(key, plugin.name)
+}
+
+async function prepareRuntime(plugin: InstalledPlugin) {
+  const source = plugin.sourceSelectionRequired ? plugin.availableBindings?.find(item => item.runtime === preparationSources.value[plugin.name]) : undefined
+  if (plugin.sourceSelectionRequired && !source) return
+  try {
+    await manage('prepare', {
+      name: plugin.name, expectedRuntime: snapshot.value?.runtime.identity,
+      ...(source ? { sourceRuntime: source.runtime, sourceVersion: source.version, sourceContent: source.content } : {}),
+    })
+  } catch { /* The shared activity keeps the actionable failure details. */ }
+}
+
+async function enableDefaultTools() {
+  settings.pluginDefaultsPolicy = 'auto'
+  await perform('prepare_preinstalled')
 }
 
 async function confirmUpdate() {
@@ -202,6 +223,11 @@ async function requestCancel(id?: string) {
       <router-link to="/settings">{{ t('nav.settings') }}</router-link>
     </n-alert>
     <template v-if="snapshot">
+      <n-alert v-if="snapshot.inventoryWarnings?.length" type="warning" class="plugins-notice">{{ t('plugins.inventoryMigrationWarning') }}</n-alert>
+      <n-alert v-if="snapshot.preinstalledAvailable?.length" type="info" class="plugins-notice">
+        <p>{{ t('plugins.defaultToolsAvailable') }}</p>
+        <n-button secondary :loading="activity?.action === 'prepare_preinstalled' && busy" :disabled="disabled" @click="enableDefaultTools">{{ t('plugins.enableDefaultTools') }}</n-button>
+      </n-alert>
       <n-alert v-if="snapshot.verificationError" type="warning" class="plugins-notice">{{ t('plugins.verificationUnavailable') }} {{ snapshot.verificationError }}</n-alert>
       <n-alert v-if="snapshot.legacyPlugins?.length" type="info" class="plugins-notice">{{ t('plugins.legacyPluginsMoved', { names: snapshot.legacyPlugins.join(', ') }) }}</n-alert>
       <div class="plugins-runtime">
@@ -250,9 +276,19 @@ async function requestCancel(id?: string) {
               <div class="plugin-installed-header">
                 <div class="plugin-card-title"><n-icon :component="ExtensionPuzzleOutline" :size="20" /><h2>{{ pluginTitle(plugin) }}</h2><n-tag v-if="plugin.preinstalled" size="small">{{ t('plugins.preinstalled') }}</n-tag></div>
                 <n-tag v-if="incompatible(plugin)" type="warning" size="small">{{ t('plugins.incompatible') }}</n-tag>
+                <n-tag v-else-if="plugin.removalPending" type="warning" size="small">{{ t('plugins.removalPending') }}</n-tag>
+                <n-tag v-else-if="plugin.prepared === false" type="warning" size="small">{{ t('plugins.notPrepared') }}</n-tag>
                 <n-tag v-else :type="plugin.enabled === false ? 'default' : plugin.loaded == null ? 'warning' : plugin.loaded ? 'success' : 'error'" size="small">{{ plugin.enabled === false ? t('plugins.disabled') : plugin.loaded == null ? t('plugins.notVerified') : plugin.loaded ? t('plugins.loaded') : t('plugins.loadFailed') }}</n-tag>
               </div>
               <p class="plugin-id">{{ plugin.name }}<span v-if="plugin.version"> · {{ plugin.version }}</span></p>
+              <p v-if="plugin.removalPending" class="plugins-help">{{ t('plugins.removalPendingHint') }}</p>
+              <template v-else-if="plugin.prepared === false">
+                <p class="plugins-help">{{ t(plugin.enabled === false ? 'plugins.prepareDisabledHint' : 'plugins.prepareRuntimeHint') }}</p>
+                <n-select v-if="plugin.sourceSelectionRequired" v-model:value="preparationSources[plugin.name]" :disabled="disabled"
+                  :placeholder="t('plugins.chooseSourceVersion')"
+                  :options="(plugin.availableBindings || []).map(item => ({ value: item.runtime, label: `${item.runtime} · ${item.version || '—'}` }))" />
+                <p class="plugins-help">{{ t(plugin.availableBindings?.length ? 'plugins.prepareDependenciesHint' : 'plugins.prepareSourceMissing') }}</p>
+              </template>
               <p v-if="plugin.resolvedCommit" class="plugin-id">{{ t('plugins.sourceCommit') }} <code :title="plugin.resolvedCommit">{{ plugin.resolvedCommit.slice(0, 12) }}</code></p>
               <div class="plugin-category-list"><n-tag v-for="value in pluginToolCategories(plugin)" :key="value || 'other'" size="small" :bordered="false">{{ categoryLabel(value) }}</n-tag></div>
               <p v-if="pluginDescription(plugin)" class="plugin-description">{{ pluginDescription(plugin) }}</p>
@@ -269,6 +305,9 @@ async function requestCancel(id?: string) {
               <p v-else-if="plugin.loaded && plugin.managed && !plugin.contributions?.views?.length" class="plugins-help">{{ t('plugins.noOperations') }}</p>
               <p v-if="!plugin.managed" class="plugins-help">{{ t('plugins.manuallyInstalled') }}</p>
               <div class="plugin-installed-footer">
+                <n-button v-if="plugin.prepared === false && plugin.availableBindings?.length && !plugin.removalPending" type="primary" size="small"
+                  :loading="installing(plugin.name)" :disabled="disabled || incompatible(plugin) || (plugin.sourceSelectionRequired && !plugin.availableBindings.some(item => item.runtime === preparationSources[plugin.name]))"
+                  @click="prepareRuntime(plugin)">{{ t('plugins.prepareRuntime') }}</n-button>
                 <div v-if="plugin.contributions?.views?.length" class="plugin-views-row">
                   <n-button v-for="(view, index) in plugin.contributions.views" :key="view.id" :type="index === 0 ? 'primary' : 'default'" size="small" :disabled="!plugin.loaded || incompatible(plugin) || busy" @click="openPluginView(plugin, view)">{{ index === 0 ? t('plugins.openTool') : view.title || view.id }}</n-button>
                 </div>

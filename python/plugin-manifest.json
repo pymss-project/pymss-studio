@@ -5,5 +5,10 @@
     "ref": "main",
     "registryRef": "main"
   },
-  "preinstalled": []
+  "preinstalled": [
+    "pymss.convert",
+    "pymss.merge",
+    "pymss.slicer",
+    "pymss.inspect"
+  ]
 }

@@ -178,6 +178,15 @@ test('published SDK exposes the extended methods with operation ids and exact pa
   assert.equal(JSON.stringify(await manage), JSON.stringify({ package: 'funasr', installed: true }))
 })
 
+test('published SDK can bind an operation run to its described contract', async () => {
+  const { sdk, sent, respond } = sdkHarness()
+  const digest = 'a'.repeat(64)
+  const request = sdk.startOperation('alice.tool.process', {}, {}, undefined, { expectedSpecDigest: digest })
+  assert.equal(sent.at(-1).params.expectedSpecDigest, digest)
+  respond(request.id, { outputs: {} })
+  assert.equal(JSON.stringify(await request), JSON.stringify({ outputs: {} }))
+})
+
 test('published SDK ignores foreign-frame responses and preserves task cancellation codes', async () => {
   const { sdk, sent, deliver, parent } = sdkHarness()
   const request = sdk.startOperation('plugin.convert', {}, {})

@@ -15,6 +15,7 @@ import {
 import { registerWindowCloseGuard, WindowClosePersistenceError } from '@/utils/windowCloseGuards'
 import { isTauriRuntime } from '@/utils/appStore'
 import type { SeparationTask, StemOutput } from '@/stores/task'
+import { isAudioOutput } from '@/utils/stemOutputs'
 import type {
   EditorMasterLimiter,
   EditorPluginSlot,
@@ -998,12 +999,14 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   async function requestProjectFromTask(task: SeparationTask) {
+    const outputs = task.outputs.filter(isAudioOutput)
+    if (task.outputs.length && !outputs.length) throw new Error(i18n.global.t('editor.importEmpty'))
     return invoke<PersistedSession>('create_editor_project_from_task', {
       payload: {
         taskId: task.id,
         input: task.input,
         outputDir: task.output,
-        outputs: task.outputs as StemOutput[],
+        outputs,
       },
     })
   }

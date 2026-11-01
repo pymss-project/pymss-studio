@@ -18,6 +18,7 @@ import { cloneWorkflow } from '@/workflows/workbench'
 import WorkflowNodeEditor from '@/components/workflow/WorkflowNodeEditorLite.vue'
 import WorkflowRevisionConflictModal from '@/components/workflow/WorkflowRevisionConflictModal.vue'
 import { useModelStore } from '@/stores/model'
+import { useWorkflowNodeStore } from '@/stores/workflowNodes'
 import {
   useWorkflowStore,
   WorkflowRevisionConflictError,
@@ -38,6 +39,8 @@ const router = useRouter()
 const message = useMessage()
 const workflow = useWorkflowStore()
 const model = useModelStore()
+const workflowNodes = useWorkflowNodeStore()
+void workflowNodes.load().catch(() => undefined)
 const { workflows } = storeToRefs(workflow)
 const { models, downloadedModels } = storeToRefs(model)
 
@@ -92,8 +95,12 @@ const formError = computed(() => {
   if (!nodes.length) return t('workflows.stepsRequired')
   // Deep validation belongs to pymss. Incomplete graphs can still be saved
   // as drafts; these checks only prevent submitting an incomplete workflow.
-  const hasOutput = nodes.some(n => isWorkflowSaveNodeType(n.type))
-  if (!hasOutput) return t('workflows.workflowNoSaveOutputs')
+  const hasOutput = nodes.some(n => isWorkflowSaveNodeType(n.type, workflowNodes.saveNodeTypes))
+  if (!hasOutput) {
+    if (workflowNodes.loading) return t('common.loading')
+    if (workflowNodes.error) return t('workflows.nodeMetadataUnavailable', { error: workflowNodes.error })
+    return t('workflows.workflowNoSaveOutputs')
+  }
   return ''
 })
 

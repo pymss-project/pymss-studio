@@ -548,6 +548,58 @@ async function restoreWorkflowQueue(count, inputCounts, workbench = false) {
   return resumeRestoredQueue(queuedWorkflowSnapshots(count, inputCounts, workbench))
 }
 
+test('a restored file workflow can be cancelled while live node metadata is loading', async () => {
+  const snapshots = queuedWorkflowSnapshots(1, [0], true)
+  snapshots[0].runConfig.workflowDefinition = { nodes: [{ id: 1, type: 'plugin_file_writer' }], links: [] }
+  storage({ 'task-history': { tasks: snapshots } })
+  const task = await newStore()
+  const calls = []
+  let rejectMetadata
+  window.__TAURI_INTERNALS__ = {
+    metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+    invoke(command) {
+      calls.push(command)
+      if (command === 'list_nodes') return new Promise((_resolve, reject) => { rejectMetadata = reject })
+      return Promise.resolve(null)
+    },
+  }
+  task.scheduleQueue()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(task.tasks[0].status, 'preparing')
+  await task.cancelWorkbenchJob('restored-workflow')
+  assert.equal(task.tasks[0].status, 'cancelled')
+  rejectMetadata(new Error('runtime unavailable'))
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(task.tasks[0].status, 'cancelled')
+  assert.ok(!calls.includes('start_workflow_inference'))
+  assert.ok(!calls.includes('cancel_task'))
+})
+
+test('cancelling one file task during metadata loading requeues the rest of its batch', async () => {
+  const snapshots = queuedWorkflowSnapshots(2, [0, 0], true)
+  for (const snapshot of snapshots) snapshot.runConfig.workflowDefinition = { nodes: [{ id: 1, type: 'plugin_file_writer' }], links: [] }
+  storage({ 'task-history': { tasks: snapshots } })
+  const task = await newStore()
+  const starts = []
+  let resolveMetadata
+  window.__TAURI_INTERNALS__ = {
+    metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+    invoke(command, args) {
+      if (command === 'list_nodes') return new Promise(resolve => { resolveMetadata = resolve })
+      if (command === 'start_workflow_inference') starts.push(args.payload.taskId)
+      return Promise.resolve({ started: true })
+    },
+  }
+  task.scheduleQueue()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  await task.cancelTask(snapshots[0].id)
+  resolveMetadata({ nodes: [{ type: 'plugin_file_writer', registered: true, savesOutput: true }] })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.deepEqual(starts, [snapshots[1].id])
+  assert.equal(task.tasks.find(item => item.id === snapshots[0].id).status, 'cancelled')
+  assert.equal(task.tasks.find(item => item.id === snapshots[1].id).status, 'preparing')
+})
+
 for (const count of [1, 2]) {
   for (const inputs of [0, 2]) {
     test(`restoring ${count} queued workflow task(s) rejects ${inputs} inputs before dispatch`, async () => {

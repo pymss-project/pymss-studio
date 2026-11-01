@@ -216,7 +216,7 @@ export type ComfyOverview = {
 /** Read-only overview of a comfy-mss graph for the workflows page: node /
  * separation / output counts, referenced models, and runtime input slots
  * (load nodes with an input_name widget — pymss >= 2.1.2 contract). */
-export function analyzeComfyOverview(definition: unknown): ComfyOverview | null {
+export function analyzeComfyOverview(definition: unknown, saveNodeTypes?: ReadonlySet<string>): ComfyOverview | null {
   if (!isRecord(definition) || !Array.isArray(definition.nodes)) return null
   const nodes = definition.nodes as any[]
   const stripPrefix = (raw: string) => raw.replace(/^\[[^\]]*\]\s*/, '').trim()
@@ -231,7 +231,7 @@ export function analyzeComfyOverview(definition: unknown): ComfyOverview | null 
       const model = stripPrefix(raw)
       if (model && !models.includes(model)) models.push(model)
     }
-    if (isWorkflowSaveNodeType(type)) outputCount += 1
+    if (isWorkflowSaveNodeType(type, saveNodeTypes)) outputCount += 1
   }
   return {
     nodeCount: nodes.length,

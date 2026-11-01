@@ -33,6 +33,7 @@ const {
   storeGraphDefaults,
 } = await vite.ssrLoadModule('/src/workflows/graphDefaults.ts')
 const {
+  analyzeComfyOverview,
   analyzeSimpleWorkflow,
   buildSimpleWorkflowDefinition,
   createDefaultSimpleEditorUi,
@@ -42,6 +43,7 @@ const {
   normalizeSimpleInferenceParams,
   renderSimpleOutputFilename,
 } = await vite.ssrLoadModule('/src/utils/workflowSimple.ts')
+
 const {
   analyzeSimpleModelChangeImpact,
   analyzeSimpleNodeRemovalImpact,
@@ -57,6 +59,21 @@ const {
   simpleStepInputTarget,
   updateSimpleEnsembleOutputStem,
 } = await vite.ssrLoadModule('/src/utils/simpleWorkflowEditor.ts')
+
+test('graph validation counts registered persistent file nodes without treating strings as files', () => {
+  const definition = { nodes: [
+    { type: 'StringConstant', outputs: [{ type: 'STRING' }] },
+    { type: 'custom.python_writer' },
+    { type: 'custom.rust_writer' },
+  ], links: [] }
+  const saves = new Set(['custom.python_writer', 'custom.rust_writer'])
+  assert.equal(countWorkflowSaveOutputs(definition), 0)
+  assert.equal(countWorkflowSaveOutputs(definition, saves), 2)
+  assert.equal(getWorkflowDefinitionIssue(definition, saves), null)
+  assert.equal(analyzeComfyOverview(definition, saves).outputCount, 2)
+  assert.equal(getWorkflowDefinitionIssue({ nodes: [{ type: 'StringConstant', savesOutput: true }], links: [] }, saves), 'no-save-outputs')
+  assert.equal(countWorkflowSaveOutputs({ nodes: [{ type: 'SaveAudio' }, { type: 'custom.python_writer' }], links: [] }, saves), 2)
+})
 
 function simpleFixture() {
   return {

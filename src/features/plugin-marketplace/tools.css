@@ -15,4 +15,9 @@
 .audio-tools-mobile-select { display: none; margin-bottom: 12px; }
 .plugin-tool-loading { min-height: 320px; display: grid; place-items: center; gap: 12px; }
 .plugin-tool-loading p { margin: 0; color: var(--on-surface-muted); font-size: 12px; }
+.plugin-tool-unavailable { padding: 24px; border: 1px solid var(--outline); border-radius: 14px; background: var(--surface-1); }
+.plugin-tool-unavailable h2 { margin: 0 0 12px; font-size: 18px; }
+.plugin-tool-unavailable p { max-width: 680px; color: var(--on-surface-muted); line-height: 1.7; overflow-wrap: anywhere; }
+.plugin-tool-unavailable .n-select { max-width: 520px; }
+.plugin-tool-unavailable .n-button { margin-right: 8px; }
 @media (max-width: 900px) { .audio-tools-mobile-select { display: block; }.audio-tools-workspace { grid-template-columns: 1fr; }.audio-tools-nav { display: none; } }

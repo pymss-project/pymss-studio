@@ -412,6 +412,7 @@ test('advanced editor labels follow locale without changing workflow data', () =
   const separate = graph.nodes.find(node => String(node.type).includes('mss_separate'))
   assert.equal(separate.title, 'MSS 分离')
   assert.equal(separate.widgets.find(widget => widget.name === 'model_name').label, '模型名称')
+  assert.equal(separate.widgets.find(widget => widget.name === 'source').label, '模型源')
   assert.equal(separate.inputs.find(input => input.name === 'audio').label, '音频')
   assert.match(separate.outputs[0].label, /\(音频\)$/)
   assert.deepEqual(exportGraph(graph), before, 'display translations must not leak into serialized workflow data')
@@ -430,6 +431,26 @@ test('advanced editor labels follow locale without changing workflow data', () =
   assert.equal(customized.title, 'Custom ensemble')
   assert.equal(customized.inputs[0].label, 'Primary mix')
   setPymssNodeTranslator(en)
+})
+
+test('plugin source ports use generic labels without changing their names or saved values', () => {
+  const type = 'test_file_source_label'
+  try {
+    registerPluginNodeSpecs([pluginNodeSpec({ type, inputs: [{ name: 'source', type: 'STRING' }], outputs: [], widgets: [] })])
+    const graph = new LGraph()
+    const node = LiteGraph.createNode(type)
+    graph.add(node)
+    const before = exportGraph(graph)
+    localizePymssNode(node, translator('zh-CN'))
+    assert.equal(node.inputs[0].label, '来源')
+    assert.equal(node.inputs[0].name, 'source')
+    assert.deepEqual(exportGraph(graph), before)
+    localizePymssNode(node, translator('en'))
+    assert.equal(node.inputs[0].label, 'Source')
+  } finally {
+    registerPluginNodeSpecs([])
+    setPymssNodeTranslator(translator('en'))
+  }
 })
 
 test('advanced editor localizes nested LiteGraph context menus', () => {

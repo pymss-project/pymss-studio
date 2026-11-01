@@ -225,10 +225,12 @@ async function handleCall(id: number, method: string, params: Record<string, unk
       }
     }
     case 'operations.describe':
-      return await invoke('describe_operation', { payload: { operation: params.operation } })
+      return await invoke('describe_operation', { payload: { operation: params.operation, ...(params.refresh === true ? { refresh: true } : {}) } })
     case 'operations.start': {
+      if (params.expectedSpecDigest !== undefined && (typeof params.expectedSpecDigest !== 'string' || !/^[0-9a-f]{64}$/.test(params.expectedSpecDigest))) throw new Error('INVALID_OPERATION_DIGEST')
       return await startBackground(id, 'start_operation_task', 'operation', {
         operation: params.operation, inputs: params.inputs || {}, params: params.params || {},
+        ...(typeof params.expectedSpecDigest === 'string' ? { expectedSpecDigest: params.expectedSpecDigest } : {}),
         ...(typeof params.outputDir === 'string' && params.outputDir.trim() ? { outputDir: params.outputDir.trim() } : {}),
       })
     }
@@ -242,6 +244,20 @@ async function handleCall(id: number, method: string, params: Record<string, unk
     case 'files.pickAudio': {
       const multiple = params.multiple === true
       const selected = await open({ multiple, title: 'Audio' })
+      if (multiple) return Array.isArray(selected) ? { paths: selected } : { paths: [] }
+      return typeof selected === 'string' ? { path: selected } : null
+    }
+    case 'files.pickFile': {
+      const extensions = params.extensions
+      if (extensions !== undefined && (!Array.isArray(extensions) || extensions.length > 32
+        || !extensions.every(value => typeof value === 'string' && /^[a-z0-9]{1,12}$/.test(value)))) {
+        throw new Error('INVALID_FILE_EXTENSIONS')
+      }
+      const title = typeof params.title === 'string' && params.title.length <= 200 ? params.title : undefined
+      const multiple = params.multiple === true
+      const selected = await open({ multiple, title,
+        ...(Array.isArray(extensions) && extensions.length ? { filters: [{ name: title || 'Files', extensions }] } : {}),
+      })
       if (multiple) return Array.isArray(selected) ? { paths: selected } : { paths: [] }
       return typeof selected === 'string' ? { path: selected } : null
     }

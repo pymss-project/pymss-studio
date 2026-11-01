@@ -199,6 +199,41 @@ class RunOperationTests(unittest.TestCase):
                 os.environ.pop("PYMSS_PLUGINS_DIR", None)
 
 
+class DescribeOperationCacheTests(unittest.TestCase):
+    def test_real_v2_fallback_is_reused_without_loading_the_runtime_again(self):
+        import pymss.operations as operations
+        import pymss.plugins as plugins
+        import worker_plugins
+
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            directory = work / "plugins"
+            directory.mkdir()
+            shutil.copytree(_loudnorm_fixture(work), directory / "loudnorm")
+            with (
+                mock.patch.dict(os.environ, {
+                    "PYMSS_PLUGINS_DIR": str(directory),
+                    "PYMSS_STUDIO_RUNTIME_ENVS_DIR": str(work / "runtimes"),
+                    "PYMSS_STUDIO_ACTIVE_RUNTIME_FILE": str(work / "active.json"),
+                }),
+                mock.patch.object(worker_plugins, "_root", return_value=work / "managed"),
+            ):
+                operations._DEFAULT_RUNTIME = None
+                plugins.reset()
+                try:
+                    first = io.StringIO()
+                    with redirect_stdout(first):
+                        self.assertEqual(worker_operations.cmd_describe_operation({"operation": "pymss.loudnorm.normalize"}), 0)
+                    second = io.StringIO()
+                    with mock.patch.object(worker_operations, "_runtime", side_effect=AssertionError("Unexpected runtime import")), redirect_stdout(second):
+                        self.assertEqual(worker_operations.cmd_describe_operation({"operation": "pymss.loudnorm.normalize"}), 0)
+                    self.assertEqual(json.loads(first.getvalue())["payload"], json.loads(second.getvalue())["payload"])
+                    self.assertEqual(len(json.loads(second.getvalue())["payload"]["specDigest"]), 64)
+                finally:
+                    operations._DEFAULT_RUNTIME = None
+                    plugins.reset()
+
+
 class OperationInputTests(unittest.TestCase):
     def test_plugin_recovery_metadata_survives_the_operation_protocol(self):
         from pymss.operations import OperationSpec, Runtime

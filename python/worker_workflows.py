@@ -1308,6 +1308,9 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
             else {"progress_event_callback": _emit_progress(task_id, log_scope)}
         run_kwargs = {}
         parameters = inspect.signature(graph.run_dag).parameters
+        if "host_request" in parameters:
+            from pymss.operations.host_services import ReadonlyHost
+            run_kwargs["host_request"] = ReadonlyHost("studio-workflow")
         if "node_results" in parameters or any(
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         ):
@@ -1383,6 +1386,8 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
             item["nodeId"] = str(rec.node_id)
         if rec and rec.sample_rate:
             item["sampleRate"] = rec.sample_rate
+        if rec and getattr(rec, "kind", "") == "file":
+            item.update({"kind": "file", "mediaType": getattr(rec, "media_type", "application/octet-stream")})
         outputs.append(item)
 
     # Non-output leaf nodes (plugin STRING producers: ASR text, measurements,

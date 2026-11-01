@@ -6,6 +6,7 @@
     "operations.start",
     "operations.cancel",
     "files.pickAudio",
+    "files.pickFile",
     "files.pickDirectory",
     "files.pickModel",
     "files.scanAudio",

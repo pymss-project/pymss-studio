@@ -5,6 +5,7 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import { FolderOutline, OpenOutline, PauseOutline, PlayOutline } from '@vicons/ionicons5'
 import { isTauriRuntime } from '@/utils/appStore'
 import type { StemOutput } from '@/stores/task'
+import { isAudioOutput } from '@/utils/stemOutputs'
 
 const props = defineProps<{
   outputs?: StemOutput[]; directories?: string[]; outputDirectory?: string
@@ -21,6 +22,7 @@ const playback = ref<Record<string, Playback>>({})
 const playingPath = ref('')
 const outputGroups = computed(() => props.groups || [{ id: 'outputs', label: '', outputs: props.outputs || [] }])
 const outputs = computed(() => outputGroups.value.flatMap(group => group.outputs))
+const audioOutputs = computed(() => outputs.value.filter(isAudioOutput))
 const directories = computed(() => [...new Set((props.directories?.length ? props.directories : [props.outputDirectory || '']).filter(Boolean))])
 let audio: HTMLAudioElement | undefined
 let audioPath = ''
@@ -54,6 +56,7 @@ function releaseAudio() {
 }
 
 function prepareAudio(path: string) {
+  if (!audioOutputs.value.some(output => output.path === path)) return undefined
   if (audio && audioPath === path && !state(path).failed) return audio
   releaseAudio()
   if (!isTauriRuntime()) return undefined
@@ -123,7 +126,7 @@ function seek(path: string, value: number) {
   if (player && player.readyState > 0) player.currentTime = position
 }
 
-watch(() => outputs.value.map(output => output.path).filter(Boolean), paths => {
+watch(() => audioOutputs.value.map(output => output.path).filter(Boolean), paths => {
   const available = new Set(paths)
   if (!available.has(audioPath)) {
     releaseAudio()
@@ -145,21 +148,21 @@ onBeforeUnmount(releaseAudio)
         </n-button>
       </div>
     </div>
-    <div class="result-preview-heading"><strong>{{ t('separate.previewTitle') }}</strong><span>{{ outputs.length }} {{ t('separate.previewStemUnit') }}</span></div>
+    <div class="result-preview-heading"><strong>{{ t(outputs.length === audioOutputs.length ? 'separate.previewTitle' : 'results.title') }}</strong><span>{{ outputs.length }} {{ t(outputs.length === audioOutputs.length ? 'separate.previewStemUnit' : 'separate.queueFileUnit') }}</span></div>
     <section v-for="group in outputGroups" :key="group.id" class="result-output-group">
       <h4 v-if="group.label" :title="group.label">{{ group.label }}</h4>
       <div class="result-track-list" role="list">
-      <article v-for="output in group.outputs" :key="output.path" class="result-track" :class="{ 'result-track--playing': playingPath === output.path, 'result-track--error': state(output.path).failed }" :data-output-path="output.path" role="listitem">
+      <article v-for="output in group.outputs" :key="output.path" class="result-track" :class="{ 'result-track--file': !isAudioOutput(output), 'result-track--playing': playingPath === output.path, 'result-track--error': state(output.path).failed }" :data-output-path="output.path" role="listitem">
         <div class="result-track__title">
           <strong :title="output.path">{{ fileName(output.path) }}</strong>
-          <small class="result-track__stem">{{ output.stem }}</small>
+          <small class="result-track__stem">{{ isAudioOutput(output) ? output.stem : output.mediaType || output.stem }}</small>
           <span v-if="state(output.path).failed" class="result-track__error" role="status">{{ t('separate.previewPlayFailed') }}</span>
         </div>
-        <n-button class="result-track__play" circle secondary size="small" :type="playingPath === output.path ? 'primary' : 'default'" :loading="state(output.path).loading" :title="t(playingPath === output.path ? 'common.pause' : 'workbench.playAudio')" :aria-label="t(playingPath === output.path ? 'common.pause' : 'workbench.playAudio') + ' · ' + fileName(output.path)" @click="toggle(output.path)">
+        <n-button v-if="isAudioOutput(output)" class="result-track__play" circle secondary size="small" :type="playingPath === output.path ? 'primary' : 'default'" :loading="state(output.path).loading" :title="t(playingPath === output.path ? 'common.pause' : 'workbench.playAudio')" :aria-label="t(playingPath === output.path ? 'common.pause' : 'workbench.playAudio') + ' · ' + fileName(output.path)" @click="toggle(output.path)">
           <template #icon><n-icon :component="playingPath === output.path ? PauseOutline : PlayOutline" /></template>
         </n-button>
-        <n-slider v-slider-label="t('workbench.playbackPosition') + ' · ' + fileName(output.path)" class="result-track__slider" :value="state(output.path).currentTime" :min="0" :max="Math.max(state(output.path).duration, 1)" :step="0.1" :tooltip="false" :disabled="!state(output.path).duration || state(output.path).failed" @update:value="(value: number) => seek(output.path, value)" />
-        <span class="result-track__time">{{ time(state(output.path).currentTime) }} / {{ state(output.path).duration ? time(state(output.path).duration) : '--:--' }}</span>
+        <n-slider v-if="isAudioOutput(output)" v-slider-label="t('workbench.playbackPosition') + ' · ' + fileName(output.path)" class="result-track__slider" :value="state(output.path).currentTime" :min="0" :max="Math.max(state(output.path).duration, 1)" :step="0.1" :tooltip="false" :disabled="!state(output.path).duration || state(output.path).failed" @update:value="(value: number) => seek(output.path, value)" />
+        <span v-if="isAudioOutput(output)" class="result-track__time">{{ time(state(output.path).currentTime) }} / {{ state(output.path).duration ? time(state(output.path).duration) : '--:--' }}</span>
         <n-button class="result-track__open" circle quaternary size="small" :title="t('common.open') + ' · ' + fileName(output.path)" :aria-label="t('common.open') + ' · ' + fileName(output.path)" @click="emit('reveal', output.path)"><template #icon><n-icon :component="OpenOutline" /></template></n-button>
       </article>
       </div>
@@ -182,6 +185,7 @@ onBeforeUnmount(releaseAudio)
 .result-output-group h4 { margin: 0; color: var(--on-surface-muted); font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .result-track { display: grid; grid-template-columns: minmax(180px, 1.15fr) 28px minmax(120px, 1fr) 102px 28px; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--outline) 78%, transparent); border-radius: 14px; background: color-mix(in srgb, var(--surface-2) 44%, transparent); transition: border-color 160ms, background-color 160ms; }
 .result-track--playing { border-color: color-mix(in srgb, var(--primary) 40%, var(--outline)); background: color-mix(in srgb, var(--primary-soft) 30%, var(--surface)); }
+.result-track--file { grid-template-columns: minmax(0, 1fr) 28px; }
 .result-track--error { border-color: color-mix(in srgb, var(--danger) 35%, var(--outline)); }
 .result-track__title { display: grid; gap: 5px; min-width: 0; }
 .result-track__title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
@@ -196,5 +200,8 @@ onBeforeUnmount(releaseAudio)
   .result-track__play { grid-column: 1; grid-row: 2; }
   .result-track__slider { grid-column: 2; grid-row: 2; }
   .result-track__time { grid-column: 3 / 5; grid-row: 2; }
+  .result-track--file { grid-template-columns: minmax(0, 1fr) 28px; }
+  .result-track--file .result-track__title { grid-column: 1; }
+  .result-track--file .result-track__open { grid-column: 2; }
 }
 </style>

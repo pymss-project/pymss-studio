@@ -17,6 +17,7 @@ import { useTaskStore, type SeparationJob, type SeparationTask } from '@/stores/
 import { useEditorStore, type OrphanedEditorProject } from '@/stores/editor'
 import { usePagedSelection } from '@/composables/usePagedSelection'
 import { resultType, RESULT_TYPE_KEYS, type ResultType } from '@/utils/resultType'
+import { isAudioOutput } from '@/utils/stemOutputs'
 import { NCheckbox, useDialog, useMessage } from 'naive-ui'
 
 type ResultSort = 'time_desc' | 'time_asc' | 'name_asc' | 'name_desc'
@@ -847,7 +848,7 @@ function formatDurationMs(value: number | undefined) {
               <span data-result-text class="result-row__type">{{ t(RESULT_TYPE_KEYS[item.resultType]) }}</span>
               <span data-result-text class="result-row__model" :title="groupTaskIdTitle(item)">{{ item.model }}</span>
               <span data-result-text>{{ item.inputCount }} {{ t('results.inputUnit') }}</span>
-              <span data-result-text>{{ item.outputCount }} {{ t('results.stemUnit') }}</span>
+              <span data-result-text>{{ item.outputCount }} {{ t(item.outputCount && item.items.every(result => result.outputs.every(isAudioOutput)) ? 'results.stemUnit' : 'results.fileUnit') }}</span>
               <span data-result-text>{{ formatDurationMs(item.durationMs) }}</span>
               <span data-result-text class="result-row__time"><n-icon :component="TimeOutline" /> {{ formatTime(item.updatedAt) }}</span>
             </span>
@@ -864,7 +865,7 @@ function formatDurationMs(value: number | undefined) {
         </button>
 
         <div v-if="!selecting" class="result-row__actions" data-guide="result-actions">
-          <n-button v-if="item.inputCount === 1" size="small" type="primary" @click.stop="openInEditor(item.primary)">
+          <n-button v-if="item.inputCount === 1 && item.primary.outputs.some(isAudioOutput)" size="small" type="primary" @click.stop="openInEditor(item.primary)">
             <template #icon><n-icon :component="ColorWandOutline" /></template>
             {{ t('results.openInEditor') }}
           </n-button>
@@ -888,10 +889,10 @@ function formatDurationMs(value: number | undefined) {
               <div v-if="item.items.length > 1" class="result-detail-card__head">
                 <div>
                   <strong>{{ getFileName(result.input) }}</strong>
-                  <span>{{ result.outputs.length }} {{ t('results.stemUnit') }} · {{ formatDurationMs(taskDurationMs(result)) }}</span>
+                  <span>{{ result.outputs.length }} {{ t(result.outputs.length && result.outputs.every(isAudioOutput) ? 'results.stemUnit' : 'results.fileUnit') }} · {{ formatDurationMs(taskDurationMs(result)) }}</span>
                 </div>
                 <div class="result-detail-card__actions">
-                  <n-button size="tiny" secondary @click.stop="openInEditor(result)">
+                  <n-button v-if="result.outputs.some(isAudioOutput)" size="tiny" secondary @click.stop="openInEditor(result)">
                     <template #icon><n-icon :component="ColorWandOutline" /></template>
                     {{ t('results.openInEditor') }}
                   </n-button>

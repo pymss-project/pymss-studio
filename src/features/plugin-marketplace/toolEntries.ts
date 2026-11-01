@@ -20,6 +20,11 @@ export type PluginToolPlugin = {
   managed: boolean
   loaded: boolean | null
   enabled?: boolean
+  prepared?: boolean
+  availability?: 'ready' | 'unavailable' | 'not_prepared'
+  error?: string | null
+  sourceSelectionRequired?: boolean
+  availableBindings?: { runtime: string; version: string | null; content: string | null }[]
   toolCategory?: string | null
   toolIcon?: string | null
   locales?: PluginLocales
@@ -34,6 +39,10 @@ export type PluginToolEntry = {
   category?: string | null
   icon?: string | null
   locales?: PluginLocales
+  availability?: 'ready' | 'unavailable' | 'not_prepared'
+  error?: string | null
+  sourceSelectionRequired?: boolean
+  availableBindings?: { runtime: string; version: string | null; content: string | null }[]
 }
 
 export function pluginToolRouteId(pluginName: string, viewId: string) {
@@ -52,7 +61,7 @@ export function pluginToolCategories(plugin: Pick<PluginToolPlugin, 'toolCategor
 
 export function pluginToolEntries(plugins: readonly PluginToolPlugin[]): PluginToolEntry[] {
   return plugins
-    .filter(plugin => plugin.managed && plugin.loaded && plugin.enabled !== false)
+    .filter(plugin => plugin.managed && (plugin.loaded || plugin.availability !== undefined) && plugin.enabled !== false)
     .flatMap(plugin => (plugin.contributions?.views || [])
       .filter(view => Array.isArray(view.placements) && view.placements.includes('tool'))
       .map(view => {
@@ -70,6 +79,8 @@ export function pluginToolEntries(plugins: readonly PluginToolPlugin[]): PluginT
           category,
           icon: view.icon || plugin.toolIcon,
           locales,
+          ...(plugin.availability !== undefined ? { availability: plugin.availability, error: plugin.error,
+            sourceSelectionRequired: plugin.sourceSelectionRequired, availableBindings: plugin.availableBindings } : {}),
         }
       }))
 }

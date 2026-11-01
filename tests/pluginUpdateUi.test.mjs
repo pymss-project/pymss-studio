@@ -19,7 +19,7 @@ function page() {
   }
   const scope = { computed, ref, nextTick: async callback => callback?.(), watch() {}, onMounted() {},
     useI18n: () => ({ t: key => key, locale: ref('zh-CN') }), usePluginMarketplace: () => market,
-    useRouter: () => ({ push() {} }), useAppStore: () => ({}),
+    useRouter: () => ({ push() {} }), useAppStore: () => ({}), useSettingsStore: () => ({ pluginDefaultsPolicy: 'review' }),
     useDialog: () => ({ warning: options => confirmations.push(options) }),
     useMessage: () => ({ success() {}, warning: value => warnings.push(value), error() {} }),
   }

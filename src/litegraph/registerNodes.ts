@@ -504,7 +504,9 @@ function localizeNodeWithSpec(node: AnyNode, spec: NodeSpec, translator?: NodeTr
     node[LAST_DEFAULT_TITLE] = title
   }
   for (const widget of node.widgets || []) {
-    widget.label = translateNodeField(String(widget.name || ''), translator)
+    const field = widget.name === 'source' && spec === NODE_SPECS[spec.type] && spec.category === 'pymss/separate'
+      ? 'model_source' : String(widget.name || '')
+    widget.label = translateNodeField(field, translator)
   }
   localizeSlots(node.inputs, translator)
   localizeSlots(node.outputs, translator)

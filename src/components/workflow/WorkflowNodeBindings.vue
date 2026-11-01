@@ -111,6 +111,7 @@ watch(() => [props.nodeId, props.action], () => {
       <strong>{{ aggregateOutput ? t('separate.outputDirectorySummary') : node.label }}</strong>
       <n-input size="small" readonly :value="outputDirectory(node.id)" :title="outputDirectory(node.id)" />
       <p v-if="nativeGraph" class="binding-hint">{{ t('workbench.outputRootHint') }}</p>
+      <p class="binding-hint">{{ t('workbench.outputSessionHint') }}</p>
       <div class="binding-actions">
         <n-button size="small" secondary type="primary" :disabled="busy" @click="pickOutput(node.id)"><template #icon><n-icon :component="FolderOpenOutline" /></template>{{ t('workbench.chooseOutput') }}</n-button>
         <n-button size="small" secondary :disabled="busy || isDefaultOutput(node.id)" :title="t('separate.outputDefault')" @click="resetOutput(node.id)"><template #icon><n-icon :component="RefreshOutline" /></template>{{ t('workbench.defaultOutput') }}</n-button>

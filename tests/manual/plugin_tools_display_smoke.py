@@ -19,6 +19,8 @@ def main():
     parser.add_argument("--url", default="http://127.0.0.1:1564")
     parser.add_argument("--plugins", type=Path, default=Path(__file__).resolve().parents[3] / "pymss-plugins")
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--animations", action="store_true")
+    parser.add_argument("--stress-routing", action="store_true")
     args = parser.parse_args()
     output = args.output_dir or Path(tempfile.mkdtemp(prefix="studio-plugin-display-"))
     output.mkdir(parents=True, exist_ok=True)
@@ -43,7 +45,7 @@ def main():
             page.add_init_script("""if(window===window.top)localStorage.setItem('pymss-studio:app-settings', JSON.stringify({
               startupOnboardingSeen:true,beginnerGuideInvitationSeen:true,locale:'zh-CN',
               themeMode:'light',animationsEnabled:false
-            }))""")
+            }))""".replace("animationsEnabled:false", f"animationsEnabled:{str(args.animations).lower()}"))
             def plugin_page(route):
                 from urllib.parse import urlparse
                 path = urlparse(route.request.url).path.removeprefix("/view")
@@ -62,9 +64,9 @@ def main():
               window.__inventory={installed:rows,pluginsDir:'C:/plugins',runtime:{identity:'cpu',pythonPath:'C:/python.exe'},catalog:[],catalogError:null};
               const callbacks=new Map(), listeners=new Map();let sequence=0;
               window.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener(_event,id){listeners.delete(id)}};
-              window.__descriptions=[];window.__heldDescriptions=[];
-              const describe=operation=>({id:operation,inputs:{audio:{type:'audio'}},
-                params:{type:'object',properties:operation.endsWith('.spectrum')?{n_fft:{type:'integer',default:2048,minimum:64,maximum:32768}}:{}},outputs:{report:{type:'object'}}});
+              window.__descriptions=[];window.__descriptionRequests=[];window.__heldDescriptions=[];window.__operationStarts=[];window.__definitionVersion=1;
+              const describe=operation=>({id:operation,specDigest:(window.__definitionVersion===1?'a':'b').repeat(64),inputs:{audio:{type:'audio'}},
+                params:{type:'object',properties:operation.endsWith('.spectrum')?{n_fft:{type:'integer',default:window.__definitionVersion===1?2048:4096,minimum:64,maximum:32768}}:{}},outputs:{report:{type:'object'}}});
               window.__releaseDescriptions=()=>{window.__holdDescriptions=false;window.__heldDescriptions.splice(0).forEach(({resolve,operation})=>resolve(describe(operation)))};
               window.__TAURI_INTERNALS__={metadata:{currentWindow:{label:'main'},currentWebview:{label:'main'}},
                 convertFileSrc:(path,protocol)=>`http://${protocol}.localhost/${path}`,
@@ -74,18 +76,32 @@ def main():
                   if(command==='plugin:event|listen'){listeners.set(++sequence,args.handler);return sequence}
                   if(command==='plugin:event|unlisten'){listeners.delete(args.eventId);return null}
                   if(command==='plugin_marketplace')return structuredClone(window.__inventory);
+                  if(command==='list_nodes')return {nodes:[]};
+                  if(command==='manage_plugin'){
+                    window.__pluginInstalls=(window.__pluginInstalls||0)+1;
+                    window.__inventory.installed.push({name:'local-'+window.__pluginInstalls,managed:true,loaded:true,enabled:true,contributions:{views:[]}});
+                    setTimeout(()=>{for(const callback of listeners.values())callbacks.get(callback)?.({event:'pymss://worker-event',payload:{type:'plugin_manage_result',taskId:args.payload.taskId,payload:structuredClone(window.__inventory)}})},40);
+                    return {taskId:args.payload.taskId};
+                  }
                   if(command==='get_build_info')return {version:'0.0.23',updateSupported:false};
                   if(command==='load_plugin_tool_settings')return {};
                   if(command==='get_workflow_editors')return {revision:0,editors:[]};
                   if(command==='load_app_store')return null;
                   if(command==='save_plugin_tool_settings')return args.data;
                   if(command==='describe_operation'){
+                    window.__descriptionRequests.push(structuredClone(args.payload));
                     const operation=args.payload.operation;window.__descriptions.push(operation);
                     if(window.__holdDescriptions)return new Promise(resolve=>window.__heldDescriptions.push({resolve,operation}));
                     return describe(operation);
                   }
                   if(command==='plugin:dialog|open')return 'C:/audio/source.wav';
                   if(command==='start_operation_task'){
+                    window.__operationStarts.push(structuredClone(args.payload));
+                    if(window.__changeDefinitionOnRun){
+                      window.__changeDefinitionOnRun=false;window.__definitionVersion=2;
+                      setTimeout(()=>{for(const callback of listeners.values())callbacks.get(callback)?.({event:'pymss://worker-event',payload:{type:'error',requestId:args.payload.requestId,taskId:args.payload.requestId,payload:{code:'OPERATION_SPEC_CHANGED',message:'The operation definition changed.',recoverable:true}}})},40);
+                      return {taskId:args.payload.requestId,started:true};
+                    }
                     const operation=args.payload.operation;
                     const value=operation.endsWith('.spectrum')?{freqs:[0,1000,2000,3000,4000],magnitudes_db:[-80,-12,-50,-60,-80]}:
                       operation.endsWith('.measure_lufs')?{lufs:'-Infinity'}:{sample_peak_dbfs:-27.467469,true_peak_dbtp:-27.461275};
@@ -96,6 +112,7 @@ def main():
                   return null;
                 }};
               const market=(await import('/src/features/plugin-marketplace/composable.ts')).usePluginMarketplace();
+              window.__market=market;
               market.snapshot.value=structuredClone(window.__inventory);
               market.error.value='';
               window.__app.setWorkerEventConnection('connected');
@@ -103,11 +120,52 @@ def main():
             }""", {"rows": rows})
             tool = page.frame_locator(".plugin-view-frame")
             expect(tool.locator(".tool-log-button")).to_be_visible()
+            if args.stress_routing:
+                route = "async(path)=>document.querySelector('#app').__vue_app__.config.globalProperties.$router.push(path)"
+                page.evaluate(route, '/plugins')
+                for index in range(2):
+                    page.get_by_role('button', name='从来源安装', exact=True).click()
+                    source = page.locator('.plugin-source-modal')
+                    expect(source).to_be_visible()
+                    source.locator('input').fill('/test/plugin-' + str(index))
+                    source.get_by_role('button', name='安装', exact=True).click()
+                    page.locator('.n-dialog').get_by_role('button', name='安装', exact=True).click()
+                    expect(source).not_to_be_visible()
+                    page.wait_for_function('!window.__market.busy.value')
+                page.get_by_role('button', name='从来源安装', exact=True).click()
+                expect(page.locator('.plugin-source-modal')).to_be_visible()
+                page.keyboard.press('Escape')
+                expect(page.locator('.plugin-source-modal')).not_to_be_visible()
+                for animations in [True, False]:
+                    page.evaluate('value=>window.__settings.animationsEnabled=value', animations)
+                    for _ in range(5):
+                        for mode in ['dark', 'light']:
+                            page.evaluate(route, '/settings')
+                            page.locator('.theme-switcher').get_by_role('button', name='深色' if mode == 'dark' else '浅色', exact=True).click()
+                            page.evaluate(route, '/workflows')
+                            expect(page.locator('.workflows-page')).to_be_visible()
+                            page.evaluate(route, '/tools?pluginView=convert/tool')
+                            expect(page.locator('.workflows-page')).to_have_count(0)
+                            expect(tool.locator('html')).to_have_attribute('data-mode', mode)
+                            expect(tool.locator('.n-input').first).to_have_css('--n-color', '#23272e' if mode == 'dark' else '#eef2f7')
+                            tool.locator('.tool-log-button').click()
+                            expect(tool.locator('.tool-activity-dialog')).to_be_visible()
+                            tool.locator('body').press('Escape')
+                            expect(tool.locator('.tool-activity-dialog')).not_to_be_visible()
+                page.screenshot(path=str(output / 'repeated-route-theme-dialogs.png'), full_page=True)
             for mode in ["light", "dark"]:
-                page.evaluate("mode=>window.__settings.themeMode=mode", mode)
+                if args.animations:
+                    page.evaluate("async()=>document.querySelector('#app').__vue_app__.config.globalProperties.$router.push('/settings')")
+                    button = page.locator('.theme-switcher').get_by_role('button', name='深色' if mode == 'dark' else '浅色', exact=True)
+                    expect(button).to_be_visible()
+                    button.click()
+                    page.evaluate("async()=>document.querySelector('#app').__vue_app__.config.globalProperties.$router.push('/tools?pluginView=convert/tool')")
+                else:
+                    page.evaluate("mode=>window.__settings.themeMode=mode", mode)
                 expect(tool.locator("html")).to_have_attribute("data-mode", mode)
                 expect(page.locator(".plugin-view-frame")).to_have_css("color-scheme", mode)
                 expect(tool.locator("html")).to_have_css("color-scheme", mode)
+                expect(tool.locator('.n-input').first).to_have_css('--n-color', '#23272e' if mode == 'dark' else '#eef2f7')
                 before = tool.locator(".audio-tool-layout").bounding_box()
                 tool.locator(".tool-log-button").click()
                 expect(tool.locator("html")).to_have_class(re.compile("tool-overlay-anchored"))
@@ -165,8 +223,21 @@ def main():
             page.evaluate(await_route)
             expect(tool.get_by_role("heading", name="频谱分析", exact=True)).to_be_visible()
             tool.get_by_role("button", name="浏览", exact=True).click()
+            field = tool.locator("#param-n_fft input")
+            field.fill("1536")
+            field.press("Tab")
+            page.evaluate("window.__changeDefinitionOnRun=true")
+            count = page.evaluate("window.__operationStarts.length")
+            tool.locator("#run").click()
+            expect(tool.locator("#error")).to_contain_text("请核对刷新后的参数")
+            expect(field).to_have_value("4096")
+            expect(tool.locator("#input-audio input")).to_have_value("C:/audio/source.wav")
+            assert page.evaluate("window.__operationStarts.length") == count + 1
+            assert page.evaluate("window.__operationStarts.at(-1).expectedSpecDigest") == "a" * 64
+            assert page.evaluate("window.__descriptionRequests.at(-1).refresh") is True
             tool.locator("#run").click()
             expect(tool.locator(".analysis-spectrum polyline")).to_have_attribute("points", re.compile(r"\d"))
+            assert page.evaluate("window.__operationStarts.at(-1).expectedSpecDigest") == "b" * 64
             expect(tool.locator(".analysis-hint")).to_contain_text("FFT")
             page.screenshot(path=str(output / "spectrum.png"), full_page=True)
             assert not errors, errors

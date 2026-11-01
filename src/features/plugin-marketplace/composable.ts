@@ -5,6 +5,7 @@ import { registerWindowCloseGuard } from '@/utils/windowCloseGuards'
 import { localLogRecord, type LogRecord } from '@/utils/logRecord'
 import { getLogLineLevel } from '@/utils/taskLog'
 import type { PluginCategory, PluginLocales } from './presentation'
+import { useSettingsStore } from '@/stores/settings'
 
 export type PluginRequirements = {
   sdkVersion: number | null
@@ -40,6 +41,12 @@ export type InstalledPlugin = {
   description?: string
   locales?: PluginLocales
   enabled?: boolean
+  prepared?: boolean
+  availability?: 'ready' | 'unavailable' | 'not_prepared'
+  removalPending?: boolean
+  cleanupRuntime?: string | null
+  sourceSelectionRequired?: boolean
+  availableBindings?: { runtime: string; version: string | null; content: string | null }[]
   preinstalled?: boolean
   toolCategory?: 'convert' | 'analyze' | 'recognize' | 'edit' | null
   toolIcon?: string | null
@@ -68,13 +75,15 @@ export type PluginInventory = {
   runtime: { identity: string; pythonPath: string }
   preinstalled?: { name: string; version: string; installed: boolean }[]
   preinstalledPending?: string[]
+  preinstalledAvailable?: string[]
+  inventoryWarnings?: string[]
   legacyPlugins?: string[]
 }
 export type PluginMarketplace = PluginInventory & {
   catalog: CatalogPlugin[]
   catalogError: string | null
 }
-export type PluginAction = 'install' | 'update' | 'repair' | 'uninstall' | 'check_updates' | 'enable' | 'disable' | 'prepare_preinstalled' | 'install_preinstalled'
+export type PluginAction = 'install' | 'update' | 'repair' | 'uninstall' | 'check_updates' | 'enable' | 'disable' | 'prepare' | 'prepare_preinstalled' | 'install_preinstalled'
 export const pluginPhases = ['queued', 'starting', 'working', 'preparing', 'checking', 'acquiring', 'preserving', 'resolving', 'installing', 'verifying', 'activating', 'refreshing', 'removing'] as const
 export type PluginPhase = typeof pluginPhases[number]
 export type PluginActivity = {
@@ -116,7 +125,7 @@ let inventoryRequest: Promise<void> | undefined
 let catalogRequest: { generation: number; promise: Promise<void> } | undefined
 let unlisten: UnlistenFn | undefined
 let listening: Promise<void> | undefined
-type ManageOptions = { name?: string; target?: string; locale?: string; mirror?: string; expectedSource?: string; expectedRuntime?: string; installDependencies?: boolean }
+type ManageOptions = { name?: string; target?: string; locale?: string; mirror?: string; expectedSource?: string; expectedRuntime?: string; installDependencies?: boolean; sourceRuntime?: string; sourceVersion?: string | null; sourceContent?: string | null }
 type TaskControl = {
   id: string
   workerId: string
@@ -234,7 +243,9 @@ async function loadSnapshot(includeCatalog: boolean, prepare = true, forceVerify
   loading.value = true
   error.value = ''
   try {
-    const result = await invoke<PluginMarketplace>('plugin_marketplace', { payload: { includeCatalog, ...(forceVerify ? { forceVerify: true } : {}) } })
+    const settings = useSettingsStore()
+    await settings.initialize()
+    const result = await invoke<PluginMarketplace>('plugin_marketplace', { payload: { includeCatalog, defaultPolicy: settings.pluginDefaultsPolicy, ...(forceVerify ? { forceVerify: true } : {}) } })
     if (request !== sequence) return
     const runtimeChanged = snapshot.value?.runtime.identity !== result.runtime.identity
     if (runtimeChanged) updates.value = {}
@@ -319,7 +330,7 @@ async function dispatch(control: TaskControl) {
     control.invoked = true
     control.awaitingAcknowledgement = true
     const response = await invoke<{ taskId: string }>('manage_plugin', {
-      payload: { action: control.action, ...control.options, taskId: control.id },
+      payload: { action: control.action, ...control.options, taskId: control.id, defaultPolicy: useSettingsStore().pluginDefaultsPolicy },
     })
     if (!tasks.has(control.id)) return
     control.workerId = response.taskId || control.id
