@@ -66,7 +66,7 @@ const ERROR_ELEVATION_REQUIRED: i32 = 740;
 // Apply an upper bound to connection setup and stalled reads without imposing a total
 // deadline on the archive download. Managed update archives can be large on slower links.
 const MANAGED_UPDATE_IO_TIMEOUT: Duration = Duration::from_secs(45);
-const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(6);
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 const MANAGED_UPDATE_PROCESS_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -301,7 +301,7 @@ pub async fn check(
     source: UpdateSource,
 ) -> AppResult<Option<ManagedUpdateInfo>> {
     let Some(distribution) = current_distribution() else {
-        return Ok(None);
+        return Err(AppError::Worker("UPDATE_DISTRIBUTION_UNSUPPORTED: This installation has no supported update distribution marker".into()));
     };
     let update = check_sources(app, channel, endpoint_override, source).await?;
     #[cfg(target_os = "macos")]
@@ -462,7 +462,7 @@ async fn download_archive(app: &AppHandle, update: &Update) -> AppResult<Vec<u8>
             || {},
         )
         .await
-        .map_err(updater_request_error)?;
+        .map_err(updater_download_error)?;
     if bytes.len() as u64 > MAX_UPDATE_ARCHIVE_BYTES {
         return Err(AppError::Worker("The downloaded update archive exceeds the supported size limit".into()));
     }
@@ -471,12 +471,23 @@ async fn download_archive(app: &AppHandle, update: &Update) -> AppResult<Vec<u8>
     Ok(bytes)
 }
 
-fn updater_request_error(error: tauri_plugin_updater::Error) -> AppError {
+fn updater_check_error(error: tauri_plugin_updater::Error) -> AppError {
     let message = match error {
-        tauri_plugin_updater::Error::Reqwest(error) => error.without_url().to_string(),
+        tauri_plugin_updater::Error::Reqwest(error) => return update_sources::metadata_request_error(error),
+        tauri_plugin_updater::Error::ReleaseNotFound => "UPDATE_METADATA_UNAVAILABLE: No valid update metadata was returned for the selected channel".into(),
         error => error.to_string(),
     };
     AppError::Worker(message)
+}
+
+fn updater_download_error(error: tauri_plugin_updater::Error) -> AppError {
+    match error {
+        tauri_plugin_updater::Error::Reqwest(error) => {
+            let code = if error.is_timeout() { "UPDATE_DOWNLOAD_TIMEOUT" } else { "UPDATE_DOWNLOAD_REQUEST_FAILED" };
+            AppError::Worker(format!("{code}: {}", error.without_url()))
+        }
+        error => AppError::Worker(error.to_string()),
+    }
 }
 
 struct CheckedUpdate {
@@ -492,6 +503,37 @@ fn release_is_preferred(version: &str, elapsed: Duration, current: &str, current
     }
 }
 
+pub(crate) fn check_failure_kind(error: &AppError) -> &'static str {
+    let message = error.to_string();
+    for code in ["UPDATE_CHECK_TIMEOUT", "UPDATE_HTTP_NOT_FOUND", "UPDATE_METADATA_UNAVAILABLE",
+        "UPDATE_DISTRIBUTION_UNSUPPORTED", "UPDATE_CHECK_INCOMPLETE", "UPDATE_REQUEST_FAILED"] {
+        if message.contains(code) { return code; }
+    }
+    "UPDATE_CHECK_FAILED"
+}
+
+fn finish_source_checks<T>(best: Option<T>, errors: Vec<String>) -> AppResult<Option<T>> {
+    if best.is_some() || errors.is_empty() { return Ok(best); }
+    Err(AppError::Worker(format!(
+        "UPDATE_CHECK_INCOMPLETE: Unable to confirm application update status: {}", errors.join("; "),
+    )))
+}
+
+fn log_source_check(app: &AppHandle, provider: UpdateProvider, channel: UpdateChannel,
+    elapsed: Duration, result: &AppResult<Option<CheckedUpdate>>) {
+    let (outcome, version, reason) = match result {
+        Ok(Some(checked)) => ("available", checked.update.version.clone(), ""),
+        Ok(None) => ("no_update", String::new(), ""),
+        Err(error) => ("failed", String::new(), check_failure_kind(error)),
+    };
+    crate::session_log::append(app, if result.is_err() { "WARN" } else { "INFO" }, "update.check.source", vec![
+        ("provider", format!("{provider:?}").to_ascii_lowercase()),
+        ("channel", channel.endpoint_name().to_string()), ("outcome", outcome.into()),
+        ("version", version), ("reason", reason.into()),
+        ("durationMs", elapsed.as_millis().to_string()),
+    ]);
+}
+
 async fn check_sources(
     app: &AppHandle,
     channel: UpdateChannel,
@@ -500,7 +542,10 @@ async fn check_sources(
 ) -> AppResult<Option<CheckedUpdate>> {
     let endpoint = resolve_update_endpoint(channel, endpoint_override.clone())?;
     if endpoint_override.as_deref().is_some_and(|value| !value.trim().is_empty()) {
-        return check_endpoint(app, endpoint, channel, UpdateProvider::Custom, None, false).await;
+        let started = Instant::now();
+        let result = check_endpoint(app, endpoint, channel, UpdateProvider::Custom, None, false).await;
+        log_source_check(app, UpdateProvider::Custom, channel, started.elapsed(), &result);
+        return result;
     }
     let mut requests = Vec::new();
     for provider in source.providers() {
@@ -509,24 +554,26 @@ async fn check_sources(
         let github = endpoint.clone();
         requests.push(tauri::async_runtime::spawn(async move {
             let started = Instant::now();
-            let checked = if provider == UpdateProvider::Modelscope {
+            let checked = async { Ok::<_, AppError>(if provider == UpdateProvider::Modelscope {
                 let client = source_client(&app)?;
                 let filename = update_sources::metadata_name(channel.endpoint_name(), UPDATE_GENERATION);
                 let manifest = update_sources::modelscope_manifest(&client, &filename).await?;
                 check_endpoint(&app, manifest.endpoint, channel, provider, Some(&manifest.version), false).await?
             } else {
                 check_endpoint(&app, github, channel, provider, None, false).await?
-            };
-            Ok::<_, AppError>(checked.map(|mut checked| { checked.elapsed = started.elapsed(); checked }))
+            }) }.await;
+            let checked = checked.map(|checked: Option<CheckedUpdate>| checked.map(|mut checked| {
+                checked.elapsed = started.elapsed(); checked
+            }));
+            log_source_check(&app, provider, channel, started.elapsed(), &checked);
+            (provider, checked)
         }));
     }
     let mut best: Option<CheckedUpdate> = None;
-    let mut successful_check = false;
     let mut errors = Vec::new();
     for request in requests {
         match request.await {
-            Ok(Ok(checked)) => {
-                successful_check = true;
+            Ok((_, Ok(checked))) => {
                 if let Some(checked) = checked {
                     if best.as_ref().map_or(true, |current| release_is_preferred(
                         &checked.update.version, checked.elapsed, &current.update.version, current.elapsed,
@@ -535,12 +582,11 @@ async fn check_sources(
                     }
                 }
             }
-            Ok(Err(error)) => errors.push(error.to_string()),
+            Ok((provider, Err(error))) => errors.push(format!("{provider:?}: {error}")),
             Err(error) => errors.push(error.to_string()),
         }
     }
-    if successful_check { return Ok(best); }
-    Err(AppError::Worker(format!("Unable to check update sources: {}", errors.join("; "))))
+    finish_source_checks(best, errors)
 }
 
 async fn check_endpoint(
@@ -559,7 +605,7 @@ async fn check_endpoint(
     let updater = configure_updater(app, builder.timeout(UPDATE_CHECK_TIMEOUT))?
         .build().map_err(|error| AppError::Worker(error.to_string()))?;
     let started = Instant::now();
-    let checked = updater.check().await.map_err(updater_request_error)?;
+    let checked = updater.check().await.map_err(updater_check_error)?;
     checked.map(|mut update| {
         if repair {
             validate_repair_version(env!("CARGO_PKG_VERSION"), &update.version)?;
@@ -1812,6 +1858,85 @@ mod recovery_tests;
 
 #[cfg(test)]
 mod tests {
+    fn failed_update_request(status: Option<&'static str>) -> reqwest::Error {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("Update request fixture failed: {error}"),
+                }
+            };
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+            let _ = stream.read(&mut [0; 4096]);
+            if let Some(status) = status {
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+        });
+        let error = tauri::async_runtime::block_on(async {
+            let client = crate::update_sources::http_client_builder().no_proxy()
+                .timeout(std::time::Duration::from_millis(200)).build().unwrap();
+            client.get(format!("http://{address}/archive.zip?token=private-update-token"))
+                .send().await.and_then(|response| response.error_for_status()).err().expect("The request must fail")
+        });
+        server.join().unwrap();
+        error
+    }
+
+    #[test]
+    fn update_timeout_codes_distinguish_checks_and_downloads_without_endpoint_secrets() {
+        let mappings: [(&str, fn(tauri_plugin_updater::Error) -> crate::error::AppError); 2] = [
+            ("UPDATE_CHECK_TIMEOUT", super::updater_check_error),
+            ("UPDATE_DOWNLOAD_TIMEOUT", super::updater_download_error),
+        ];
+        for (expected, mapper) in mappings {
+            let error = failed_update_request(None);
+            assert!(error.is_timeout());
+            let failure = mapper(tauri_plugin_updater::Error::Reqwest(error)).to_string();
+            assert!(failure.contains(expected), "{failure}");
+            assert!(!failure.contains("private-update-token"));
+            assert!(!failure.contains("127.0.0.1"));
+        }
+    }
+
+    #[test]
+    fn update_download_request_errors_do_not_use_check_error_codes() {
+        let error = failed_update_request(Some("503 Service Unavailable"));
+        assert!(!error.is_timeout());
+        let failure = super::updater_download_error(tauri_plugin_updater::Error::Reqwest(error)).to_string();
+        assert!(failure.contains("UPDATE_DOWNLOAD_REQUEST_FAILED"), "{failure}");
+        assert!(failure.contains("503"));
+        assert!(!failure.contains("private-update-token"));
+        assert!(!failure.contains("127.0.0.1"));
+    }
+
+    #[test]
+    fn source_checks_only_report_latest_when_all_selected_sources_succeeded() {
+        assert_eq!(super::finish_source_checks::<u8>(None, vec![]).unwrap(), None);
+        let error = super::finish_source_checks::<u8>(None, vec!["Github: request failed".into()]).unwrap_err();
+        assert_eq!(super::check_failure_kind(&error), "UPDATE_CHECK_INCOMPLETE");
+        assert!(error.to_string().contains("Github"));
+        assert_eq!(super::finish_source_checks(Some(7), vec!["Modelscope: request failed".into()]).unwrap(), Some(7));
+        assert!(super::finish_source_checks::<u8>(None, vec!["Github failed".into(), "Modelscope failed".into()]).is_err());
+    }
+
+    #[test]
+    fn update_check_diagnostics_use_fixed_error_labels() {
+        let error = crate::error::AppError::Worker("request failed for https://host/private?secret=value".into());
+        assert_eq!(super::check_failure_kind(&error), "UPDATE_CHECK_FAILED");
+        assert_eq!(super::UPDATE_CHECK_TIMEOUT, std::time::Duration::from_secs(15));
+    }
+
     #[test]
     fn repair_rejects_upgrade_downgrade_and_build_substitution() {
         assert!(super::validate_repair_version("1.2.3", "1.2.3").is_ok());

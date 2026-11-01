@@ -995,7 +995,33 @@ fn emit_batch_stderr(app: &AppHandle, task_ids: &[String], line: String) {
     }
 }
 
+fn native_worker_failure(code: Option<i32>) -> Option<String> {
+    let status = code? as u32;
+    let reason = match status {
+        0xC0000005 => "Windows access violation",
+        0xC000001D => "Windows illegal instruction",
+        0xC0000409 => "Windows fail-fast termination",
+        0xC0000374 => "Windows heap corruption",
+        _ => return None,
+    };
+    Some(format!("{reason} (0x{status:08X})"))
+}
+
+fn worker_stage(envelope: &WorkerEnvelope, fallback_task_id: &str) -> Option<(String, String)> {
+    if envelope.event_type != "task_stage" { return None; }
+    let stage = envelope.payload.get("stage")?.as_str()?;
+    if stage.is_empty() || stage.len() > 64 || !stage.bytes().all(|value| value.is_ascii_lowercase() || value.is_ascii_digit() || value == b'_') {
+        return None;
+    }
+    Some((envelope.task_id.as_deref().unwrap_or(fallback_task_id).to_string(), stage.to_string()))
+}
+
 fn emit_task_error_to_all(app: &AppHandle, task_ids: &[String], message: String) {
+    emit_task_error_details_to_all(app, task_ids, message, None, Value::Null);
+}
+
+fn emit_task_error_details_to_all(app: &AppHandle, task_ids: &[String], message: String,
+    code: Option<&str>, details: Value) {
     let mut record = LogRecord::new(
         "studio",
         Some("error"),
@@ -1011,13 +1037,18 @@ fn emit_task_error_to_all(app: &AppHandle, task_ids: &[String], message: String)
             .context
             .insert("taskIds".into(), serde_json::json!(task_ids));
     }
+    if let Some(code) = code { record.context.insert("code".into(), code.into()); }
+    if let Some(details) = details.as_object() { record.context.extend(details.clone()); }
     let record = session_log::append_record(app, record);
     for task_id in task_ids {
+        let mut payload = serde_json::json!({ "message": record.message, "logRecord": record });
+        if let Some(code) = code { payload["code"] = code.into(); }
+        if !details.is_null() { payload["extra"] = details.clone(); }
         let _ = app.emit(
             "pymss://worker-event",
             serde_json::json!({
                 "type": "error", "taskId": task_id,
-                "payload": { "message": record.message, "logRecord": record }
+                "payload": payload
             }),
         );
     }
@@ -1598,6 +1629,11 @@ fn run_worker_with_payload_inner(
         return Err(err);
     }
     if !status.success() {
+        if let Some(message) = native_worker_failure(status.code()) {
+            return Err(AppError::Worker(format!(
+                "WORKER_NATIVE_CRASH: {message}. Export diagnostics and check system application error events for the faulting module."
+            )));
+        }
         let detail = stderr_lines
             .lock()
             .ok()
@@ -1747,12 +1783,14 @@ fn spawn_worker_background_inner(
         let mut terminal_task_ids: HashSet<String> = HashSet::new();
         let mut core_terminal_events = Vec::new();
         let mut core_terminal_error = None;
+        let mut last_stage = None;
         read_lossy_lines(stdout, |line| {
             if line.trim().is_empty() {
                 return;
             }
             match serde_json::from_str::<WorkerEnvelope>(&line) {
                 Ok(mut envelope) => {
+                    if let Some(stage) = worker_stage(&envelope, &task_id) { last_stage = Some(stage); }
                     if envelope.event_type == "error" {
                         log_worker_event_with_scope(&app, &command_name, &mut envelope, Some(&operation_id), Some(&task_id));
                     }
@@ -1901,11 +1939,16 @@ fn spawn_worker_background_inner(
         if !missing_terminal_task_ids.is_empty() {
             match exit_status {
                 Some(status) if !status.success() => {
-                    emit_task_error_to_all(
-                        &app,
-                        &missing_terminal_task_ids,
-                        format!("worker exited with {status}"),
-                    );
+                    if let Some(message) = native_worker_failure(status.code()) {
+                        let mut details = serde_json::json!({ "exitStatus": status.to_string(), "exitCode": status.code() });
+                        if let Some((stage_task_id, stage)) = &last_stage {
+                            details["lastStage"] = stage.clone().into();
+                            details["lastStageTaskId"] = stage_task_id.clone().into();
+                        }
+                        emit_task_error_details_to_all(&app, &missing_terminal_task_ids, message, Some("WORKER_NATIVE_CRASH"), details);
+                    } else {
+                        emit_task_error_to_all(&app, &missing_terminal_task_ids, format!("worker exited with {status}"));
+                    }
                 }
                 None => {
                     emit_task_error_to_all(
@@ -1959,6 +2002,30 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::path::Path;
+
+    #[test]
+    fn native_worker_exit_codes_preserve_status_without_guessing_the_driver() {
+        let message = super::native_worker_failure(Some(0xC0000005_u32 as i32)).unwrap();
+        assert!(message.contains("0xC0000005"));
+        assert!(message.contains("access violation"));
+        assert!(!message.contains("AMD") && !message.contains("ROCm"));
+        for code in [None, Some(0), Some(1), Some(-9)] {
+            assert!(super::native_worker_failure(code).is_none());
+        }
+        assert!(super::native_worker_failure(Some(0xC000001D_u32 as i32)).unwrap().contains("illegal instruction"));
+    }
+
+    #[test]
+    fn worker_failure_phase_only_accepts_bounded_stage_identifiers() {
+        let envelope = |stage: &str| serde_json::from_value(json!({
+            "type": "task_stage", "taskId": "task-1", "payload": { "stage": stage }
+        })).unwrap();
+        assert_eq!(super::worker_stage(&envelope("checking_device"), "fallback"), Some(("task-1".into(), "checking_device".into())));
+        for stage in ["", "C:/private/input.wav", "loading\nmodel"] {
+            assert!(super::worker_stage(&envelope(stage), "fallback").is_none());
+        }
+        assert!(super::worker_stage(&envelope(&"x".repeat(65)), "fallback").is_none());
+    }
 
     #[test]
     fn worker_scratch_is_scoped_and_cleans_orphaned_child_files() {

@@ -335,7 +335,12 @@ export const useUpdateStore = defineStore('update', () => {
           return update
         } catch (err) {
           if (restartRequired.value) return availableUpdate.value
-          error.value = err instanceof Error ? err.message : String(err)
+          const detail = err instanceof Error ? err.message : String(err)
+          const hint = detail.includes('UPDATE_DISTRIBUTION_UNSUPPORTED')
+            ? i18n.global.t('settings.updateDistributionUnsupported')
+            : /UPDATE_CHECK_INCOMPLETE|UPDATE_METADATA_UNAVAILABLE|UPDATE_HTTP_NOT_FOUND|UPDATE_CHECK_TIMEOUT/.test(detail)
+              ? i18n.global.t('settings.updateCheckIncomplete') : ''
+          error.value = hint ? `${hint}\n${detail}` : detail
           status.value = 'failed'
           throw err
         } finally {

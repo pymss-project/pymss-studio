@@ -125,7 +125,20 @@ pub async fn check_managed_update(
     if cfg!(feature = "vst-lab") {
         return Err(AppError::Worker("Updates are disabled in VST Lab".into()));
     }
-    update_manager::check(&app, channel, endpoint_override, source.unwrap_or_default()).await
+    let source = source.unwrap_or_default();
+    let started = std::time::Instant::now();
+    session_log::append(&app, "INFO", "update.check.started", vec![
+        ("channel", format!("{channel:?}").to_ascii_lowercase()),
+        ("source", format!("{source:?}").to_ascii_lowercase()),
+        ("customEndpoint", endpoint_override.as_deref().is_some_and(|value| !value.trim().is_empty()).to_string()),
+    ]);
+    let result = update_manager::check(&app, channel, endpoint_override, source).await;
+    let outcome = match &result { Ok(Some(_)) => "available", Ok(None) => "no_update", Err(_) => "failed" };
+    session_log::append(&app, if result.is_err() { "ERROR" } else { "INFO" }, "update.check.completed", vec![
+        ("outcome", outcome.into()), ("durationMs", started.elapsed().as_millis().to_string()),
+        ("reason", result.as_ref().err().map(update_manager::check_failure_kind).unwrap_or("").into()),
+    ]);
+    result
 }
 
 #[tauri::command]
@@ -638,13 +651,25 @@ fn require_windows_runtime_management() -> AppResult<()> {
     }
 }
 
+fn runtime_management_supported(platform: &str) -> bool {
+    matches!(platform, "windows" | "linux")
+}
+
+fn require_runtime_management() -> AppResult<()> {
+    if runtime_management_supported(std::env::consts::OS) {
+        Ok(())
+    } else {
+        Err(AppError::Worker("RUNTIME_PLATFORM_UNSUPPORTED: Runtime management is only available on Windows and Linux".into()))
+    }
+}
+
 #[tauri::command]
 pub async fn start_runtime_install(
     app: AppHandle,
     state: State<'_, AppState>,
     payload: Value,
 ) -> AppResult<Value> {
-    require_windows_runtime_management()?;
+    require_runtime_management()?;
     if let Ok(tasks) = state.tasks.lock() {
         if tasks.keys().any(|id| id.starts_with("runtime_install_")) {
             return Err(AppError::Worker("runtime installation is already running".into()));
@@ -689,13 +714,13 @@ pub async fn cancel_runtime_core_update(
 
 #[tauri::command]
 pub async fn activate_runtime(app: AppHandle, payload: Value) -> AppResult<Value> {
-    require_windows_runtime_management()?;
+    require_runtime_management()?;
     run_worker_with_payload(&app, "activate_runtime", Some(payload))
 }
 
 #[tauri::command]
 pub async fn delete_runtime(app: AppHandle, payload: Value) -> AppResult<Value> {
-    require_windows_runtime_management()?;
+    require_runtime_management()?;
     run_worker_with_payload(&app, "delete_runtime", Some(payload))
 }
 
@@ -3482,6 +3507,16 @@ mod tests {
     use super::*;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn runtime_management_accepts_windows_and_linux_only() {
+        for platform in ["windows", "linux"] {
+            assert!(runtime_management_supported(platform), "{platform}");
+        }
+        for platform in ["macos", "android", "unknown", ""] {
+            assert!(!runtime_management_supported(platform), "{platform}");
+        }
+    }
 
     fn temp_test_dir(name: &str) -> PathBuf {
         let unique = SystemTime::now()

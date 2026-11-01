@@ -4,7 +4,7 @@ import test from 'node:test'
 import vm from 'node:vm'
 import ts from 'typescript'
 import { computed, effectScope, nextTick, reactive, ref, watch } from 'vue'
-import { detectRuntimePlatform, preferredInstalledRuntimeBackend, recommendedRuntimeBackend, runtimeEnvironmentForBackend } from '../src/utils/runtime.ts'
+import { detectRuntimePlatform, preferredInstalledRuntimeBackend, recommendedRuntimeBackend, runtimeEnvironmentForBackend, supportsRuntimeManagement } from '../src/utils/runtime.ts'
 
 const source = readFileSync(new URL('../src/components/StartupOnboarding.vue', import.meta.url), 'utf8')
   .match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
@@ -39,7 +39,7 @@ function environment(t, options = {}) {
       installedEnvironments: options.installed || [],
     },
     runtimeInfoError: '', runtimeInstallStatus: 'idle', runtimeInstallBackend: null, runtimeInstallMessage: '',
-    runtimeManagementSupported: platform === 'win32',
+    runtimeManagementSupported: supportsRuntimeManagement({ platform }),
     runtimeReadyForBackend(backend) {
       return this.runtimeInfo.ready && (backend === 'mlx' ? this.runtimeInfo.packages.mlx : this.runtimeInfo.torchBackend === backend)
     },
@@ -121,6 +121,15 @@ test('an ongoing installation is preserved while leaving setup for management', 
   await env.primaryAction({})
   assert.deepEqual(env.actions, ['route:settings:runtime:cpu', 'complete', 'emitted'])
   assert.equal(env.app.runtimeInstallStatus, 'installing')
+})
+
+test('Linux onboarding hands CPU installation to runtime management', async t => {
+  const env = environment(t, { platform: 'linux', machine: 'x86_64' })
+  env.selectedBackend.value = 'cpu'
+  env.step.value = 3
+  assert.equal(env.app.runtimeManagementSupported, true)
+  await env.primaryAction({})
+  assert.deepEqual(env.actions, ['route:settings:runtime:cpu', 'complete', 'emitted'])
 })
 
 test('a runtime detection failure can continue to management without changing the environment', async t => {

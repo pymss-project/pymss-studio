@@ -181,8 +181,49 @@ class InferenceParameterCompatibilityTests(unittest.TestCase):
 
                 kwargs = separator_type.call_args.kwargs
                 self.assertEqual(kwargs.get("target_instrument_override"), expected_override)
+                if expected_override is None:
+                    self.assertNotIn("target_instrument_override", kwargs)
                 self.assertEqual(kwargs["model_path"], str(weights))
                 self.assertEqual(self.config_path.read_bytes(), original_config)
+
+    def test_legacy_separator_accepts_an_unused_target_override(self) -> None:
+        class ConstructorReached(Exception):
+            pass
+
+        class LegacySeparator:
+            def __init__(self, *, model_type):
+                raise ConstructorReached(model_type)
+
+        sys.modules["pymss"].MSSeparator = LegacySeparator
+        with mock.patch("worker_rocm.configure_rocm_runtime"), self.assertRaisesRegex(ConstructorReached, "roformer"):
+            worker_infer._studio_separator_type()(model_type="roformer", target_instrument_override=None)
+
+    def test_legacy_separator_rejects_a_required_override_before_gpu_initialization(self) -> None:
+        class LegacySeparator:
+            def __init__(self, *, model_type):
+                self.model_type = model_type
+
+        sys.modules["pymss"].MSSeparator = LegacySeparator
+        with mock.patch("worker_rocm.configure_rocm_runtime") as configure:
+            with self.assertRaisesRegex(RuntimeError, "Update the kernel") as caught:
+                worker_infer._studio_separator_type()(model_type="roformer", target_instrument_override="Vocals")
+            configure.assert_not_called()
+        with mock.patch.object(worker_infer, "emit_error", return_value=1) as emit_error:
+            self.assertEqual(worker_infer._emit_inference_error(caught.exception, "legacy-task"), 1)
+            self.assertEqual(emit_error.call_args.args[0], "RUNTIME_OUTDATED")
+            self.assertFalse(emit_error.call_args.kwargs.get("recoverable", False))
+
+    def test_modern_separator_retains_a_required_override(self) -> None:
+        class ConstructorReached(Exception):
+            pass
+
+        class ModernSeparator:
+            def __init__(self, *, target_instrument_override, **kwargs):
+                raise ConstructorReached(target_instrument_override)
+
+        sys.modules["pymss"].MSSeparator = ModernSeparator
+        with mock.patch("worker_rocm.configure_rocm_runtime"), self.assertRaisesRegex(ConstructorReached, "Vocals"):
+            worker_infer._studio_separator_type()(model_type="roformer", target_instrument_override="Vocals")
 
     def test_audio_chunk_size_is_used_when_inference_chunk_size_is_missing_or_null(self) -> None:
         for include_null in (False, True):

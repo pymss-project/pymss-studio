@@ -75,6 +75,37 @@ async function newStore() {
   return task
 }
 
+test('a terminal kernel compatibility error releases its worker slot and starts the next job', async () => {
+  storage([record('kernel'), record('next')])
+  const store = await newStore()
+  const current = store.tasks.find(task => task.id === 'kernel')
+  const next = store.tasks.find(task => task.id === 'next')
+  current.status = 'loading_model'
+  current.progress = 20
+  next.status = 'queued'
+  next.runConfig = { runMode: 'model', device: 'cpu', deviceIds: [0], outputLayout: 'flat' }
+  const started = []
+  window.__TAURI_INTERNALS__ = {
+    metadata: { currentWindow: { label: 'main' } },
+    async invoke(command, args) {
+      if (command === 'save_app_store') return null
+      assert.equal(command, 'start_separation')
+      started.push(args.payload.taskId)
+      return { taskId: args.payload.taskId, started: true }
+    },
+  }
+
+  store.handleWorkerEvent({ type: 'error', taskId: 'kernel', payload: {
+    code: 'RUNTIME_OUTDATED', message: 'Update the kernel', recoverable: false,
+  } })
+  assert.equal(current.status, 'failed')
+  assert.equal(current.progress, 100)
+  assert.deepEqual(started, ['next'])
+  assert.equal(next.status, 'preparing')
+  assert.ok(!store.activeWorkerTasks.some(task => task.id === 'kernel'))
+  store.handleWorkerEvent({ type: 'task_done', taskId: 'next', payload: { files: [] } })
+})
+
 test('worker text and measurement results preserve numeric and string node IDs across persistence and restart', async () => {
   const persisted = storage([record('text'), record('mixed')])
   const store = await newStore()

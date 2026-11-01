@@ -613,6 +613,8 @@ function resolveTaskErrorMessage(code: unknown, message: unknown, input?: string
   if (code === 'INPUT_MEDIA_UNSUPPORTED') {
     return i18n.global.t('separate.inputMediaUnsupported', { path })
   }
+  if (code === 'RUNTIME_OUTDATED') return i18n.global.t('separate.runtimeOutdated')
+  if (code === 'WORKER_NATIVE_CRASH') return i18n.global.t('separate.workerNativeCrash', { detail })
   return detail || i18n.global.t('toast.taskFailed')
 }
 

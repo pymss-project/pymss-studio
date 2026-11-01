@@ -82,6 +82,17 @@ pub fn http_client_builder() -> reqwest::ClientBuilder {
     Client::builder()
 }
 
+pub(crate) fn metadata_request_error(error: reqwest::Error) -> AppError {
+    let code = if error.is_timeout() {
+        "UPDATE_CHECK_TIMEOUT"
+    } else if error.status() == Some(reqwest::StatusCode::NOT_FOUND) {
+        "UPDATE_HTTP_NOT_FOUND"
+    } else {
+        "UPDATE_REQUEST_FAILED"
+    };
+    AppError::Worker(format!("{code}: {}", error.without_url()))
+}
+
 pub async fn modelscope_manifest(
     client: &Client,
     filename: &str,
@@ -109,18 +120,14 @@ async fn modelscope_manifest_at(
             .get(endpoint)
             .send()
             .await
-            .map_err(|error| {
-                AppError::Worker(format!("ModelScope catalog request failed: {error}"))
-            })?
+            .map_err(metadata_request_error)?
             .error_for_status()
-            .map_err(|error| {
-                AppError::Worker(format!("ModelScope catalog request failed: {error}"))
-            })?;
+            .map_err(metadata_request_error)?;
         let mut body = Vec::new();
         while let Some(chunk) = response
             .chunk()
             .await
-            .map_err(|error| AppError::Worker(error.to_string()))?
+            .map_err(metadata_request_error)?
         {
             if body.len().saturating_add(chunk.len()) > MAX_CATALOG_PAGE_BYTES {
                 return Err(AppError::Worker(
@@ -157,7 +164,7 @@ async fn modelscope_manifest_at(
         }) {
             return latest_mirror_manifest(&paths, filename).ok_or_else(|| {
                 AppError::Worker(format!(
-                    "ModelScope has no complete update release for {filename}"
+                    "UPDATE_METADATA_UNAVAILABLE: ModelScope has no complete update release for {filename}"
                 ))
             });
         }
@@ -385,6 +392,10 @@ mod tests {
     }
 
     fn catalog_server(responses: Vec<String>) -> (Url, thread::JoinHandle<Vec<String>>) {
+        catalog_server_with_status(responses, "200 OK")
+    }
+
+    fn catalog_server_with_status(responses: Vec<String>, status: &'static str) -> (Url, thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let endpoint =
             Url::parse(&format!("http://{}/tree", listener.local_addr().unwrap())).unwrap();
@@ -412,7 +423,7 @@ mod tests {
                 let mut request = vec![0; 8192];
                 let size = stream.read(&mut request).unwrap();
                 requests.push(String::from_utf8_lossy(&request[..size]).to_string());
-                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
             }
             requests
         });
@@ -452,6 +463,22 @@ mod tests {
     }
 
     #[test]
+    fn metadata_http_failures_keep_status_without_recording_endpoint_secrets() {
+        let (mut endpoint, server) = catalog_server_with_status(vec!["{}".into()], "404 Not Found");
+        endpoint.set_query(Some("token=private-endpoint-token"));
+        let error = tauri::async_runtime::block_on(async {
+            let client = http_client_builder().no_proxy().timeout(Duration::from_secs(2)).build().unwrap();
+            modelscope_manifest_at(&client, &endpoint, "stable.json").await.err().expect("404 must fail")
+        });
+        server.join().unwrap();
+        let message = error.to_string();
+        assert!(message.contains("UPDATE_HTTP_NOT_FOUND"));
+        assert!(message.contains("404"));
+        assert!(!message.contains("private-endpoint-token"));
+        assert!(!message.contains("127.0.0.1"));
+    }
+
+    #[test]
     fn catalog_missing_channel_is_unavailable() {
         for files in [
             serde_json::json!([]),
@@ -475,7 +502,8 @@ mod tests {
                 modelscope_manifest_at(&client, &endpoint, "stable-v1-windows-x64-update.json").await
             });
             server.join().unwrap();
-            assert!(result.is_err(), "Missing channel metadata was treated as a completed update check");
+            let error = result.err().expect("Missing channel metadata must not complete the update check");
+            assert!(error.to_string().contains("UPDATE_METADATA_UNAVAILABLE"));
         }
     }
 

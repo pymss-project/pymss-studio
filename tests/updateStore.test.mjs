@@ -525,6 +525,22 @@ test('a backend busy rejection does not exit the application or record acceptanc
   assert.ok(!store.error.includes('APPLICATION_UPDATE_BUSY:'))
 })
 
+for (const code of ['UPDATE_CHECK_INCOMPLETE', 'UPDATE_DISTRIBUTION_UNSUPPORTED']) {
+  test(`${code} remains a failed check instead of reporting the latest version`, async () => {
+    const storage = desktopStorage({ checkError: new Error(`${code}: update status unavailable`) })
+    const store = newStore()
+    await store.initialize()
+    await assert.rejects(store.checkForUpdates(true), new RegExp(code))
+    assert.equal(store.status, 'failed')
+    assert.equal(store.availableUpdate, null)
+    assert.equal(store.latestVersion, '')
+    assert.match(store.error, new RegExp(code))
+    assert.match(store.error, /settings\.update/)
+    assert.deepEqual(storage.payload(), persisted016)
+    assert.deepEqual(storage.writes, [])
+  })
+}
+
 test('macOS update signature failures show a localized summary and retain the diagnostic in the log', async () => {
   const detail = 'worker error: MACOS_UPDATE_SIGNATURE_INVALID: a sealed resource is missing or invalid\nfile modified: Contents/Resources/version'
   const storage = desktopStorage({ update: { ...offeredUpdate, distribution: 'macosApp' }, installError: new Error(detail) })

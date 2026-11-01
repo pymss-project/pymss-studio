@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import math
 import os
 import re
@@ -31,6 +32,10 @@ class ModelNotFoundError(RuntimeError):
 
 
 class ModelDownloadError(RuntimeError):
+    pass
+
+
+class RuntimeCompatibilityError(RuntimeError):
     pass
 
 
@@ -219,6 +224,17 @@ def _studio_separator_type() -> type[Any]:
             return updated
 
         def __init__(self, *args: Any, output_naming: Any = None, output_model: str = "", **kwargs: Any) -> None:
+            if kwargs.get("target_instrument_override") is None:
+                kwargs.pop("target_instrument_override", None)
+            else:
+                parameters = inspect.signature(MSSeparator.__init__).parameters
+                if "target_instrument_override" not in parameters and not any(
+                    parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+                ):
+                    raise RuntimeCompatibilityError(
+                        "The active pymss kernel does not support this model's target instrument override. "
+                        "Update the kernel or synchronize runtime dependencies in Settings before retrying."
+                    )
             from worker_rocm import configure_rocm_runtime
             configure_rocm_runtime(kwargs.get("device", "auto"), kwargs.get("device_ids"), kwargs.get("logger"))
             super().__init__(*args, **kwargs)
@@ -440,6 +456,8 @@ def resolve_pymss_output_dir(output_dir: str, success_files: list[str], fallback
     return str(Path(output_dir) / file_name)
 
 def _emit_inference_error(exc: Exception, task_id: str) -> int:
+    if isinstance(exc, RuntimeCompatibilityError):
+        return emit_error("RUNTIME_OUTDATED", str(exc), task_id=task_id)
     if isinstance(exc, InferenceParameterError):
         return emit_error("INFERENCE_PARAMS_INVALID", str(exc), task_id=task_id)
     message = str(exc)
@@ -608,6 +626,7 @@ def _prepare_separator(
         emit("task_stage", {"stage": "downloading_model", "message": "Checking model files"}, task_id=task_id)
     else:
         emit("task_stage", {"stage": "ensuring_model", "message": "Checking model files"}, task_id=task_id)
+    emit("task_stage", {"stage": "loading_runtime", "message": "Loading separation runtime"}, task_id=task_id)
     StudioMSSeparator = _studio_separator_type()
     emit("task_stage", {"stage": "loading_model", "message": "Loading model"}, task_id=task_id)
     try:
@@ -646,11 +665,14 @@ def _prepare_separator(
         config_path=resolved.get('config_path'),
         inference_params=inference_params,
     )
+    target_options = {}
+    if resolved.get('target_instrument_override') is not None:
+        target_options['target_instrument_override'] = resolved['target_instrument_override']
     return StudioMSSeparator(
         model_type=resolved_model_type,
         model_path=resolved_model_path,
         config_path=resolved.get('config_path'),
-        target_instrument_override=resolved.get('target_instrument_override'),
+        **target_options,
         device=device,
         device_ids=device_ids,
         output_format=output_format,
@@ -881,6 +903,7 @@ def cmd_infer_batch(payload: dict[str, Any]) -> int:
             root_task_id,
             task_id_provider=current_log_task_id,
         ))
+        emit("task_stage", {"stage": "checking_device", "message": "Checking execution device"}, task_id=root_task_id)
         separator = _prepare_separator(
             payload={**payload, "output": output_root, "saveAsFolder": save_as_folder},
             task_id=root_task_id,
@@ -935,6 +958,7 @@ def cmd_infer(payload: dict[str, Any]) -> int:
         return emit_error("INPUT_NOT_FOUND", "Missing input path", task_id=task_id)
     if not Path(input_path).exists():
         return emit_error("INPUT_NOT_FOUND", f"Input path does not exist: {input_path}", task_id=task_id)
+    emit("task_stage", {"stage": "checking_device", "message": "Checking execution device"}, task_id=task_id)
     try:
         _resolve_separator_device(payload.get("device"), payload.get("deviceIds"))
     except Exception as exc:
