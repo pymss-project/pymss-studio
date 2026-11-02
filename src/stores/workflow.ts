@@ -52,21 +52,24 @@ export type SaveWorkflowInput = {
 type StoredWorkflowState = {
   workflows?: Partial<WorkflowEntry>[]
   selectedWorkflowId?: string
+  recoveryBackupPath?: string
 }
 
 type LoadedWorkflowState = {
   workflows: WorkflowEntry[]
   selectedWorkflowId: string
+  recoveryBackupPath?: string
 }
 
 type WorkflowStoreMutation = {
-  action: 'upsert' | 'delete' | 'select'
+  action: 'upsert' | 'delete' | 'select' | 'dismiss_recovery'
   entry?: WorkflowEntry
   workflowId?: string
   expectedUpdatedAt?: number
   legacyIndex?: number
   legacyEntry?: Partial<WorkflowEntry>
   force?: boolean
+  recoveryBackupPath?: string
 }
 
 type WorkflowMutationResponse = {
@@ -150,6 +153,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
   function editorFor(workflowId: string) { return workflowEditorFor(openedEditors.value, workflowId) }
   const initialized = ref(false)
   const isSaving = ref(false)
+  const recoveryBackupPath = ref('')
   const selectedWorkflow = computed(() => workflows.value.find(item => item.id === selectedWorkflowId.value) || null)
   let pendingPersistCount = 0
   let mutationQueue = Promise.resolve()
@@ -193,7 +197,12 @@ export const useWorkflowStore = defineStore('workflow', () => {
       ? storedSelectedId
       : loadedWorkflows[0]?.id || ''
     legacyWorkflowReferences = nextLegacyReferences
-    return { workflows: loadedWorkflows, selectedWorkflowId: loadedSelectedId }
+    return {
+      workflows: loadedWorkflows,
+      selectedWorkflowId: loadedSelectedId,
+      ...(typeof stored?.recoveryBackupPath === 'string' && stored.recoveryBackupPath
+        ? { recoveryBackupPath: stored.recoveryBackupPath } : {}),
+    }
   }
 
   async function readStoredState(throwOnError = false): Promise<LoadedWorkflowState> {
@@ -233,6 +242,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     const next: LoadedWorkflowState = {
       workflows: current.workflows.map(item => JSON.parse(JSON.stringify(item)) as WorkflowEntry),
       selectedWorkflowId: current.selectedWorkflowId,
+      ...(current.recoveryBackupPath ? { recoveryBackupPath: current.recoveryBackupPath } : {}),
     }
     if (mutation.action === 'upsert' && mutation.entry) {
       const index = findMutationWorkflowIndex(next.workflows, mutation)
@@ -287,6 +297,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
           next.selectedWorkflowId = next.workflows[0]?.id || ''
         }
       }
+    } else if (mutation.action === 'dismiss_recovery') {
+      if (next.recoveryBackupPath === mutation.recoveryBackupPath) delete next.recoveryBackupPath
     } else if (mutation.action === 'select') {
       if (!mutation.workflowId) {
         next.selectedWorkflowId = ''
@@ -316,6 +328,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
   function applyStoredState(state: LoadedWorkflowState) {
     workflows.value = state.workflows
     selectedWorkflowId.value = state.selectedWorkflowId
+    recoveryBackupPath.value = state.recoveryBackupPath || ''
     initialized.value = true
   }
 
@@ -349,6 +362,16 @@ export const useWorkflowStore = defineStore('workflow', () => {
 
   async function reload(options: { throwOnError?: boolean } = {}) {
     await loadStoredState(options.throwOnError)
+  }
+
+  async function dismissRecoveryNotice() {
+    const backupPath = recoveryBackupPath.value
+    if (!backupPath) return
+    const selectionGenerationAtRequest = selectionMutationGeneration
+    await queueMutation(async () => {
+      const response = await mutateStoredState({ action: 'dismiss_recovery', recoveryBackupPath: backupPath })
+      applyStoredState(normalizeMutationState(response.state, selectionGenerationAtRequest))
+    })
   }
 
   async function refreshAfterEditorClosed() {
@@ -520,6 +543,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
     selectedWorkflow,
     initialized,
     isSaving,
+    recoveryBackupPath,
+    dismissRecoveryNotice,
     initialize,
     reload,
     handleEditorClosed,

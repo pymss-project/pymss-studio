@@ -306,6 +306,7 @@ const nextDisabled = computed(() => {
             <n-select
               v-model:value="modelType"
               :options="modelTypeOptions"
+              to="body"
               filterable
               :placeholder="t('models.customTypePlaceholder')"
             />

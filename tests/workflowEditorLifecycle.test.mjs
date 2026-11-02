@@ -222,6 +222,8 @@ function environment() {
                 },
               }
             }
+          } else if (mutation.action === 'dismiss_recovery') {
+            if (state.recoveryBackupPath === mutation.recoveryBackupPath) delete state.recoveryBackupPath
           } else {
             throw new Error(`Unexpected workflow mutation: ${mutation.action}`)
           }
@@ -298,6 +300,45 @@ afterEach(async () => {
   for (const store of stores.splice(0)) store.$dispose()
   Reflect.deleteProperty(globalThis, 'window')
   Reflect.deleteProperty(globalThis, 'localStorage')
+})
+
+test('workflow recovery notice survives saves and reloads until acknowledged', async () => {
+  const env = environment()
+  const backupPath = 'C:/studio/settings/workflows.corrupt-original.json'
+  env.stored = { workflows: [], selectedWorkflowId: '', recoveryBackupPath: backupPath }
+  await env.store.initialize()
+  assert.equal(env.store.recoveryBackupPath, backupPath)
+  await env.store.saveWorkflow(entry('after-recovery'))
+  await env.store.reload()
+  assert.equal(env.store.recoveryBackupPath, backupPath)
+  assert.equal(env.store.workflows[0].id, 'after-recovery')
+  await env.store.dismissRecoveryNotice()
+  assert.equal(env.store.recoveryBackupPath, '')
+  assert.equal(env.stored.recoveryBackupPath, undefined)
+  assert.equal(env.stored.workflows[0].id, 'after-recovery')
+  await env.store.reload()
+  assert.equal(env.store.recoveryBackupPath, '')
+})
+
+test('acknowledging an older recovery does not hide a newer backup', async () => {
+  const env = environment()
+  env.stored = { workflows: [], selectedWorkflowId: '', recoveryBackupPath: 'older backup' }
+  await env.store.initialize()
+  env.stored = { ...env.stored, recoveryBackupPath: 'newer backup' }
+  await env.store.dismissRecoveryNotice()
+  assert.equal(env.store.recoveryBackupPath, 'newer backup')
+  assert.equal(env.stored.recoveryBackupPath, 'newer backup')
+})
+
+test('a failed recovery acknowledgement retains the notice and workflow data', async () => {
+  const env = environment()
+  env.stored = { ...env.stored, recoveryBackupPath: 'retained backup' }
+  await env.store.initialize()
+  const before = structuredClone(env.stored)
+  env.mutate = async () => { throw new Error('Storage unavailable') }
+  await assert.rejects(env.store.dismissRecoveryNotice(), /Storage unavailable/)
+  assert.equal(env.store.recoveryBackupPath, 'retained backup')
+  assert.deepEqual(env.stored, before)
 })
 
 test('overview rejects malformed simple imports without saving or changing selection', async () => {

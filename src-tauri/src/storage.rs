@@ -278,6 +278,9 @@ pub fn app_store_path(app: &AppHandle, name: &str) -> AppResult<PathBuf> {
 pub fn read_app_store(app: &AppHandle, name: &str) -> AppResult<Value> {
     ensure_app_directories(app)?;
     let path = app_store_path(app, name)?;
+    if name == "workflow-state" {
+        return read_workflow_store_file(&path);
+    }
     if !path.is_file() {
         return Ok(Value::Null);
     }
@@ -441,22 +444,58 @@ fn write_json_file_with_replace(
 pub fn mutate_workflow_store(app: &AppHandle, mutation: &Value) -> AppResult<Value> {
     ensure_app_directories(app)?;
     let path = app_store_path(app, "workflow-state")?;
+    mutate_workflow_store_file(&path, mutation)
+}
+
+fn read_workflow_store_file(path: &Path) -> AppResult<Value> {
+    let _read_guard = JSON_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    read_workflow_store_file_locked(path)
+}
+
+fn read_workflow_store_file_locked(path: &Path) -> AppResult<Value> {
+    let content = match std::fs::read(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Value::Null),
+        Err(error) => return Err(error.into()),
+    };
+    if let Ok(state) = serde_json::from_slice::<Value>(&content) {
+        return Ok(state);
+    }
+
+    let parent = path.parent().ok_or_else(|| AppError::Worker("Workflow store directory is unavailable".into()))?;
+    let mut backup = tempfile::Builder::new()
+        .prefix("workflows.corrupt-")
+        .suffix(".json")
+        .tempfile_in(parent)?;
+    backup.write_all(&content)?;
+    backup.as_file().sync_all()?;
+    let (file, backup_path) = backup.keep().map_err(|error| error.error)?;
+    drop(file);
+    let state = serde_json::json!({
+        "workflows": [],
+        "selectedWorkflowId": "",
+        "recoveryBackupPath": backup_path.to_string_lossy(),
+    });
+    // The raw backup is durable before replacing the unreadable store. The
+    // caller holds JSON_WRITE_LOCK, including when recovering during a save.
+    write_json_file_locked(path, &state)?;
+    Ok(state)
+}
+
+fn mutate_workflow_store_file(path: &Path, mutation: &Value) -> AppResult<Value> {
     let _write_guard = JSON_WRITE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    let state = if path.is_file() {
-        let content = std::fs::read_to_string(&path)?;
-        serde_json::from_str::<Value>(&content)?
-    } else {
-        serde_json::json!({ "workflows": [], "selectedWorkflowId": "" })
-    };
+    let state = read_workflow_store_file_locked(path)?;
     let response = apply_workflow_mutation(state, mutation)?;
     if response.get("conflict").is_none() {
         let next_state = response
             .get("state")
             .ok_or_else(|| AppError::Worker("workflow mutation returned no state".into()))?;
-        write_json_file_locked(&path, next_state)?;
+        write_json_file_locked(path, next_state)?;
     }
     Ok(response)
 }
@@ -664,6 +703,13 @@ fn apply_workflow_mutation(mut state: Value, mutation: &Value) -> AppResult<Valu
                 }
             }
         }
+        "dismiss_recovery" => {
+            if let Some(path) = mutation.get("recoveryBackupPath").and_then(Value::as_str) {
+                if state_object.get("recoveryBackupPath").and_then(Value::as_str) == Some(path) {
+                    state_object.remove("recoveryBackupPath");
+                }
+            }
+        }
         _ => {
             return Err(AppError::Worker(format!(
                 "unknown workflow mutation: {action}"
@@ -751,6 +797,111 @@ mod tests {
 
     fn path(name: &str) -> PathBuf {
         PathBuf::from(name)
+    }
+
+    #[test]
+    fn workflow_recovery_preserves_invalid_utf8_and_json_before_rebuilding() {
+        for bytes in [b"\xff\x00\xfe".as_slice(), b"{\"workflows\":".as_slice()] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("workflows.json");
+            std::fs::write(&path, bytes).unwrap();
+            let state = super::read_workflow_store_file(&path).unwrap();
+            let backup = PathBuf::from(state["recoveryBackupPath"].as_str().unwrap());
+            assert_eq!(backup.parent(), Some(directory.path()));
+            assert_eq!(std::fs::read(&backup).unwrap(), bytes);
+            assert_eq!(state["workflows"], json!([]));
+            assert_eq!(super::read_workflow_store_file(&path).unwrap(), state);
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+        }
+    }
+
+    #[test]
+    fn workflow_recovery_keeps_healthy_files_unchanged_and_does_not_mask_io_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("workflows.json");
+        assert_eq!(super::read_workflow_store_file(&path).unwrap(), serde_json::Value::Null);
+        let bytes = b"{\"workflows\": [], \"selectedWorkflowId\": \"\"}\n";
+        std::fs::write(&path, bytes).unwrap();
+        let state = super::read_workflow_store_file(&path).unwrap();
+        assert_eq!(state["workflows"], json!([]));
+        assert!(state.get("recoveryBackupPath").is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        let unreadable = directory.path().join("directory.json");
+        std::fs::create_dir(&unreadable).unwrap();
+        assert!(super::read_workflow_store_file(&unreadable).is_err());
+        assert!(unreadable.is_dir());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn workflow_recovery_allows_saving_and_preserves_previous_backups() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("workflows.json");
+        std::fs::write(&path, b"first invalid file").unwrap();
+        let first = super::mutate_workflow_store_file(&path, &json!({
+            "action": "upsert", "entry": {"id": "new", "name": "New workflow", "updatedAt": 10},
+        })).unwrap();
+        let first_backup = PathBuf::from(first["state"]["recoveryBackupPath"].as_str().unwrap());
+        assert_eq!(first["state"]["workflows"][0]["id"], "new");
+        assert_eq!(std::fs::read(&first_backup).unwrap(), b"first invalid file");
+        let conflict = super::mutate_workflow_store_file(&path, &json!({
+            "action": "upsert", "entry": {"id": "new", "name": "Stale", "updatedAt": 11},
+            "expectedUpdatedAt": 5,
+        })).unwrap();
+        assert!(conflict.get("conflict").is_some());
+        let stale = super::mutate_workflow_store_file(&path, &json!({
+            "action": "dismiss_recovery", "recoveryBackupPath": "earlier backup",
+        })).unwrap();
+        assert_eq!(stale["state"]["recoveryBackupPath"], first["state"]["recoveryBackupPath"]);
+        let acknowledged = super::mutate_workflow_store_file(&path, &json!({
+            "action": "dismiss_recovery", "recoveryBackupPath": first_backup.to_string_lossy(),
+        })).unwrap();
+        assert!(acknowledged["state"].get("recoveryBackupPath").is_none());
+        assert_eq!(acknowledged["state"]["workflows"][0]["name"], "New workflow");
+        assert_eq!(std::fs::read(&first_backup).unwrap(), b"first invalid file");
+        std::fs::write(&path, b"second invalid file").unwrap();
+        let second = super::read_workflow_store_file(&path).unwrap();
+        let second_backup = PathBuf::from(second["recoveryBackupPath"].as_str().unwrap());
+        assert_ne!(first_backup, second_backup);
+        assert_eq!(std::fs::read(&first_backup).unwrap(), b"first invalid file");
+        assert_eq!(std::fs::read(&second_backup).unwrap(), b"second invalid file");
+    }
+
+    #[test]
+    fn workflow_recovery_serializes_concurrent_readers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("workflows.json");
+        std::fs::write(&path, b"invalid state").unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(6));
+        let threads = (0..6).map(|_| {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                super::read_workflow_store_file(&path).unwrap()
+            })
+        }).collect::<Vec<_>>();
+        let states = threads.into_iter().map(|thread| thread.join().unwrap()).collect::<Vec<_>>();
+        assert!(states.iter().all(|state| state == &states[0]));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn workflow_recovery_preserves_original_and_backup_when_replacement_is_blocked() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("workflows.json");
+        let original = b"unreadable workflow state";
+        std::fs::write(&path, original).unwrap();
+        let _reader = std::fs::OpenOptions::new().read(true).share_mode(1).open(&path).unwrap();
+        assert!(super::read_workflow_store_file(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let backups = std::fs::read_dir(directory.path()).unwrap().filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("workflows.corrupt-")).collect::<Vec<_>>();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(std::fs::read(backups[0].path()).unwrap(), original);
     }
 
     #[test]

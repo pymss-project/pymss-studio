@@ -10,6 +10,7 @@ import { isMainTaskOwner } from '@/utils/taskOwner'
 import AppBrandMark from '@/components/AppBrandMark.vue'
 import StartupOnboarding from '@/components/StartupOnboarding.vue'
 import BeginnerGuide from '@/components/BeginnerGuide.vue'
+import WorkflowRecoveryNotice from '@/components/workflow/WorkflowRecoveryNotice.vue'
 import { useBeginnerGuideStore } from '@/stores/beginnerGuide'
 import ViewportRecoveryOverlay from '@/components/ViewportRecoveryOverlay.vue'
 import { useSettingsStore } from '@/stores/settings'
@@ -340,6 +341,7 @@ const themeOverrides = computed(() => {
     <n-notification-provider>
       <n-message-provider>
         <n-dialog-provider>
+        <WorkflowRecoveryNotice />
         <div class="app-shell" :inert="beginnerGuide.demoActive || undefined" :class="{ 'app-shell--editor': isStandaloneRoute, 'app-shell--workflow-node-editor': isStandaloneRoute && isWorkflowEditorRoute, 'app-shell--native-titlebar': isMacOS, 'no-animations': !settings.animationsEnabled }">
           <div class="app-backdrop" />
           <TitleBar v-if="!isWorkflowEditorRoute || isMainTaskOwner()" />
