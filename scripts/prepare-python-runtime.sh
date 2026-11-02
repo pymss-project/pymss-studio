@@ -238,6 +238,7 @@ print('librosa', librosa.__version__)
 print('av', av.__version__)
 print('mlx', importlib.util.find_spec('mlx') is not None)
 PY
+PYTHONDONTWRITEBYTECODE=1 runtime_python "$(dirname "$0")/verify-pymss-plugin-api.py"
 PYTHONDONTWRITEBYTECODE=1 runtime_python "$(dirname "$0")/../python/runtime_audio_probe.py" --check-core
 bash "$(dirname "$0")/prune-python-runtime.sh" "$RUNTIME_DIR" --keep-venv
 runtime_python -m pip --version

@@ -29,6 +29,7 @@ jobs:
         run: |
           python -m unittest discover -s tests/python -t tests -p "test_runtime_pruning.py"
           python -m unittest discover -s tests/python -t tests -p "test_prepare_runtime_probe.py"
+          python -m unittest discover -s tests/python -t tests -p "test_pymss_plugin_api.py"
           python -m unittest discover -s tests/python -t tests -p "test_release_core_resolution.py"
       - name: Verify optional components preserve the fixed runtime
         run: python -m unittest discover -s tests/python -t tests -p "test_worker_optional_packages.py"

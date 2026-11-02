@@ -384,6 +384,7 @@ print(json.dumps(result))
 
     & (Join-Path $PSScriptRoot "prune-python-runtime.ps1") -RuntimeDir $envDir -KeepScripts
     Invoke-NativeChecked -FilePath $envPython -Arguments @('-m', 'pip', '--version')
+    Invoke-NativeChecked -FilePath $envPython -Arguments @('-B', (Join-Path $PSScriptRoot "verify-pymss-plugin-api.py"))
     Write-Host "=== InitialBackend complete: $InitialBackend environment ready ==="
     exit 0
 }
@@ -445,6 +446,7 @@ Assert-BootstrapRuntime -PythonPath $runtimePython
 $previousDontWriteBytecode = $env:PYTHONDONTWRITEBYTECODE
 $env:PYTHONDONTWRITEBYTECODE = "1"
 Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-c', "import importlib.util, pymss, pymss.graph, torch, librosa, av, yaml, tqdm; print('pymss', getattr(pymss, '__version__', 'unknown'), pymss.__file__); print('torch', torch.__version__, 'cuda', torch.version.cuda, 'cuda_available', torch.cuda.is_available()); print('librosa', librosa.__version__); print('av', av.__version__); print('mlx', importlib.util.find_spec('mlx') is not None)")
+Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-B', (Join-Path $PSScriptRoot "verify-pymss-plugin-api.py"))
 Invoke-NativeChecked -FilePath $runtimePython -Arguments @((Join-Path $root "python\runtime_audio_probe.py"), '--check-core')
 if ($null -eq $previousDontWriteBytecode) {
     Remove-Item Env:\PYTHONDONTWRITEBYTECODE -ErrorAction SilentlyContinue
