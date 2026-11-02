@@ -876,10 +876,12 @@ mod platform {
             let root = tempfile::tempdir().unwrap();
             let target = signed_bundle(root.path(), "Installed.app", "1.0.0");
             let source = signed_bundle(root.path(), "New.app", "1.1.0");
+            validate_bundle(&source, Some("1.1.0")).unwrap();
             fs::write(source.join("Contents/Resources/version"), "changed").unwrap();
             let error = install_writable(&target, &source, "1.1.0", 1024).unwrap_err();
-            assert!(error.to_string().contains("MACOS_UPDATE_SIGNATURE_INVALID:"));
-            assert!(error.to_string().contains("Contents/Resources/version"));
+            assert!(error.to_string().contains("MACOS_UPDATE_SIGNATURE_INVALID:"), "{error}");
+            assert_eq!(fs::read_to_string(target.join("Contents/Resources/version")).unwrap(), "1.0.0");
+            assert_eq!(fs::read_to_string(source.join("Contents/Resources/version")).unwrap(), "changed");
             validate_bundle(&target, Some("1.0.0")).unwrap();
         }
 
