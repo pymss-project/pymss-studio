@@ -11,7 +11,7 @@ if __package__:
 else:
     import _bootstrap as _worker_test_bootstrap  # noqa: F401
 
-import worker_plugin_inventory as inventory
+from pymss_plugin_manager import inventory
 
 
 class ApplicationInventoryTests(unittest.TestCase):

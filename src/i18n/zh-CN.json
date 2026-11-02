@@ -37,6 +37,7 @@
     "download": "下载",
     "refresh": "刷新",
     "refreshing": "正在刷新…",
+    "loading": "正在加载…",
     "unknown": "未知",
     "all": "全部",
     "notAvailable": "不可用",
@@ -2049,6 +2050,7 @@
   },
   "plugins": {
     "title": "插件市场",
+    "viewUnavailable": "插件界面不可用：",
     "subtitle": "发现音频扩展，管理当前运行环境中的插件。",
     "installSource": "从来源安装",
     "runtimeRequired": "请先在设置中安装并启用运行环境，再使用插件。",

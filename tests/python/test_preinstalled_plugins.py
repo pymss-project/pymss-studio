@@ -12,6 +12,7 @@ else:
     import test_worker_plugins as marketplace_tests
 
 import worker_plugins as plugins
+from pymss_plugin_manager import _engine as management
 
 
 class PreinstalledPluginTests(unittest.TestCase):
@@ -72,7 +73,7 @@ entry = "ui/index.html"
 placements = ["tool"]
 operation = "hello.hello"
 ''')
-        with mock.patch.object(plugins, "_bundled", return_value={}):
+        with mock.patch.object(management, "_bundled", return_value={}):
             self.install(source)
             row = plugins._inventory(self.root, verify=False)["installed"][0]
             self.assertNotIn("toolId", row)
@@ -89,7 +90,7 @@ operation = "hello.hello"
 
     def test_prepare_is_offline_idempotent_and_does_not_replace_user_version(self):
         self.bundle()
-        with mock.patch.object(plugins, "_install_dependencies", side_effect=AssertionError("No pip for preinstalled plugins")):
+        with mock.patch.object(management, "_install_dependencies", side_effect=AssertionError("No pip for preinstalled plugins")):
             code, events = self.manage("prepare_preinstalled")
         self.assertEqual(code, 0, events)
         self.assertTrue(events[-1]["payload"]["installed"][0]["loaded"])

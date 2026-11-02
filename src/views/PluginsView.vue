@@ -45,7 +45,7 @@ const removedPreinstalled = computed(() => (snapshot.value?.preinstalled || []).
   !plugin.installed && plugin.name.toLowerCase().includes(search.value.trim().toLowerCase()),
 ))
 const updateCount = computed(() => Object.values(updates.value).filter(update => update.up_to_date === false).length)
-const disabled = computed(() => busy.value || loading.value || catalogLoading.value)
+const disabled = computed(() => busy.value || loading.value || catalogLoading.value || snapshot.value?.runtime.managementSupported === false)
 
 function pluginActivity(name: string) {
   return [...activities.value].reverse().find(task => task.name === name)
@@ -293,6 +293,7 @@ async function requestCancel(id?: string) {
               <div class="plugin-category-list"><n-tag v-for="value in pluginToolCategories(plugin)" :key="value || 'other'" size="small" :bordered="false">{{ categoryLabel(value) }}</n-tag></div>
               <p v-if="pluginDescription(plugin)" class="plugin-description">{{ pluginDescription(plugin) }}</p>
               <p v-if="plugin.error && !incompatible(plugin)" class="plugin-error">{{ plugin.error }}</p>
+              <p v-if="plugin.viewError" class="plugins-help">{{ t('plugins.viewUnavailable') }} {{ plugin.viewError }}</p>
               <p v-if="incompatible(plugin)" class="plugin-error">{{ plugin.compatibility?.reasons.join('\n') }}</p>
               <p v-if="plugin.dependencyError" class="plugins-help" :title="plugin.dependencyError">{{ t('plugins.optionalBackendHint') }}</p>
               <p v-if="updates[plugin.name]?.error" class="plugin-error">{{ updates[plugin.name]?.error }}</p>

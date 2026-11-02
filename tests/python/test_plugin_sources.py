@@ -46,7 +46,7 @@ class PluginSourceTests(unittest.TestCase):
         source = self.source()
         commit = "v1.0.0"
 
-        def acquire(target, *, plugins_dir, subpath, no_deps, ref, registry_url):
+        def acquire(target, *, plugins_dir, subpath, no_deps, ref, registry_url, temporary_root=None):
             self.assertEqual(target, "https://github.com/example/plugins")
             self.assertEqual(ref, commit)
             self.assertEqual(subpath, "plugins/hello")
@@ -300,7 +300,7 @@ class PluginSourceTests(unittest.TestCase):
         remote = self.source(version='3.0.0')
         selected = {'mode': 'repository', 'repositoryUrl': 'https://github.com/other/plugins', 'ref': 'main', 'registryRef': 'main'}
 
-        def install(name, plugins_dir, subpath, no_deps, ref, registry_url):
+        def install(name, plugins_dir, subpath, no_deps, ref, registry_url, temporary_root=None):
             self.assertEqual(name, selected['repositoryUrl'])
             self.assertEqual(subpath, 'plugins/hello')
             self.assertEqual(ref, 'v3.0.0')

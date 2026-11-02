@@ -18,6 +18,7 @@ else:
 
 import worker_operations
 import worker_plugins as plugins
+from pymss_plugin_manager import _engine as management
 
 
 class PluginMarketplaceTests(unittest.TestCase):
@@ -51,6 +52,8 @@ class PluginMarketplaceTests(unittest.TestCase):
 
     @staticmethod
     def reset_runtime():
+        from pymss_plugin_manager.leases import release_runtime
+        release_runtime()
         import pymss.operations
         import pymss.plugins
         pymss.operations._DEFAULT_RUNTIME = None
@@ -86,6 +89,7 @@ def setup(plugin):
         return source
 
     def manage(self, action, **payload):
+        self.reset_runtime()
         output = io.StringIO()
         with redirect_stdout(output):
             code = plugins.cmd_manage_plugin({"action": action, "taskId": "plugin_manage_test", **payload})
@@ -123,7 +127,7 @@ def setup(plugin):
         legacy_manifest = '[tool.pymss.plugin]\nid="oldtool"\napi_version=1\n'
         (legacy / "pyproject.toml").write_text(legacy_manifest)
         with mock.patch.object(manifest, "API_VERSION", 1), \
-             mock.patch.object(plugins, "_acquire_source", side_effect=AssertionError("source acquired")) as acquire:
+             mock.patch.object(management, "_acquire_source", side_effect=AssertionError("source acquired")) as acquire:
             code, events = self.manage("install", target=str(self.source()))
         self.assertEqual(code, 1)
         self.assertEqual(events[-1]["type"], "error")
@@ -142,7 +146,7 @@ def setup(plugin):
             return []
 
         with mock.patch.object(Runtime, "load_plugins", legacy_loader), \
-             mock.patch.object(plugins.subprocess, "run", side_effect=AssertionError("unexpected probe")) as run:
+             mock.patch("pymss_plugin_manager.service.probe", side_effect=AssertionError("unexpected probe")) as run:
             with self.assertRaises(plugins.PluginRuntimeIncompatible):
                 plugins._probe(self.root)
         run.assert_not_called()
@@ -167,7 +171,7 @@ def setup(plugin):
         self.assertEqual(plugins._manifest(self.root / "installed/hello")["version"], "1.0.0")
 
     def test_failing_dependency_install_does_not_publish_source(self):
-        with mock.patch.object(plugins, "_install_dependencies", side_effect=RuntimeError("dependency conflict")):
+        with mock.patch.object(management, "_install_dependencies", side_effect=RuntimeError("dependency conflict")):
             code, events = self.manage("install", target=str(self.source()))
         self.assertEqual(code, 1)
         self.assertFalse((self.root / "installed/hello").exists())
@@ -376,19 +380,22 @@ def setup(plugin):
         self.assertFalse(update["up_to_date"])
         self.assertEqual(update["remote_version"], "2.0.0")
 
-    def test_pymss_directory_plugin_is_visible_and_blocks_the_same_plugin_id(self):
+    def test_explicit_managed_binding_does_not_implicitly_load_a_foreign_directory(self):
         manual = self.work / "manual/hello"
         manual.parent.mkdir(parents=True)
         shutil.copytree(self.source(), manual)
         copy = self.work / "managed/hello"
         shutil.copytree(manual, copy)
         code, events = self.manage("install", target=str(copy))
-        self.assertEqual(code, 1, events)
-        self.assertIn("already activated from", events[-1]["payload"]["message"])
-        row = plugins._inventory(self.root)["installed"][0]
+        self.assertEqual(code, 0, events)
+        rows = plugins._inventory(self.root)["installed"]
+        row = next(row for row in rows if not row["managed"])
         self.assertEqual(row["name"], "hello")
         self.assertFalse(row["managed"])
         self.assertIsNone(row["loaded"])
+        self.assertTrue(next(row for row in rows if row["managed"])["loaded"])
+        self.assertEqual(self.manage("disable", name="hello")[0], 0)
+        self.assertNotIn("hello.hello", {spec["id"] for spec in plugins.operation_runtime().list_operations()})
 
     def test_recovery_cleans_abandoned_install_and_uninstall_transactions(self):
         for name in ["install-abandoned", "removed-old"]:
@@ -399,6 +406,7 @@ def setup(plugin):
         self.assertEqual(list(self.root.joinpath("transactions").iterdir()), [])
 
     def test_sidecar_activation_keeps_host_paths_first(self):
+        shutil.copytree(self.source(), self.root / "installed/hello")
         deps = self.root / "installed/hello/.studio-deps"
         deps.mkdir(parents=True)
         before = list(sys.path)
@@ -447,7 +455,7 @@ def setup(plugin):
 
     def test_read_only_recovery_failure_does_not_hide_installed_plugins(self):
         self.install(self.source())
-        with mock.patch.object(plugins, "runtime_lock", side_effect=PermissionError("read-only")):
+        with mock.patch.object(management, "runtime_lock", side_effect=PermissionError("read-only")):
             snapshot = plugins._inventory(self.root)
             runtime = plugins.operation_runtime()
         self.assertTrue(snapshot["installed"][0]["loaded"])
@@ -485,7 +493,7 @@ def setup(plugin):
 
         source = self.source()
 
-        def clone_source(url, destination, *, subpath, ref):
+        def clone_source(url, destination, *, subpath, ref, temporary_root=None):
             shutil.copytree(source, destination)
             return {}
 
@@ -503,7 +511,9 @@ def setup(plugin):
                 result = plugins._acquire_source(target, self.work / f"download-{index}")
                 clone.assert_called_once()
                 self.assertEqual(clone.call_args.args[0], url)
-                self.assertEqual(clone.call_args.kwargs, {"ref": ref, "subpath": subpath})
+                self.assertEqual(clone.call_args.kwargs["ref"], ref)
+                self.assertEqual(clone.call_args.kwargs["subpath"], subpath)
+                self.assertTrue(clone.call_args.kwargs["temporary_root"].is_relative_to(self.work))
                 metadata = plugins._manifest(result.path)
                 self.assertEqual(metadata["url"], url)
                 self.assertEqual(metadata["ref"], ref)
@@ -572,7 +582,7 @@ def setup(plugin):
                     {"metadata": {"name": "tiny-extra", "version": "1.2.0"}},
                 ]}))
         with mock.patch.object(importlib.metadata, "distributions", return_value=[fake_host]), \
-             mock.patch.object(plugins, "_run_process", side_effect=run), redirect_stdout(io.StringIO()):
+             mock.patch.object(management, "_run_process", side_effect=run), redirect_stdout(io.StringIO()):
             plugins._install_dependencies(source, self.root, "plugin_manage_test", {"mirror": "pypi"})
         self.assertEqual(calls[0][:3], [sys.executable, "-m", "pip"])
         self.assertIn("numpy==2.0.0", source.parent.joinpath("constraints.txt").read_text())

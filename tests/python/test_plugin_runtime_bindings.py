@@ -14,8 +14,9 @@ else:
     import test_worker_plugins as marketplace
     import test_preinstalled_plugins as preinstalled
 
-import worker_plugin_inventory as inventory
+from pymss_plugin_manager import inventory
 import worker_plugins as plugins
+from pymss_plugin_manager import _engine as management
 
 
 class RuntimeBindingTests(unittest.TestCase):
@@ -66,8 +67,8 @@ class RuntimeBindingTests(unittest.TestCase):
         dependency.parent.mkdir()
         dependency.write_text("value = 7\n", encoding="utf-8")
         self.switch("cuda")
-        resolver = plugins._install_dependencies
-        with mock.patch.object(plugins, "_install_dependencies", wraps=resolver) as resolved:
+        resolver = management._install_dependencies
+        with mock.patch.object(management, "_install_dependencies", wraps=resolver) as resolved:
             code, events = self.manage("prepare", name="hello", expectedRuntime=self.root.name)
         self.assertEqual(code, 0, events)
         resolved.assert_called_once()
@@ -426,7 +427,7 @@ class RuntimeBindingTests(unittest.TestCase):
                 raise SystemExit("Worker exited before moving the plugin")
             return stage(task_id, message, phase, **kwargs)
 
-        with mock.patch.object(plugins, "_stage", side_effect=crash_before_move), self.assertRaises(SystemExit):
+        with mock.patch.object(management, "_stage", side_effect=crash_before_move), self.assertRaises(SystemExit):
             self.manage("uninstall", name="hello")
         self.assertTrue(self.row()["removalPending"])
         self.assertTrue((self.root / "installed/hello").is_dir())
@@ -494,7 +495,7 @@ class RuntimeBindingTests(unittest.TestCase):
             (distribution / "METADATA").write_text(
                 f"Metadata-Version: 2.1\nName: studio-conflict-fixture\nVersion: {version}\n", encoding="utf-8")
 
-        with mock.patch.object(plugins, "_install_dependencies", side_effect=sidecar):
+        with mock.patch.object(management, "_install_dependencies", side_effect=sidecar):
             self.install(self.source())
             self.assertEqual(self.manage("disable", name="hello")[0], 0)
             self.install(self.source(name="other"))

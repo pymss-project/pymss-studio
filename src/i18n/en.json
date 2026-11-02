@@ -37,6 +37,7 @@
     "download": "Download",
     "refresh": "Refresh",
     "refreshing": "Refreshing…",
+    "loading": "Loading…",
     "unknown": "Unknown",
     "all": "All",
     "notAvailable": "Unavailable",
@@ -2049,6 +2050,7 @@
   },
   "plugins": {
     "title": "Plugin marketplace",
+    "viewUnavailable": "Plugin interface unavailable:",
     "subtitle": "Discover audio extensions and manage plugins for your current runtime.",
     "installSource": "Install from source",
     "runtimeRequired": "Install and activate a runtime in Settings to use plugins.",

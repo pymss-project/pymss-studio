@@ -13,6 +13,7 @@ else:
     import test_worker_plugins as marketplace
 
 import worker_plugins as plugins
+from pymss_plugin_manager import _engine as management
 
 
 class PluginUpdateTests(unittest.TestCase):
@@ -54,8 +55,8 @@ operation = "hello.hello"
                 raise AssertionError("code-only updates must not copy the dependency tree")
             return copytree(source, *args, **kwargs)
 
-        with mock.patch.object(plugins, "_install_dependencies", side_effect=AssertionError("unexpected dependency install")), \
-                mock.patch.object(plugins.shutil, "copytree", side_effect=copy_source):
+        with mock.patch.object(management, "_install_dependencies", side_effect=AssertionError("unexpected dependency install")), \
+                mock.patch.object(management.shutil, "copytree", side_effect=copy_source):
             code, events = self.manage("update", name="hello")
         self.assertEqual(code, 0, events)
         self.assertEqual(events[-1]["payload"]["installed"][0]["version"], "2.0.0")
@@ -66,7 +67,7 @@ operation = "hello.hello"
     def test_dependency_installation_requires_explicit_update_opt_in(self):
         self.install(self.source())
         self.source(version="2.0.0")
-        with mock.patch.object(plugins, "_install_dependencies") as install:
+        with mock.patch.object(management, "_install_dependencies") as install:
             code, events = self.manage("update", name="hello", installDependencies=True)
         self.assertEqual(code, 0, events)
         self.assertEqual(install.call_count, 1)
@@ -85,14 +86,14 @@ operation = "hello.hello"
         project.write_text(project.read_text().replace("dependencies=[]", 'dependencies=["kept-dependency==1.0"]'))
         code = source / "__init__.py"
         code.write_text("from kept_dependency import value\n" + code.read_text())
-        with mock.patch.object(plugins, "_install_dependencies", side_effect=AssertionError("unexpected pip")):
+        with mock.patch.object(management, "_install_dependencies", side_effect=AssertionError("unexpected pip")):
             result, events = self.manage("update", name="hello")
         self.assertEqual(result, 0, events)
         self.assertTrue(events[-1]["payload"]["installed"][0]["loaded"])
         self.assertEqual(plugins._manifest(self.root / "installed/hello")["version"], "2.0.0")
 
     def test_optional_tool_backend_is_not_downloaded_by_default_installation(self):
-        with mock.patch.object(plugins, "_run_process", side_effect=AssertionError("unexpected pip")):
+        with mock.patch.object(management, "_run_process", side_effect=AssertionError("unexpected pip")):
             code, events = self.manage("install", target=str(self.deferred_source()))
         self.assertEqual(code, 0, events)
         row = events[-1]["payload"]["installed"][0]
@@ -100,7 +101,7 @@ operation = "hello.hello"
         self.assertIn("missing-tool-backend", row["dependencyError"])
 
     def test_deferral_does_not_apply_to_a_different_operation(self):
-        with mock.patch.object(plugins, "_run_process", side_effect=RuntimeError("dependency installation required")) as pip:
+        with mock.patch.object(management, "_run_process", side_effect=RuntimeError("dependency installation required")) as pip:
             code, events = self.manage("install", target=str(self.deferred_source(matches=False)))
         self.assertEqual(code, 1)
         self.assertTrue(pip.called)
@@ -111,7 +112,7 @@ operation = "hello.hello"
         source = self.source(version="2.0.0")
         project = source / "pyproject.toml"
         project.write_text(project.read_text().replace("dependencies=[]", 'dependencies=["missing-tool-backend>=1"]'))
-        with mock.patch.object(plugins, "_run_process", side_effect=AssertionError("unexpected pip")):
+        with mock.patch.object(management, "_run_process", side_effect=AssertionError("unexpected pip")):
             code, events = self.manage("update", name="hello")
         self.assertEqual(code, 1)
         self.assertIn("Missing plugin dependency", events[-1]["payload"]["message"])
@@ -129,7 +130,7 @@ operation = "hello.hello"
 
     def test_non_boolean_dependency_opt_in_is_rejected_before_installation(self):
         for value in ("false", 1, None):
-            with self.subTest(value=value), mock.patch.object(plugins, "_install") as install:
+            with self.subTest(value=value), mock.patch.object(management, "_install") as install:
                 code, _events = self.manage("update", name="hello", installDependencies=value)
             self.assertEqual(code, 1)
             install.assert_not_called()
@@ -143,7 +144,7 @@ operation = "hello.hello"
             self.assertIn("funasr==1.3.26", (source.parent / "constraints.txt").read_text())
             (source.parent / "pip-report.json").write_text(json.dumps({"install": []}))
 
-        with mock.patch.object(plugins, "_run_process", side_effect=resolve):
+        with mock.patch.object(management, "_run_process", side_effect=resolve):
             plugins._install_dependencies(source, self.root, None, {"action": "repair", "mirror": "pypi"})
 
 

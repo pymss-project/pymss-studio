@@ -51,6 +51,7 @@ export type InstalledPlugin = {
   toolCategory?: 'convert' | 'analyze' | 'recognize' | 'edit' | null
   toolIcon?: string | null
   dependencyError?: string | null
+  viewError?: string | null
   requirements?: PluginRequirements | null
   compatibility?: PluginCompatibility
   resolvedCommit?: string | null
@@ -72,7 +73,7 @@ export type PluginInventory = {
   installed: InstalledPlugin[]
   pluginsDir: string
   verificationError?: string | null
-  runtime: { identity: string; pythonPath: string }
+  runtime: { identity: string; pythonPath: string; bindingDir?: string; managementSupported?: boolean }
   preinstalled?: { name: string; version: string; installed: boolean }[]
   preinstalledPending?: string[]
   preinstalledAvailable?: string[]

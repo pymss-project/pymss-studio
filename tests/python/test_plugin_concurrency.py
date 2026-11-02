@@ -28,9 +28,10 @@ class PluginConcurrencyTests(unittest.TestCase):
 import sys, time
 from pathlib import Path
 import worker_plugins as p
+from pymss_plugin_manager import _engine as engine
 p._PLUGIN_MANIFEST = Path(sys.argv[1])
 gate, label, source = Path(sys.argv[2]), sys.argv[3], sys.argv[4]
-original = p._acquire_source
+original = engine._acquire_source
 def acquire(*args, **kwargs):
     (gate / (label + '.started')).touch()
     deadline = time.monotonic() + 25
@@ -39,13 +40,13 @@ def acquire(*args, **kwargs):
             raise RuntimeError('Concurrent acquisition did not start')
         time.sleep(.02)
     return original(*args, **kwargs)
-p._acquire_source = acquire
+engine._acquire_source = acquire
 if sys.argv[5]:
     def dependencies(plugin, root, task_id, payload):
         info = plugin / '.studio-deps' / ('studio_concurrency_peer_test-' + sys.argv[5] + '.dist-info')
         info.mkdir(parents=True)
         (info / 'METADATA').write_text('Metadata-Version: 2.1\nName: studio-concurrency-peer-test\nVersion: ' + sys.argv[5] + '\n')
-    p._install_dependencies = dependencies
+    engine._install_dependencies = dependencies
 raise SystemExit(p.cmd_manage_plugin({'action':'install', 'target':source, 'taskId':label}))
 '''
         env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(Path(plugins.__file__).parent), os.environ.get("PYTHONPATH", "")]), "PYTHONUTF8": "1"}
