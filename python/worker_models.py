@@ -909,6 +909,8 @@ def cmd_env_info() -> int:
 
     try:
         import pymss  # type: ignore
+        # A lazy package import alone does not verify the inference runtime.
+        getattr(pymss, "MSSeparator")
         payload["pymssAvailable"] = True
         payload["pymssPath"] = str(Path(pymss.__file__).resolve()) if getattr(pymss, "__file__", None) else None
         payload["pymssVersion"] = payload.get("pymssVersion") or getattr(pymss, "__version__", None)
@@ -955,6 +957,15 @@ def cmd_env_info() -> int:
     except Exception as exc:
         payload["torchError"] = str(exc)
 
+    if payload["pymssAvailable"]:
+        from worker_plugins import register_cli_environment
+
+        try:
+            binding = register_cli_environment()
+            if binding is not None:
+                payload["pluginBindingDir"] = str(binding)
+        except (OSError, ValueError, ImportError) as error:
+            payload["pluginBindingError"] = str(error)
     emit("env_info", payload)
     return 0
 

@@ -203,6 +203,37 @@ def _root() -> Path:
     return runtime.packages_dir.parent.parent / "plugins" / f"{runtime.identity}-{digest}"
 
 
+def register_cli_environment() -> Path | None:
+    """Associate a verified Studio interpreter with its CLI defaults."""
+    if not any(os.environ.get(name) for name in (
+        "PYMSS_STUDIO_RUNTIME_ENVS_DIR", "PYMSS_STUDIO_ACTIVE_RUNTIME_FILE",
+        "PYMSS_STUDIO_BUNDLED_RUNTIME_ENVS_DIR",
+    )):
+        return None
+    from worker_bootstrap import _read_runtime_state
+
+    state = _read_runtime_state()
+    if not state or not state.get("pythonPath"):
+        return None
+    try:
+        from pymss_plugin_manager.environment import python_identity, register_environment_binding
+    except ModuleNotFoundError as error:
+        if error.name in {"pymss_plugin_manager", "pymss_plugin_manager.environment"}:
+            return None
+        raise
+    if python_identity(state["pythonPath"]) != python_identity(sys.executable):
+        return None
+    import pymss_plugin_manager
+
+    core = Path(pymss_plugin_manager.__file__).resolve().parent.parent
+    binding = _root()
+    from worker_optional_packages import OPTIONAL_PACKAGES, optional_package_paths
+
+    register_environment_binding(binding, core_path=core,
+                                 import_paths=tuple(optional_package_paths(OPTIONAL_PACKAGES)))
+    return binding
+
+
 @contextmanager
 def _plugin_registry() -> Iterator[None]:
     """Select Studio's configured registry for pymss calls unless the user overrides it."""

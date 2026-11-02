@@ -63,6 +63,113 @@ class SharedPluginManagementTests(unittest.TestCase):
         self.assertEqual(removed.returncode, 0, removed.stderr)
         self.assertFalse(any(row["managed"] for row in worker_plugins._inventory(self.root)["installed"]))
 
+    def test_cli_automatically_uses_the_environment_registered_by_studio(self):
+        from pymss_plugin_manager.environment import environment_binding
+
+        with (
+            mock.patch.dict(os.environ, {"PYMSS_PLUGIN_ENVIRONMENTS_DIR": str(self.work / "cli-environments")}),
+            mock.patch("worker_bootstrap._read_runtime_state", return_value={"pythonPath": sys.executable}),
+        ):
+            from worker_optional_packages import _package_dir
+
+            component = _package_dir("funasr")
+            component.mkdir(parents=True)
+            (component / "registered_component.py").write_text("VALUE = 42\n", encoding="utf-8")
+            metadata = component / "registered_component-1.0.dist-info"
+            metadata.mkdir()
+            (metadata / "METADATA").write_text("Metadata-Version: 2.1\nName: registered-component\nVersion: 1.0\n", encoding="utf-8")
+            self.assertEqual(worker_plugins.register_cli_environment(), self.root)
+            self.assertEqual(environment_binding().binding_dir, self.root.resolve())
+            self.assertIn(component.resolve(), environment_binding().import_paths)
+            env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
+            # The CLI now selects the registered binding rather than the old flat directory.
+            env.pop("PYMSS_PLUGINS_DIR", None)
+            env.pop("PYMSS_PLUGIN_BINDING", None)
+
+            def cli(*arguments):
+                return subprocess.run([sys.executable, "-X", "utf8", "-m", "pymss", *arguments],
+                                      capture_output=True, text=True, encoding="utf-8", timeout=45, env=env)
+
+            source = self.provider()
+            project = source / "pyproject.toml"
+            project.write_text(project.read_text(encoding="utf-8").replace("dependencies=[]", 'dependencies=["registered-component==1.0"]')
+                               + '\n[tool.pymss.studio]\nruntime_packages=["funasr"]\n', encoding="utf-8")
+            entry = source / "__init__.py"
+            entry.write_text("from registered_component import VALUE\n" + entry.read_text(encoding="utf-8").replace("lambda: 42", "lambda: VALUE"), encoding="utf-8")
+            installed = cli("install", str(source))
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            row = next(row for row in worker_plugins._inventory(self.root)["installed"] if row["managed"])
+            self.assertEqual(row["name"], "example.provider")
+            self.assertTrue(row["loaded"], row)
+            executed = cli("provider-probe")
+            self.assertEqual(executed.returncode, 0, executed.stderr)
+            self.assertEqual(executed.stdout.strip(), "42")
+            self.assertEqual(self.manage("disable", name="example.provider")[0], 0)
+            self.assertNotEqual(cli("provider-probe").returncode, 0)
+            removed = cli("plugins", "uninstall", "example.provider", "--json")
+            self.assertEqual(removed.returncode, 0, removed.stderr)
+            self.assertFalse(any(row["managed"] for row in worker_plugins._inventory(self.root)["installed"]))
+
+    def test_cli_registration_requires_the_selected_interpreter(self):
+        from pymss_plugin_manager.environment import environment_binding
+
+        with mock.patch.dict(os.environ, {"PYMSS_PLUGIN_ENVIRONMENTS_DIR": str(self.work / "cli-environments")}):
+            for state in (None, {}, {"pythonPath": str(self.work / "other/python")}):
+                with self.subTest(state=state), mock.patch("worker_bootstrap._read_runtime_state", return_value=state):
+                    self.assertIsNone(worker_plugins.register_cli_environment())
+                    self.assertIsNone(environment_binding())
+            with (
+                mock.patch("worker_bootstrap._read_runtime_state", return_value={"pythonPath": sys.executable}),
+                mock.patch.dict(sys.modules, {"pymss_plugin_manager.environment": None}),
+            ):
+                self.assertIsNone(worker_plugins.register_cli_environment())
+
+    def test_environment_info_registers_cli_defaults_and_reports_write_failures(self):
+        import worker_models
+
+        output = io.StringIO()
+        with mock.patch.object(worker_plugins, "register_cli_environment", return_value=self.root), redirect_stdout(output):
+            self.assertEqual(worker_models.cmd_env_info(), 0)
+        self.assertEqual(json.loads(output.getvalue())["payload"]["pluginBindingDir"], str(self.root))
+        output = io.StringIO()
+        with (
+            mock.patch.object(worker_plugins, "register_cli_environment", side_effect=PermissionError("Record is locked")),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(worker_models.cmd_env_info(), 0)
+        payload = json.loads(output.getvalue())["payload"]
+        self.assertTrue(payload["pymssAvailable"])
+        self.assertEqual(payload["pluginBindingError"], "Record is locked")
+
+    def test_environment_info_rejects_a_broken_lazy_inference_api(self):
+        import worker_models
+
+        class BrokenCore:
+            __file__ = str(self.work / "pymss/__init__.py")
+            __version__ = "2.2.0"
+            __path__ = []
+
+            @property
+            def MSSeparator(self):
+                raise ImportError("Inference dependency is unavailable")
+
+        # Keep modules imported by env_info cached, especially native runtimes.
+        if "pymss" in sys.modules:
+            self.addCleanup(sys.modules.__setitem__, "pymss", sys.modules["pymss"])
+        else:
+            self.addCleanup(sys.modules.pop, "pymss", None)
+        sys.modules["pymss"] = BrokenCore()
+        output = io.StringIO()
+        with (
+            mock.patch.object(worker_plugins, "register_cli_environment") as register,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(worker_models.cmd_env_info(), 0)
+        payload = json.loads(output.getvalue())["payload"]
+        self.assertFalse(payload["pymssAvailable"])
+        self.assertEqual(payload["pymssError"], "Inference dependency is unavailable")
+        register.assert_not_called()
+
     def test_store_queries_do_not_execute_installed_setup(self):
         source = self.provider()
         self.assertEqual(self.cli("install", str(source)).returncode, 0)
