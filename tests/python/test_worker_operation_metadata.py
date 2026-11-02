@@ -156,6 +156,20 @@ class OperationMetadataTests(unittest.TestCase):
                 self.assertTrue(self.package.is_dir())
                 self.assertIsNone(self.query())
 
+    def test_alias_paths_still_honor_disabled_and_unprepared_plugin_intents(self):
+        self.snapshot()
+        alias = self.work / "managed-alias"
+        try:
+            alias.symlink_to(self.root, target_is_directory=True)
+        except OSError:
+            self.skipTest("Directory symlinks are unavailable")
+        with mock.patch.object(worker_plugins, "_root", return_value=alias):
+            self.assertIsNotNone(self.query())
+            for revision, state, version in [(1, "disabled", "1.0.0"), (2, "enabled", "2.0.0")]:
+                with self.subTest(state=state, version=version):
+                    worker_plugin_inventory.commit(self.root, "alice.tool", state, revision, definition={}, version=version)
+                    self.assertIsNone(self.query())
+
     def test_runtime_fallback_caches_the_requested_operation_for_later_queries(self):
         runtime = SimpleNamespace(describe_operation=lambda _: description(), list_operations=lambda: [description()])
         output = io.StringIO()

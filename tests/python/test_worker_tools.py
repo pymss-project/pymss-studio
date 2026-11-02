@@ -82,7 +82,7 @@ class WorkerToolsTests(unittest.TestCase):
         import worker_optional_packages
 
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             plugin = root / "installed/pymss.asr"
             plugin.mkdir(parents=True)
             plugin.joinpath("pyproject.toml").write_text(

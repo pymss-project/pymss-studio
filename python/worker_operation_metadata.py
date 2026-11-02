@@ -184,7 +184,7 @@ def capture_context(operation: str | None = None) -> MetadataContext | None:
     try:
         import worker_plugins as plugins
 
-        root = plugins._root()
+        root = plugins._root().resolve()
         if root.is_dir():
             plugins._recover_for_read(root)
         intents = plugins._execution_intents(root)
