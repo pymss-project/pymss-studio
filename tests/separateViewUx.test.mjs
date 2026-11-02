@@ -235,6 +235,7 @@ test('changing a selected workflow to multiple inputs disables submission with a
   const warnings = []
   const context = {
     computed, runMode: ref('workflow'), selectedWorkflow,
+    workflowNodes: { saveNodeTypes: [] },
     getSeparateWorkflowInputIssue, getWorkflowDefinitionIssue: () => null,
     t: (key, params) => `${key}:${params?.count ?? ''}`,
     submittingJob: ref(false), inputFiles: ref(['D:/Audio/song.wav']),
