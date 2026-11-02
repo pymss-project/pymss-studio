@@ -23,6 +23,25 @@ const { snapshot, updates, loading, catalogLoading, error, busy, exclusiveBusy, 
 const tab = ref<'browse' | 'installed'>('browse')
 const search = ref('')
 const category = ref('all')
+const switchingSource = ref(false)
+const sourceOptions = computed(() => [
+  { label: t('plugins.sourceAuto'), value: 'auto' },
+  { label: 'GitHub', value: 'github' },
+  { label: 'GitCode', value: 'gitcode', disabled: snapshot.value?.catalogSource?.gitAvailable === false },
+])
+
+async function changePluginSource(value: 'auto' | 'github' | 'gitcode') {
+  if (value === settings.pluginSource || busy.value || switchingSource.value) return
+  switchingSource.value = true
+  try {
+    await settings.savePluginSourcePreference(value)
+    await openMarketplace(true)
+  } catch (failure) {
+    message.error(String(failure))
+  } finally {
+    switchingSource.value = false
+  }
+}
 const categoryLabels = { convert: 'tools.categoryConvert', analyze: 'tools.categoryAnalyze', recognize: 'tools.categoryRecognize', edit: 'tools.categoryEdit' }
 const categoryOptions = computed(() => [{ label: t('plugins.allCategories'), value: 'all' },
   ...pluginCategories.map(value => ({ label: t(categoryLabels[value]), value })), { label: t('plugins.otherCategory'), value: 'other' }])
@@ -239,6 +258,10 @@ async function requestCancel(id?: string) {
           <template #prefix><n-icon :component="SearchOutline" /></template>
         </n-input>
         <n-select v-model:value="category" :options="categoryOptions" :aria-label="t('plugins.categoryFilter')" class="plugins-category-filter" />
+        <n-select v-if="tab === 'browse'" :value="settings.pluginSource || 'auto'" :options="sourceOptions"
+          :aria-label="t('plugins.sourceLabel')" :title="t('plugins.sourceAutoHint')" class="plugins-source-filter"
+          :disabled="busy || loading || catalogLoading || switchingSource || snapshot?.catalogSource?.supported === false || snapshot?.catalogSource?.provider === 'custom'"
+          @update:value="changePluginSource" />
         <n-button v-if="tab === 'browse'" secondary :loading="loading || catalogLoading" :disabled="busy" @click="openMarketplace(true)"><template #icon><n-icon :component="RefreshOutline" /></template>{{ t('plugins.refreshCatalog') }}</n-button>
         <n-button v-else :loading="activity?.action === 'check_updates' && busy" :disabled="disabled || !snapshot.installed.some(plugin => plugin.managed)" @click="perform('check_updates')">
           {{ t('plugins.checkUpdates') }}<template v-if="updateCount"> ({{ updateCount }})</template>
@@ -247,6 +270,13 @@ async function requestCancel(id?: string) {
       </div>
       <n-tabs v-model:value="tab" type="line" animated>
         <n-tab-pane name="browse" :tab="t('plugins.browse')">
+          <n-alert v-if="snapshot.catalogSource?.supported === false" type="warning" class="plugins-notice">
+            {{ t('plugins.sourceCoreUpdate') }}
+          </n-alert>
+          <p v-else-if="snapshot.catalogSource?.provider" class="plugins-source-status">
+            {{ snapshot.catalogSource.provider === 'custom' ? t('plugins.sourceCustom') : t('plugins.sourceSelected', { source: snapshot.catalogSource.provider === 'github' ? 'GitHub' : 'GitCode' }) }}
+            <span v-if="snapshot.catalogSource.gitAvailable === false"> {{ t('plugins.sourceGitRequired') }}</span>
+          </p>
           <n-alert v-if="snapshot.catalogError" type="warning" class="plugins-notice">
             {{ t('plugins.catalogUnavailable') }} {{ snapshot.catalogError }}
           </n-alert>
@@ -363,6 +393,8 @@ async function requestCancel(id?: string) {
 .plugins-toolbar { flex-wrap: wrap; margin-bottom: 12px; }
 .plugins-search { flex: 1; min-width: 200px; }
 .plugins-category-filter { width: 150px; flex-shrink: 0; }
+.plugins-source-filter { width: 180px; flex-shrink: 0; }
+.plugins-source-status { margin: 0 0 12px; color: var(--text-secondary); font-size: 13px; }
 .plugin-category-list { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
 .plugins-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 310px), 1fr)); gap: 16px; }
 .plugin-card { border: 1px solid var(--outline); background: var(--surface-1); border-radius: 12px; padding: 20px; min-width: 0; }

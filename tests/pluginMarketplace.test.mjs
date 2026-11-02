@@ -47,6 +47,26 @@ const nextTurn = () => new Promise(resolve => setImmediate(resolve))
 
 const installedResult = name => ({ ...empty(), updates: {}, installed: [{ name, managed: true, loaded: true, operations: [] }] })
 
+test('catalog source survives inventory refresh and is cleared when catalog loading fails', async () => {
+  await reset()
+  const source = { supported: true, provider: 'gitcode', preference: 'auto', gitAvailable: true }
+  globalThis.__pluginInvoke = async (command, args) => ({
+    ...empty(), ...(args?.payload?.catalogOnly ? { catalogSource: source } : {}),
+  })
+  await market.openMarketplace(true)
+  assert.deepEqual(market.snapshot.value.catalogSource, source)
+  await market.refreshInventory()
+  assert.deepEqual(market.snapshot.value.catalogSource, source)
+  globalThis.__pluginInvoke = async (command, args) => {
+    if (args?.payload?.catalogOnly) throw new Error('Source unavailable')
+    return empty()
+  }
+  await market.openMarketplace(true)
+  assert.equal(market.snapshot.value.catalogSource, undefined)
+  assert.deepEqual(market.snapshot.value.catalog, [])
+  assert.match(market.snapshot.value.catalogError, /Source unavailable/)
+})
+
 test('three installs overlap, queued work starts as a slot frees, and delayed inventories merge', async () => {
   await reset()
   const completions = ['one', 'two', 'three', 'four'].map(name => market.manage('install', { name }))

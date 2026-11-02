@@ -20,12 +20,13 @@ class PymssPluginApiTests(unittest.TestCase):
                 "current_operation_context", "run_native_process", "register_commands", "register_rpc_processes",
             )}),
             "pymss_plugin_manager": SimpleNamespace(PluginContext=type, PluginPolicy=type, PluginService=type),
+            "pymss.plugins.marketplace": SimpleNamespace(fetch_official_catalog=lambda: None, source_info=lambda: None),
         }
         self.enterContext(mock.patch.object(PROBE, "import_module", side_effect=self.modules.__getitem__))
-        self.enterContext(mock.patch.object(PROBE.metadata, "version", return_value="2.3.0"))
+        self.enterContext(mock.patch.object(PROBE.metadata, "version", return_value="2.3.1"))
 
     def test_complete_published_core_passes(self):
-        self.assertEqual(PROBE.verify(), {"pymssVersion": "2.3.0", "pluginApisVerified": True})
+        self.assertEqual(PROBE.verify(), {"pymssVersion": "2.3.1", "pluginApisVerified": True})
 
     def test_missing_or_noncallable_api_rejects_the_bundle(self):
         for module, attributes in self.modules.items():

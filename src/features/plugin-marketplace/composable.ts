@@ -83,6 +83,13 @@ export type PluginInventory = {
 export type PluginMarketplace = PluginInventory & {
   catalog: CatalogPlugin[]
   catalogError: string | null
+  catalogSource?: {
+    supported: boolean
+    provider?: 'github' | 'gitcode' | 'custom'
+    preference?: 'auto' | 'github' | 'gitcode'
+    gitAvailable?: boolean
+    commit?: string
+  }
 }
 export type PluginAction = 'install' | 'update' | 'repair' | 'uninstall' | 'check_updates' | 'enable' | 'disable' | 'prepare' | 'prepare_preinstalled' | 'install_preinstalled'
 export const pluginPhases = ['queued', 'starting', 'working', 'preparing', 'checking', 'acquiring', 'preserving', 'resolving', 'installing', 'verifying', 'activating', 'refreshing', 'removing'] as const
@@ -251,7 +258,7 @@ async function loadSnapshot(includeCatalog: boolean, prepare = true, forceVerify
     const runtimeChanged = snapshot.value?.runtime.identity !== result.runtime.identity
     if (runtimeChanged) updates.value = {}
     snapshot.value = !includeCatalog && !runtimeChanged && snapshot.value
-      ? { ...result, catalog: snapshot.value.catalog, catalogError: snapshot.value.catalogError }
+      ? { ...result, catalog: snapshot.value.catalog, catalogError: snapshot.value.catalogError, catalogSource: snapshot.value.catalogSource }
       : result
     if (runtimeChanged) pluginRevision.value += 1
     if (prepare && result.preinstalledPending?.length) {
@@ -299,12 +306,12 @@ async function loadCatalog() {
   const runtime = snapshot.value.runtime.identity
   catalogLoading.value = true
   try {
-    const catalog = await invoke<Pick<PluginMarketplace, 'catalog' | 'catalogError' | 'runtime'>>('plugin_marketplace', { payload: { catalogOnly: true } })
+    const catalog = await invoke<Pick<PluginMarketplace, 'catalog' | 'catalogError' | 'catalogSource' | 'runtime'>>('plugin_marketplace', { payload: { catalogOnly: true } })
     if (request !== catalogSequence || generation !== sequence || snapshot.value?.runtime.identity !== runtime || catalog.runtime.identity !== runtime) return
-    snapshot.value = { ...snapshot.value, catalog: catalog.catalog, catalogError: catalog.catalogError }
+    snapshot.value = { ...snapshot.value, catalog: catalog.catalog, catalogError: catalog.catalogError, catalogSource: catalog.catalogSource }
   } catch (failure) {
     if (request === catalogSequence && generation === sequence && snapshot.value?.runtime.identity === runtime) {
-      snapshot.value = { ...snapshot.value, catalogError: String(failure) }
+      snapshot.value = { ...snapshot.value, catalog: [], catalogSource: undefined, catalogError: String(failure) }
     }
   } finally {
     if (request === catalogSequence) catalogLoading.value = false

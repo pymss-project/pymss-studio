@@ -849,6 +849,16 @@ def _inventory(root: Path, *, verify: bool = False, default_policy: str | None =
     }
 
 
+def _catalog_source_info() -> dict:
+    try:
+        from pymss.plugins.marketplace import source_info
+    except ModuleNotFoundError as error:
+        if error.name == "pymss.plugins.marketplace":
+            return {"supported": False}
+        raise
+    return {"supported": True, **(source_info() or {"provider": "custom"})}
+
+
 def cmd_plugin_marketplace(payload: dict[str, Any]) -> int:
     try:
         root = _root()
@@ -876,6 +886,8 @@ def cmd_plugin_marketplace(payload: dict[str, Any]) -> int:
             else:
                 snapshot["catalog"] = []
             snapshot["catalogError"] = None
+            if payload.get("includeCatalog", True):
+                snapshot["catalogSource"] = _catalog_source_info()
         except Exception as error:
             snapshot["catalog"], snapshot["catalogError"] = [], str(error)
         emit("plugin_marketplace", snapshot)

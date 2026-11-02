@@ -13,6 +13,7 @@ def verify() -> dict:
             "register_commands", "register_rpc_processes",
         ),
         "pymss_plugin_manager": ("PluginContext", "PluginPolicy", "PluginService"),
+        "pymss.plugins.marketplace": ("fetch_official_catalog", "source_info"),
     }
     for name, attributes in required.items():
         module = import_module(name)

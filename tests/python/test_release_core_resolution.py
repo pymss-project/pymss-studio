@@ -32,11 +32,11 @@ class ReleaseCoreResolutionTests(unittest.TestCase):
         self.path.write_text(json.dumps(self.manifest), encoding="utf-8")
 
     def test_default_core_requirements_preserve_the_shared_plugin_api_floor(self):
-        self.assertEqual(MANIFEST["common"]["pymss"], "pymss[proxy]>=2.3.0")
+        self.assertEqual(MANIFEST["common"]["pymss"], "pymss[proxy]>=2.3.1")
         self.assertEqual(MANIFEST["common"]["pymss-core"], "pymss-core>=0.1.14")
         for filename in ("requirements.txt", "requirements-ci.txt"):
             lines = (ROOT / "python" / filename).read_text(encoding="utf-8").splitlines()
-            self.assertIn("pymss[proxy]>=2.3.0", lines)
+            self.assertIn("pymss[proxy]>=2.3.1", lines)
             self.assertIn("pymss-core>=0.1.14", lines)
 
     def test_minimum_versions_resolve_newer_stable_releases_and_keep_extras(self):

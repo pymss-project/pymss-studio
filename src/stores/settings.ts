@@ -117,6 +117,7 @@ type StoredSettings = {
   proxyBypass?: string
   updateChannel?: UpdateChannel
   updateSource?: UpdateSource
+  pluginSource?: 'auto' | 'github' | 'gitcode'
   updateEndpointOverride?: string
 }
 
@@ -269,6 +270,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const proxyBypass = ref('')
   const updateChannel = ref<UpdateChannel>(DEFAULT_UPDATE_CHANNEL)
   const updateSource = ref<UpdateSource>('auto')
+  const pluginSource = ref<'auto' | 'github' | 'gitcode'>('auto')
   const updateEndpointOverride = ref('')
   const startupOnboardingSeen = ref(false)
   const pluginDefaultsPolicy = ref<'auto' | 'review'>('review')
@@ -313,6 +315,7 @@ export const useSettingsStore = defineStore('settings', () => {
     proxyBypass: proxyBypass.value,
     updateChannel: updateChannel.value,
     updateSource: updateSource.value,
+    pluginSource: pluginSource.value,
     updateEndpointOverride: updateEndpointOverride.value.trim() || undefined,
   }))
 
@@ -379,6 +382,7 @@ export const useSettingsStore = defineStore('settings', () => {
     proxyBypass.value = stored?.proxyBypass || ''
     updateChannel.value = stored?.updateChannel === 'prerelease' ? 'prerelease' : DEFAULT_UPDATE_CHANNEL
     updateSource.value = stored?.updateSource === 'github' || stored?.updateSource === 'modelscope' ? stored.updateSource : 'auto'
+    pluginSource.value = stored?.pluginSource === 'github' || stored?.pluginSource === 'gitcode' ? stored.pluginSource : 'auto'
     updateEndpointOverride.value = String(stored?.updateEndpointOverride || '').trim()
     startupOnboardingSeen.value = stored?.startupOnboardingSeen === true
       || String(stored?.startupOnboardingSeenVersion || '').trim().length > 0
@@ -450,6 +454,7 @@ export const useSettingsStore = defineStore('settings', () => {
       proxyBypass,
       updateChannel,
       updateSource,
+      pluginSource,
       updateEndpointOverride,
       pluginDefaultsPolicy,
       beginnerGuideInvitationSeen,
@@ -916,6 +921,23 @@ export const useSettingsStore = defineStore('settings', () => {
     await saveAppStore('app-settings', persistable.value)
   }
 
+  async function savePluginSourcePreference(value: 'auto' | 'github' | 'gitcode') {
+    if (!initialized.value || !isMainTaskOwner()) throw new Error('Plugin source settings are unavailable')
+    const previous = pluginSource.value
+    pluginSource.value = value
+    await nextTick()
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = null
+    }
+    try {
+      await saveAppStore('app-settings', persistable.value)
+    } catch (error) {
+      pluginSource.value = previous
+      throw error
+    }
+  }
+
   return {
     initialized,
     appPaths,
@@ -954,6 +976,7 @@ export const useSettingsStore = defineStore('settings', () => {
     proxyBypass,
     updateChannel,
     updateSource,
+    pluginSource,
     updateEndpointOverride,
     startupOnboardingSeen,
     pluginDefaultsPolicy,
@@ -963,6 +986,7 @@ export const useSettingsStore = defineStore('settings', () => {
     initialize,
     markStartupOnboardingCompleted,
     saveEditorExportPreference,
+    savePluginSourcePreference,
     pickModelDir,
     pickOutputDir,
     pickFolder,

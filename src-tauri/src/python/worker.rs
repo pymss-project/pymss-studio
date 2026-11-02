@@ -746,6 +746,13 @@ fn apply_plugin_source_override(cmd: &mut Command, developer_mode: bool, source:
     Ok(())
 }
 
+fn apply_plugin_marketplace_source(cmd: &mut Command, source: Option<&Value>) {
+    let preference = source.and_then(Value::as_str)
+        .filter(|value| matches!(*value, "github" | "gitcode"))
+        .unwrap_or("auto");
+    cmd.env("PYMSS_PLUGINS_SOURCE", preference);
+}
+
 fn build_worker_command(
     app: &AppHandle,
     command: &str,
@@ -806,6 +813,8 @@ fn build_worker_command(
     let developer_mode = session_log::developer_mode_enabled();
     let source = if developer_mode { storage::read_app_store(app, "plugin-source")? } else { Value::Null };
     apply_plugin_source_override(&mut cmd, developer_mode, &source)?;
+    let settings = storage::read_app_store(app, "app-settings")?;
+    apply_plugin_marketplace_source(&mut cmd, settings.get("pluginSource"));
     // The collector owns persistence and terminal output. Never inherit legacy file writers.
     cmd.env_remove("PYMSS_STUDIO_AUDIO_TEMP_TOKEN")
         .env_remove("PYMSS_STUDIO_AUDIO_TEMP_STATE")
@@ -2158,6 +2167,18 @@ mod tests {
         assert!(is_background_terminal_event("manage_plugin", "task_cancelled"));
         assert!(!is_background_terminal_event("manage_plugin", "plugin_stage"));
         assert!(!is_background_terminal_event("manage_plugin", "plugin_log"));
+    }
+
+    #[test]
+    fn plugin_marketplace_source_uses_the_validated_settings_snapshot() {
+        for (stored, expected) in [(serde_json::Value::Null, "auto"), (json!("invalid"), "auto"),
+                                   (json!("github"), "github"), (json!("gitcode"), "gitcode")] {
+            let mut command = std::process::Command::new("python");
+            command.env("PYMSS_PLUGINS_SOURCE", "inherited");
+            super::apply_plugin_marketplace_source(&mut command, Some(&stored));
+            let source = command.get_envs().find(|(key, _)| *key == "PYMSS_PLUGINS_SOURCE").unwrap().1.unwrap();
+            assert_eq!(source, expected);
+        }
     }
 
     #[test]

@@ -55,3 +55,37 @@ test('enabling defaults survives a settings store restart', async () => {
     assert.equal(next.pluginDefaultsPolicy, 'auto')
   } finally { next.$dispose() }
 })
+
+test('plugin source changes are durable before the settings method returns', async () => {
+  localStorage.setItem(key, JSON.stringify({ startupOnboardingSeen: true, pluginSource: 'invalid' }))
+  const settings = useSettingsStore(createPinia())
+  try {
+    await settings.initialize()
+    assert.equal(settings.pluginSource, 'auto')
+    await settings.savePluginSourcePreference('gitcode')
+    assert.equal(persisted().pluginSource, 'gitcode')
+    const restored = useSettingsStore(createPinia())
+    try {
+      await restored.initialize()
+      assert.equal(restored.pluginSource, 'gitcode')
+    } finally { restored.$dispose() }
+  } finally { settings.$dispose() }
+})
+
+test('a failed source preference write restores the previous source', async () => {
+  localStorage.setItem(key, JSON.stringify({ startupOnboardingSeen: true, pluginSource: 'github' }))
+  const settings = useSettingsStore(createPinia())
+  try {
+    await settings.initialize()
+    window.__TAURI_INTERNALS__ = {
+      metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+      invoke: async () => { throw new Error('Settings unavailable') },
+    }
+    await assert.rejects(settings.savePluginSourcePreference('gitcode'), /Settings unavailable/)
+    assert.equal(settings.pluginSource, 'github')
+  } finally {
+    delete window.__TAURI_INTERNALS__
+    await saved()
+    settings.$dispose()
+  }
+})
