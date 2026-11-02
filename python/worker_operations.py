@@ -183,9 +183,10 @@ def cmd_run_operation(payload: dict[str, Any]) -> int:
             host_options = {"host_request": ReadonlyHost("studio-worker", operation_id)}
 
         def _progress(fraction, message="", event=None):
+            # Kernel completion precedes output saving; the result event completes the task.
             emit("operation_progress", {
                 "operation": operation_id,
-                "fraction": float(fraction),
+                "fraction": min(0.99, float(fraction)),
                 "message": str(message or ""),
                 **({"event": event} if event is not None else {}),
             }, request_id=request_id)

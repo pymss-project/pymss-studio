@@ -434,7 +434,7 @@ def activate_plugin_dependencies(root: Path | None = None) -> None:
 
 
 def operation_runtime():
-    """Load pymss default-directory plugins and runtime-owned marketplace plugins."""
+    """Load plugins from the active runtime binding only."""
     # Batch workflows call this from worker threads. stdout redirection is
     # process-global, and plugin activation mutates the shared runtime.
     with _RUNTIME_LOCK, isolate_protocol_stdout():

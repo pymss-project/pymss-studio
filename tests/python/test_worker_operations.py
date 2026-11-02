@@ -7,10 +7,9 @@ from __future__ import annotations
 import io
 import json
 import os
-import shutil
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
@@ -68,38 +67,46 @@ def _loudnorm_fixture(root: Path) -> Path:
 _LOUDNORM_SRC = None  # resolved lazily via _loudnorm_fixture()
 
 
+@contextmanager
+def _installed_plugin_runtime(work: Path):
+    """Install into an isolated binding and release its process lease on teardown."""
+    import pymss.operations as operations
+    import pymss.plugins as plugins
+    import worker_plugins
+    from pymss_plugin_manager import PluginContext, PluginService
+    from pymss_plugin_manager.leases import release_runtime
+
+    root = work / "managed"
+    with (
+        mock.patch.dict(os.environ, {
+            "PYMSS_PLUGINS_DIR": str(work / "manual"),
+            "PYMSS_STUDIO_RUNTIME_ENVS_DIR": str(work / "runtimes"),
+            "PYMSS_STUDIO_ACTIVE_RUNTIME_FILE": str(work / "active.json"),
+        }),
+        mock.patch.object(worker_plugins, "_root", return_value=root),
+    ):
+        operations._DEFAULT_RUNTIME = None
+        plugins.reset()
+        try:
+            PluginService(PluginContext(root)).install(str(_loudnorm_fixture(work)))
+            yield
+        finally:
+            release_runtime()
+            operations._DEFAULT_RUNTIME = None
+            plugins.reset()
+
+
 def _read_event(output: io.StringIO) -> dict:
     return json.loads(output.getvalue())
 
 
 class ListOperationsTests(unittest.TestCase):
     def test_lists_operations_from_installed_plugin(self) -> None:
-        with tempfile.TemporaryDirectory() as d:
-            plugins = Path(d) / "plugins"
-            plugins.mkdir()
-            shutil.copytree(_loudnorm_fixture(Path(d)), plugins / "loudnorm")
-            old = os.environ.get("PYMSS_PLUGINS_DIR")
-            os.environ["PYMSS_PLUGINS_DIR"] = str(plugins)
-            try:
-                # Fresh runtime per call: reset module-level default runtime
-                import pymss.operations as ops
-                ops._DEFAULT_RUNTIME = None
-                import pymss.plugins as plugs
-                plugs.reset()
-
-                output = io.StringIO()
-                with redirect_stdout(output):
-                    code = worker_operations.cmd_list_operations({})
-                event = _read_event(output)
-            finally:
-                if old is None:
-                    os.environ.pop("PYMSS_PLUGINS_DIR", None)
-                else:
-                    os.environ["PYMSS_PLUGINS_DIR"] = old
-                import pymss.operations as ops
-                ops._DEFAULT_RUNTIME = None
-                import pymss.plugins as plugs
-                plugs.reset()
+        with tempfile.TemporaryDirectory() as d, _installed_plugin_runtime(Path(d)):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = worker_operations.cmd_list_operations({})
+            event = _read_event(output)
         self.assertEqual(code, 0)
         self.assertTrue(event["payload"]["pymssOperationsAvailable"])
         ids = [op["id"] for op in event["payload"]["operations"]]
@@ -120,118 +127,120 @@ class ListOperationsTests(unittest.TestCase):
 
 
 class RunOperationTests(unittest.TestCase):
-    def _install_plugin(self, d: Path) -> None:
-        plugins = d / "plugins"
-        plugins.mkdir()
-        shutil.copytree(_loudnorm_fixture(d), plugins / "loudnorm")
-        os.environ["PYMSS_PLUGINS_DIR"] = str(plugins)
-
-    def _reset_runtime(self) -> None:
-        import pymss.operations as ops
-        import pymss.plugins as plugs
-
-        ops._DEFAULT_RUNTIME = None
-        plugs.reset()
-
     def test_run_operation_normalizes_file_input(self) -> None:
         import numpy as np
         import soundfile as sf
 
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory() as d, _installed_plugin_runtime(Path(d)):
             work = Path(d)
-            self._install_plugin(work)
-            self._reset_runtime()
-            try:
-                sr = 44100
-                t = np.arange(sr * 2, dtype=np.float32) / sr
-                tone = (0.3 * np.stack([np.sin(2 * np.pi * 440 * t)] * 2)).astype(np.float32)
-                wav = work / "tone.wav"
-                sf.write(str(wav), tone.T, sr)
+            sr = 44100
+            t = np.arange(sr * 2, dtype=np.float32) / sr
+            tone = (0.3 * np.stack([np.sin(2 * np.pi * 440 * t)] * 2)).astype(np.float32)
+            wav = work / "tone.wav"
+            sf.write(str(wav), tone.T, sr)
 
-                out_dir = work / "configured-output"
-                output = io.StringIO()
-                with (
-                    mock.patch.dict(os.environ, {"PYMSS_STUDIO_DEFAULT_OUTPUT_DIR": str(out_dir)}),
-                    redirect_stdout(output),
-                ):
-                    code = worker_operations.cmd_run_operation({
-                        "operation": "pymss.loudnorm.normalize",
-                        "inputs": {"audio": {"kind": "file", "path": str(wav)}},
-                        "params": {"target_lufs": -18.0},
-                        "requestId": "req-1",
-                    })
-                events = [json.loads(line) for line in output.getvalue().splitlines() if line.strip()]
-                self.assertEqual(code, 0, events)
-                result_event = next(e for e in events if e["type"] == "operation_result")
-                audio_out = result_event["payload"]["outputs"]["audio"]
-                self.assertEqual(audio_out["kind"], "audio_file")
-                self.assertTrue(Path(audio_out["path"]).parent.samefile(out_dir))
+            out_dir = work / "configured-output"
+            output = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"PYMSS_STUDIO_DEFAULT_OUTPUT_DIR": str(out_dir)}),
+                redirect_stdout(output),
+            ):
+                code = worker_operations.cmd_run_operation({
+                    "operation": "pymss.loudnorm.normalize",
+                    "inputs": {"audio": {"kind": "file", "path": str(wav)}},
+                    "params": {"target_lufs": -18.0},
+                    "requestId": "req-1",
+                })
+            events = [json.loads(line) for line in output.getvalue().splitlines() if line.strip()]
+            self.assertEqual(code, 0, events)
+            result_event = next(e for e in events if e["type"] == "operation_result")
+            audio_out = result_event["payload"]["outputs"]["audio"]
+            self.assertEqual(audio_out["kind"], "audio_file")
+            self.assertTrue(Path(audio_out["path"]).parent.samefile(out_dir))
 
-                data, srr = sf.read(audio_out["path"], dtype="float32")
-                self.assertEqual(srr, sr)
-                self.assertEqual(data.shape, (sr * 2, 2))
-                self.assertTrue(np.isfinite(data).all())
-                self.assertAlmostEqual(float(abs(data).max()), 10 ** (-18.0 / 20.0), places=4)
-            finally:
-                self._reset_runtime()
-                os.environ.pop("PYMSS_PLUGINS_DIR", None)
+            data, srr = sf.read(audio_out["path"], dtype="float32")
+            self.assertEqual(srr, sr)
+            self.assertEqual(data.shape, (sr * 2, 2))
+            self.assertTrue(np.isfinite(data).all())
+            self.assertAlmostEqual(float(abs(data).max()), 10 ** (-18.0 / 20.0), places=4)
 
     def test_run_operation_missing_input_fails_with_code(self) -> None:
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory() as d, _installed_plugin_runtime(Path(d)):
             work = Path(d)
-            self._install_plugin(work)
-            self._reset_runtime()
-            try:
-                output = io.StringIO()
-                with redirect_stdout(output):
-                    code = worker_operations.cmd_run_operation({
-                        "operation": "pymss.loudnorm.normalize",
-                        "inputs": {},
-                        "params": {},
-                        "outputDir": str(work / "out"),
-                    })
-                event = _read_event(output)
-                self.assertEqual(code, 1)
-                self.assertEqual(event["payload"]["code"], "OPERATION_FAILED")
-                self.assertIn("audio", event["payload"]["message"])
-            finally:
-                self._reset_runtime()
-                os.environ.pop("PYMSS_PLUGINS_DIR", None)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = worker_operations.cmd_run_operation({
+                    "operation": "pymss.loudnorm.normalize",
+                    "inputs": {},
+                    "params": {},
+                    "outputDir": str(work / "out"),
+                })
+            event = _read_event(output)
+            self.assertEqual(code, 1)
+            self.assertEqual(event["payload"]["code"], "OPERATION_FAILED")
+            self.assertIn("audio", event["payload"]["message"])
 
 
 class DescribeOperationCacheTests(unittest.TestCase):
     def test_real_v2_fallback_is_reused_without_loading_the_runtime_again(self):
-        import pymss.operations as operations
-        import pymss.plugins as plugins
-        import worker_plugins
+        with tempfile.TemporaryDirectory() as temporary, _installed_plugin_runtime(Path(temporary)):
+            first = io.StringIO()
+            with redirect_stdout(first):
+                self.assertEqual(worker_operations.cmd_describe_operation({"operation": "pymss.loudnorm.normalize"}), 0)
+            second = io.StringIO()
+            with mock.patch.object(worker_operations, "_runtime", side_effect=AssertionError("Unexpected runtime import")), redirect_stdout(second):
+                self.assertEqual(worker_operations.cmd_describe_operation({"operation": "pymss.loudnorm.normalize"}), 0)
+            self.assertEqual(json.loads(first.getvalue())["payload"], json.loads(second.getvalue())["payload"])
+            self.assertEqual(len(json.loads(second.getvalue())["payload"]["specDigest"]), 64)
 
-        with tempfile.TemporaryDirectory() as temporary:
-            work = Path(temporary)
-            directory = work / "plugins"
-            directory.mkdir()
-            shutil.copytree(_loudnorm_fixture(work), directory / "loudnorm")
-            with (
-                mock.patch.dict(os.environ, {
-                    "PYMSS_PLUGINS_DIR": str(directory),
-                    "PYMSS_STUDIO_RUNTIME_ENVS_DIR": str(work / "runtimes"),
-                    "PYMSS_STUDIO_ACTIVE_RUNTIME_FILE": str(work / "active.json"),
-                }),
-                mock.patch.object(worker_plugins, "_root", return_value=work / "managed"),
-            ):
-                operations._DEFAULT_RUNTIME = None
-                plugins.reset()
-                try:
-                    first = io.StringIO()
-                    with redirect_stdout(first):
-                        self.assertEqual(worker_operations.cmd_describe_operation({"operation": "pymss.loudnorm.normalize"}), 0)
-                    second = io.StringIO()
-                    with mock.patch.object(worker_operations, "_runtime", side_effect=AssertionError("Unexpected runtime import")), redirect_stdout(second):
-                        self.assertEqual(worker_operations.cmd_describe_operation({"operation": "pymss.loudnorm.normalize"}), 0)
-                    self.assertEqual(json.loads(first.getvalue())["payload"], json.loads(second.getvalue())["payload"])
-                    self.assertEqual(len(json.loads(second.getvalue())["payload"]["specDigest"]), 64)
-                finally:
-                    operations._DEFAULT_RUNTIME = None
-                    plugins.reset()
+
+class OperationProgressTests(unittest.TestCase):
+    def runtime(self):
+        import numpy as np
+        from pymss.graph.core import AudioArtifact
+        from pymss.operations import OperationSpec, Runtime
+
+        def run(context, inputs, params):
+            context.report_progress(0.4, "Processing")
+            context.report_progress(1.0, "Processing completed")
+            return {"audio": AudioArtifact(np.full((1, 32), 0.1, dtype=np.float32), 48000)}
+
+        runtime = Runtime()
+        runtime.register(spec=OperationSpec(id="test.progress", schema_version=1, title="Progress", inputs={},
+                                            params={"type": "object"}, outputs={"audio": {"type": "audio"}}), run=run)
+        return runtime
+
+    def test_processing_progress_reserves_completion_until_audio_is_saved(self):
+        output = io.StringIO()
+        original = worker_operations._serialize_output
+
+        def save(name, value, directory):
+            events = [json.loads(line) for line in output.getvalue().splitlines()]
+            self.assertEqual([event["payload"]["fraction"] for event in events], [0.4, 0.99])
+            self.assertTrue(all(event["type"] == "operation_progress" for event in events))
+            return original(name, value, directory)
+
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(worker_operations, "_runtime", return_value=self.runtime()), \
+                 mock.patch.object(worker_operations, "_serialize_output", side_effect=save), redirect_stdout(output):
+                code = worker_operations.cmd_run_operation({"operation": "test.progress", "outputDir": directory})
+            events = [json.loads(line) for line in output.getvalue().splitlines()]
+            self.assertEqual(code, 0, events)
+            self.assertEqual(events[-1]["type"], "operation_result")
+            self.assertTrue(Path(events[-1]["payload"]["outputs"]["audio"]["path"]).is_file())
+
+    def test_failed_output_save_never_reports_completion(self):
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(worker_operations, "_runtime", return_value=self.runtime()), \
+             mock.patch.object(worker_operations, "_serialize_output", side_effect=OSError("Output storage unavailable")), \
+             redirect_stdout(output):
+            code = worker_operations.cmd_run_operation({"operation": "test.progress", "outputDir": directory})
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(code, 1, events)
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertNotIn("operation_result", [event["type"] for event in events])
+        self.assertTrue(all(event["payload"]["fraction"] < 1 for event in events if event["type"] == "operation_progress"))
 
 
 class OperationInputTests(unittest.TestCase):
