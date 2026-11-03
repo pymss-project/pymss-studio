@@ -24,7 +24,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: macos-timing-test-b48688e26-app
-          run-id: 41600185038
+          run-id: 41601393106
           github-token: ${{ github.token }}
           path: downloaded-app
       - name: Validate companion commands against the DMG application

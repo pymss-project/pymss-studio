@@ -16,7 +16,7 @@ output.mkdir(parents=True, exist_ok=True)
 dmg, = downloaded.glob("*.dmg")
 app_report = json.loads((downloaded / "timing-ci-verification.json").read_text())
 assert app_report["signatureAfterTests"] == "PASS"
-assert app_report["commit"] == "e8cf736e26abe09a60196f2f23dcd94be92de353"
+assert app_report["commit"] == "521998013936dcf0c897412707a7bde8e80d8311"
 assert all(item["exitCode"] == 0 for item in app_report["checks"])
 kit = output / "mac-timing-test-kit"
 shutil.copytree(studio / "test-support/timing-kit", kit)
@@ -46,7 +46,7 @@ with tempfile.TemporaryDirectory(prefix="timing-kit-app-") as temp:
     with (app / "Contents/Info.plist").open("rb") as stream:
         info = plistlib.load(stream)
     executable_sha = sha(app / "Contents/MacOS" / info["CFBundleExecutable"])
-    receipt = {"buildId": "b48688e26", "applicationCommit": app_report["commit"], "applicationRunId": 41600185038,
+    receipt = {"buildId": "b48688e26", "applicationCommit": app_report["commit"], "applicationRunId": 41601393106,
                "kitCommit": os.environ["GITHUB_SHA"], "kitRunId": os.environ["GITHUB_RUN_ID"],
                "pluginSnapshotCommit": "9660b8439ed3666a22916e88498eb06309ea1cd2",
                "coreSnapshotCommit": "d7015a69cc7022df1666bd3d4b3f72b27275d435",
