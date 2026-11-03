@@ -6,7 +6,7 @@ import sys
 import tempfile
 import time
 
-app, plugins, core, report = map(Path, sys.argv[1:])
+app, plugins, core, report = (Path(value).resolve() for value in sys.argv[1:])
 studio = Path(__file__).resolve().parents[1]
 resources = next(path for path in [app / 'Contents/Resources', app / 'Contents/Resources/resources']
                  if (path / 'python/worker.py').is_file())

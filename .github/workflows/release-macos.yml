@@ -275,7 +275,7 @@ jobs:
       - name: Verify targeted fixes against the signed application
         run: |
           APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio Timing Test.app' | head -n 1)
-          python3 test-support/run-acceptance-ci.py "$APP" "$PWD/test-inputs/plugins" "$PWD/test-inputs/core" "$PWD/release/timing-ci-verification.json"
+          python3 test-support/run-acceptance-ci.py "$PWD/$APP" "$PWD/test-inputs/plugins" "$PWD/test-inputs/core" "$PWD/release/timing-ci-verification.json"
 
       - name: Verify core overlays survive signed bundle replacement and rollback
         run: |
@@ -315,4 +315,21 @@ jobs:
           compression-level: 0
           path: |
             release/*.dmg
+            release/timing-ci-verification.json
+
+      - name: Preserve signed test bundle if acceptance fails
+        if: failure()
+        run: |
+          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio Timing Test.app' | head -n 1)
+          if [ -n "$APP" ]; then
+            tar -czf "$RUNNER_TEMP/timing-signed-app.tar.gz" -C "$(dirname "$APP")" "$(basename "$APP")"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: macos-timing-test-b48688e26-diagnostics
+          if-no-files-found: ignore
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/timing-signed-app.tar.gz
             release/timing-ci-verification.json
