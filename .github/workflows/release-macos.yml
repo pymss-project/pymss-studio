@@ -50,8 +50,9 @@ jobs:
           cargo.write_text(text, encoding="utf-8")
           PY
 
-      - name: Resolve latest stable release cores
-        run: python3 scripts/resolve-release-core.py python/runtime-manifest.json
+      - name: Verify pinned acceptance baseline
+        run: >-
+          python3 -c 'import json; m=json.load(open("python/runtime-manifest.json")); assert m["common"]["pymss"]=="pymss[proxy]==2.3.1"; print(m["common"])'
 
       - name: Prepare bootstrap and MLX runtime environment
         working-directory: .
@@ -114,10 +115,10 @@ jobs:
           PYMSS_BUILD_RUN_ATTEMPT: ${{ github.run_attempt }}
           PYMSS_BUILD_REPOSITORY: ${{ github.repository }}
           PYMSS_BUILD_REPOSITORY_OWNER: ${{ github.repository_owner }}
-          PYMSS_BUILD_UPDATE_SUPPORTED: 'true'
+          PYMSS_BUILD_UPDATE_SUPPORTED: 'false'
           PYMSS_BUILD_TARGET: macos-arm64
           PYMSS_BUILD_VARIANT: macos-arm64-mlx
-          PYMSS_BUILD_OFFICIAL: ${{ github.repository == 'pymss-project/pymss-studio' && github.repository_owner == 'pymss-project' && 'true' || 'false' }}
+          PYMSS_BUILD_OFFICIAL: 'false'
           MACOSX_DEPLOYMENT_TARGET: "14.0.0"
         run: |
           python3 - <<'PY' > src-tauri/tauri.bundle.resources.json
@@ -140,9 +141,9 @@ jobs:
 
       - name: Re-sign bundled macOS app after embedding runtime
         run: |
-          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio.app' | head -n 1)
+          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio Timing Test.app' | head -n 1)
           if [ -z "$APP" ]; then
-            echo "Pymss Studio.app not found"
+            echo "Pymss Studio Timing Test.app not found"
             exit 1
           fi
           RES="$APP/Contents/Resources"
@@ -163,9 +164,9 @@ jobs:
 
       - name: Verify bundled macOS resources
         run: |
-          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio.app' | head -n 1)
+          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio Timing Test.app' | head -n 1)
           if [ -z "$APP" ]; then
-            echo "Pymss Studio.app not found"
+            echo "Pymss Studio Timing Test.app not found"
             exit 1
           fi
 
@@ -257,17 +258,29 @@ jobs:
           codesign --verify --deep --strict --verbose=4 "$APP"
           python3 scripts/verify-native-plugins.py "$APP" --platform macos
 
+      - uses: actions/checkout@v4
+        with:
+          repository: pymss-project/pymss-plugins
+          ref: 9660b8439ed3666a22916e88498eb06309ea1cd2
+          path: test-inputs/plugins
+          persist-credentials: false
+
+      - uses: actions/checkout@v4
+        with:
+          repository: pymss-project/pymss
+          ref: d7015a69cc7022df1666bd3d4b3f72b27275d435
+          path: test-inputs/core
+          persist-credentials: false
+
+      - name: Verify targeted fixes against the signed application
+        run: |
+          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio Timing Test.app' | head -n 1)
+          python3 test-support/run-acceptance-ci.py "$APP" "$PWD/test-inputs/plugins" "$PWD/test-inputs/core" "$PWD/release/timing-ci-verification.json"
+
       - name: Verify core overlays survive signed bundle replacement and rollback
         run: |
-          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio.app' | head -n 1)
+          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio Timing Test.app' | head -n 1)
           python3 scripts/check-macos-core-update.py "$APP"
-
-      - name: Build managed macOS update archive from final signed app
-        run: |
-          VERSION="${PYMSS_VERSION#v}"
-          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio.app' | head -n 1)
-          codesign --verify --deep --strict "$APP"
-          python3 scripts/build-macos-update.py "$APP" "release/Pymss-Studio-${VERSION}-macos-arm64-update.app.tar.gz"
 
       - name: Verify macOS update logic
         run: |
@@ -278,16 +291,16 @@ jobs:
         run: |
           VERSION="${PYMSS_VERSION#v}"
           mkdir -p release
-          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio.app' | head -n 1)
+          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio Timing Test.app' | head -n 1)
           if [ -z "$APP" ]; then
-            echo "Pymss Studio.app not found"
+            echo "Pymss Studio Timing Test.app not found"
             exit 1
           fi
           STAGE="$(mktemp -d)"
           cp -R "$APP" "$STAGE/"
           ln -s /Applications "$STAGE/Applications"
           hdiutil create \
-            -volname "Pymss Studio" \
+            -volname "Pymss Studio Timing Test" \
             -srcfolder "$STAGE" \
             -ov \
             -format UDZO \
@@ -298,7 +311,8 @@ jobs:
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Pymss-Studio-${{ env.PYMSS_VERSION }}-macos-${{ matrix.arch }}-mlx
+          name: macos-timing-test-b48688e26-app
+          compression-level: 0
           path: |
             release/*.dmg
-            release/*-macos-arm64-update.app.tar.gz*
+            release/timing-ci-verification.json

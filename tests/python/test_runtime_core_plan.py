@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +20,22 @@ class CorePlanTests(unittest.TestCase):
         self.case = fixture.RuntimeOverlayUpdateTests("test_success_builds_overlay_without_torch_or_base_mutation")
         self.case.setUp()
         self.addCleanup(self.case.doCleanups)
+
+    def test_online_update_uses_the_selected_index_despite_inherited_offline_settings(self):
+        environment = {"PIP_NO_INDEX": "1", "HTTPS_PROXY": "http://127.0.0.1:9", "PIP_CERT": "runtime-ca.pem"}
+        with mock.patch.dict(os.environ, environment):
+            status, commands, *_ = self.case.run_update(
+                backend="mlx", bundled=True, platform="darwin", bootstrap=True,
+                expected_pip_environment={**environment, "PIP_NO_INDEX": "0"},
+            )
+        self.assertEqual(status, 0)
+        self.assertIn("--index-url", commands[0])
+        self.assertEqual(commands[0][commands[0].index("--index-url") + 1], worker.PYPI_MIRROR_URLS["pypi"])
+
+    def test_dependency_sync_preserves_offline_verification_settings(self):
+        with mock.patch.dict(os.environ, {"PIP_NO_INDEX": "1"}):
+            status, *_ = self.case.run_update(mode="sync", expected_pip_environment={"PIP_NO_INDEX": "1"})
+        self.assertEqual(status, 0)
 
     def test_preparation_never_installs_or_activates_packages(self):
         status, commands, _env, _python, events = self.case.run_update(prepare_only=True)
@@ -57,7 +74,7 @@ class CorePlanTests(unittest.TestCase):
         status, commands, *_rest, events = self.case.run_update(overlay_probe=probe("cpu", pymss="2.1.3"))
         self.assertNotEqual(status, 0)
         self.assertEqual(commands, [])
-        self.assertIn("No newer core is compatible", events[-1]["payload"]["message"])
+        self.assertIn("No newer core could be resolved", events[-1]["payload"]["message"])
 
     def test_expired_plan_or_changed_active_environment_is_rejected_before_installation(self):
         def expire(plan, _active):

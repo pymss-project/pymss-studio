@@ -1,0 +1,54 @@
+{
+  "buildId": "b48688e26",
+  "version": "0.0.25-dev.timing.20261103.b48688e26",
+  "productName": "Pymss Studio Timing Test",
+  "identifier": "studio.pymss.timing-test.b48688e26",
+  "platform": "macos-arm64",
+  "minimumMacOS": "14.0",
+  "runtimeBaseline": "2.3.1",
+  "runtimeUpdateTarget": "2.3.2",
+  "timingVersion": "0.3.2",
+  "sources": {
+    "pymss": {
+      "baseCommit": "86a5df45b27dd05199955f6d5b430b66706cda8c",
+      "snapshotCommit": "d7015a69cc7022df1666bd3d4b3f72b27275d435",
+      "files": {
+        "pymss/plugins/install.py": "c8196d5d5d63b9aed583d166cebe6d248ce661000029f525d963d3d284db8b66",
+        "test/test_plugin_sources.py": "9f58ccb8ef7ae9d3192373c07ba5d23b3333ba47b360445e47bf5144f399dca2"
+      }
+    },
+    "pymss-plugins": {
+      "baseCommit": "4f300153cf9014a8da322d1465a20b16a37ff2b6",
+      "snapshotCommit": "9660b8439ed3666a22916e88498eb06309ea1cd2",
+      "files": {
+        "plugins/analysis/ui/dist/index.html": "3492cb08416b76103063b2ae13668a2c18122c4cbf05cad4a470bd67585f62f3",
+        "plugins/analysis/views/spectrum/index.html": "d5b724e2cffbddf6db7c8153a5123654b2aba9ac3233d6bee5f54e46596651f6",
+        "plugins/dynamics/ui/dist/index.html": "5dfcc8648ad64485319ce5eb3e853cca32983e6dfd1c1eae2b3751c203356100",
+        "plugins/spectral/ui/dist/index.html": "bcf9b42ea9736411ca9828d92813191ed8d85af9ba7311b9173261f6ea29a196",
+        "plugins/timing/README.md": "a398777672bd25d87a176748f956acf4af3ba24b778cf0e808a37a48c1b9f5ea",
+        "plugins/timing/backend/operations.py": "5034cdd0c6390d91a124b09033680881a29ac5671db5c0748123d27df7b6af3d",
+        "plugins/timing/operations.json": "7caaec3a97a88a2e34a4922c3ed44ba8af2fa5faa720a01b4eaebb348d26eac0",
+        "plugins/timing/pyproject.toml": "c953dd047ffeb2318a51540e64099e27cca83c73fb0a4983594b9e16ebed60ba",
+        "plugins/timing/ui/dist/index.html": "1b4c4e65bc3d13ab8da49d3d294b2a2183db21ad6cdaa6f072fdd0db84bc1307",
+        "plugins/timing/ui/src/locales/en.json": "c18839bc77aaa68ab8b1eadd2869df52ad1ccf4bdc5b28b782a7610319c5aa0b",
+        "plugins/timing/ui/src/locales/zh-CN.json": "135dd75ab50fe49b702ea2dd48ef08fbf44ff4240e9f0df48e11ef80fe16635b",
+        "plugins/timing/ui/src/tool.json": "83a7552720a09753c0a979f6ab9f37d83c5b2e84b3c846acf32a42df048c5b42",
+        "registry.json": "c7cea3511ab4faddecbb2749d0ab61ada872aa20b57704e661738372fec886ef",
+        "tooling/frontend/src/components/OperationTool.vue": "7a481a125c793cdabf31a2c130edd0b7bbe0626a53cfd25175c55ccf651ce0de",
+        "tooling/tests/manual/timing_algorithms_smoke.py": "2e923f051c9cc61427e522798864611752da9c5be80a02d4237d24fbfc30ee78",
+        "tooling/tests/manual/tool_views_smoke.py": "298f286562d8ba3c03c629240165a22e66de48bc13e07dde31566702a39d6790",
+        "tooling/tests/test_timing_file_operation.py": "950d1567b453728ea17c499cb881a79d7c71cb09355e4645c9689c05c5cd2284",
+        "tooling/tests/test_timing_rubberband.py": "9b93681647971cd0dc05fdeabee88abe4cf199b48413bfe60448f7aa9aabc8ef",
+        "tooling/tests/test_tool_plugins.py": "5fc908f20c1a03d961865617d5474bc99bab4fc85e17d134281bd64ade995813"
+      }
+    },
+    "pymss-studio": {
+      "baseCommit": "0fa9dd93e5481eada6063eb75ef8fed54513a498",
+      "files": {
+        "python/worker_bootstrap.py": "153878455af1bf33460234a7eebfe840f8c9e32d0728f4077cd0c131c69204dc",
+        "tests/python/test_runtime_core_plan.py": "4e9979a717605fdcf5622bc34a8f1cfcd1c0f098673a6d04dfd94ef6f3469896",
+        "tests/python/test_runtime_core_update.py": "c295134538a57fc5758c4450d835614b3ba70954d28fed01b7b8aefa6e8e1193"
+      }
+    }
+  }
+}

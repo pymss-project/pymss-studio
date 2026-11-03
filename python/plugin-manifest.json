@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "repository": {
     "url": "https://github.com/pymss-project/pymss-plugins",
-    "ref": "main",
-    "registryRef": "main"
+    "ref": "9660b8439ed3666a22916e88498eb06309ea1cd2",
+    "registryRef": "9660b8439ed3666a22916e88498eb06309ea1cd2"
   },
   "preinstalled": [
     "pymss.convert",

@@ -1,0 +1,14 @@
+name: macOS Timing Test b48688e26
+on:
+  push:
+    branches: [build/macos-timing-20261103-b48688e26]
+    paths-ignore: ['test-support/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  macos:
+    uses: ./.github/workflows/release-macos.yml
+    with:
+      version: 0.0.25-dev.timing.20261103.b48688e26
+    secrets: inherit
