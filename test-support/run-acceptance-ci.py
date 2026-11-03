@@ -50,7 +50,8 @@ with tempfile.TemporaryDirectory(prefix='timing-build-qa-') as temporary:
         'tests.python.test_runtime_core_update'], paths=[studio / 'python', studio])
     dependencies = root / 'test-dependencies'
     run('isolated test-only loudness dependency', ['-m', 'pip', 'install', '--disable-pip-version-check',
-        '--no-deps', '--target', str(dependencies), 'pyloudnorm==0.1.1'])
+        '--no-deps', '--target', str(dependencies), 'pyloudnorm==0.2.0'])
+    run('test dependency availability', ['-c', 'import pyloudnorm, scipy, numpy; print("test dependencies ready")'], paths=[dependencies])
     run('Timing operations and native runtimes on baseline', ['-m', 'unittest',
         'tooling.tests.test_timing_file_operation', 'tooling.tests.test_timing_radius',
         'tooling.tests.test_timing_rubberband', 'tooling.tests.test_timing_runtime',
