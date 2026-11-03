@@ -36,7 +36,9 @@ jobs:
       - name: Recover the exact signed application
         run: |
           mkdir recovered release
-          tar -xzf diagnostics/timing-signed-app.tar.gz -C recovered
+          ARCHIVE=$(find diagnostics -type f -name timing-signed-app.tar.gz)
+          test -n "$ARCHIVE"
+          tar -xzf "$ARCHIVE" -C recovered
           codesign --verify --deep --strict 'recovered/Pymss Studio Timing Test.app'
       - name: Verify targeted fixes against the signed application
         env:
