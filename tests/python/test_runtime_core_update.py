@@ -185,6 +185,7 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
         rollback_after=False,
         state_overrides=None,
         expected_resolution_cores=None,
+        expected_pip_environment=None,
     ):
         bundled_root, env, python = self.make_env(backend, manifest_version=manifest_version, bundled=bundled, platform=platform, bootstrap=bootstrap)
         if state_overrides:
@@ -204,6 +205,8 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
             return (installed_probe or base)["packageVersions"]
 
         def popen(command, **kwargs):
+            for key, value in (expected_pip_environment or {}).items():
+                self.assertEqual(kwargs["env"].get(key), value)
             command_status = 0 if "--dry-run" in command else pip_status
             if "--dry-run" in command:
                 for requirement in expected_resolution_cores or ():

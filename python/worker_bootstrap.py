@@ -2502,6 +2502,10 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             pip_command.append("--pre")
 
         def run_pip(command: list[str], stage: str) -> None:
+            environment = _probe_environment(python_path=python_path)
+            if mode == "update" and index_url:
+                # An online core update must use the explicitly selected index.
+                environment["PIP_NO_INDEX"] = "0"
             process = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE,
@@ -2509,7 +2513,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                env=_probe_environment(python_path=python_path),
+                env=environment,
             )
             assert process.stdout is not None
             try:
@@ -2552,6 +2556,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             requirements = _resolved_overlay_requirements(requirements, report)
             selected = {canonicalize_name(item["metadata"]["name"]): item["metadata"]["version"] for item in report["install"]}
             targets = {name: selected.get(name) or base_versions.get(name) for name in targets}
+            append_log("resolve", "Resolved core versions: " + ", ".join(f"{name}={version}" for name, version in targets.items()))
             for index, name in enumerate(("pymss", "pymss-core")):
                 if not targets[name]:
                     raise RuntimeError(f"Unable to resolve a compatible version of {name}")
@@ -2562,7 +2567,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
                 not package_versions.get(name) or Version(version) > Version(package_versions[name])
                 for name, version in targets.items()
             ):
-                raise RuntimeError("No newer core is compatible with the current runtime. Check the package mirror or upgrade Python/PyTorch before retrying.")
+                raise RuntimeError("No newer core could be resolved from the selected package source. Check source availability and pip constraints before retrying.")
             _save_core_update_plan({
                 "backend": backend, "pythonPath": str(python_path), "mode": mode,
                 "channel": channel, "mirror": mirror, "identity": identity,
