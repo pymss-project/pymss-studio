@@ -1,0 +1,50 @@
+name: Worker Cancellation Check 20261103
+on:
+  push:
+    branches: [build/worker-cancellation-20261103]
+permissions:
+  contents: read
+jobs:
+  cancellation:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: pymss-project/pymss
+          ref: d59b5b46ae61d937e1dc7976b3918979f0f4bcd2
+          path: test-core
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Reproduce the previous POSIX cancellation failure
+        if: runner.os != 'Windows'
+        run: |
+          python - <<'PYTHON'
+          from pathlib import Path
+          import subprocess,sys
+          result=subprocess.run([sys.executable,'tests/manual/worker_native_cancellation_smoke.py','--gate','test-core/pymss/operations/_command_bootstrap.py','--module','test-support/legacy-process-tree.rs','--mode','managed'],capture_output=True,text=True,timeout=180)
+          Path('legacy-cancellation.log').write_text(result.stdout+chr(10)+result.stderr,encoding='utf-8')
+          print(result.stdout[-3000:]);print(result.stderr[-3500:])
+          assert result.returncode != 0 and 'Cancellation left a running process' in result.stderr, 'The prior orphan-process failure was not reproduced'
+          print('Prior cancellation failure reproduced; its test-owned processes were cleaned up')
+          PYTHON
+      - name: Verify fixed cancellation, retry, and unrelated process safety
+        run: python tests/manual/worker_native_cancellation_smoke.py --gate test-core/pymss/operations/_command_bootstrap.py --report worker-process-cleanup.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: worker-cancellation-${{ matrix.os }}
+          if-no-files-found: ignore
+          path: |
+            worker-process-cleanup.json
+            legacy-cancellation.log

@@ -18,6 +18,12 @@ use tauri::{AppHandle, Emitter, Manager, State};
 #[path = "audio_output.rs"]
 mod audio_output;
 
+#[path = "process_tree.rs"]
+mod process_tree;
+#[cfg(windows)]
+pub(crate) use process_tree::kill_process_tree;
+pub(crate) use process_tree::terminate_worker;
+
 pub(crate) fn recover_audio_output_temps(app: &AppHandle) {
     if let Ok(directory) = storage::temp_dir(app) {
         std::thread::spawn(move || audio_output::recover(&directory.join("audio-output-cleanup")));
@@ -54,17 +60,7 @@ fn operation_output_directory(payload: &Value, default: &Path) -> AppResult<Path
 use std::os::windows::process::CommandExt;
 
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-pub(crate) fn kill_process_tree(pid: u32) {
-    #[cfg(windows)]
-    let _ = Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .status();
-    #[cfg(not(windows))]
-    let _ = Command::new("pkill").args(["-TERM", "-P", &pid.to_string()]).status();
-}
+use process_tree::CREATE_NO_WINDOW;
 
 const PYTHON_TERMINAL_LOG_PREFIX: &str = "__PYMSS_STUDIO_TERMINAL_LOG__";
 static PROGRESS_LOG_TIMES: OnceLock<Mutex<HashMap<String, (Instant, u64)>>> = OnceLock::new();
@@ -784,8 +780,7 @@ fn build_worker_command(
     let mut cmd = Command::new(&python);
     #[cfg(unix)]
     if command == "manage_plugin" {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
+        process_tree::configure_worker(&mut cmd);
     }
     isolate_python_environment(&mut cmd, &storage::temp_dir(app)?);
     #[cfg(windows)]
@@ -1734,6 +1729,8 @@ fn spawn_worker_background_inner(
     };
     if let Some(scope) = &audio_scope { scope.configure(&mut cmd); }
     if let Some(scratch) = &scratch { cmd.env("PYMSS_SCRATCH_DIR", scratch.path()); }
+    #[cfg(unix)]
+    process_tree::configure_worker(&mut cmd);
     let started_at = std::time::Instant::now();
     session_log::append(
         &app,
@@ -1753,9 +1750,7 @@ fn spawn_worker_background_inner(
     };
     if let Some(scope) = &mut audio_scope {
         if let Err(error) = scope.attach(child.id()) {
-            kill_process_tree(child.id());
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = terminate_worker(&mut child);
             let _ = std::fs::remove_file(&payload_file);
             return Err(error.into());
         }

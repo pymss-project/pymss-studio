@@ -6,7 +6,7 @@ use crate::model_dir_migration::{
 };
 use crate::python::worker::{
     bundled_bin_dirs, cleanup_editor_export_temp_files, editor_export_task_token, run_worker_once,
-    run_worker_with_payload, spawn_worker_background, kill_process_tree,
+    run_worker_with_payload, spawn_worker_background, terminate_worker,
 };
 use crate::session_log::{self, DebugLogContent, DebugLogInfo, DebugLogReport};
 use crate::state::{AppState, ProxySettings};
@@ -2555,15 +2555,7 @@ pub async fn cancel_task(
             cancelled.extend(cancelled_task_ids.iter().cloned());
         }
         if let Ok(mut child) = child.lock() {
-            let pid = child.id();
-            #[cfg(unix)]
-            if task_id.starts_with("plugin_manage_") {
-                // Plugin workers get a dedicated process group, including pip build children.
-                unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
-            }
-            kill_process_tree(pid);
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = terminate_worker(&mut child);
         }
         for cancelled_task_id in cancelled_task_ids {
             // Plugin cancellation is emitted by the worker supervisor after releasing

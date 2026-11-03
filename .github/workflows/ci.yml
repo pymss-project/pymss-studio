@@ -10,6 +10,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  worker-process-cleanup:
+    name: Worker process cleanup (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: pymss-project/pymss
+          ref: d59b5b46ae61d937e1dc7976b3918979f0f4bcd2
+          path: test-core
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify native cancellation, retry, and unrelated process safety
+        run: python tests/manual/worker_native_cancellation_smoke.py --gate test-core/pymss/operations/_command_bootstrap.py --report worker-process-cleanup.json
+
   runtime-safety:
     name: Runtime safety (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
