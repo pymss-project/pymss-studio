@@ -25,6 +25,7 @@ export PYTHONHOME="$RES/python-runtime" PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSI
 export NUMBA_CACHE_DIR="$HOME/.pymss-studio-timing-test-b48688e26/numba"
 export PYMSS_PLUGIN_ENVIRONMENTS_DIR="$HOME/.pymss-studio-timing-test-b48688e26/cli-environments"
 export PYMSS_SCRATCH_DIR="$HOME/.pymss-studio-timing-test-b48688e26/scratch"
+mkdir -p "$NUMBA_CACHE_DIR" "$PYMSS_PLUGIN_ENVIRONMENTS_DIR" "$PYMSS_SCRATCH_DIR"
 run_acceptance() {
   "$RES/python-runtime/bin/python3" -B -X utf8 "$KIT_ROOT/acceptance.py" "$1" --app "$APP"
 }
