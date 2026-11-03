@@ -13,6 +13,7 @@ import platform
 import plistlib
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 import zipfile
@@ -85,6 +86,9 @@ def verify(app):
     child_environment = environment(app)
     os.environ.clear()
     os.environ.update(child_environment)
+    # macOS exposes /var through /private/var; fixtures use one canonical spelling.
+    tempfile.tempdir = str(Path(tempfile.gettempdir()).resolve())
+    os.environ["TMPDIR"] = tempfile.tempdir
     # Load the exact published plugin tests, with all scratch files in their own temporary directories.
     sys.path.insert(0, str(KIT))
     suite = unittest.defaultTestLoader.loadTestsFromName("tooling.tests.test_timing_file_operation")

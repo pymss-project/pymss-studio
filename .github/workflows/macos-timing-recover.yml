@@ -1,0 +1,60 @@
+name: macOS Timing Recovery b48688e26
+on:
+  push:
+    branches: [build/macos-timing-20261103-b48688e26]
+    paths: ['test-support/run-acceptance-ci.py', '.github/workflows/macos-timing-recover.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  acceptance:
+    if: ${{ contains(github.event.head_commit.message, 'recover-acceptance:') }}
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: pymss-project/pymss-plugins
+          ref: 9660b8439ed3666a22916e88498eb06309ea1cd2
+          path: test-inputs/plugins
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: pymss-project/pymss
+          ref: d7015a69cc7022df1666bd3d4b3f72b27275d435
+          path: test-inputs/core
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-timing-test-b48688e26-diagnostics
+          run-id: 41601393106
+          github-token: ${{ github.token }}
+          path: diagnostics
+      - name: Recover the exact signed application
+        run: |
+          mkdir recovered release
+          tar -xzf diagnostics/timing-signed-app.tar.gz -C recovered
+          codesign --verify --deep --strict 'recovered/Pymss Studio Timing Test.app'
+      - name: Verify targeted fixes against the signed application
+        env:
+          PYMSS_TEST_APP_COMMIT: 521998013936dcf0c897412707a7bde8e80d8311
+          PYMSS_TEST_COMPILATION_RUN_ID: '41601393106'
+        run: python3 test-support/run-acceptance-ci.py "$PWD/recovered/Pymss Studio Timing Test.app" "$PWD/test-inputs/plugins" "$PWD/test-inputs/core" "$PWD/release/timing-ci-verification.json"
+      - name: Verify offline overlays and signed replacement
+        run: python3 scripts/check-macos-core-update.py "$PWD/recovered/Pymss Studio Timing Test.app"
+      - name: Verify update packaging contracts
+        run: python3 -m unittest tests.python.test_macos_update_release
+      - name: Package the verified application
+        run: |
+          ln -s /Applications recovered/Applications
+          hdiutil create -volname 'Pymss Studio Timing Test' -srcfolder recovered -ov -format UDZO 'release/Pymss-Studio-0.0.25-dev.timing.20261103.b48688e26-macos-arm64-mlx.dmg'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-timing-test-b48688e26-app
+          compression-level: 0
+          path: |
+            release/*.dmg
+            release/timing-ci-verification.json

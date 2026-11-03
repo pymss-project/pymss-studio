@@ -8,7 +8,7 @@ permissions:
   actions: read
 jobs:
   kit:
-    if: ${{ contains(github.event.head_commit.message, 'test-kit-only:') }}
+    if: ${{ contains(github.event.head_commit.message, 'test-kit-only:') && !contains(github.event.head_commit.message, 'recover-acceptance:') }}
     runs-on: macos-14
     timeout-minutes: 20
     steps:

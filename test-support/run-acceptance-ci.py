@@ -12,7 +12,9 @@ resources = next(path for path in [app / 'Contents/Resources', app / 'Contents/R
                  if (path / 'python/worker.py').is_file())
 python = resources / 'python-runtime/bin/python3'
 marker = json.loads((resources / 'python/timing-test-build.json').read_text(encoding='utf-8'))
-results = {'build': marker, 'commit': os.environ['GITHUB_SHA'], 'runId': os.environ['GITHUB_RUN_ID'],
+results = {'build': marker, 'commit': os.environ.get('PYMSS_TEST_APP_COMMIT', os.environ['GITHUB_SHA']),
+           'verificationCommit': os.environ['GITHUB_SHA'], 'compilationRunId': os.environ.get('PYMSS_TEST_COMPILATION_RUN_ID', os.environ['GITHUB_RUN_ID']),
+           'runId': os.environ['GITHUB_RUN_ID'],
            'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'], 'checks': []}
 
 with tempfile.TemporaryDirectory(prefix='timing-build-qa-') as temporary:
@@ -21,7 +23,8 @@ with tempfile.TemporaryDirectory(prefix='timing-build-qa-') as temporary:
     env.update(PYTHONHOME=str(resources / 'python-runtime'), PYTHONDONTWRITEBYTECODE='1', PYTHONNOUSERSITE='1',
                PYMSS_STUDIO_DATA_ROOT=str(root / 'data'), PYMSS_USER_MODELS=str(root / 'user-models.json'),
                PYMSS_MODEL_DIR=str(root / 'models'), NUMBA_CACHE_DIR=str(root / 'numba'),
-               RADIUS_FFMPEG=str(resources / 'bin/ffmpeg'), RADIUS_FFMPEG_IO='1')
+               RADIUS_FFMPEG=str(resources / 'bin/ffmpeg'), RADIUS_FFMPEG_IO='1',
+               TMPDIR=str(Path(tempfile.gettempdir()).resolve()))
     env.pop('PYMSS_PLUGIN_BINDING', None)
     env['PATH'] = str(resources / 'bin') + os.pathsep + env['PATH']
 
@@ -31,7 +34,8 @@ with tempfile.TemporaryDirectory(prefix='timing-build-qa-') as temporary:
         started = time.time()
         result = subprocess.run([str(python), '-B', '-X', 'utf8', *arguments], cwd=cwd, env=current,
                                 text=True, capture_output=True, timeout=360)
-        print(name, result.stdout[-2000:], result.stderr[-4000:], flush=True)
+        print(name, result.stdout if result.returncode else result.stdout[-2000:],
+              result.stderr if result.returncode else result.stderr[-4000:], flush=True)
         results['checks'].append({'name': name, 'exitCode': result.returncode,
                                   'seconds': round(time.time() - started, 2),
                                   'stdout': result.stdout[-3000:], 'stderr': result.stderr[-5000:]})
