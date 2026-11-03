@@ -48,11 +48,13 @@ with tempfile.TemporaryDirectory(prefix='timing-build-qa-') as temporary:
         "import importlib.metadata as m; assert m.version('pymss')=='2.3.1'; assert m.version('pymss-core')=='0.1.14'; print('pymss 2.3.1 / core 0.1.14')"])
     run('Studio core update contracts', ['-m', 'unittest', 'tests.python.test_runtime_core_plan',
         'tests.python.test_runtime_core_update'], paths=[studio / 'python', studio])
+    dependencies = root / 'test-dependencies'
+    run('isolated test-only loudness dependency', ['-m', 'pip', 'install', '--disable-pip-version-check',
+        '--no-deps', '--target', str(dependencies), 'pyloudnorm==0.1.1'])
     run('Timing operations and native runtimes on baseline', ['-m', 'unittest',
         'tooling.tests.test_timing_file_operation', 'tooling.tests.test_timing_radius',
         'tooling.tests.test_timing_rubberband', 'tooling.tests.test_timing_runtime',
-        'tooling.tests.test_timing_progress', 'tooling.tests.test_tool_plugins'], cwd=plugins, paths=[plugins])
-    dependencies = root / 'test-dependencies'
+        'tooling.tests.test_timing_progress', 'tooling.tests.test_tool_plugins'], cwd=plugins, paths=[plugins, dependencies])
     run('isolated pytest dependency preparation', ['-m', 'pip', 'install', '--disable-pip-version-check',
         '--target', str(dependencies), 'pytest>=8,<9'])
     run('core source installation contracts', ['-m', 'pytest', '-q', 'test/test_plugin_sources.py',
