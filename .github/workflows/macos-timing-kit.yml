@@ -1,0 +1,37 @@
+name: macOS Timing Kit b48688e26
+on:
+  push:
+    branches: [build/macos-timing-20261103-b48688e26]
+    paths: ['test-support/**', '.github/workflows/macos-timing-kit.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  kit:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: pymss-project/pymss-plugins
+          ref: 9660b8439ed3666a22916e88498eb06309ea1cd2
+          path: test-inputs/plugins
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-timing-test-b48688e26-app
+          run-id: 41600185038
+          github-token: ${{ github.token }}
+          path: downloaded-app
+      - name: Validate companion commands against the DMG application
+        run: python3 test-support/build-timing-kit.py "$PWD" "$PWD/downloaded-app" "$PWD/test-inputs/plugins" "$PWD/kit-delivery"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-timing-test-b48688e26-kit
+          path: |
+            kit-delivery/*.zip
+            kit-delivery/*.json
+            kit-delivery/*.md

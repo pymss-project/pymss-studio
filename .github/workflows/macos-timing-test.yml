@@ -8,6 +8,7 @@ permissions:
   contents: read
 jobs:
   macos:
+    if: ${{ !contains(github.event.head_commit.message, 'test-kit-only:') }}
     uses: ./.github/workflows/release-macos.yml
     with:
       version: 0.0.25-dev.timing.20261103.b48688e26
