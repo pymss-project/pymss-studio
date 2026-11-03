@@ -28,6 +28,17 @@ const DYNAMIC_KEY_PREFIXES = [
   'plugins.actions.',
   'plugins.phases.',
   'plugins.taskStates.',
+  // Diagnostic panels select labels by network, directory, result and host state IDs.
+  'debugSystem.networkTargets.',
+  'debugSystem.networkStates.',
+  'debugSystem.directoryIds.',
+  'debugSystem.directoryStates.',
+  'debugSystem.writeStates.',
+  'debugSystem.updateOutcome.',
+  'debugBusiness.resultReason.',
+  'debugBusiness.fileState.',
+  'debugBusiness.hostState.',
+  'debugUpdates.status.',
 ]
 
 /**
