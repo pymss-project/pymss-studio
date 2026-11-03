@@ -46,7 +46,8 @@ with tempfile.TemporaryDirectory(prefix="timing-kit-app-") as temp:
     with (app / "Contents/Info.plist").open("rb") as stream:
         info = plistlib.load(stream)
     executable_sha = sha(app / "Contents/MacOS" / info["CFBundleExecutable"])
-    receipt = {"buildId": "b48688e26", "applicationCommit": app_report["commit"], "applicationRunId": 41601393106,
+    receipt = {"buildId": "b48688e26", "applicationCommit": app_report["commit"], "applicationRunId": 41602723381,
+               "compilationRunId": app_report["compilationRunId"], "applicationVerificationCommit": app_report["verificationCommit"],
                "kitCommit": os.environ["GITHUB_SHA"], "kitRunId": os.environ["GITHUB_RUN_ID"],
                "pluginSnapshotCommit": "9660b8439ed3666a22916e88498eb06309ea1cd2",
                "coreSnapshotCommit": "d7015a69cc7022df1666bd3d4b3f72b27275d435",
