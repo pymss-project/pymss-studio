@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter, State};
 
 /// Returns available bytes for the partition containing `path`.
 /// Walks up to find an existing ancestor. Returns None if unavailable.
-fn disk_available_bytes(path: &Path) -> Option<u64> {
+pub(crate) fn disk_available_bytes(path: &Path) -> Option<u64> {
     let mut check = path;
     loop {
         if check.exists() {

@@ -63,7 +63,7 @@ fn queue_automatic_report(app: &AppHandle, sequence: u64, trigger: &str, line: &
 fn write_automatic_report(app: &AppHandle, request: &PendingReport, finishing: bool) {
     let Ok(_guard) = REPORT_WRITE_LOCK.lock() else { return; };
     let current = automatic_reports().lock().map(|reports| reports.accepts(request, finishing)).unwrap_or(false);
-    if current { let _ = write_diagnostic_report_with_trigger(app, &request.trigger, &request.line); }
+    if current { let _ = write_diagnostic_report_with_trigger(app, &request.trigger, &request.line, None); }
 }
 
 pub(crate) fn finish_automatic_reports(app: &AppHandle) {
@@ -182,7 +182,7 @@ pub(crate) fn record_operation_failure(app: &AppHandle, command: &str, operation
 }
 
 pub(crate) fn record_environment_probe(command: &str, payload: &serde_json::Value) {
-    if !matches!(command, "env_info" | "runtime_info" | "optional_package_status" | "runtime_core_versions") {
+    if !matches!(command, "env_info" | "runtime_info" | "optional_package_status" | "runtime_core_versions" | "plugin_diagnostics" | "network_diagnostics") {
         return;
     }
     let summary = diagnostic_report::summarize_probe(command, payload);
@@ -203,6 +203,30 @@ pub(crate) fn record_editor_project(project: &serde_json::Value) {
     summary["source"] = "Last loaded or saved editor project; media contents and project names are omitted".into();
     if let Ok(mut context) = report_context().lock() {
         context.editor(summary);
+    }
+}
+
+pub(crate) fn begin_window_diagnostics(request_id: &str) -> AppResult<()> {
+    report_context().lock().map_err(|_| AppError::Worker("Diagnostic context lock failed".into()))?
+        .begin_window_request(request_id);
+    Ok(())
+}
+
+pub(crate) fn record_window_diagnostics(request_id: &str, label: &str, payload: &serde_json::Value) -> AppResult<bool> {
+    let mut summary = diagnostic_report::summarize_window_state(payload);
+    summary["observedAt"] = timestamp().into();
+    Ok(report_context().lock().map_err(|_| AppError::Worker("Diagnostic context lock failed".into()))?
+        .observe_window(request_id, label, summary))
+}
+
+pub(crate) fn forget_window_diagnostics(label: &str) {
+    if let Ok(mut context) = report_context().lock() { context.forget_window(label); }
+}
+
+pub(crate) fn window_diagnostics(request_id: &str, expected: &[String]) -> serde_json::Value {
+    match report_context().try_lock() {
+        Ok(context) => context.current_window_states(request_id, expected),
+        Err(error) => serde_json::json!({"status": if matches!(error, std::sync::TryLockError::WouldBlock) { "busy" } else { "error" }, "expected": expected, "observed": [], "missing": expected}),
     }
 }
 
@@ -530,8 +554,8 @@ pub fn clear(app: &AppHandle) -> AppResult<DebugLogInfo> {
     info(app)
 }
 
-pub fn create_diagnostic_report(app: &AppHandle) -> AppResult<DebugLogReport> {
-    create_diagnostic_report_with_trigger(app, "manual", "manual diagnostic report request")
+pub fn create_diagnostic_report(app: &AppHandle, snapshot: Option<&serde_json::Value>) -> AppResult<DebugLogReport> {
+    create_diagnostic_report_with_trigger(app, "manual", "manual diagnostic report request", snapshot)
 }
 
 fn append_session_line(path: &PathBuf, line: &str) {
@@ -627,16 +651,18 @@ fn create_diagnostic_report_with_trigger(
     app: &AppHandle,
     trigger: &str,
     trigger_line: &str,
+    snapshot: Option<&serde_json::Value>,
 ) -> AppResult<DebugLogReport> {
     let _report_guard = REPORT_WRITE_LOCK.lock()
         .map_err(|_| AppError::Worker("diagnostic report lock poisoned".into()))?;
-    write_diagnostic_report_with_trigger(app, trigger, trigger_line)
+    write_diagnostic_report_with_trigger(app, trigger, trigger_line, snapshot)
 }
 
 fn write_diagnostic_report_with_trigger(
     app: &AppHandle,
     trigger: &str,
     trigger_line: &str,
+    snapshot: Option<&serde_json::Value>,
 ) -> AppResult<DebugLogReport> {
     let path = diagnostic_report_path(app)?;
     if let Some(parent) = path.parent() {
@@ -666,7 +692,7 @@ fn write_diagnostic_report_with_trigger(
             "sectionChars": MAX_REPORT_SECTION_CHARS, "logTailBytes": REPORT_TAIL_BYTES},
         "activityLimits": activity.get("limits"),
     });
-    let sections = vec![
+    let mut sections = vec![
         ("Current Windows and Feature Navigation", serde_json::json!({
             "windows": activity.get("windows"), "recentVisits": activity.get("navigation"),
             "omittedVisits": activity["omitted"]["navigation"]})),
@@ -681,6 +707,8 @@ fn write_diagnostic_report_with_trigger(
             "source": "Last successful observations in this process; probes are not rerun when generating a report",
             "observations": activity.get("environment")})),
         ("Last Observed Editor Project", activity.get("editor").cloned().filter(|value| !value.is_null()).unwrap_or_else(|| serde_json::json!({"status": "not_observed"}))),
+        ("Last Observed Window Diagnostics", serde_json::json!(activity["windowStates"].as_array().map(Vec::as_slice).unwrap_or_default().iter().take(8).map(diagnostic_report::summarize_window_report).collect::<Vec<_>>())),
+        ("Native Plugin Host", diagnostic_report::summarize_native_host(&crate::commands::plugin_host::diagnostic_snapshot(&storage::data_root_dir(app)?, &app.state::<crate::commands::plugin_host::PluginHostState>()))),
         ("Persisted Separation and Workflow Tasks", report_store(app, "task-history", diagnostic_report::summarize_task_history)),
         ("Workflow Library", report_store(app, "workflow-state", diagnostic_report::summarize_workflows)),
         ("Application Settings", report_store(app, "app-settings", diagnostic_report::summarize_settings)),
@@ -693,6 +721,9 @@ fn write_diagnostic_report_with_trigger(
             "deferredVersion", "deferredAt", "lastAcceptedVersion",
         ]))),
     ];
+    if let Some(snapshot) = snapshot {
+        sections.push(("Diagnostic Page Snapshot", diagnostic_report::summarize_diagnostic_page(snapshot)));
+    }
     let data = DiagnosticReportData {
         metadata, sections, torch: torch_diagnostics_markdown(), trigger: trigger_line.to_string(),
         session: read_tail_path(session_log_path(app)?, REPORT_TAIL_BYTES)?,

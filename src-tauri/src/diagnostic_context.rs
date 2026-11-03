@@ -16,6 +16,8 @@ pub(crate) struct DiagnosticContext {
     windows: BTreeMap<String, Value>,
     probes: BTreeMap<String, Value>,
     editor: Option<Value>,
+    diagnostic_request: Option<String>,
+    window_states: BTreeMap<String, Value>,
     levels: BTreeMap<String, u64>,
     omitted_operations: usize,
     omitted_issues: usize,
@@ -320,6 +322,33 @@ impl DiagnosticContext {
         self.editor = Some(summary);
     }
 
+    pub(crate) fn begin_window_request(&mut self, request_id: &str) {
+        self.diagnostic_request = Some(request_id.into());
+        self.window_states.clear();
+    }
+
+    pub(crate) fn observe_window(&mut self, request_id: &str, label: &str, mut summary: Value) -> bool {
+        if self.diagnostic_request.as_deref() != Some(request_id)
+            || (self.window_states.len() >= 8 && !self.window_states.contains_key(label)) { return false; }
+        summary["windowLabel"] = json!(label);
+        summary["requestId"] = json!(request_id);
+        self.window_states.insert(label.into(), summary);
+        true
+    }
+
+    pub(crate) fn forget_window(&mut self, label: &str) {
+        self.window_states.remove(label);
+        self.windows.remove(label);
+    }
+
+    pub(crate) fn current_window_states(&self, request_id: &str, expected: &[String]) -> Value {
+        let observed: Vec<_> = self.window_states.iter().filter(|(label, state)| expected.contains(label)
+            && state["requestId"] == request_id).map(|(_, state)| state.clone()).collect();
+        let missing: Vec<_> = expected.iter().filter(|label| !observed.iter().any(|state| state["windowLabel"] == label.as_str())).collect();
+        json!({"status": if self.diagnostic_request.as_deref() == Some(request_id) { "observed" } else { "superseded" },
+            "expected": expected, "observed": observed, "missing": missing})
+    }
+
     pub(crate) fn snapshot(&self) -> Value {
         json!({
             "scope": "Current process only; persisted task history is reported separately",
@@ -331,6 +360,7 @@ impl DiagnosticContext {
             "events": self.events.iter().rev().collect::<Vec<_>>(),
             "environment": self.probes,
             "editor": self.editor,
+            "windowStates": self.window_states.values().collect::<Vec<_>>(),
             "omitted": {"operations": self.omitted_operations, "issues": self.omitted_issues,
                 "events": self.omitted_events, "navigation": self.omitted_navigation},
             "limits": {"operations": OPERATION_LIMIT, "issues": ISSUE_LIMIT,
@@ -342,6 +372,34 @@ impl DiagnosticContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_window_requests_reject_stale_replies_and_track_missing_windows() {
+        let mut context = DiagnosticContext::default();
+        context.begin_window_request("first");
+        assert!(context.observe_window("first", "editor-one", json!({"kind": "editor"})));
+        context.begin_window_request("second");
+        assert!(!context.observe_window("first", "editor-one", json!({"error": "stale"})));
+        let expected = vec!["editor-one".to_string(), "editor-two".to_string()];
+        let snapshot = context.current_window_states("second", &expected);
+        assert_eq!(snapshot["missing"].as_array().unwrap().len(), 2);
+        assert!(context.observe_window("second", "editor-one", json!({"kind": "editor", "exporting": true})));
+        let snapshot = context.current_window_states("second", &expected);
+        assert_eq!(snapshot["observed"][0]["exporting"], true);
+        assert_eq!(snapshot["missing"], json!(["editor-two"]));
+        context.forget_window("editor-one");
+        assert!(context.current_window_states("second", &expected)["observed"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn window_observations_are_bounded_and_refresh_reclaims_the_capacity() {
+        let mut context = DiagnosticContext::default();
+        context.begin_window_request("first");
+        for index in 0..8 { assert!(context.observe_window("first", &format!("editor-{index}"), json!({"kind": "editor"}))); }
+        assert!(!context.observe_window("first", "editor-extra", json!({"kind": "editor"})));
+        context.begin_window_request("second");
+        assert!(context.observe_window("second", "editor-extra", json!({"kind": "editor"})));
+    }
 
     fn request(id: &str, task: &str) -> LogRecord {
         let mut record = LogRecord::new(

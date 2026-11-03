@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import type { PluginDiagnosticSnapshot } from '../src/features/diagnostics/pluginDiagnostics.ts'
 import { buildDiagnosticChecks, isDiagnosticIssueEvent, summarizeDiagnosticChecks } from '../src/utils/diagnostics.ts'
 
 const ready = {
@@ -44,11 +45,46 @@ test('device errors, incompatible optional packages and disconnected event liste
   assert.equal(checks.find(check => check.key === 'connection')?.detail, 'Listener failed')
 })
 
-test('macOS hides unsupported speech dependencies and missing optional probe data is unknown', () => {
-  assert.ok(!buildDiagnosticChecks({ ...ready, isMac: true }).some(check => check.key === 'funasr'))
+test('macOS checks the MLX speech package and missing optional probe data is unknown', () => {
+  const mlx = buildDiagnosticChecks({ ...ready, isMac: true, optionalPackage: { ...ready.optionalPackage, requirement: 'funasr-mlx>=0.2.2' } })
+  assert.equal(mlx.find(check => check.key === 'funasr')?.state, 'optional')
+  assert.equal(mlx.find(check => check.key === 'funasr')?.label, 'FunASR MLX')
   const checks = buildDiagnosticChecks({ ...ready, optionalPackage: null, optionalError: 'Probe failed' })
   assert.equal(checks.find(check => check.key === 'funasr')?.state, 'unknown')
   assert.equal(summarizeDiagnosticChecks(checks).state, 'unknown')
+})
+
+test('plugin APIs and interpreter binding are checked independently from pymss importability', () => {
+  const snapshot: PluginDiagnosticSnapshot = {
+    checkedAt: '',
+    runtime: { pythonPath: '/actual/python', configuredPythonPath: '/configured/python', interpreterMatches: false,
+      bindingDir: '/plugins', identity: 'cpu', pymssVersion: '2.0.19', managementSupported: false, pluginApisSupported: false, apiError: 'Missing plugin APIs' },
+    plugins: [], verification: { performed: false, error: null },
+  }
+  const checks = buildDiagnosticChecks({ ...ready, pluginDiagnostics: snapshot })
+  assert.equal(checks.find(check => check.key === 'pymss')?.state, 'ok')
+  assert.equal(checks.find(check => check.key === 'pluginRuntime')?.state, 'warn')
+  assert.equal(checks.find(check => check.key === 'pluginBinding')?.state, 'error')
+  assert.equal(checks.find(check => check.key === 'pluginRuntime')?.detail, 'Missing plugin APIs')
+})
+
+test('reading installed records does not imply plugin loading was verified', () => {
+  const snapshot: PluginDiagnosticSnapshot = {
+    checkedAt: '',
+    runtime: { pythonPath: '/python', configuredPythonPath: '/python', interpreterMatches: true,
+      bindingDir: '/plugins', identity: 'cpu', pymssVersion: '2.3.1', managementSupported: true, pluginApisSupported: true, apiError: null },
+    plugins: [{ name: 'example', version: '1', enabled: true, path: '/plugins/example', loaded: null, error: null }],
+    verification: { performed: false, error: null },
+  }
+  const state = () => buildDiagnosticChecks({ ...ready, pluginDiagnostics: snapshot }).find(check => check.key === 'pluginLoading')?.state
+  assert.equal(state(), 'unknown')
+  snapshot.verification.performed = true
+  snapshot.plugins[0].loaded = true
+  assert.equal(state(), 'ok')
+  snapshot.plugins[0].loaded = false
+  assert.equal(state(), 'warn')
+  snapshot.plugins[0].enabled = false
+  assert.equal(state(), 'optional')
 })
 
 test('the detailed device probe takes priority over cached runtime acceleration flags', () => {

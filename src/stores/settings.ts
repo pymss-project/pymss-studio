@@ -974,6 +974,7 @@ export const useSettingsStore = defineStore('settings', () => {
     proxyMode,
     proxyUrl,
     proxyBypass,
+    syncProxyToBackend,
     updateChannel,
     updateSource,
     pluginSource,

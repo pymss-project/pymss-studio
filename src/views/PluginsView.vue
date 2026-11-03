@@ -74,7 +74,7 @@ function installing(name: string) {
   return task?.status === 'running' || task?.status === 'cancelling'
 }
 function installDisabled(name = '') {
-  return exclusiveBusy.value || loading.value || catalogLoading.value || (name ? installing(name) : false)
+  return exclusiveBusy.value || loading.value || catalogLoading.value || snapshot.value?.runtime.managementSupported === false || (name ? installing(name) : false)
 }
 function installLabel(name: string) {
   return installing(name) ? t(pluginActivity(name)?.phase === 'queued' ? 'plugins.phases.queued' : 'plugins.installing') : t('plugins.install')
@@ -242,7 +242,8 @@ async function requestCancel(id?: string) {
       <router-link to="/settings">{{ t('nav.settings') }}</router-link>
     </n-alert>
     <template v-if="snapshot">
-      <n-alert v-if="snapshot.inventoryWarnings?.length" type="warning" class="plugins-notice">{{ t('plugins.inventoryMigrationWarning') }}</n-alert>
+      <n-alert v-if="snapshot.runtime.managementSupported === false" type="warning" class="plugins-notice">{{ t('plugins.runtimeIncompatible') }}</n-alert>
+      <n-alert v-else-if="snapshot.inventoryWarnings?.length" type="warning" class="plugins-notice">{{ t('plugins.inventoryMigrationWarning') }}</n-alert>
       <n-alert v-if="snapshot.preinstalledAvailable?.length" type="info" class="plugins-notice">
         <p>{{ t('plugins.defaultToolsAvailable') }}</p>
         <n-button secondary :loading="activity?.action === 'prepare_preinstalled' && busy" :disabled="disabled" @click="enableDefaultTools">{{ t('plugins.enableDefaultTools') }}</n-button>

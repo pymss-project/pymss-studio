@@ -36,6 +36,7 @@ import {
 } from '@/utils/simpleWorkflowEditor'
 import { isSimpleWorkflowDefinition } from '@/workflows/formats'
 import { WorkflowEditorInUseError } from '@/utils/workflowEditorState'
+import { useDiagnosticWindowState } from '@/features/diagnostics/windowState'
 
 const studioLog = createLogger('ui.views.WorkflowSimpleEditorView')
 
@@ -485,6 +486,11 @@ onBeforeUnmount(() => {
   unlistenCloseRequested?.()
 })
 
+useDiagnosticWindowState('workflow', () => ({
+  kind: 'workflow', workflowId: editingId.value, updatedAt: expectedUpdatedAt.value,
+  saving: saving.value, dirty: dirty.value, error: saveError.value || loadError.value,
+  revisionConflict: showRevisionConflict.value, recoveryBackupAvailable: Boolean(workflow.recoveryBackupPath),
+}))
 </script>
 
 <template>

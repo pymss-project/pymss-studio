@@ -26,6 +26,7 @@ import { useWorkbenchStore } from '@/stores/workbench'
 import type { WorkflowRuntimeBindings } from '@/workflows/workbench'
 import { activeRuntimeEnvironment, runtimeBackendLabel, runtimeCoreSyncAvailable, runtimeCoreUpdateAvailable as hasRuntimeCoreUpdate } from '@/utils/runtime'
 import { connectWorkerEvents } from '@/utils/events'
+import { useRenderDiagnosticState } from '@/features/diagnostics/renderState'
 
 const studioLog = createLogger('ui.App')
 
@@ -45,6 +46,10 @@ watch(() => route.name, name => {
   if (name === 'tools') toolsOpened.value = true
 }, { immediate: true })
 const { t, locale } = useI18n()
+useRenderDiagnosticState(() => ({
+  theme: settings.themeMode, resolvedTheme: themeIsDark.value ? 'dark' : 'light', animations: settings.animationsEnabled, scale: settings.scaleFactor,
+  locale: settings.locale, resolvedLocale: locale.value, routePath: route.path,
+}), () => settings.developerMode)
 const componentLocale = computed(() => locale.value.startsWith('zh') ? zhCN : enUS)
 const bootReady = ref(false)
 const backgroundWarmupsStarted = ref(false)

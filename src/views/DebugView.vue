@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { storeToRefs } from 'pinia'
 import { useI18n } from 'vue-i18n'
@@ -23,16 +23,31 @@ import { useSettingsStore } from '@/stores/settings'
 import { useTaskStore } from '@/stores/task'
 import { useModelStore, type DownloadTask } from '@/stores/model'
 import { useWorkflowStore } from '@/stores/workflow'
+import { useUpdateStore } from '@/stores/update'
+import { usePluginDiagnostics } from '@/features/diagnostics/pluginDiagnostics'
+import { buildUpdateDiagnosticSnapshot } from '@/utils/updateDiagnostics'
 import { useOptionalRuntimePackage } from '@/features/runtime-packages/optionalRuntimePackage'
 import { buildDiagnosticChecks, isDiagnosticIssueEvent, summarizeDiagnosticChecks, type DiagnosticState } from '@/utils/diagnostics'
 import { detectRuntimePlatform } from '@/utils/runtime'
 import { isTauriRuntime } from '@/utils/appStore'
 import TaskLogConsole from '@/components/TaskLogConsole.vue'
 import PluginSourcePanel from '@/components/debug/PluginSourcePanel.vue'
+import PluginDiagnosticsPanel from '@/components/debug/PluginDiagnosticsPanel.vue'
+import ApplicationUpdateDiagnostics from '@/components/debug/ApplicationUpdateDiagnostics.vue'
+import WorkflowResultDiagnostics from '@/components/debug/WorkflowResultDiagnostics.vue'
+import EditorHostDiagnostics from '@/components/debug/EditorHostDiagnostics.vue'
+import { useBusinessDiagnostics } from '@/features/diagnostics/businessDiagnostics'
+import { buildWorkflowResultSnapshot } from '@/utils/workflowResultDiagnostics'
+import NetworkDiagnostics from '@/components/debug/NetworkDiagnostics.vue'
+import StorageDiagnostics from '@/components/debug/StorageDiagnostics.vue'
+import RenderDiagnostics from '@/components/debug/RenderDiagnostics.vue'
+import { useNetworkDiagnostics } from '@/features/diagnostics/networkDiagnostics'
+import { useStorageDiagnostics, type DiagnosticDirectory } from '@/features/diagnostics/storageDiagnostics'
+import { useRendererDiagnostics } from '@/features/diagnostics/businessDiagnostics'
 import { formatBytes } from '@/utils/format'
 import { normalizeLogRecord, formatLogRecord, logContextPreview, logMessagePreview, locationLabel, logClock, sourceLabel, type LogRecord } from '@/utils/logRecord'
 
-const { t } = useI18n()
+const { t, te, locale } = useI18n()
 const message = useMessage()
 const router = useRouter()
 const app = useAppStore()
@@ -40,13 +55,30 @@ const settings = useSettingsStore()
 const task = useTaskStore()
 const modelStore = useModelStore()
 const workflow = useWorkflowStore()
+const updates = useUpdateStore()
+const pluginDiagnostics = usePluginDiagnostics()
+const businessDiagnostics = useBusinessDiagnostics()
+const networkDiagnostics = useNetworkDiagnostics()
+const storageDiagnostics = useStorageDiagnostics()
+const rendererDiagnostics = useRendererDiagnostics()
+const workflowResults = computed(() => buildWorkflowResultSnapshot(workflow, task.tasks, new Set(task.resultTasks.map(item => item.id))))
+const updateDiagnostics = computed(() => {
+  const snapshot = buildUpdateDiagnosticSnapshot(updates)
+  snapshot.currentVersion ||= app.buildInfoVersion
+  return snapshot
+})
 const funAsr = useOptionalRuntimePackage('funasr')
 
 const { developerMode, dataRoot, modelDir, outputDir, settingsDir, editorProjectsDir, logsDir, tempDir, defaultDevice, downloadSource, downloadMethod, maxConcurrentSeparations, updateEndpointOverride } = storeToRefs(settings)
 const { activeWorkerTasks, runningTasks } = storeToRefs(task)
 const { downloadTasks } = storeToRefs(modelStore)
+const storageDirectories = computed<DiagnosticDirectory[]>(() => [
+  { id: 'data', path: dataRoot.value }, { id: 'models', path: modelDir.value }, { id: 'outputs', path: outputDir.value },
+  { id: 'settings', path: settingsDir.value }, { id: 'editor', path: editorProjectsDir.value },
+  { id: 'logs', path: logsDir.value }, { id: 'temp', path: tempDir.value },
+])
 
-type DebugTab = 'overview' | 'runtime' | 'activity' | 'models' | 'events' | 'logs' | 'runtime-tools' | 'updates' | 'plugins'
+type DebugTab = 'overview' | 'runtime' | 'activity' | 'models' | 'events' | 'logs' | 'runtime-tools' | 'updates' | 'plugins' | 'editor-host' | 'system'
 type CatalogEditMode = 'simple' | 'advanced'
 type DebugLogLevelFilter = 'all' | 'error' | 'warn' | 'info' | 'debug' | 'unclassified'
 type DebugLogCategoryFilter = 'all' | 'issues' | 'traceback' | 'pymss' | 'worker' | 'app' | 'runtime' | 'store' | 'other'
@@ -253,6 +285,7 @@ const diagnostics = computed(() => buildDiagnosticChecks({
   env: app.envInfo, runtime: app.runtimeInfo, envError: app.envError, runtimeError: app.runtimeInfoError,
   connection: app.workerEventConnectionStatus, connectionError: app.workerEventConnectionError,
   optionalPackage: funAsr.status.value, optionalError: funAsr.error.value, isMac: isMac.value,
+  pluginDiagnostics: pluginDiagnostics.snapshot.value, pluginError: pluginDiagnostics.error.value,
 }))
 const diagnosticSummary = computed(() => summarizeDiagnosticChecks(diagnostics.value))
 watch([developerMode, () => diagnosticSummary.value.state], ([enabled, state], [wasEnabled]) => {
@@ -268,7 +301,7 @@ const diagnosticGroups = computed(() => [
   { key: 'capabilities', title: t('debug.capabilities'), hint: t('debug.groupCapabilitiesHint'), icon: CheckmarkCircleOutline },
   { key: 'connection', title: t('debug.connection'), hint: t('debug.groupConnectionHint'), icon: TerminalOutline },
 ].map(group => ({ ...group, checks: diagnostics.value.filter(check => check.group === group.key) })))
-const diagnosticBusy = computed(() => checkingDiagnostics.value || optionalChecking.value || app.envLoading || app.runtimeInfoLoading)
+const diagnosticBusy = computed(() => checkingDiagnostics.value || optionalChecking.value || app.envLoading || app.runtimeInfoLoading || pluginDiagnostics.loading.value)
 const failedTasks = computed(() => [...task.failedTasks].sort((a, b) => b.updatedAt - a.updatedAt))
 const latestFailedTask = computed(() => failedTasks.value[0])
 const failedTaskPageCount = computed(() => Math.max(1, Math.ceil(failedTasks.value.length / failedTaskPageSize)))
@@ -303,7 +336,9 @@ const advancedTabs = computed(() => [
   { key: 'events', label: t('debug.tabEvents') },
   { key: 'runtime-tools', label: t('debug.tabRuntimeTools') },
   { key: 'plugins', label: t('debugPlugins.tab') },
-  { key: 'updates', label: t('debug.updateEndpointTitle') },
+  { key: 'updates', label: t('debugUpdates.tab') },
+  { key: 'editor-host', label: t('debugBusiness.editorTab') },
+  { key: 'system', label: t('debugSystem.tab') },
 ] as Array<{ key: DebugTab; label: string }>)
 const debugModelOptions = computed(() => modelStore.models
   .filter((model) => model.downloaded || model.source === 'user')
@@ -882,8 +917,9 @@ async function checkEnv() {
   try {
     const results = await Promise.allSettled([app.checkRuntimeInfo(), app.checkEnv()])
     await refreshOptionalDependency()
+    await refreshPluginDiagnostics()
     lastCheckedAt.value = Date.now()
-    if (results.some(result => result.status === 'rejected') || (!isMac.value && funAsr.error.value)) message.warning(t('debug.checkPartialFailure'))
+    if (results.some(result => result.status === 'rejected') || funAsr.error.value || pluginDiagnostics.error.value) message.warning(t('debug.checkPartialFailure'))
     else message.success(t('debug.envCheckDone'))
     if (activeTab.value === 'runtime-tools') await loadRuntimeDebugPointers()
   } finally {
@@ -892,14 +928,33 @@ async function checkEnv() {
 }
 
 async function refreshOptionalDependency() {
-  if (isMac.value || !isTauriRuntime() || optionalChecking.value) return
+  if (!isTauriRuntime() || optionalChecking.value) return
   optionalChecking.value = true
   try { await funAsr.refresh() }
   finally { optionalChecking.value = false }
 }
 
-function openDiagnosticAction(action: 'runtime' | 'tools' | 'events') {
+async function refreshPluginDiagnostics(verify = false) {
+  if (!developerMode.value || !isTauriRuntime()) return
+  await pluginDiagnostics.refresh(verify)
+}
+
+async function checkNetworkDiagnostics() {
+  if (!developerMode.value || !isTauriRuntime()) return
+  await networkDiagnostics.check({ modelSource: downloadSource.value, pluginSource: settings.pluginSource,
+    proxyMode: settings.proxyMode, updateSource: settings.updateSource, channel: settings.updateChannel,
+    locale: locale.value, endpointOverride: updateEndpointOverride.value,
+  }, () => settings.syncProxyToBackend())
+}
+
+async function inspectStorageDiagnostics(writeProbe: boolean) {
+  if (!developerMode.value || !isTauriRuntime()) return
+  await storageDiagnostics.inspect(storageDirectories.value, writeProbe)
+}
+
+function openDiagnosticAction(action: 'runtime' | 'tools' | 'events' | 'plugins') {
   if (action === 'events') activeTab.value = 'events'
+  else if (action === 'plugins') activeTab.value = 'plugins'
   else if (action === 'runtime') void router.push({ name: 'settings', query: { section: 'runtime' } })
   else void router.push({ name: 'tools' })
 }
@@ -928,7 +983,7 @@ function copyDiagnosticSummary() {
     `Pymss Studio ${app.buildInfoVersion || '-'} (${app.buildInfoVariant || '-'})`,
     `${t('debug.envStatus')}: ${t(diagnosticStateLabels[diagnosticSummary.value.state])}`,
     `${t('debug.lastChecked')}: ${lastCheckedAt.value ? new Date(lastCheckedAt.value).toISOString() : t('debug.stateUnknown')}`,
-    ...diagnostics.value.map(check => `${check.label.startsWith('debug.') ? t(check.label) : check.label}: ${t(diagnosticStateLabels[check.state])}${check.value ? ` · ${check.value}` : ''}${check.detail && check.state !== 'ok' ? `\n  ${check.detail.replace(/\n/g, '\n  ')}` : ''}`),
+    ...diagnostics.value.map(check => `${te(check.label) ? t(check.label) : check.label}: ${t(diagnosticStateLabels[check.state])}${check.value ? ` · ${check.value}` : ''}${check.detail && check.state !== 'ok' ? `\n  ${check.detail.replace(/\n/g, '\n  ')}` : ''}`),
     `${t('debug.activeWorkerTasks')}: ${activeWorkerTasks.value.length}; ${t('debug.queuedCount', { count: task.queuedTasks.length })}`,
     `${t('debug.workflowTasks')}: ${runningTasks.value.filter(item => item.runConfig?.runMode === 'workflow').length}`,
   ].join('\n')
@@ -1153,7 +1208,17 @@ async function createDebugLogReport() {
   if (!developerMode.value || debugLogReportLoading.value || debugLogClearing.value) return
   debugLogReportLoading.value = true
   try {
-    const report = await invoke<DebugLogReport>('debug_log_create_report')
+    const report = await invoke<DebugLogReport>('debug_log_create_report', { payload: {
+      observedAt: new Date().toISOString(),
+      pluginDiagnostics: { snapshot: pluginDiagnostics.snapshot.value, error: pluginDiagnostics.error.value, loading: pluginDiagnostics.loading.value },
+      applicationUpdate: updateDiagnostics.value,
+      workflowResults: workflowResults.value,
+      outputChecks: businessDiagnostics.outputs.value,
+      businessDiagnostics: businessDiagnostics.snapshot.value,
+      networkDiagnostics: networkDiagnostics.snapshot.value,
+      storageDiagnostics: storageDiagnostics.snapshot.value,
+      rendererDiagnostics: rendererDiagnostics.snapshot.value,
+    } })
     message.success(t('debug.reportCreated'))
     await loadDebugLog()
     await revealPath(report.path)
@@ -1325,7 +1390,7 @@ async function overrideActiveRuntimePointer() {
 function loadDebugPageData() {
   if (!developerMode.value) return
   if (!app.envLoading && !app.envInfo) app.checkEnvInBackground().catch(() => {})
-  app.ensureRuntimeInfo().then(() => refreshOptionalDependency()).catch(() => {})
+  app.ensureRuntimeInfo().then(() => Promise.allSettled([refreshOptionalDependency(), refreshPluginDiagnostics()])).catch(() => {})
   loadTabData(activeTab.value)
 }
 
@@ -1336,6 +1401,9 @@ function loadTabData(tab: DebugTab) {
   if (tab === 'models' && !debugCatalogInfo.value && !debugCatalogLoading.value) void loadDebugCatalog()
   if (tab === 'models' && !modelStore.models.length) modelStore.loadModels().catch(() => {})
   if (tab === 'activity') void loadActivity()
+  if (tab === 'plugins' && !pluginDiagnostics.snapshot.value && !pluginDiagnostics.loading.value) void refreshPluginDiagnostics()
+  if (tab === 'editor-host' && !businessDiagnostics.snapshot.value && !businessDiagnostics.loading.value) void businessDiagnostics.refresh()
+  if (tab === 'system' && !rendererDiagnostics.snapshot.value && !rendererDiagnostics.loading.value) void rendererDiagnostics.refresh()
 }
 
 onMounted(() => {
@@ -1378,7 +1446,24 @@ watch(developerMode, (enabled) => {
     runtimeDebugInfo.value = null
     debugLogInfo.value = null
     debugLogContent.value = null
+    pluginDiagnostics.invalidate()
+    businessDiagnostics.invalidate()
+    networkDiagnostics.invalidate(); storageDiagnostics.invalidate(); rendererDiagnostics.invalidate()
   }
+})
+
+watch(() => [app.runtimeInfo?.installState?.pythonPath, app.runtimeInfo?.installedBackend, app.runtimeInfo?.pymssVersion], () => {
+  pluginDiagnostics.invalidate()
+  void refreshPluginDiagnostics()
+  networkDiagnostics.invalidate()
+})
+
+watch(() => JSON.stringify(workflowResults.value.results.paths), () => businessDiagnostics.invalidateOutputs())
+watch(() => JSON.stringify(storageDirectories.value), () => storageDiagnostics.invalidate())
+watch(() => [settings.proxyMode, settings.proxyUrl, settings.proxyBypass, settings.downloadSource,
+  settings.pluginSource, settings.updateSource, settings.updateChannel, settings.updateEndpointOverride, locale.value], () => networkDiagnostics.invalidate())
+onBeforeUnmount(() => {
+  businessDiagnostics.invalidate(); pluginDiagnostics.invalidate(); networkDiagnostics.invalidate(); storageDiagnostics.invalidate(); rendererDiagnostics.invalidate()
 })
 </script>
 
@@ -1431,7 +1516,10 @@ watch(developerMode, (enabled) => {
     </nav>
     </div>
 
-    <PluginSourcePanel v-if="activeTab === 'plugins' && developerMode" />
+    <template v-if="activeTab === 'plugins' && developerMode">
+      <PluginDiagnosticsPanel :snapshot="pluginDiagnostics.snapshot.value" :loading="pluginDiagnostics.loading.value" :verifying="pluginDiagnostics.verifying.value" :error="pluginDiagnostics.error.value" @refresh="refreshPluginDiagnostics()" @verify="refreshPluginDiagnostics(true)" />
+      <PluginSourcePanel />
+    </template>
     <section v-if="activeTab === 'overview'" class="debug-overview-summary">
     <div class="debug-status-grid">
       <button v-for="item in statusCards" :key="item.label" type="button" class="debug-status-card" :class="`debug-status-card--${item.tone}`" @click="openStatusCard(item.tab)">
@@ -1473,7 +1561,7 @@ watch(developerMode, (enabled) => {
             <n-icon :component="diagnosticIcon(item.state)" />
             <div class="diagnostic-row__main">
               <div class="diagnostic-row__head">
-                <strong>{{ item.label.startsWith('debug.') ? t(item.label) : item.label }}</strong>
+                <strong>{{ te(item.label) ? t(item.label) : item.label }}</strong>
                 <span class="diagnostic-state">{{ item.state === 'unknown' && diagnosticBusy ? t('settings.checkingEnv') : t(diagnosticStateLabels[item.state]) }}</span>
               </div>
               <span v-if="item.value">{{ item.value }}</span>
@@ -1533,6 +1621,7 @@ watch(developerMode, (enabled) => {
 
     </section>
 
+      <ApplicationUpdateDiagnostics v-if="activeTab === 'updates'" :snapshot="updateDiagnostics" />
       <n-card v-if="activeTab === 'updates'" class="debug-card" :bordered="true" size="small">
         <template #header>
           <div class="debug-section-title">
@@ -1974,6 +2063,13 @@ watch(developerMode, (enabled) => {
       </n-card>
     </section>
 
+    <WorkflowResultDiagnostics v-if="activeTab === 'activity'" :snapshot="workflowResults" :outputs="businessDiagnostics.outputs.value" :loading="businessDiagnostics.outputsLoading.value" :error="businessDiagnostics.outputsError.value" @inspect="businessDiagnostics.inspectOutputs(workflowResults.results.paths)" />
+    <EditorHostDiagnostics v-if="activeTab === 'editor-host'" :snapshot="businessDiagnostics.snapshot.value" :loading="businessDiagnostics.loading.value" :error="businessDiagnostics.error.value" @refresh="businessDiagnostics.refresh()" />
+    <section v-if="activeTab === 'system'">
+      <NetworkDiagnostics :snapshot="networkDiagnostics.snapshot.value" :busy="networkDiagnostics.busy.value" :disabled="!isTauriRuntime()" @check="checkNetworkDiagnostics" />
+      <StorageDiagnostics :snapshot="storageDiagnostics.snapshot.value" :busy="storageDiagnostics.busy.value" :error="storageDiagnostics.error.value" :disabled="!isTauriRuntime()" @inspect="inspectStorageDiagnostics" />
+      <RenderDiagnostics :snapshot="rendererDiagnostics.snapshot.value" :loading="rendererDiagnostics.loading.value" :error="rendererDiagnostics.error.value" :disabled="!isTauriRuntime()" @refresh="rendererDiagnostics.refresh()" />
+    </section>
     <section v-if="activeTab === 'activity'" class="debug-grid debug-activity-grid">
       <n-alert v-if="activityLoadError" class="debug-activity-error" type="error">{{ activityLoadError }}</n-alert>
       <n-card class="debug-card" :bordered="true" size="small">

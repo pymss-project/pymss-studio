@@ -154,6 +154,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const initialized = ref(false)
   const isSaving = ref(false)
   const recoveryBackupPath = ref('')
+  const lastMutationError = ref<{ message: string; code: string; at: string } | null>(null)
   const selectedWorkflow = computed(() => workflows.value.find(item => item.id === selectedWorkflowId.value) || null)
   let pendingPersistCount = 0
   let mutationQueue = Promise.resolve()
@@ -169,7 +170,20 @@ export const useWorkflowStore = defineStore('workflow', () => {
   function queueMutation<T>(operation: () => Promise<T>) {
     pendingPersistCount += 1
     isSaving.value = true
-    const run = mutationQueue.catch(() => undefined).then(operation)
+    const run = mutationQueue.catch(() => undefined).then(async () => {
+      try {
+        const result = await operation()
+        lastMutationError.value = null
+        return result
+      } catch (error) {
+        lastMutationError.value = {
+          message: error instanceof Error ? error.message : String(error),
+          code: error instanceof WorkflowRevisionConflictError || error instanceof WorkflowEditorInUseError ? error.code : 'WORKFLOW_MUTATION_FAILED',
+          at: new Date().toISOString(),
+        }
+        throw error
+      }
+    })
     mutationQueue = run.then(() => undefined, () => undefined)
     return run.finally(() => {
       pendingPersistCount -= 1
@@ -544,6 +558,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     initialized,
     isSaving,
     recoveryBackupPath,
+    lastMutationError,
     dismissRecoveryNotice,
     initialize,
     reload,

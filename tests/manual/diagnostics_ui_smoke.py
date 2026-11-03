@@ -33,8 +33,7 @@ with sync_playwright() as playwright:
           const content=container.nextElementSibling.getBoundingClientRect();
           const overlaps=Math.min(primary.right,panel.right)-Math.max(primary.left,panel.left)>0.5
             &&Math.min(primary.bottom,panel.bottom)-Math.max(primary.top,panel.top)>0.5;
-          const sameRow=innerWidth<1200||Math.abs(panel.top-primary.top)<1;
-          return panel.left>=bar.left&&panel.right<=bar.right&&panel.top>=bar.top&&!overlaps&&sameRow
+          return panel.left>=bar.left&&panel.right<=bar.right&&panel.top>=bar.top&&!overlaps
             &&panel.bottom<=bar.bottom&&panel.bottom<=content.top
             &&panel.left>=0&&panel.right<=innerWidth;
         }"""), 'all navigation entries should be adjacent, visible and clear of page content'
@@ -54,7 +53,7 @@ with sync_playwright() as playwright:
         return dialog
 
     page.add_init_script("""localStorage.setItem('pymss-studio:app-settings', JSON.stringify({
-      startupOnboardingSeen:true,locale:'zh-CN',themeMode:'light',developerMode:false
+      startupOnboardingSeen:true,beginnerGuideInvitationSeen:true,locale:'zh-CN',themeMode:'light',developerMode:false
     }))""")
     page.goto(args.url.rstrip('/') + '/#/debug')
     page.wait_for_load_state('networkidle')
@@ -64,14 +63,16 @@ with sync_playwright() as playwright:
     page.evaluate("""async () => {
       const stores=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s;
       window.__app=stores.get('app');window.__settings=stores.get('settings');
-      window.__tasks=stores.get('task');window.__workflow=stores.get('workflow');window.__models=stores.get('model');
+      window.__tasks=stores.get('task');window.__workflow=stores.get('workflow');window.__models=stores.get('model');window.__updates=stores.get('update');
       window.__calls=[];window.__revealedPaths=[];window.__copied='';window.__runtimeFailure=false;window.__envFailure=false;window.__logFailure=false;
+      window.__pluginRows=[];window.__verifyCalls=0;
+      window.__captureRender=(await import('/src/utils/renderDiagnostics.ts')).captureRenderDiagnostics;
       Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async(text)=>window.__copied=text}});
       window.__env={pythonVersion:'3.12.10',platform:'Windows-11',workerVersion:'2.1.0',
-        pymssAvailable:true,pymssVersion:'2.1.8',torchAvailable:true,torchVersion:'2.7.1',
+        pymssAvailable:true,pymssVersion:'2.3.1',torchAvailable:true,torchVersion:'2.7.1',
         torchBackend:'cpu',cudaAvailable:false,avAvailable:true,librosaAvailable:true,customModelsSupported:true};
       window.__runtime={platform:'win32',machine:'AMD64',ready:true,installedBackend:'cpu',torchBackend:'cpu',
-        torchVersion:'2.7.1',pymssVersion:'2.1.8',pymssGraphAvailable:true,packages:{audioread:true},
+        torchVersion:'2.7.1',pymssVersion:'2.3.1',pymssGraphAvailable:true,packages:{audioread:true},
         installState:{backend:'cpu',pythonPath:'D:/runtime/cpu/python.exe'},installedEnvironments:[]};
       window.__logInfo={path:'D:/logs/session.log',logsDir:'D:/logs',exists:true,sizeBytes:240,
         persistentPath:'D:/logs/studio.log',persistentExists:true,persistentSizeBytes:240,
@@ -83,14 +84,42 @@ with sync_playwright() as playwright:
           window.__calls.push(command);
           if(command==='runtime_info'){if(window.__runtimeFailure)throw new Error('Runtime probe failed');return structuredClone(window.__runtime);}
           if(command==='get_env_info'){if(window.__envFailure)throw new Error('Environment probe failed');return structuredClone(window.__env);}
-          if(command==='optional_runtime_package_status')return {package:'funasr',requirement:'funasr==1.3.26',installed:false,present:false,version:null,source:null,runtimeIdentity:'cpu-py312'};
+          if(command==='optional_runtime_package_status')return {package:'funasr',requirement:window.__runtime.platform==='darwin'?'funasr-mlx>=0.2.2':'funasr==1.3.26',installed:false,present:false,version:null,source:null,runtimeIdentity:'cpu-py312'};
+          if(command==='plugin_diagnostics'){
+            if(args.payload.verify)window.__verifyCalls++;
+            return {checkedAt:'2026-11-03T00:00:00Z',runtime:{pythonPath:__runtime.installState.pythonPath,configuredPythonPath:__runtime.installState.pythonPath,interpreterMatches:true,bindingDir:'D:/data/plugins/cpu',identity:'cpu',pymssVersion:'2.3.1',managementSupported:true,pluginApisSupported:true,apiError:null},
+              plugins:__pluginRows.map(row=>({...row,loaded:args.payload.verify?true:null})),verification:{performed:args.payload.verify,error:null}};
+          }
+          if(command==='debug_plugin_source')return {defaults:{mode:'repository',repositoryUrl:'https://github.com/pymss-project/pymss-plugins',ref:'main',registryRef:'main'},effective:{mode:'repository',repositoryUrl:'https://github.com/pymss-project/pymss-plugins',ref:'main',registryRef:'main'},available:true,error:null,catalogCount:null,configPath:'D:/data/plugin-source.json'};
           if(command==='debug_log_info')return window.__logInfo;
           if(command==='debug_log_read'){if(window.__logFailure)throw new Error('Log read failed');return {path:'D:/logs/studio.log',content:window.__logText,sizeBytes:240,truncated:false};}
           if(command==='get_workflow_editors')return {revision:2,editors:[{label:'workflow-node-editor-flow',workflowId:'flow',kind:'advanced'}]};
           if(command==='debug_runtime_pointers')return {runtimeEnvsDir:'D:/runtime',activeRuntimeFile:'D:/runtime/active-runtime.json',files:[]};
+          if(command==='begin_business_diagnostics'){window.__businessRequestId=args.requestId;return;}
+          if(command==='update_proxy_settings')return;
+          if(command==='network_diagnostics')return {checkedAt:'now',proxyMode:'system',checks:[
+            {id:'models',status:'ok',source:'modelscope',host:'modelscope.cn',httpStatus:200,elapsedMs:10},
+            {id:'pypi',status:'timeout',source:'ustc',host:'pypi.mirrors.ustc.edu.cn',elapsedMs:15000,error:'Request timed out'}]};
+          if(command==='plugin_marketplace')return {catalog:[],catalogSource:{supported:true,provider:'gitcode',preference:'auto',gitAvailable:true}};
+          if(command==='check_managed_update')return null;
+          if(command==='inspect_diagnostic_storage')return {checkedAt:'now',writeProbe:args.writeProbe,directories:args.directories.map(directory=>({
+            ...directory,state:'directory',availableBytes:1024*1024,writeStatus:args.writeProbe?'ok':'not_checked'}))};
+          if(command==='get_renderer_diagnostics')return {checkedAt:'now',requestId:args.requestId,webviewVersion:'123.4',webviewError:null,os:'windows',arch:'x86_64',
+            windows:{status:'observed',expected:['main'],missing:[],observed:[{kind:'renderer',windowLabel:'main',observedAt:'now',
+              rendering:__captureRender({theme:__settings.themeMode,resolvedTheme:document.documentElement.classList.contains('dark-theme')?'dark':'light',
+                animations:__settings.animationsEnabled,scale:__settings.scaleFactor,locale:__settings.locale,resolvedLocale:__settings.locale,routePath:'/debug'}),changes:[]}]}};
+          if(command==='get_business_diagnostics')return {
+            checkedAt:'2026-11-03T01:00:00Z',requestId:args.requestId,
+            windows:{status:'observed',expected:['editor-a','workflow-node-editor-flow','editor-unresponsive'],missing:['editor-unresponsive'],observed:[
+              {kind:'workflow',windowLabel:'workflow-node-editor-flow',observedAt:'now',workflowId:'flow',dirty:true,saving:false,revisionConflict:true,error:'Revision changed'},
+              {kind:'editor',windowLabel:'editor-a',observedAt:'now',projectId:'project',exporting:true,exportPhase:'rendering',exportCompleted:40,exportTotal:100,playbackStatus:'paused',recordingState:'idle',lastExportPath:'D:/exports/last.wav',pluginStateError:'Native host unavailable'}]},
+            nativeHost:{capabilities:{enabled:true,platform:'windows',formats:['vst3'],nativeEditor:true,nativeTransport:true},stopping:false,
+              session:{status:'busy'},scan:{status:'scanning',completed:1,total:3},renders:{status:'active',activeCount:1},
+              storage:{status:'observed',cache:{status:'observed',entryCount:3,descriptorCount:2,failureCount:1},blacklist:{status:'observed',count:1,manualCount:0,timeoutCount:1}}}};
+          if(command==='inspect_diagnostic_outputs')return {checkedAt:'2026-11-03T01:00:00Z',files:args.paths.map(path=>({path,state:path.includes('missing')?'missing':'present'}))};
           if(command==='debug_catalog_info')return {baseCatalogPath:'D:/catalog.json',debugCatalogPath:'D:/debug/catalog.json',debugDir:'D:/debug',baseCatalog:{models:[]},debugCatalog:{models:[]},effectiveCatalog:{models:[]},status:{}};
           if(command==='list_models')return {models:[],categories:[],categoriesCn:[],modelDir:'D:/models'};
-          if(command==='debug_log_create_report'){window.__logInfo.reportExists=true;return {path:'D:/logs/report.md',exists:true,sizeBytes:240};}
+          if(command==='debug_log_create_report'){window.__reportSnapshot=args.payload;window.__logInfo.reportExists=true;return {path:'D:/logs/report.md',exists:true,sizeBytes:240};}
           if(command==='reveal_path'){window.__revealedPaths.push(args.path);return;}
           if(command==='save_app_store')return;
           if(command==='get_build_info')return {version:'0.0.12',variant:'default',updateSupported:false};
@@ -98,6 +127,7 @@ with sync_playwright() as playwright:
           throw new Error('Unexpected command: '+command);
         }};
       window.__app.envInfo=structuredClone(window.__env);
+      window.__app.buildInfoVersion='0.0.24';
       window.__app.setWorkerEventConnection('connected');
       await window.__app.checkRuntimeInfo();
       window.__settings.developerMode=true;
@@ -112,9 +142,9 @@ with sync_playwright() as playwright:
     advanced = page.locator('.debug-advanced-nav')
     expect(advanced).to_be_visible()
     expect(page.locator('.debug-advanced-toggle')).to_have_count(0)
-    expect(advanced.get_by_role('button')).to_have_count(4)
+    expect(advanced.get_by_role('button')).to_have_count(7)
     check_advanced_layout()
-    expect(page.locator('.diagnostic-row--optional')).to_contain_text('FunASR')
+    expect(page.locator('.diagnostic-row--optional').filter(has_text='FunASR')).to_contain_text('FunASR')
     expect(page.locator('.diagnostic-row--warn')).to_have_count(0)
     expect(page.locator('.debug-header-actions').get_by_role('button', name='重新检测', exact=True)).to_be_enabled()
     assert page.evaluate("!__calls.some(c=>['debug_catalog_info','debug_runtime_pointers','debug_log_read'].includes(c))")
@@ -142,7 +172,7 @@ with sync_playwright() as playwright:
     detect = page.locator('.debug-header-actions').get_by_role('button', name='重新检测', exact=True)
     detect.click()
     expect(page.locator('.diagnostic-row--error')).to_contain_text('Runtime probe failed')
-    expect(page.locator('.diagnostic-row').filter(has_text='pymss')).to_contain_text('2.1.8')
+    expect(page.locator('.diagnostic-row').filter(has_text='pymss')).to_contain_text('2.3.1')
     page.screenshot(path=str(args.output_dir / 'probe-failed.png'), full_page=True)
     page.evaluate('__runtimeFailure=false')
     detect.click()
@@ -297,7 +327,7 @@ with sync_playwright() as playwright:
     expected_traceback = '\n'.join(line[len('[ERROR] '):] for line in page.evaluate('__traceback'))
     expect(traceback.locator('.log-line-text')).to_have_text(expected_traceback, use_inner_text=False)
     assert traceback.locator('.log-line-text').text_content() == expected_traceback
-    expect(traceback.locator('.log-level-badge')).to_have_count(1)
+    expect(traceback.locator('.log-line-level')).to_have_count(1)
     expect(traceback.locator('.log-line-number')).to_have_text('082–088')
     expect(traceback.locator('.log-line-text')).to_have_css('font-weight', '400')
     expect(console.locator('.log-source-badge')).to_have_count(0)
@@ -443,7 +473,56 @@ with sync_playwright() as playwright:
     assert page.locator('.debug-page').evaluate('el=>el.scrollWidth<=el.clientWidth')
     page.screenshot(path=str(args.output_dir / 'advanced-environment-config.png'), full_page=True)
     expect(advanced).to_be_visible()
-    expect(page.locator('.debug-advanced-nav button')).to_have_text(['模型调试', 'Worker 事件', '环境配置', '检查更新地址'])
+    expect(page.locator('.debug-advanced-nav button')).to_have_text(['模型调试', 'Worker 事件', '环境配置', '插件', '应用更新', '编辑器与 VST', '系统检查'])
+
+    advanced_tab('插件')
+    expect(page.locator('.plugin-diagnostics-panel')).to_contain_text('D:/runtime/cpu/python.exe')
+    assert page.evaluate('__verifyCalls') == 0
+    assert page.evaluate("!__calls.some(c=>['plugin_marketplace','manage_plugin'].includes(c))")
+    page.evaluate("__pluginRows=[{name:'example.provider',version:'1.0',enabled:true,path:'D:/plugins/example',error:null}]")
+    page.locator('.plugin-diagnostics-panel').get_by_role('button', name='刷新', exact=True).click()
+    expect(page.locator('.plugin-diagnostics-panel')).to_contain_text('尚未验证')
+    assert page.evaluate('__verifyCalls') == 0
+    page.locator('.plugin-diagnostics-panel').get_by_role('button', name='验证插件加载', exact=True).click()
+    expect(page.locator('.plugin-diagnostics-panel')).to_contain_text('验证通过')
+    assert page.evaluate('__verifyCalls') == 1
+    page.screenshot(path=str(args.output_dir / 'plugin-diagnostics.png'), full_page=True)
+
+    page.evaluate("__updates.status='failed';__updates.error='Update checksum mismatch';__updates.selectedSource='github';__updates.integrity={supported:true,valid:false,repairSupported:true,detail:'Resource changed'}")
+    advanced_tab('应用更新')
+    expect(page.locator('.update-diagnostics-panel')).to_contain_text('Update checksum mismatch')
+    expect(page.locator('.update-diagnostics-panel')).to_contain_text('0.0.24')
+    expect(page.locator('.update-diagnostics-panel')).to_contain_text('Resource changed')
+    assert page.evaluate("__calls.filter(c=>['check_managed_update','start_managed_update'].includes(c)).length") == 0
+    page.screenshot(path=str(args.output_dir / 'update-diagnostics.png'), full_page=True)
+    page.locator('.debug-header-actions').get_by_role('button', name='生成诊断报告', exact=True).click()
+    page.wait_for_function("__reportSnapshot?.applicationUpdate?.error==='Update checksum mismatch'")
+    assert page.evaluate('__reportSnapshot.pluginDiagnostics.snapshot.verification.performed')
+
+    advanced_tab('系统检查')
+    expect(page.locator('.render-diagnostics')).to_contain_text('123.4')
+    assert page.evaluate("!__calls.some(c=>['network_diagnostics','inspect_diagnostic_storage'].includes(c))")
+    page.locator('.network-diagnostics').get_by_role('button', name='手动检查网络', exact=True).click()
+    expect(page.locator('.network-diagnostics')).to_contain_text('gitcode')
+    expect(page.locator('.network-diagnostics')).to_contain_text('Request timed out')
+    expect(page.locator('.network-diagnostics')).to_contain_text('HTTP 200')
+    assert page.evaluate("__calls.filter(c=>c==='check_managed_update').length") == 1
+    page.locator('.storage-diagnostics').get_by_role('button', name='读取目录状态', exact=True).click()
+    expect(page.locator('.storage-diagnostics-row')).to_have_count(7)
+    expect(page.locator('.storage-diagnostics')).to_contain_text('未检查')
+    page.locator('.storage-diagnostics').get_by_role('button', name='创建临时文件验证写入', exact=True).click()
+    expect(page.locator('.storage-diagnostics')).to_contain_text('写入与清理通过')
+    page.screenshot(path=str(args.output_dir / 'system-diagnostics.png'), full_page=True)
+    page.locator('.debug-header-actions').get_by_role('button', name='生成诊断报告', exact=True).click()
+    page.wait_for_function('__reportSnapshot?.networkDiagnostics?.checks?.length===4 && __reportSnapshot?.storageDiagnostics?.writeProbe===true && __reportSnapshot?.rendererDiagnostics?.webviewVersion==="123.4"')
+    assert page.evaluate("!__calls.some(c=>['start_managed_update','manage_plugin'].includes(c))")
+
+    page.evaluate("__runtime.platform='darwin';__runtime.machine='arm64'")
+    page.locator('.debug-header-actions').get_by_role('button', name='重新检测', exact=True).click()
+    page.wait_for_function("__app.runtimeInfo.platform==='darwin'")
+    main_tab('概览')
+    open_details(page.locator('.debug-health-details'))
+    expect(page.locator('.debug-health-grid')).to_contain_text('FunASR MLX')
     page.screenshot(path=str(args.output_dir / 'advanced-tools.png'), full_page=True)
     advanced_tab('模型调试')
     page.wait_for_function("__calls.includes('debug_catalog_info')")
@@ -453,7 +532,7 @@ with sync_playwright() as playwright:
     page.wait_for_function("__revealedPaths.at(-1)==='D:/debug'")
     debug_directory.get_by_role('button', name='复制', exact=True).click()
     assert page.evaluate('__copied') == 'D:/debug'
-    advanced_tab('检查更新地址')
+    advanced_tab('应用更新')
     expect(page.locator('.update-endpoint-panel')).to_be_visible()
     main_tab('概览')
     page.evaluate("__settings.themeMode='dark'")
@@ -471,6 +550,50 @@ with sync_playwright() as playwright:
     page.screenshot(path=str(args.output_dir / 'overview-en-narrow.png'), full_page=True)
     check_advanced_layout()
     page.screenshot(path=str(args.output_dir / 'navigation-en-narrow.png'))
+    advanced_tab('Plugins')
+    expect(page.locator('.plugin-diagnostics-panel')).to_contain_text('Actual worker interpreter')
+    assert page.locator('.debug-page').evaluate('el=>el.scrollWidth<=el.clientWidth')
+    page.screenshot(path=str(args.output_dir / 'plugin-diagnostics-en-narrow.png'), full_page=True)
+    advanced_tab('Application updates')
+    expect(page.locator('.update-diagnostics-panel')).to_contain_text('Update checksum mismatch')
+    assert page.locator('.debug-page').evaluate('el=>el.scrollWidth<=el.clientWidth')
+    page.screenshot(path=str(args.output_dir / 'update-diagnostics-en-narrow.png'), full_page=True)
+    advanced_tab('System checks')
+    page.locator('.render-diagnostics').get_by_role('button', name='Refresh', exact=True).click()
+    expect(page.locator('.render-diagnostics')).to_contain_text('dark / dark → dark')
+    assert page.locator('.debug-page').evaluate('el=>el.scrollWidth<=el.clientWidth')
+    page.screenshot(path=str(args.output_dir / 'system-diagnostics-en-narrow.png'), full_page=True)
+    page.evaluate("""() => {
+      const task=(id,fields={})=>({id,model:'model',input:'input.wav',output:'D:/outputs',status:'done',message:'',createdAt:1,updatedAt:1,progress:100,stageLabel:'',files:[],outputs:[],logs:[],...fields});
+      __tasks.tasks=[task('diagnostic-files',{files:['D:/outputs/exists.txt','D:/outputs/missing.txt']}),
+        task('diagnostic-hidden',{resultHidden:true,files:['D:/outputs/hidden.txt']}),task('diagnostic-empty'),
+        task('diagnostic-value',{nodeValues:[{nodeId:'metric',nodeType:'analysis',slot:0,value:'42'}]})];
+      __workflow.recoveryBackupPath='D:/settings/workflows.backup.json';
+      __workflow.lastMutationError={code:'WORKFLOW_REVISION_CONFLICT',message:'Revision changed',at:'now'};
+    }""")
+    expect(page.locator('.workflow-recovery-modal')).to_be_visible()
+    page.keyboard.press('Escape')
+    expect(page.locator('.workflow-recovery-modal')).to_be_hidden()
+    page.locator('.debug-tabs button').nth(1).click()
+    expect(page.locator('.workflow-result-diagnostics')).to_contain_text('WORKFLOW_REVISION_CONFLICT')
+    expect(page.locator('.workflow-result-diagnostics')).to_contain_text('workflows.backup.json')
+    assert page.evaluate("!__calls.includes('inspect_diagnostic_outputs')")
+    page.locator('.workflow-result-diagnostics').get_by_role('button', name='Check recorded outputs', exact=True).click()
+    expect(page.locator('.workflow-result-diagnostics')).to_contain_text('D:/outputs/missing.txt')
+    expect(page.locator('.workflow-result-diagnostics')).to_contain_text('Missing')
+    assert page.evaluate("__tasks.tasks.find(t=>t.id==='diagnostic-hidden').resultHidden")
+    page.screenshot(path=str(args.output_dir / 'workflow-results-diagnostics-en-narrow.png'), full_page=True)
+    advanced_tab('Editor and VST')
+    expect(page.locator('.editor-host-diagnostics')).to_contain_text('editor-unresponsive')
+    expect(page.locator('.editor-host-diagnostics')).to_contain_text('Busy; not observed')
+    expect(page.locator('.editor-host-diagnostics')).to_contain_text('rendering 40 / 100')
+    expect(page.locator('.editor-host-diagnostics')).to_contain_text('Native host unavailable')
+    assert page.evaluate("!__calls.some(c=>['plugin_host_request','plugin_host_scan','plugin_host_scan_report','plugin_host_render'].includes(c))")
+    page.screenshot(path=str(args.output_dir / 'editor-host-diagnostics-en-narrow.png'), full_page=True)
+    page.locator('.debug-header-actions').get_by_role('button', name='Create diagnostic report', exact=True).click()
+    page.wait_for_function("__reportSnapshot?.businessDiagnostics?.windows?.missing?.length===1")
+    assert page.evaluate("__reportSnapshot.outputChecks.files.some(f=>f.state==='missing')")
+    main_tab('Overview')
     page.emulate_media(reduced_motion='reduce')
     assert page.locator('.debug-status-card').first.evaluate('el=>getComputedStyle(el).transitionDuration') == '0s'
     assert not errors, errors

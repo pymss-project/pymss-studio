@@ -3,6 +3,8 @@
 mod commands;
 #[cfg(any(target_os = "macos", test))]
 mod app_quit;
+mod business_diagnostics;
+mod storage_diagnostics;
 mod automatic_report;
 mod diagnostic_context;
 mod diagnostic_report;
@@ -84,6 +86,7 @@ fn main() {
             let _ = window.set_focus();
         })
         .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) { session_log::forget_window_diagnostics(window.label()); }
             if matches!(event, tauri::WindowEvent::Destroyed)
                 && (window.label().starts_with("workflow-node-editor")
                     || window.label().starts_with("workflow-simple-editor"))
@@ -120,6 +123,12 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            storage_diagnostics::inspect_diagnostic_storage,
+            business_diagnostics::begin_business_diagnostics,
+            business_diagnostics::publish_debug_window_state,
+            business_diagnostics::get_business_diagnostics,
+            business_diagnostics::get_renderer_diagnostics,
+            business_diagnostics::inspect_diagnostic_outputs,
             commands::plugin_host::plugin_host_capabilities,
             commands::plugin_host::plugin_host_scan,
             commands::plugin_host::plugin_host_scan_report,
@@ -160,6 +169,8 @@ fn main() {
             commands::app_cmd::list_operations,
             commands::app_cmd::list_nodes,
             commands::app_cmd::plugin_marketplace,
+            commands::app_cmd::plugin_diagnostics,
+            commands::app_cmd::network_diagnostics,
             commands::app_cmd::debug_plugin_source,
             commands::app_cmd::debug_save_plugin_source,
             commands::app_cmd::load_plugin_tool_settings,

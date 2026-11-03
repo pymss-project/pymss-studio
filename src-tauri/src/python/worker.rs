@@ -157,6 +157,7 @@ fn requires_bootstrap_python(command: &str) -> bool {
     matches!(
         command,
         "health"
+            | "network_diagnostics"
             | "plugin_source_info"
             | "runtime_info"
             | "runtime_env_sizes"
@@ -426,14 +427,14 @@ fn distinct_bundled_runtime_env(
     bundled.filter(|path| path.canonicalize().ok() != user_runtime)
 }
 
-fn active_runtime_python_path(app: &AppHandle) -> AppResult<Option<String>> {
+fn active_runtime_python_path(app: &AppHandle, developer_mode: bool) -> AppResult<Option<String>> {
     let user_file = storage::active_runtime_file(app)?;
     if let Some((path, _source)) = resolve_active_runtime_record(&user_file) {
         let is_managed = is_user_runtime_python_path(app, &path)?;
         let is_debug_override = active_debug_override_path_allowed(
             &user_file,
             &path,
-            storage::is_development_executable(),
+            developer_mode,
         );
         if (is_managed || is_debug_override) && active_path_backend_matches(&user_file, &path) {
             return Ok(Some(path));
@@ -566,9 +567,9 @@ fn active_path_backend_matches(file: &Path, python_path: &str) -> bool {
 fn active_debug_override_path_allowed(
     file: &Path,
     python_path: &str,
-    development_executable: bool,
+    developer_mode: bool,
 ) -> bool {
-    if !development_executable {
+    if !developer_mode {
         return false;
     }
     let Ok(content) = std::fs::read_to_string(file) else {
@@ -762,13 +763,15 @@ fn build_worker_command(
 ) -> AppResult<Command> {
     let worker = worker_path(app)?;
     let bootstrap_python = bootstrap_python_path(app)?;
+    let settings = storage::read_app_store(app, "app-settings")?;
+    let developer_mode = settings.get("developerMode").and_then(Value::as_bool) == Some(true);
     // Runtime management must never run inside the environment it is managing: the bootstrap
     // interpreter is the only one guaranteed to exist while an environment is being built,
     // switched, or deleted.
     let active_runtime_python = if requires_bootstrap_python(command) {
         None
     } else {
-        active_runtime_python_path(app)?
+        active_runtime_python_path(app, developer_mode)?
     };
     let active_overlay = active_runtime_python
         .as_deref()
@@ -802,6 +805,7 @@ fn build_worker_command(
             },
         )
         .env("PYMSS_STUDIO_BOOTSTRAP_PYTHON", &bootstrap_python)
+        .env("PYMSS_STUDIO_ALLOW_DEBUG_RUNTIME_OVERRIDE", if developer_mode { "1" } else { "0" })
         .env(
             "PYMSS_STUDIO_DEFAULT_OUTPUT_DIR",
             default_output_dir(app)?.to_string_lossy().to_string(),
@@ -810,10 +814,8 @@ fn build_worker_command(
         cmd.env("PYTHONPATH", overlay.to_string_lossy().to_string());
     }
     // Source overrides belong to developer settings and affect only new workers.
-    let developer_mode = session_log::developer_mode_enabled();
     let source = if developer_mode { storage::read_app_store(app, "plugin-source")? } else { Value::Null };
     apply_plugin_source_override(&mut cmd, developer_mode, &source)?;
-    let settings = storage::read_app_store(app, "app-settings")?;
     apply_plugin_marketplace_source(&mut cmd, settings.get("pluginSource"));
     // The collector owns persistence and terminal output. Never inherit legacy file writers.
     cmd.env_remove("PYMSS_STUDIO_AUDIO_TEMP_TOKEN")
@@ -832,9 +834,6 @@ fn build_worker_command(
             "PYMSS_STUDIO_ACTIVE_RUNTIME_FILE",
             file.to_string_lossy().to_string(),
         );
-    }
-    if storage::is_development_executable() {
-        cmd.env("PYMSS_STUDIO_ALLOW_DEBUG_RUNTIME_OVERRIDE", "1");
     }
     if let Some(dir) = bundled_runtime_envs_dir(app)? {
         cmd.env(
@@ -2992,7 +2991,7 @@ mod tests {
     }
 
     #[test]
-    fn external_runtime_pointer_requires_a_development_debug_override() {
+    fn external_runtime_pointer_requires_developer_mode_and_an_explicit_debug_override() {
         let root = temp_root("external-debug-runtime");
         let active = root.join("active-runtime.json");
         let python = root
@@ -3024,6 +3023,18 @@ mod tests {
             &python.to_string_lossy(),
             false,
         ));
+        let resolved = super::resolve_active_runtime_record(&active).unwrap().0;
+        for command in ["env_info", "plugin_marketplace", "list_nodes", "run_operation", "manage_plugin"] {
+            for developer_mode in [false, true] {
+                let allowed = super::active_debug_override_path_allowed(&active, &resolved, developer_mode);
+                let selected = super::select_worker_python(command, "bootstrap", allowed.then(|| resolved.clone()));
+                if developer_mode {
+                    assert_eq!(selected.unwrap(), resolved, "{command}");
+                } else {
+                    assert!(selected.is_err(), "{command}");
+                }
+            }
+        }
 
         fs::write(
             &active,

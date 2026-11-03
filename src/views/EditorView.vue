@@ -22,6 +22,7 @@ import { useEditorMixerView } from '@/composables/useEditorMixerView'
 import { useEditorPlayback } from '@/composables/useEditorPlayback'
 import { useEditorProjectBridge } from '@/composables/useEditorProjectBridge'
 import { useEditorRecording } from '@/composables/useEditorRecording'
+import { useDiagnosticWindowState } from '@/features/diagnostics/windowState'
 import { useEditorShortcuts } from '@/composables/useEditorShortcuts'
 
 const route = useRoute()
@@ -187,6 +188,17 @@ const recordingPreview = computed(() => {
     duration: Math.max(0.01, recordingElapsed.value),
   }
 })
+useDiagnosticWindowState('editor', () => ({
+  kind: 'editor', projectId: editor.session?.id || '', loading: editor.loading, saving: editor.saving,
+  exporting: editor.exporting, exportCancelling: editor.exportCancelling,
+  exportPhase: editor.exportProgress?.phase || '', exportCompleted: editor.exportProgress?.completed,
+  exportTotal: editor.exportProgress?.total, hasLastExport: Boolean(editor.lastExport), error: editor.lastError,
+  lastExportPath: editor.lastExport?.path || '',
+  playbackStatus: playback.status.value, playbackError: playbackError.value,
+  recordingState: recordingState.value, recordingError: recordingError.value,
+  pluginStateDirty: editor.pluginStateDirty, pluginStateError: editor.pluginStateError,
+  pluginStateUnavailable: editor.pluginStateUnavailable,
+}))
 const displayedTimelineDuration = computed(() => (
   recordingPreview.value ? Math.max(editor.duration, playbackCurrentTime.value) : editor.duration
 ))

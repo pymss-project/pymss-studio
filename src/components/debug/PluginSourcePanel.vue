@@ -64,7 +64,7 @@ async function readCatalog() {
   if (busy.value || dirty.value || !info.value || info.value.error) return
   const expected = signature(info.value), current = ++sequence
   error.value = ''; catalog.value = []; selection.value = []; completed.value = []
-  await market.refresh()
+  await market.refresh(false, { prepare: false })
   if (disposed || current !== sequence) return
   if (market.error.value || market.snapshot.value?.catalogError) {
     error.value = market.error.value || market.snapshot.value?.catalogError || ''
@@ -134,7 +134,7 @@ async function cancelAcquisition() {
   catch (failure) { if (!disposed) error.value = String(failure) }
 }
 
-onMounted(async () => { await loadSource(); if (!disposed && info.value && !info.value.error) await readCatalog() })
+onMounted(loadSource)
 onBeforeUnmount(() => { disposed = true; sequence++; stopRequested = true; acquisitionDialog?.destroy() })
 </script>
 

@@ -453,8 +453,7 @@ impl Summary {
         // Match the editor's layout detection, including numeric legacy folders and
         // current layouts with a trailing ComfyUI button value.
         let legacy_save = parameter_type == "pymss_save_audio"
-            && (is_digits(widgets.get(2))
-                || (widgets.len() >= 6 && !is_digits(widgets.get(1))));
+            && (is_digits(widgets.get(2)) || (widgets.len() >= 6 && !is_digits(widgets.get(1))));
         let legacy_custom = matches!(
             parameter_type,
             "custom_mss_separate" | "pymss_custom_mss_separate"
@@ -469,7 +468,10 @@ impl Summary {
             } else {
                 index
             };
-            if let Some(value) = widgets.get(widget_index).and_then(|value| self.scalar(value)) {
+            if let Some(value) = widgets
+                .get(widget_index)
+                .and_then(|value| self.scalar(value))
+            {
                 params.insert((*key).into(), value);
             } else if legacy_custom && *key == "debug" {
                 params.insert((*key).into(), json!(false));
@@ -569,7 +571,8 @@ fn sanitize_urls(text: &str) -> String {
                     ')' if paren_depth > 0 => paren_depth -= 1,
                     ')' if paren_wrapped => return Some(position),
                     ']' if square_wrapped
-                        || (single_quoted && text[..position].ends_with('\'')) => {
+                        || (single_quoted && text[..position].ends_with('\'')) =>
+                    {
                         return Some(position);
                     }
                     _ if c.is_whitespace() || matches!(c, '"' | '<' | '>') => {
@@ -1096,9 +1099,12 @@ pub(crate) fn summarize_task_history(store: &Value) -> Value {
         })
         .collect();
     let mut status_counts = Map::new();
-    for status in ACTIVE_TASK_STATUSES.iter().copied().chain([
-        "done", "failed", "cancelled", "interrupted",
-    ]) {
+    for status in
+        ACTIVE_TASK_STATUSES
+            .iter()
+            .copied()
+            .chain(["done", "failed", "cancelled", "interrupted"])
+    {
         status_counts.insert(
             status.into(),
             json!(tasks
@@ -1139,6 +1145,8 @@ pub(crate) fn summarize_settings(store: &Value) -> Value {
             "proxyMode",
             "updateChannel",
             "updateSource",
+            "pluginSource",
+            "pluginDefaultsPolicy",
         ],
     );
     for key in ["modelDir", "outputDir"] {
@@ -1196,7 +1204,561 @@ pub(crate) fn summarize_workflows(store: &Value) -> Value {
 }
 
 /// Cache only bounded capability facts, never a raw environment or package response.
+fn summarize_plugin_diagnostics(payload: &Value) -> Value {
+    let mut summary = Summary::default();
+    let mut result = summary.pick(payload, &["checkedAt"]);
+    let runtime = &payload["runtime"];
+    let mut environment = summary.pick(
+        runtime,
+        &[
+            "identity",
+            "pymssVersion",
+            "managementSupported",
+            "pluginApisSupported",
+            "interpreterMatches",
+        ],
+    );
+    for field in ["pythonPath", "configuredPythonPath", "bindingDir"] {
+        environment[field] = summary.basename(&runtime[field]);
+    }
+    if let Some(error) = runtime["apiError"].as_str() {
+        environment["apiError"] = summary.text(error, MAX_ERROR);
+    }
+    if let Some(error) = runtime["bindingError"].as_str() {
+        environment["bindingError"] = summary.text(error, MAX_ERROR);
+    }
+    result["runtime"] = environment;
+    let plugins = payload["plugins"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    result["enabledCount"] = json!(plugins
+        .iter()
+        .filter(|plugin| plugin["enabled"] == true)
+        .count());
+    result["failedCount"] = json!(plugins
+        .iter()
+        .filter(|plugin| plugin["enabled"] == true
+            && (plugin["loaded"] == false
+                || plugin["error"]
+                    .as_str()
+                    .is_some_and(|error| !error.is_empty())))
+        .count());
+    let items = plugins
+        .iter()
+        .take(MAX_ITEMS)
+        .map(|plugin| {
+            let mut item = summary.pick(plugin, &["name", "version", "enabled", "loaded"]);
+            if let Some(error) = plugin["error"].as_str() {
+                item["error"] = summary.text(error, MAX_ERROR);
+            }
+            item
+        })
+        .collect();
+    result["plugins"] = summary.list(plugins.len(), items);
+    result["verification"] = summary.pick(&payload["verification"], &["performed"]);
+    if let Some(error) = payload["verification"]["error"].as_str() {
+        result["verification"]["error"] = summary.text(error, MAX_ERROR);
+    }
+    summary.finish(result)
+}
+
+pub(crate) fn summarize_window_state(payload: &Value) -> Value {
+    let mut summary = Summary::default();
+    let mut result = summary.pick(
+        payload,
+        &[
+            "kind",
+            "workflowId",
+            "projectId",
+            "updatedAt",
+            "dirty",
+            "saving",
+            "revisionConflict",
+            "recoveryBackupAvailable",
+            "loading",
+            "exporting",
+            "exportCancelling",
+            "exportPhase",
+            "exportCompleted",
+            "exportTotal",
+            "hasLastExport",
+            "playbackStatus",
+            "recordingState",
+            "pluginStateDirty",
+            "pluginStateUnavailable",
+        ],
+    );
+    for key in [
+        "error",
+        "playbackError",
+        "recordingError",
+        "pluginStateError",
+    ] {
+        if let Some(error) = payload[key].as_str() {
+            result[key] = summary.text(error, MAX_ERROR);
+        }
+    }
+    if let Some(path) = payload["lastExportPath"].as_str() {
+        result["lastExportPath"] = summary.text(path, 4096);
+    }
+    if payload["rendering"].is_object() {
+        result["rendering"] = summarize_rendering(&payload["rendering"]);
+    }
+    if let Some(changes) = payload["changes"].as_array() {
+        result["changes"] = json!(changes
+            .iter()
+            .rev()
+            .take(20)
+            .rev()
+            .map(summarize_render_change)
+            .collect::<Vec<_>>());
+    }
+    summary.finish(result)
+}
+
+pub(crate) fn summarize_window_report(payload: &Value) -> Value {
+    let mut summary = Summary::default();
+    let mut result = summary.pick(
+        payload,
+        &[
+            "kind",
+            "observedAt",
+            "updatedAt",
+            "dirty",
+            "saving",
+            "revisionConflict",
+            "recoveryBackupAvailable",
+            "loading",
+            "exporting",
+            "exportCancelling",
+            "exportPhase",
+            "exportCompleted",
+            "exportTotal",
+            "hasLastExport",
+            "playbackStatus",
+            "recordingState",
+            "pluginStateDirty",
+            "pluginStateUnavailable",
+        ],
+    );
+    for key in [
+        "error",
+        "playbackError",
+        "recordingError",
+        "pluginStateError",
+    ] {
+        result[format!("{key}Present")] =
+            json!(payload[key].as_str().is_some_and(|value| !value.is_empty()));
+    }
+    if payload["rendering"].is_object() {
+        result["rendering"] = summarize_rendering(&payload["rendering"]);
+    }
+    if let Some(changes) = payload["changes"].as_array() {
+        result["changes"] = json!(changes
+            .iter()
+            .rev()
+            .take(20)
+            .rev()
+            .map(summarize_render_change)
+            .collect::<Vec<_>>());
+    }
+    summary.finish(result)
+}
+
+fn summarize_render_change(payload: &Value) -> Value {
+    let mut summary = Summary::default();
+    let mut result = summary.pick(
+        payload,
+        &[
+            "at",
+            "theme",
+            "resolvedTheme",
+            "animations",
+            "scale",
+            "locale",
+            "resolvedLocale",
+        ],
+    );
+    if let Some(route) = payload["routePath"].as_str() {
+        result["routePath"] =
+            summary.text(route.split(['?', '#']).next().unwrap_or_default(), MAX_TEXT);
+    }
+    summary.finish(result)
+}
+
+fn summarize_rendering(payload: &Value) -> Value {
+    let mut summary = Summary::default();
+    let mut result = summary.pick(
+        payload,
+        &[
+            "checkedAt",
+            "configuredTheme",
+            "resolvedTheme",
+            "configuredAnimations",
+            "configuredScale",
+            "configuredLocale",
+            "resolvedLocale",
+            "userAgent",
+            "platform",
+            "language",
+            "documentLanguage",
+            "visibility",
+            "themeClass",
+            "animationsDisabled",
+            "devicePixelRatio",
+            "viewportWidth",
+            "viewportHeight",
+            "prefersDark",
+            "prefersReducedMotion",
+            "surfaceColor",
+            "textColor",
+            "pageRoots",
+            "visiblePageRoots",
+            "modalRoots",
+            "visibleModalRoots",
+            "sampleLimit",
+            "viewTransitionsAvailable",
+        ],
+    );
+    if let Some(route) = payload["routePath"].as_str() {
+        result["routePath"] =
+            summary.text(route.split(['?', '#']).next().unwrap_or_default(), MAX_TEXT);
+    }
+    summary.finish(result)
+}
+
+fn summarize_network(payload: &Value) -> Value {
+    let mut summary = Summary::default();
+    let mut result = summary.pick(
+        payload,
+        &[
+            "checkedAt",
+            "proxyMode",
+            "observedProxyMode",
+            "timeoutSeconds",
+            "readLimitBytes",
+        ],
+    );
+    result["configuration"] = summary.pick(
+        &payload["configuration"],
+        &[
+            "modelSource",
+            "pluginSource",
+            "proxyMode",
+            "updateSource",
+            "channel",
+            "locale",
+            "customUpdateEndpoint",
+        ],
+    );
+    let checks = payload["checks"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let entries = checks
+        .iter()
+        .take(4)
+        .map(|check| {
+            let mut item = summary.pick(
+                check,
+                &[
+                    "id",
+                    "status",
+                    "kind",
+                    "source",
+                    "sourcePreference",
+                    "host",
+                    "httpStatus",
+                    "elapsedMs",
+                    "errorCode",
+                    "gitAvailable",
+                    "catalogCount",
+                    "outcome",
+                ],
+            );
+            item["errorPresent"] = json!(check["error"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()));
+            item
+        })
+        .collect();
+    result["checks"] = summary.list(checks.len(), entries);
+    summary.finish(result)
+}
+
+pub(crate) fn summarize_native_host(payload: &Value) -> Value {
+    let mut summary = Summary::default();
+    let mut result = summary.pick(payload, &["stopping"]);
+    result["capabilities"] = summary.pick(
+        &payload["capabilities"],
+        &[
+            "enabled",
+            "platform",
+            "nativeEditor",
+            "nativeTransport",
+            "recording",
+            "scanControl",
+            "catalogCache",
+            "labBuild",
+        ],
+    );
+    result["capabilities"]["formats"] = summary.scalars(&payload["capabilities"]["formats"]);
+    result["session"] = summary.pick(&payload["session"], &["status", "hasProcess", "generation"]);
+    result["renders"] = summary.pick(&payload["renders"], &["status", "activeCount"]);
+    result["scan"] = summary.pick(
+        &payload["scan"],
+        &["status", "completed", "total", "elapsedMs", "canSkip"],
+    );
+    result["storage"] = summary.pick(&payload["storage"], &["status"]);
+    result["storage"]["cache"] = summary.pick(
+        &payload["storage"]["cache"],
+        &[
+            "status",
+            "version",
+            "entryCount",
+            "descriptorCount",
+            "failureCount",
+        ],
+    );
+    result["storage"]["blacklist"] = summary.pick(
+        &payload["storage"]["blacklist"],
+        &["status", "count", "manualCount", "timeoutCount"],
+    );
+    summary.finish(result)
+}
+
+pub(crate) fn summarize_diagnostic_page(payload: &Value) -> Value {
+    let mut summary = Summary::default();
+    let mut result = summary.pick(payload, &["observedAt"]);
+    let plugins = &payload["pluginDiagnostics"];
+    result["pluginDiagnostics"] = summary.pick(plugins, &["loading"]);
+    if let Some(error) = plugins["error"].as_str() {
+        result["pluginDiagnostics"]["error"] = summary.text(error, MAX_ERROR);
+    }
+    result["pluginDiagnostics"]["snapshot"] = if plugins["snapshot"].is_object() {
+        summarize_plugin_diagnostics(&plugins["snapshot"])
+    } else {
+        json!({"status": "not_observed"})
+    };
+    let update = &payload["applicationUpdate"];
+    let mut update_summary = summary.pick(
+        update,
+        &[
+            "status",
+            "currentVersion",
+            "latestVersion",
+            "selectedSource",
+            "lastCheckedAt",
+            "downloadDownloadedBytes",
+            "downloadTotalBytes",
+            "downloadSpeedBytesPerSecond",
+            "downloadProgressPercent",
+            "restartRequired",
+            "installFailed",
+            "integrityChecking",
+            "repairing",
+        ],
+    );
+    for field in ["error", "integrityError"] {
+        if let Some(error) = update[field].as_str() {
+            update_summary[field] = summary.text(error, MAX_ERROR);
+        }
+    }
+    update_summary["integrity"] = if update["integrity"].is_object() {
+        let mut integrity = summary.pick(
+            &update["integrity"],
+            &["supported", "valid", "repairSupported"],
+        );
+        if let Some(detail) = update["integrity"]["detail"].as_str() {
+            integrity["detail"] = summary.text(detail, MAX_ERROR);
+        }
+        integrity
+    } else {
+        Value::Null
+    };
+    let logs = update["downloadLogs"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let entries = logs
+        .iter()
+        .rev()
+        .take(20)
+        .rev()
+        .map(|entry| {
+            let mut item = summary.pick(entry, &["at"]);
+            if let Some(message) = entry["message"].as_str() {
+                item["message"] = summary.text(message, MAX_ERROR);
+            }
+            item
+        })
+        .collect();
+    update_summary["downloadLogs"] = summary.list(logs.len(), entries);
+    result["applicationUpdate"] = update_summary;
+    if let Some(workflow) = payload.get("workflowResults") {
+        let mut item = summary.pick(
+            &workflow["workflow"],
+            &["initialized", "count", "selectedWorkflowId", "isSaving"],
+        );
+        item["recoveryBackupPath"] = summary.basename(&workflow["workflow"]["recoveryBackupPath"]);
+        item["lastMutationError"] =
+            summary.pick(&workflow["workflow"]["lastMutationError"], &["code", "at"]);
+        if let Some(error) = workflow["workflow"]["lastMutationError"]["message"].as_str() {
+            item["lastMutationError"]["message"] = summary.text(error, MAX_ERROR);
+        }
+        result["workflowResults"]["workflow"] = item;
+        result["workflowResults"]["results"] = summary.pick(
+            &workflow["results"],
+            &[
+                "completedCount",
+                "visibleCount",
+                "hiddenCount",
+                "omittedTasks",
+                "omittedPaths",
+            ],
+        );
+        let tasks = workflow["results"]["tasks"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let items = tasks
+            .iter()
+            .take(MAX_TASKS)
+            .map(|task| {
+                summary.pick(
+                    task,
+                    &[
+                        "id",
+                        "visible",
+                        "resultHidden",
+                        "outputCount",
+                        "fileCount",
+                        "nodeValueCount",
+                        "reason",
+                    ],
+                )
+            })
+            .collect();
+        result["workflowResults"]["results"]["tasks"] = summary.list(tasks.len(), items);
+    }
+    if let Some(outputs) = payload
+        .get("outputChecks")
+        .filter(|value| value.is_object())
+    {
+        result["outputChecks"] = summary.pick(outputs, &["checkedAt"]);
+        let files = outputs["files"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let entries = files
+            .iter()
+            .take(MAX_ITEMS)
+            .map(|file| {
+                let mut item = summary.pick(file, &["state", "bytes"]);
+                item["name"] = summary.basename(&file["path"]);
+                if let Some(error) = file["error"].as_str() {
+                    item["error"] = summary.text(error, MAX_ERROR);
+                }
+                item
+            })
+            .collect();
+        result["outputChecks"]["files"] = summary.list(files.len(), entries);
+    }
+    if let Some(business) = payload
+        .get("businessDiagnostics")
+        .filter(|value| value.is_object())
+    {
+        let mut item = summary.pick(business, &["checkedAt", "requestId"]);
+        item["windows"] = summary.pick(&business["windows"], &["status"]);
+        item["windows"]["expectedCount"] =
+            json!(collection_len(business["windows"].get("expected")));
+        item["windows"]["missingCount"] = json!(collection_len(business["windows"].get("missing")));
+        let states = business["windows"]["observed"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let observations = states
+            .iter()
+            .take(8)
+            .map(|state| summarize_window_report(state))
+            .collect();
+        item["windows"]["observed"] = summary.list(states.len(), observations);
+        result["businessDiagnostics"] = item;
+    }
+    if let Some(network) = payload
+        .get("networkDiagnostics")
+        .filter(|value| value.is_object())
+    {
+        result["networkDiagnostics"] = summarize_network(network);
+    }
+    if let Some(storage) = payload
+        .get("storageDiagnostics")
+        .filter(|value| value.is_object())
+    {
+        let mut item = summary.pick(storage, &["checkedAt", "writeProbe"]);
+        let directories = storage["directories"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let entries = directories
+            .iter()
+            .take(7)
+            .map(|directory| {
+                let mut value = summary.pick(
+                    directory,
+                    &[
+                        "id",
+                        "state",
+                        "availableBytes",
+                        "readonlyAttribute",
+                        "writeStatus",
+                    ],
+                );
+                for key in ["error", "writeError", "cleanupError"] {
+                    value[format!("{key}Present")] = json!(directory[key]
+                        .as_str()
+                        .is_some_and(|message| !message.is_empty()));
+                }
+                value
+            })
+            .collect();
+        item["directories"] = summary.list(directories.len(), entries);
+        result["storageDiagnostics"] = item;
+    }
+    if let Some(renderer) = payload
+        .get("rendererDiagnostics")
+        .filter(|value| value.is_object())
+    {
+        let mut item = summary.pick(renderer, &["checkedAt", "webviewVersion", "os", "arch"]);
+        item["webviewErrorPresent"] = json!(renderer["webviewError"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
+        item["missingWindowCount"] = json!(collection_len(renderer["windows"].get("missing")));
+        let windows = renderer["windows"]["observed"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        item["windows"] = summary.list(
+            windows.len(),
+            windows
+                .iter()
+                .take(8)
+                .map(summarize_window_report)
+                .collect(),
+        );
+        result["rendererDiagnostics"] = item;
+    }
+    summary.finish(result)
+}
+
 pub(crate) fn summarize_probe(command: &str, payload: &Value) -> Value {
+    if command == "network_diagnostics" {
+        return summarize_network(payload);
+    }
+    if command == "plugin_diagnostics" {
+        return summarize_plugin_diagnostics(payload);
+    }
     let mut summary = Summary::default();
     let mut result = summary.pick(
         payload,
@@ -1341,6 +1903,131 @@ mod tests {
     use super::*;
 
     #[test]
+    fn system_diagnostics_reports_keep_health_without_credentials_paths_or_route_queries() {
+        let page = summarize_diagnostic_page(&json!({
+            "networkDiagnostics": {"observedProxyMode": "custom", "configuration": {
+                "customUpdateEndpoint": true, "endpointOverride": "https://alice:private-secret@private.test"},
+                "checks": [{"id": "models", "status": "timeout", "host": "example.test", "error": "private-secret"}]},
+            "storageDiagnostics": {"writeProbe": true, "directories": [{"id": "data", "state": "directory",
+                "path": "/private/directory", "probePath": "/private/probe", "writeStatus": "cleanup_failed", "cleanupError": "private-secret"}]},
+            "rendererDiagnostics": {"webviewVersion": "123.4", "webviewError": "private-secret", "windows": {
+                "missing": ["private-window"], "observed": [{"kind": "renderer", "windowLabel": "private-window",
+                    "rendering": {"routePath": "/debug?private-secret#fragment", "themeClass": "mixed", "dom": "private-secret"},
+                    "changes": (0..30).map(|_| json!({"routePath": "/models?private-secret", "theme": "dark"})).collect::<Vec<_>>() }]}}
+        }));
+        assert_eq!(
+            page["networkDiagnostics"]["checks"]["items"][0]["status"],
+            "timeout"
+        );
+        assert_eq!(page["networkDiagnostics"]["observedProxyMode"], "custom");
+        assert_eq!(
+            page["storageDiagnostics"]["directories"]["items"][0]["writeStatus"],
+            "cleanup_failed"
+        );
+        assert_eq!(page["rendererDiagnostics"]["missingWindowCount"], 1);
+        let rendering = &page["rendererDiagnostics"]["windows"]["items"][0];
+        assert_eq!(rendering["rendering"]["routePath"], "/debug");
+        assert_eq!(rendering["changes"].as_array().unwrap().len(), 20);
+        assert!(!page.to_string().contains("private"));
+    }
+
+    #[test]
+    fn business_reports_keep_fault_states_without_media_paths_or_host_identifiers() {
+        let window = json!({"kind": "editor", "windowLabel": "editor-private", "projectId": "/private/project", "lastExportPath": "/private/export.wav",
+            "error": "Cannot decode /private/audio.wav", "playbackError": "Device failed", "exporting": true,
+            "graph": {"text": "private contents"}});
+        let report = summarize_window_report(&window);
+        assert_eq!(report["errorPresent"], true);
+        assert_eq!(report["exporting"], true);
+        assert!(!report.to_string().contains("private"));
+        let host = summarize_native_host(
+            &json!({"session": {"status": "active", "projectId": "/private/project", "hasProcess": true},
+            "renders": {"status": "active", "activeCount": 1, "taskIds": ["private"]}}),
+        );
+        assert_eq!(host["renders"]["activeCount"], 1);
+        assert!(!host.to_string().contains("private"));
+        let page = summarize_diagnostic_page(
+            &json!({"workflowResults": {"workflow": {"isSaving": true,
+            "recoveryBackupPath": "/private/backup.json", "definition": "private graph"},
+            "results": {"completedCount": 1, "tasks": [{"id": "task", "reason": "hidden"}]}},
+            "businessDiagnostics": {"windows": {"expected": ["private"], "missing": ["private"], "observed": [window]}}}),
+        );
+        assert_eq!(page["workflowResults"]["workflow"]["isSaving"], true);
+        assert_eq!(
+            page["workflowResults"]["workflow"]["recoveryBackupPath"],
+            "backup.json"
+        );
+        assert_eq!(page["businessDiagnostics"]["windows"]["missingCount"], 1);
+        assert!(!page.to_string().contains("private"));
+    }
+
+    #[test]
+    fn diagnostic_page_snapshots_keep_plugin_failures_and_redact_update_logs() {
+        let snapshot = json!({
+            "observedAt": "2026-11-03T00:00:00Z", "secret": "never-include",
+            "pluginDiagnostics": {"loading": false, "error": "", "snapshot": {
+                "checkedAt": "2026-11-03T00:00:00Z",
+                "runtime": {"pythonPath": "/private/env/bin/python", "configuredPythonPath": "/other/bin/python",
+                    "bindingDir": "/private/plugins/cuda", "identity": "cuda", "interpreterMatches": false,
+                    "managementSupported": false, "pluginApisSupported": false, "apiError": "Missing APIs"},
+                "plugins": [{"name": "example", "enabled": true, "loaded": false, "error": "Import failed", "private": "never-include"}],
+                "verification": {"performed": true, "error": null}}},
+            "applicationUpdate": {"status": "failed", "restartRequired": true,
+                "error": "Checksum mismatch", "integrity": {"supported": true, "valid": false},
+                "downloadLogs": [{"at": "now", "message": "https://user:pass@example.com/archive?token=hidden"}],
+                "credentials": "never-include"},
+        });
+        let report = summarize_diagnostic_page(&snapshot);
+        assert_eq!(
+            report["pluginDiagnostics"]["snapshot"]["runtime"]["interpreterMatches"],
+            false
+        );
+        assert_eq!(report["pluginDiagnostics"]["snapshot"]["failedCount"], 1);
+        assert_eq!(report["applicationUpdate"]["status"], "failed");
+        assert_eq!(report["applicationUpdate"]["integrity"]["valid"], false);
+        let text = report.to_string();
+        for forbidden in [
+            "never-include",
+            "/private/",
+            "/other/",
+            "user:pass",
+            "hidden",
+        ] {
+            assert!(!text.contains(forbidden), "{forbidden}");
+        }
+    }
+
+    #[test]
+    fn diagnostic_page_snapshots_bound_collections_and_keep_unobserved_state() {
+        let logs: Vec<_> = (0..30)
+            .map(|i| json!({"at": i.to_string(), "message": "x".repeat(1000)}))
+            .collect();
+        let plugins: Vec<_> = (0..40)
+            .map(|i| json!({"name": format!("plugin-{i}"), "enabled": true, "loaded": null}))
+            .collect();
+        let report = summarize_diagnostic_page(&json!({
+            "pluginDiagnostics": {"snapshot": {"runtime": {}, "plugins": plugins}},
+            "applicationUpdate": {"downloadLogs": logs},
+        }));
+        assert_eq!(
+            report["pluginDiagnostics"]["snapshot"]["plugins"]["included"],
+            MAX_ITEMS
+        );
+        assert_eq!(report["applicationUpdate"]["downloadLogs"]["included"], 20);
+        assert_eq!(report["applicationUpdate"]["downloadLogs"]["omitted"], 10);
+        assert_eq!(
+            report["applicationUpdate"]["downloadLogs"]["items"][0]["at"],
+            "10"
+        );
+        assert!(report["applicationUpdate"]["integrity"].is_null());
+        let missing = summarize_diagnostic_page(&json!({}));
+        assert_eq!(
+            missing["pluginDiagnostics"]["snapshot"]["status"],
+            "not_observed"
+        );
+    }
+
+    #[test]
     fn requests_keep_batch_correlations_and_effective_inference_parameters() {
         let report = summarize_request(
             "infer_batch",
@@ -1397,15 +2084,31 @@ mod tests {
     #[test]
     fn save_node_snapshots_follow_legacy_and_current_widget_layouts() {
         for (values, expected_rate) in [
-            (json!(["mp3", "private-folder", "48000", "FLOAT", "PCM_16", "192k"]), json!("48000")),
-            (json!(["mp3", "2026", "48000", "FLOAT", "PCM_16", "192k"]), json!("48000")),
-            (json!(["mp3", "48000", "FLOAT", "PCM_16", "192k", null]), json!("48000")),
-            (json!(["mp3", 48000, "FLOAT", "PCM_16", "192k"]), json!(48000)),
+            (
+                json!(["mp3", "private-folder", "48000", "FLOAT", "PCM_16", "192k"]),
+                json!("48000"),
+            ),
+            (
+                json!(["mp3", "2026", "48000", "FLOAT", "PCM_16", "192k"]),
+                json!("48000"),
+            ),
+            (
+                json!(["mp3", "48000", "FLOAT", "PCM_16", "192k", null]),
+                json!("48000"),
+            ),
+            (
+                json!(["mp3", 48000, "FLOAT", "PCM_16", "192k"]),
+                json!(48000),
+            ),
         ] {
-            let report = summarize_request("infer_workflow", &json!({"workflow": {
-                "nodes": [{"id": 1, "type": "pymss_save_audio", "widgets_values": values}]
-            }}));
-            let parameters = &report["configuration"]["workflow"]["nodes"]["items"][0]["parameters"];
+            let report = summarize_request(
+                "infer_workflow",
+                &json!({"workflow": {
+                    "nodes": [{"id": 1, "type": "pymss_save_audio", "widgets_values": values}]
+                }}),
+            );
+            let parameters =
+                &report["configuration"]["workflow"]["nodes"]["items"][0]["parameters"];
             assert_eq!(parameters["output_format"], "mp3");
             assert_eq!(parameters["sample_rate"], expected_rate);
             assert_eq!(parameters["wav_bit_depth"], "FLOAT");
@@ -1420,13 +2123,25 @@ mod tests {
         for suffix in ["", "_list"] {
             for prefix in ["", "pymss_"] {
                 for values in [
-                    json!(["custom.ckpt", "bs_roformer", "cpu", true, "modelscope", "0,1", true]),
+                    json!([
+                        "custom.ckpt",
+                        "bs_roformer",
+                        "cpu",
+                        true,
+                        "modelscope",
+                        "0,1",
+                        true
+                    ]),
                     json!(["custom.ckpt", "bs_roformer", "cpu", "0,1", true]),
                 ] {
-                    let report = summarize_request("infer_workflow", &json!({"workflow": {
-                        "nodes": [{"id": 1, "type": format!("{prefix}custom_mss_separate{suffix}"), "widgets_values": values}]
-                    }}));
-                    let parameters = &report["configuration"]["workflow"]["nodes"]["items"][0]["parameters"];
+                    let report = summarize_request(
+                        "infer_workflow",
+                        &json!({"workflow": {
+                            "nodes": [{"id": 1, "type": format!("{prefix}custom_mss_separate{suffix}"), "widgets_values": values}]
+                        }}),
+                    );
+                    let parameters =
+                        &report["configuration"]["workflow"]["nodes"]["items"][0]["parameters"];
                     assert_eq!(parameters["device"], "cpu");
                     assert_eq!(parameters["deviceIds"], "0,1");
                     assert_eq!(parameters["debug"], true);
@@ -1584,10 +2299,22 @@ mod tests {
     #[test]
     fn text_sanitization_consumes_escaped_quotes_inside_credentials() {
         for (input, expected) in [
-            (r#"Request rejected: {"password":"prefix\"private-suffix","status":"failed"}"#, r#"Request rejected: {"password":"[redacted]","status":"failed"}"#),
-            (r#"token='prefix\'private-suffix' status=failed"#, "token='[redacted]' status=failed"),
-            (r#"password="private\\" status=failed"#, "password=\"[redacted]\" status=failed"),
-            (r#"password="prefix\\\"private-suffix" status=failed"#, "password=\"[redacted]\" status=failed"),
+            (
+                r#"Request rejected: {"password":"prefix\"private-suffix","status":"failed"}"#,
+                r#"Request rejected: {"password":"[redacted]","status":"failed"}"#,
+            ),
+            (
+                r#"token='prefix\'private-suffix' status=failed"#,
+                "token='[redacted]' status=failed",
+            ),
+            (
+                r#"password="private\\" status=failed"#,
+                "password=\"[redacted]\" status=failed",
+            ),
+            (
+                r#"password="prefix\\\"private-suffix" status=failed"#,
+                "password=\"[redacted]\" status=failed",
+            ),
         ] {
             assert_eq!(sanitize_text(input), expected, "input: {input}");
         }
@@ -1596,13 +2323,34 @@ mod tests {
     #[test]
     fn text_sanitization_treats_brackets_as_boundaries_only_for_wrapped_urls() {
         for (input, expected) in [
-            ("https://alice:p)ass@example.com/file?signature=private", "https://example.com/file"),
-            ("https://alice:p]ass@example.com/file?signature=private", "https://example.com/file"),
-            ("https://example.com/file?signature=private)value", "https://example.com/file"),
-            ("https://example.com/file?signature=private]value", "https://example.com/file"),
-            ("[source](https://alice:p)ass@example.com/file?signature=private)", "[source](https://example.com/file)"),
-            ("[https://alice:p]ass@example.com/file?signature=private]", "[https://example.com/file]"),
-            ("['https://example.com/file?signature=private]value']", "['https://example.com/file']"),
+            (
+                "https://alice:p)ass@example.com/file?signature=private",
+                "https://example.com/file",
+            ),
+            (
+                "https://alice:p]ass@example.com/file?signature=private",
+                "https://example.com/file",
+            ),
+            (
+                "https://example.com/file?signature=private)value",
+                "https://example.com/file",
+            ),
+            (
+                "https://example.com/file?signature=private]value",
+                "https://example.com/file",
+            ),
+            (
+                "[source](https://alice:p)ass@example.com/file?signature=private)",
+                "[source](https://example.com/file)",
+            ),
+            (
+                "[https://alice:p]ass@example.com/file?signature=private]",
+                "[https://example.com/file]",
+            ),
+            (
+                "['https://example.com/file?signature=private]value']",
+                "['https://example.com/file']",
+            ),
         ] {
             if input.starts_with("https://") {
                 assert!(url::Url::parse(input).is_ok());

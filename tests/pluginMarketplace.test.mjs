@@ -47,6 +47,16 @@ const nextTurn = () => new Promise(resolve => setImmediate(resolve))
 
 const installedResult = name => ({ ...empty(), updates: {}, installed: [{ name, managed: true, loaded: true, operations: [] }] })
 
+test('diagnostic catalog requests can suppress default preparation', async () => {
+  await reset()
+  globalThis.__pluginInvoke = async (command, args) => {
+    requests.push({ command, ...args })
+    return { ...empty(), preinstalledPending: ['alpha'] }
+  }
+  await market.refresh(false, { prepare: false })
+  assert.equal(requests.some(request => request.command === 'manage_plugin'), false)
+})
+
 test('catalog source survives inventory refresh and is cleared when catalog loading fails', async () => {
   await reset()
   const source = { supported: true, provider: 'gitcode', preference: 'auto', gitAvailable: true }

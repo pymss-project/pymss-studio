@@ -1,5 +1,6 @@
 import type { EnvInfo, RuntimeInfo, WorkerEventConnectionStatus } from '../stores/app.ts'
 import type { OptionalPackageStatus } from '../features/runtime-packages/optionalRuntimePackage.ts'
+import type { PluginDiagnosticSnapshot } from '../features/diagnostics/pluginDiagnostics.ts'
 
 export type DiagnosticState = 'ok' | 'warn' | 'error' | 'unknown' | 'optional'
 export type DiagnosticCheck = {
@@ -10,7 +11,7 @@ export type DiagnosticCheck = {
   value?: string
   detail?: string
   hint?: string
-  action: 'runtime' | 'tools' | 'events'
+  action: 'runtime' | 'tools' | 'events' | 'plugins'
 }
 
 const stateFor = (available: boolean | null | undefined, missing: DiagnosticState = 'error'): DiagnosticState =>
@@ -37,6 +38,8 @@ export function buildDiagnosticChecks(input: {
   connectionError?: string
   optionalPackage?: OptionalPackageStatus | null
   optionalError?: string
+  pluginDiagnostics?: PluginDiagnosticSnapshot | null
+  pluginError?: string
   isMac: boolean
 }): DiagnosticCheck[] {
   const { env, runtime } = input
@@ -72,14 +75,35 @@ export function buildDiagnosticChecks(input: {
     detail: acceleratorError || undefined, hint: 'debug.hintAccelerator', action: 'runtime',
   })
 
-  if (!input.isMac) {
-    const optional = input.optionalPackage
-    checks.push({
-      key: 'funasr', group: 'capabilities', label: 'FunASR',
-      state: input.optionalError ? 'unknown' : optional?.installed ? 'ok' : optional?.present || optional?.issue ? 'warn' : optional ? 'optional' : 'unknown',
-      value: optional?.version || undefined, detail: input.optionalError || undefined,
-      hint: 'debug.hintFunasr', action: 'tools',
-    })
+  const optional = input.optionalPackage
+  checks.push({
+    key: 'funasr', group: 'capabilities', label: optional?.requirement?.startsWith('funasr-mlx') ? 'FunASR MLX' : 'FunASR',
+    state: input.optionalError ? 'unknown' : optional?.installed ? 'ok' : optional?.present || optional?.issue ? 'warn' : optional ? 'optional' : 'unknown',
+    value: optional?.version || undefined, detail: input.optionalError || undefined,
+    hint: 'debug.hintFunasr', action: 'tools',
+  })
+
+  const plugins = input.pluginDiagnostics
+  if ('pluginDiagnostics' in input || input.pluginError) {
+    const enabled = plugins?.plugins.filter(plugin => plugin.enabled) || []
+    const failures = enabled.filter(plugin => plugin.loaded === false || plugin.error)
+    checks.push(
+      { key: 'pluginRuntime', group: 'capabilities', label: 'debugPlugins.checkApis',
+        state: input.pluginError ? 'unknown' : plugins ? plugins.runtime.managementSupported && plugins.runtime.pluginApisSupported ? 'ok' : 'warn' : 'unknown',
+        value: plugins?.runtime.pymssVersion || undefined, detail: input.pluginError || plugins?.runtime.apiError || undefined,
+        hint: 'debugPlugins.hintApis', action: 'plugins' },
+      { key: 'pluginBinding', group: 'runtime', label: 'debugPlugins.checkBinding',
+        state: plugins?.runtime.bindingError ? 'error' : stateFor(plugins?.runtime.interpreterMatches),
+        value: plugins?.runtime.pythonPath, detail: plugins?.runtime.bindingError || undefined,
+        hint: 'debugPlugins.hintBinding', action: 'plugins' },
+      { key: 'pluginLoading', group: 'capabilities', label: 'debugPlugins.checkLoading',
+        state: !plugins ? 'unknown' : plugins.verification.error || failures.length ? 'warn'
+          : !enabled.length ? 'optional' : !plugins.verification.performed ? 'unknown'
+            : enabled.every(plugin => plugin.loaded === true) ? 'ok' : 'unknown',
+        value: plugins ? String(enabled.length) : undefined,
+        detail: plugins?.verification.error || failures.map(plugin => `${plugin.name}: ${plugin.error || ''}`).join('\n') || undefined,
+        hint: 'debugPlugins.hintLoading', action: 'plugins' },
+    )
   }
 
   checks.push({

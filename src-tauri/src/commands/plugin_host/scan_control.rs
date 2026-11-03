@@ -47,6 +47,22 @@ struct Inner {
 #[derive(Default)]
 pub(super) struct ScanControl(Mutex<Inner>);
 
+impl ScanControl {
+    pub fn diagnostic_snapshot(&self) -> serde_json::Value {
+        let inner = match self.0.try_lock() {
+            Ok(inner) => inner,
+            Err(error) => return super::diagnostics::lock_failure(error),
+        };
+        let Some(active) = inner.active.as_ref() else { return serde_json::json!({"status": "idle"}); };
+        serde_json::json!({"status": if !active.running { if active.cancelled { "cancelled" } else { "finished" } }
+            else if active.collecting { "collecting" } else { "scanning" },
+            "scanId": active.id, "completed": active.completed, "total": active.total,
+            "currentName": active.current.as_ref().map(|item| item.name.as_str()),
+            "elapsedMs": active.current.as_ref().map_or(0, |item| item.ticket.started.elapsed().as_millis()),
+            "canSkip": active.running && !active.cancelled && active.current.as_ref().is_some_and(|item| !item.skipped)})
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Progress {

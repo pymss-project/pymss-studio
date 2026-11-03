@@ -14,7 +14,7 @@ function page() {
   const calls = [], warnings = [], confirmations = []
   const market = {
     snapshot: ref({ runtime: { identity: 'cpu' }, catalog: [], installed: [{ name: 'hello', version: '1.0' }] }),
-    updates: ref({}), loading: ref(false), catalogLoading: ref(false), error: ref(''), busy: ref(false), logs: ref([]), activity: ref(null),
+    updates: ref({}), loading: ref(false), catalogLoading: ref(false), error: ref(''), busy: ref(false), exclusiveBusy: ref(false), logs: ref([]), activity: ref(null),
     openMarketplace() {}, refresh() {}, cancel() {}, manage: async (...args) => { calls.push(args) },
   }
   const scope = { computed, ref, nextTick: async callback => callback?.(), watch() {}, onMounted() {},
@@ -23,7 +23,7 @@ function page() {
     useDialog: () => ({ warning: options => confirmations.push(options) }),
     useMessage: () => ({ success() {}, warning: value => warnings.push(value), error() {} }),
   }
-  const controller = vm.runInNewContext(`${code}\n({ selectMore, confirmUpdate, showUpdate, installDependencies, updateRuntime, showLogs })`, scope)
+  const controller = vm.runInNewContext(`${code}\n({ selectMore, confirmUpdate, showUpdate, installDependencies, updateRuntime, showLogs, installDisabled })`, scope)
   return { controller, calls, warnings, confirmations, market }
 }
 
@@ -66,4 +66,13 @@ test('repairing dependencies requires its own confirmation', async () => {
   assert.equal(confirmations[0].content, 'plugins.repairConfirm')
   await confirmations[0].onPositiveClick()
   assert.equal(calls[0][0], 'repair')
+})
+
+test('a recognized runtime with an old core cannot start a plugin installation', () => {
+  const { controller, market } = page()
+  market.snapshot.value.runtime.managementSupported = false
+  assert.equal(controller.installDisabled(), true)
+  assert.equal(controller.installDisabled('hello'), true)
+  market.snapshot.value.runtime.managementSupported = true
+  assert.equal(controller.installDisabled(), false)
 })

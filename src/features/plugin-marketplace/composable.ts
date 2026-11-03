@@ -274,7 +274,7 @@ async function loadSnapshot(includeCatalog: boolean, prepare = true, forceVerify
   }
 }
 
-function refresh(forceVerify = false) { return loadSnapshot(true, true, forceVerify === true) }
+function refresh(forceVerify = false, options: { prepare?: boolean } = {}) { return loadSnapshot(true, options.prepare !== false, forceVerify === true) }
 function refreshInventory(forceVerify = false) { return loadSnapshot(false, true, forceVerify === true) }
 
 function reloadRuntimeInventory() {

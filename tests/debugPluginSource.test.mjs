@@ -48,6 +48,21 @@ test('local defaults retain remote fields and unsaved source changes cannot fetc
   assert.equal(saved.registryRef, 'main')
 })
 
+test('opening source diagnostics only reads configuration', async () => {
+  const { calls, lifecycle } = panel()
+  await lifecycle.mount()
+  assert.deepEqual(calls.map(([command]) => command), ['debug_plugin_source'])
+})
+
+test('explicit catalog reads do not prepare default plugins', async () => {
+  const requested = []
+  const { controller } = panel({ market: { refresh: async (...args) => requested.push(args) } })
+  await controller.loadSource()
+  await controller.readCatalog()
+  assert.equal(requested[0][0], false)
+  assert.equal(requested[0][1].prepare, false)
+})
+
 test('a failed save keeps the editable draft and does not acquire from a stale source', async () => {
   const { controller: c, calls } = panel({ invoke: async command => {
     calls.push([command])

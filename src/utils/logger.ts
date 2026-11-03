@@ -6,6 +6,7 @@ type Method = 'debug' | 'info' | 'warn' | 'error'
 const FEATURE_PAGES = new Set([
   'separate', 'models', 'workflows', 'workflow-node-editor', 'workflow-simple-editor',
   'results', 'tools', 'debug', 'editor', 'settings',
+  'plugins', 'plugin-workspace',
 ])
 const AUDIO_TOOLS = new Set(['convert', 'merge', 'sdr', 'midi', 'inspect', 'slicer', 'asr', 'loudness', 'tempo_key'])
 
@@ -115,6 +116,8 @@ function errorDetail(value: unknown): string {
   }
   return ''
 }
+
+export function redactDiagnosticText(value: unknown) { return redact(String(value)) }
 
 export function createLogger(module: string) {
   const write = (level: Method, message: string, details: unknown[]) => {

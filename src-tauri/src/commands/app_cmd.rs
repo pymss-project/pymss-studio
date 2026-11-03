@@ -245,9 +245,9 @@ pub async fn debug_log_clear(app: AppHandle) -> AppResult<DebugLogInfo> {
 }
 
 #[tauri::command]
-pub async fn debug_log_create_report(app: AppHandle) -> AppResult<DebugLogReport> {
+pub async fn debug_log_create_report(app: AppHandle, payload: Option<Value>) -> AppResult<DebugLogReport> {
     require_runtime_debug_developer_mode(&app)?;
-    session_log::create_diagnostic_report(&app)
+    session_log::create_diagnostic_report(&app, payload.as_ref())
 }
 
 #[tauri::command]
@@ -736,7 +736,7 @@ fn debug_runtime_allowed_roots(app: &AppHandle) -> AppResult<Vec<(PathBuf, Strin
     Ok(vec![(storage::runtime_envs_dir(app)?, "application".to_string())])
 }
 
-fn require_runtime_debug_developer_mode(app: &AppHandle) -> AppResult<()> {
+pub(crate) fn require_runtime_debug_developer_mode(app: &AppHandle) -> AppResult<()> {
     let settings = storage::read_app_store(app, "app-settings")?;
     if settings.get("developerMode").and_then(Value::as_bool) == Some(true) {
         return Ok(());
@@ -2141,6 +2141,18 @@ pub async fn debug_save_plugin_source(app: AppHandle, source: Value) -> AppResul
     }
     storage::write_app_store(&app, "plugin-source", &source)?;
     debug_plugin_source(app).await
+}
+
+#[tauri::command]
+pub async fn network_diagnostics(app: AppHandle, payload: Option<Value>) -> AppResult<Value> {
+    require_runtime_debug_developer_mode(&app)?;
+    run_worker_with_payload(&app, "network_diagnostics", payload)
+}
+
+#[tauri::command]
+pub async fn plugin_diagnostics(app: AppHandle, payload: Option<Value>) -> AppResult<Value> {
+    require_runtime_debug_developer_mode(&app)?;
+    run_worker_with_payload(&app, "plugin_diagnostics", payload)
 }
 
 #[tauri::command]

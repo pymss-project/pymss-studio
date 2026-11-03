@@ -10,7 +10,7 @@ import { createPinia } from 'pinia'
 const fixturesId = '\0workflow-lifecycle-fixtures'
 const stubs = {
   'vue-router': `export { useRoute, useRouter } from '${fixturesId}'`,
-  'vue-i18n': 'export const useI18n = () => ({ t: key => key })',
+  'vue-i18n': 'import { ref } from "vue"; export const useI18n = () => ({ t: key => key, locale: ref("en") })',
   'naive-ui': `export const darkTheme = {}; export { useMessage } from '${fixturesId}'; export const useDialog = () => ({})`,
   '@vicons/ionicons5': 'export const AlertCircleOutline={}, CheckmarkCircle={}, CubeOutline={}, EllipsisHorizontalOutline={}, GitNetworkOutline={}, MusicalNotesOutline={}, OpenOutline={}, PlayOutline={}, SearchOutline={}',
 }
@@ -473,9 +473,11 @@ test('standalone routes do not subscribe to main-window workflow events', async 
     window.__TAURI_INTERNALS__.metadata = { currentWindow: { label: 'workflow-editor' } }
     const shell = env.mount(App)
     await flush()
-    assert.equal(env.listeners.size, 0, path)
+    assert.deepEqual([...env.listeners.values()].map(listener => listener.event), ['pymss://renderer-state-request'], path)
     assert.equal(env.reads.length, 0)
     shell.unmount()
+    await flush()
+    assert.equal(env.listeners.size, 0)
   }
 })
 
@@ -822,6 +824,11 @@ test('revision conflicts still reject saves without changing data or closing the
   assert.deepEqual(env.stored, saved)
   assert.deepEqual(env.writes, [])
   assert.equal(env.store.simpleEditorOpenWorkflowId, 'original')
+  assert.equal(env.store.lastMutationError.code, 'WORKFLOW_REVISION_CONFLICT')
+  assert.ok(env.store.lastMutationError.at)
+  assert.equal(env.store.isSaving, false)
+  await env.store.saveWorkflow({ id: 'original', name: 'Current edit', definition: entry('original').definition, expectedUpdatedAt: 16 })
+  assert.equal(env.store.lastMutationError, null)
 })
 
 test('overview metadata edits do not overwrite a newer workflow saved elsewhere', async () => {

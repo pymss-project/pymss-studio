@@ -13,6 +13,7 @@ import WorkflowRunPanel from '@/components/workflow/WorkflowRunPanel.vue'
 import WorkflowExecutionProgress from '@/components/workflow/WorkflowExecutionProgress.vue'
 import WorkflowNodeBindings from '@/components/workflow/WorkflowNodeBindings.vue'
 import { WorkflowEditorInUseError } from '@/utils/workflowEditorState'
+import { useDiagnosticWindowState } from '@/features/diagnostics/windowState'
 import { useWorkflowWorkbench } from '@/composables/useWorkflowWorkbench'
 import { cloneWorkflow } from '@/workflows/workbench'
 import WorkflowNodeEditor from '@/components/workflow/WorkflowNodeEditorLite.vue'
@@ -528,6 +529,11 @@ onBeforeUnmount(() => {
   unlistenCloseRequested?.()
 })
 
+useDiagnosticWindowState('workflow', () => ({
+  kind: 'workflow', workflowId: editingId.value, updatedAt: loadedUpdatedAt.value,
+  saving: saving.value, dirty: dirty.value, error: saveError.value || formatError.value || canvasError.value,
+  revisionConflict: showRevisionConflict.value, recoveryBackupAvailable: Boolean(workflow.recoveryBackupPath),
+}))
 </script>
 
 <template>

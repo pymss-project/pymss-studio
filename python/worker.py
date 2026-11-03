@@ -15,6 +15,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def run_command(command: str, payload: dict) -> int:
+    if command == "network_diagnostics":
+        from worker_network_diagnostics import cmd_network_diagnostics
+        return cmd_network_diagnostics(payload)
+    if command == "plugin_diagnostics":
+        from worker_diagnostics import cmd_plugin_diagnostics
+        return cmd_plugin_diagnostics(payload)
     if command == "runtime_info":
         from worker_bootstrap import cmd_runtime_info
         return cmd_runtime_info(payload)

@@ -13,6 +13,8 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 
 mod blacklist;
+mod diagnostics;
+pub(crate) use diagnostics::snapshot as diagnostic_snapshot;
 mod dialogs;
 mod process_exit;
 #[cfg(test)]
