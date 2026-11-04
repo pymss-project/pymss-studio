@@ -21,12 +21,20 @@ class PymssPluginApiTests(unittest.TestCase):
             )}),
             "pymss_plugin_manager": SimpleNamespace(PluginContext=type, PluginPolicy=type, PluginService=type),
             "pymss.plugins.marketplace": SimpleNamespace(fetch_official_catalog=lambda: None, source_info=lambda: None),
+            "pymss_plugin_manager._engine": SimpleNamespace(UPDATE_REVIEW_VERSION=1),
         }
         self.enterContext(mock.patch.object(PROBE, "import_module", side_effect=self.modules.__getitem__))
-        self.enterContext(mock.patch.object(PROBE.metadata, "version", return_value="2.3.1"))
+        self.enterContext(mock.patch.object(PROBE.metadata, "version", return_value="2.3.4"))
 
     def test_complete_published_core_passes(self):
-        self.assertEqual(PROBE.verify(), {"pymssVersion": "2.3.1", "pluginApisVerified": True})
+        self.assertEqual(PROBE.verify(), {"pymssVersion": "2.3.4", "pluginApisVerified": True})
+
+    def test_unsupported_review_protocol_rejects_the_bundle(self):
+        for version in (None, 0, 2, True, "1"):
+            with self.subTest(version=version):
+                self.modules["pymss_plugin_manager._engine"].UPDATE_REVIEW_VERSION = version
+                with self.assertRaisesRegex(RuntimeError, "UPDATE_REVIEW_VERSION"):
+                    PROBE.verify()
 
     def test_missing_or_noncallable_api_rejects_the_bundle(self):
         for module, attributes in self.modules.items():

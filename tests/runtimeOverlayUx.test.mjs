@@ -17,6 +17,6 @@ test('runtime overlay declares a stable base generation and shared-plugin core m
   assert.equal(manifest.baseGeneration, 1)
   // Release resolution pins this manifest separately; dependency synchronization
   // must accept newer stable cores while requiring the shared-plugin baseline.
-  assert.equal(manifest.common.pymss, 'pymss[proxy]>=2.3.1')
+  assert.equal(manifest.common.pymss, 'pymss[proxy]>=2.3.4')
   assert.equal(manifest.common['pymss-core'], 'pymss-core>=0.1.14')
 })

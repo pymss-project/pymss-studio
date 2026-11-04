@@ -20,6 +20,9 @@ def verify() -> dict:
         for attribute in attributes:
             if not callable(getattr(module, attribute, None)):
                 raise RuntimeError(f"Bundled pymss is missing required plugin API: {name}.{attribute}")
+    reviewed_update = getattr(import_module("pymss_plugin_manager._engine"), "UPDATE_REVIEW_VERSION", None)
+    if type(reviewed_update) is not int or reviewed_update != 1:
+        raise RuntimeError("Bundled pymss is missing required plugin API: pymss_plugin_manager._engine.UPDATE_REVIEW_VERSION=1")
     return {"pymssVersion": metadata.version("pymss"), "pluginApisVerified": True}
 
 

@@ -32,12 +32,18 @@ class ReleaseCoreResolutionTests(unittest.TestCase):
         self.path.write_text(json.dumps(self.manifest), encoding="utf-8")
 
     def test_default_core_requirements_preserve_the_shared_plugin_api_floor(self):
-        self.assertEqual(MANIFEST["common"]["pymss"], "pymss[proxy]>=2.3.1")
+        self.assertEqual(MANIFEST["common"]["pymss"], "pymss[proxy]>=2.3.4")
         self.assertEqual(MANIFEST["common"]["pymss-core"], "pymss-core>=0.1.14")
-        for filename in ("requirements.txt", "requirements-ci.txt"):
-            lines = (ROOT / "python" / filename).read_text(encoding="utf-8").splitlines()
-            self.assertIn("pymss[proxy]>=2.3.1", lines)
-            self.assertIn("pymss-core>=0.1.14", lines)
+        lines = (ROOT / "python/requirements.txt").read_text(encoding="utf-8").splitlines()
+        self.assertIn("pymss[proxy]>=2.3.4", lines)
+        self.assertIn("pymss-core>=0.1.14", lines)
+
+    def test_ci_uses_an_immutable_official_core_snapshot(self):
+        lines = (ROOT / "python/requirements-ci.txt").read_text(encoding="utf-8").splitlines()
+        core = [line for line in lines if line.startswith("pymss[proxy]")]
+        self.assertEqual(len(core), 1)
+        self.assertRegex(core[0], r"^pymss\[proxy\] @ git\+https://github\.com/pymss-project/pymss\.git@[0-9a-f]{40}$")
+        self.assertIn("pymss-core>=0.1.14", lines)
 
     def test_minimum_versions_resolve_newer_stable_releases_and_keep_extras(self):
         self.manifest["common"].update({
