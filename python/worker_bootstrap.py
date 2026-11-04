@@ -23,6 +23,7 @@ from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import Version
 
 from worker_runtime_lock import RuntimeLockBusy, runtime_lock
+from worker_platform import machine
 
 MANIFEST_PATH = Path(__file__).with_name("runtime-manifest.json")
 
@@ -716,6 +717,7 @@ print(json.dumps(result, ensure_ascii=False))
         errors="replace",
         stderr=subprocess.PIPE,
         env=_probe_environment(overlay_path, python_path=python_path),
+        timeout=60,
     )
     result = json.loads(output)
     if (
@@ -763,6 +765,7 @@ print(json.dumps(result, ensure_ascii=False))
             encoding="utf-8",
             errors="replace",
             env=_probe_environment(overlay_path, python_path=python_path),
+            timeout=30,
         )
         data = json.loads(output.strip() or "{}")
         return {name: (str(data.get(name)) if data.get(name) else None) for name in package_names}
@@ -1500,7 +1503,9 @@ def _manifest_versions_are_satisfied(
 def _runtime_probe_failure(error: Exception) -> dict[str, str]:
     # Exception strings can contain the entire probe command, subprocess output
     # or credential-bearing paths. Report only the failure category and codes.
-    if isinstance(error, ValueError):
+    if isinstance(error, subprocess.TimeoutExpired):
+        code, reason = "PYTHON_PROBE_TIMEOUT", "Python runtime probe exceeded its time limit"
+    elif isinstance(error, ValueError):
         code, reason = "PYTHON_PROBE_INVALID_RESPONSE", "Python runtime probe returned an invalid response"
     elif isinstance(error, OSError):
         code, reason = "PYTHON_START_FAILED", "Python interpreter could not be started"
@@ -1620,7 +1625,7 @@ def _runtime_info_payload(payload: dict[str, Any], *, repair: bool = True) -> di
         "manifestVersion": manifest["manifestVersion"],
         "pythonVersion": platform.python_version(),
         "platform": sys.platform,
-        "machine": platform.machine(),
+        "machine": machine(),
         "bootstrapPython": str(_bootstrap_python_path()),
         "runtimeEnvsDir": str(RUNTIME_ENVS_DIR),
         "activeRuntimeFile": str(ACTIVE_RUNTIME_FILE),

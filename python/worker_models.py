@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import platform
 import shutil
 import sys
 import traceback
@@ -12,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from worker_asr_cache import is_complete_asr_model_cache
+from worker_platform import description as platform_description
 
 import yaml
 
@@ -882,7 +882,7 @@ def cmd_health() -> int:
 def cmd_env_info() -> int:
     payload: dict[str, Any] = {
         "pythonVersion": sys.version.split()[0],
-        "platform": platform.platform(),
+        "platform": platform_description(),
         "workerVersion": WORKER_VERSION,
         "pymssAvailable": False,
         "pymssPath": None,

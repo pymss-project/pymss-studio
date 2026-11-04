@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
-import platform
 import re
 import sys
 from pathlib import Path
 from typing import Any
+
+from worker_platform import machine as platform_machine
 
 _SDK = json.loads(Path(__file__).with_name("plugin-sdk.json").read_text(encoding="utf-8"))
 SDK_VERSION: int = _SDK["version"]
@@ -56,7 +57,7 @@ def catalog_requirements(value: object) -> dict[str, Any]:
 
 
 def runtime_profile() -> dict[str, Any]:
-    machine = platform.machine().lower()
+    machine = platform_machine().lower()
     architecture = {"amd64": "x86_64", "aarch64": "arm64"}.get(machine, machine)
     backends = []
     for name in ("torch", "mlx"):

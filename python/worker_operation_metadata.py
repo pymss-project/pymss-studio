@@ -7,11 +7,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import platform
 import stat
 import sys
 import tempfile
 from typing import Any
+
+from worker_platform import machine
 
 MAX_METADATA_BYTES = 2 * 1024 * 1024
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
@@ -171,7 +172,7 @@ def _profile_fingerprint(packages: tuple[Package, ...]) -> str:
                         distributions.add((os.path.normcase(os.path.abspath(candidate)), info.st_size, info.st_mtime_ns))
     return hashlib.sha256(_canonical({
         "python": sys.version, "executable": os.path.normcase(os.path.abspath(sys.executable)),
-        "platform": sys.platform, "machine": platform.machine(),
+        "platform": sys.platform, "machine": machine(),
         "backend": runtime.backend, "identity": runtime.identity,
         "sdk": hashlib.sha256(Path(__file__).with_name("plugin-sdk.json").read_bytes()).hexdigest(),
         "packages": [(str(package.directory), package.stamp) for package in packages],

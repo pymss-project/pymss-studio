@@ -221,6 +221,17 @@ fn worker_scratch(command: &str) -> std::io::Result<Option<tempfile::TempDir>> {
     }
 }
 
+fn query_timeout(command: &str) -> Option<std::time::Duration> {
+    let seconds = match command {
+        "env_info" | "runtime_info" | "plugin_marketplace" | "list_nodes" | "describe_operation" => {
+            90
+        }
+        "runtime_env_sizes" => 180,
+        _ => return None,
+    };
+    Some(std::time::Duration::from_secs(seconds))
+}
+
 fn runtime_access_command<'a>(command: &'a str, payload: &Value) -> &'a str {
     if command == "manage_plugin" && payload.get("action").and_then(Value::as_str) == Some("install") {
         "install_plugin"
@@ -1521,6 +1532,7 @@ fn run_worker_with_payload_inner(
         }
     };
     if let Some(scratch) = &scratch { cmd.env("PYMSS_SCRATCH_DIR", scratch.path()); }
+    let timeout = query_timeout(command);
     let started_at = std::time::Instant::now();
     session_log::append(
         app,
@@ -1528,8 +1540,14 @@ fn run_worker_with_payload_inner(
         "worker.spawn",
         vec![("command", command.to_string())],
     );
-    let mut child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
-        Ok(child) => child,
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let launched = match timeout {
+        Some(timeout) => process_tree::QueryDeadline::spawn(&mut cmd, timeout)
+            .map(|deadline| (deadline.child(), Some(deadline))),
+        None => cmd.spawn().map(|child| (Arc::new(Mutex::new(child)), None)),
+    };
+    let (child, deadline) = match launched {
+        Ok(process) => process,
         Err(error) => {
             if let Some(path) = payload_file.as_ref() {
                 let _ = std::fs::remove_file(path);
@@ -1538,11 +1556,13 @@ fn run_worker_with_payload_inner(
         }
     };
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| AppError::Worker("missing worker stdout".into()))?;
-    let stderr = child.stderr.take();
+    let (stdout, stderr) = {
+        let mut process = child.lock()
+            .map_err(|_| AppError::Worker("worker process lock poisoned".into()))?;
+        let stdout = process.stdout.take()
+            .ok_or_else(|| AppError::Worker("missing worker stdout".into()))?;
+        (stdout, process.stderr.take())
+    };
     let stderr_app = app.clone();
     let stderr_operation_id = operation_id.to_string();
     let stderr_command = command.to_string();
@@ -1606,7 +1626,24 @@ fn run_worker_with_payload_inner(
             }
         }
     });
-    let status = child.wait()?;
+    let status = if deadline.is_some() {
+        loop {
+            let status = child
+                .lock()
+                .map_err(|_| AppError::Worker("worker process lock poisoned".into()))?
+                .try_wait()?;
+            if let Some(status) = status {
+                break status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    } else {
+        child
+            .lock()
+            .map_err(|_| AppError::Worker("worker process lock poisoned".into()))?
+            .wait()?
+    };
+    let timed_out = deadline.map(|deadline| deadline.finish()).unwrap_or(false);
     session_log::append(
         app,
         if status.success() {
@@ -1627,6 +1664,12 @@ fn run_worker_with_payload_inner(
     }
     if let Some(path) = payload_file.as_ref() {
         let _ = std::fs::remove_file(path);
+    }
+    if timed_out {
+        return Err(AppError::Worker(format!(
+            "WORKER_QUERY_TIMEOUT: {command} exceeded its {} second time limit. Check runtime diagnostics and retry.",
+            timeout.unwrap().as_secs(),
+        )));
     }
     if let Some(err) = worker_error {
         return Err(err);
