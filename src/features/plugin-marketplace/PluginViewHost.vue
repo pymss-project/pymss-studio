@@ -45,7 +45,14 @@ const errorText = ref('')
 const src = ref('')
 const measuredHeight = ref(640)
 const overlayOpen = ref(false)
+const frameLoaded = ref(false)
+let pendingOverlayGeneration = 0
 let disposed = false
+
+function onFrameLoad() {
+  frameLoaded.value = true
+  pushTheme()
+}
 
 const MIN_VIEW_HEIGHT = 120
 const MAX_VIEW_HEIGHT = 20_000
@@ -374,13 +381,20 @@ function pushTheme() {
 
 watch(locale, pushTheme)
 
+function overlayLayout() {
+  const bounds = frame.value?.parentElement?.getBoundingClientRect()
+  return bounds ? {
+    bounds: { left: bounds.left, top: bounds.top, width: bounds.width },
+    viewport: { width: window.innerWidth, height: window.innerHeight },
+  } : null
+}
+
 function syncOverlayLayout() {
   if (!overlayOpen.value) return
-  const bounds = frame.value?.parentElement?.getBoundingClientRect()
-  if (!bounds) return
+  const layout = overlayLayout()
+  if (!layout) return
   postToFrame({ jsonrpc: '2.0', method: 'host.overlay', params: {
-    open: true,
-    bounds: { left: bounds.left, top: bounds.top, width: bounds.width },
+    open: true, ...layout,
   } })
 }
 
@@ -392,9 +406,26 @@ function onWindowMessage(event: MessageEvent) {
   if (!data || typeof data !== 'object' || data.jsonrpc !== '2.0') return
   if (data.method === 'pymss.overlay') {
     if (allowed('ui.overlay') && typeof data.params?.open === 'boolean') {
-      overlayOpen.value = data.params.open
-      if (overlayOpen.value) syncOverlayLayout()
-      else postToFrame({ jsonrpc: '2.0', method: 'host.overlay', params: { open: false } })
+      const params = data.params
+      if ('prepared' in params) {
+        if (params.open && params.prepared === pendingOverlayGeneration && pendingOverlayGeneration > 0) {
+          pendingOverlayGeneration = 0
+          overlayOpen.value = true
+          syncOverlayLayout()
+        }
+      } else if (params.open && params.synchronized === true) {
+        const layout = overlayLayout()
+        if (!layout || !Number.isSafeInteger(params.generation) || params.generation <= 0) return
+        pendingOverlayGeneration = params.generation
+        postToFrame({ jsonrpc: '2.0', method: 'host.overlay', params: {
+          open: true, prepare: true, generation: params.generation, ...layout,
+        } })
+      } else {
+        pendingOverlayGeneration = 0
+        overlayOpen.value = params.open
+        if (overlayOpen.value) syncOverlayLayout()
+        else postToFrame({ jsonrpc: '2.0', method: 'host.overlay', params: { open: false } })
+      }
     }
     return
   }
@@ -497,6 +528,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   unregisterCloseGuard()
+  pendingOverlayGeneration = 0
+  overlayOpen.value = false
   disposed = true
   window.removeEventListener('message', onWindowMessage)
   window.removeEventListener('resize', syncOverlayLayout)
@@ -517,12 +550,12 @@ onBeforeUnmount(() => {
       v-if="src && status !== 'error'"
       ref="frame"
       class="plugin-view-frame"
-      :class="{ 'plugin-view-frame--overlay': overlayOpen }"
+      :class="{ 'plugin-view-frame--overlay': overlayOpen, 'plugin-view-frame--loaded': frameLoaded }"
       :style="{ height: overlayOpen ? '100dvh' : `${measuredHeight}px` }"
       :src="src"
       sandbox="allow-scripts allow-forms"
       :title="view.title || pluginName"
-      @load="pushTheme"
+      @load="onFrameLoad"
     />
   </div>
 </template>
@@ -530,7 +563,11 @@ onBeforeUnmount(() => {
 <style scoped>
 .plugin-view-host { min-width: 0; }
 .plugin-view-frame--overlay { position: fixed; inset: 0; z-index: 3000; width: 100vw !important; }
-.plugin-view-frame { display: block; width: 100%; border: 0; background: transparent; }
+.plugin-view-frame { display: block; width: 100%; border: 0; background: transparent; opacity: 0; }
+.plugin-view-frame:not(.plugin-view-frame--loaded) { pointer-events: none; }
+.plugin-view-frame--loaded { opacity: 1; animation: plugin-frame-enter 180ms ease-out; }
+@keyframes plugin-frame-enter { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .plugin-view-frame--loaded { animation: none; } }
 /* Match the child document so the browser keeps its canvas transparent. */
 .plugin-view-frame { color-scheme: light; }
 :global(.dark-theme .plugin-view-frame) { color-scheme: dark; }

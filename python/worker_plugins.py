@@ -413,6 +413,8 @@ def _unprepared_row(root: Path, name: str, entry: dict, observations: list[dict]
     return {
         "name": name, "pluginId": name, "version": entry.get("version"), "source": meta.get("source", "recorded"),
         "url": meta.get("url"), "path": "", "managed": True, "enabled": entry["state"] == "enabled", "loaded": False,
+        "sourceRef": meta.get("ref"), "sourceSubpath": meta.get("subpath"), "contentDigest": entry.get("content"),
+        "installedAt": meta.get("installed_at"), "resolvedCommit": meta.get("resolved_commit"),
         "prepared": False, "availability": "not_prepared", "error": None, "dependencyError": None,
         "requirements": requirements, "compatibility": compatibility(core_requirements, profile),
         "description": definition.get("description", ""), "locales": presentation["locales"],
@@ -809,6 +811,8 @@ def _inventory(root: Path, *, verify: bool = False, default_policy: str | None =
             "name": plugin.name, "pluginId": plugin.name, "version": (manifest or {}).get("version") or meta.get("version"),
             "managed": True, "source": meta.get("source", "unknown"), "url": meta.get("url"),
             "resolvedCommit": meta.get("resolved_commit"),
+            "contentDigest": intent.get("content"), "installedAt": meta.get("installed_at"),
+            "sourceRef": meta.get("ref"), "sourceSubpath": meta.get("subpath"),
             "requirements": requirements, "compatibility": compatible,
             "path": str(plugin), "loaded": loaded, "enabled": enabled,
             "prepared": True, "availability": "ready" if loaded else "unavailable",
@@ -835,11 +839,18 @@ def _inventory(root: Path, *, verify: bool = False, default_policy: str | None =
         rows.append(row)
     rows.extend(_directory_plugins())
     available = [name for name in bundles if name not in state["plugins"] and not _location(root, name).exists()]
+    try:
+        with _plugin_registry():
+            update_source = [str(_LOCAL_SOURCE.get()) if _LOCAL_SOURCE.get() else None, _REGISTRY_URL.get()]
+    except (OSError, ValueError):
+        # A broken catalog configuration must not hide installed plugins.
+        update_source = None
     return {
         "installed": rows, "pluginsDir": str(root / "installed"),
         "verificationError": verification_error,
         "legacyPlugins": _legacy_plugins(root),
         "runtime": {"identity": root.name, "pythonPath": sys.executable, "bindingDir": str(root),
+                    "updateSourceIdentity": hashlib.sha256(json.dumps(update_source).encode()).hexdigest(),
                     "managementSupported": True, **profile},
         "preinstalled": [{"name": name, "version": row["version"], "installed": name in state["plugins"] and state["plugins"][name]["state"] != "removed"}
                          for name, row in bundles.items()],
@@ -1037,6 +1048,8 @@ def cmd_manage_plugin(payload: dict[str, Any]) -> int:
             raise ValueError("Unsupported plugin action")
         if "installDependencies" in payload and type(payload["installDependencies"]) is not bool:
             raise ValueError("installDependencies must be a boolean")
+        if "expectedUpdate" in payload and getattr(_manager_engine(), "UPDATE_REVIEW_VERSION", None) != 1:
+            raise PluginRuntimeIncompatible("Update this runtime's pymss core before applying a reviewed plugin update.")
         if payload.get("defaultPolicy") not in {None, "auto", "review"}:
             raise ValueError("Invalid default plugin policy")
         if payload.get("expectedSource") is not None:

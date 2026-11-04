@@ -121,11 +121,87 @@ class PluginSourceTests(unittest.TestCase):
         value = json.loads(receipt.read_text())
         value['defaultRepository'] = True
         receipt.write_text(json.dumps(value))
-        with mock.patch.object(installer, 'list_available', return_value=[{'name': 'hello', 'url': 'https://example.com/plugins', 'subpath': 'hello', 'version': '2.0.0'}]), \
-             mock.patch.object(installer, 'check_update', side_effect=AssertionError('unexpected clone')), redirect_stdout(io.StringIO()):
-            result = plugins._check_updates(self.root, None)
-        self.assertEqual(result['hello']['remote_version'], '2.0.0')
-        self.assertFalse(result['hello']['up_to_date'])
+        commit = 'b' * 40
+        for host in ['github.com', 'gitcode.com']:
+            with self.subTest(host=host), \
+                 mock.patch.object(installer, 'list_available', return_value=[{
+                     'name': 'hello', 'url': f'https://{host}/example/plugins', 'subpath': 'hello',
+                     'version': '2.0.0', 'ref': commit,
+                 }]), mock.patch.object(installer, '_fetch_remote_meta', side_effect=AssertionError('unexpected clone')), \
+                 redirect_stdout(io.StringIO()):
+                result = plugins._check_updates(self.root, None)['hello']
+            self.assertEqual(result['remote_version'], '2.0.0')
+            self.assertFalse(result['up_to_date'])
+            self.assertEqual(result['target']['candidate'], {'version': '2.0.0', 'commit': commit})
+
+    def test_unpinned_non_github_catalog_resolves_the_actual_update_commit(self):
+        from pymss.plugins import install as installer
+        self.install(self.source())
+        receipt = self.root / 'installed/hello/.pymss-install.json'
+        value = json.loads(receipt.read_text())
+        value['defaultRepository'] = True
+        receipt.write_text(json.dumps(value))
+        url, commit = 'https://gitcode.com/example/plugins', 'b' * 40
+        with mock.patch.object(installer, 'list_available', return_value=[{
+            'name': 'hello', 'url': url, 'subpath': 'hello', 'version': '2.0.0', 'ref': 'stable',
+        }]), mock.patch.object(installer, '_fetch_remote_meta', return_value={
+            'version': '2.0.0', 'resolved_commit': commit,
+        }) as remote, redirect_stdout(io.StringIO()):
+            result = plugins._check_updates(self.root, None)['hello']
+        remote.assert_called_once_with(url, 'hello', ref='stable')
+        self.assertEqual(result['status'], 'update')
+        self.assertEqual(result['target']['candidate'], {'version': '2.0.0', 'commit': commit})
+
+    def test_inventory_update_source_identity_tracks_configured_sources_without_fetching(self):
+        identities = []
+        sources = [
+            {'mode': 'local', 'localPath': str(self.work / 'source-a')},
+            {'mode': 'local', 'localPath': str(self.work / 'source-b')},
+            {'mode': 'repository', 'repositoryUrl': 'https://github.com/example/one', 'ref': 'main', 'registryRef': 'main'},
+            {'mode': 'repository', 'repositoryUrl': 'https://github.com/example/two', 'ref': 'main', 'registryRef': 'main'},
+            {'mode': 'repository', 'repositoryUrl': 'https://github.com/example/two', 'ref': 'stable', 'registryRef': 'stable'},
+        ]
+        for source in sources:
+            with self.subTest(source=source), \
+                 mock.patch.dict(os.environ, {'PYMSS_STUDIO_PLUGIN_SOURCE_OVERRIDE': json.dumps(source)}), \
+                 mock.patch('pymss.plugins.install.list_available', side_effect=AssertionError('unexpected network request')), \
+                 mock.patch.object(plugins, '_local_catalog', side_effect=AssertionError('unexpected catalog read')):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    code = plugins.cmd_plugin_marketplace({'includeCatalog': False})
+                self.assertEqual(code, 0, output.getvalue())
+                identity = json.loads(output.getvalue())['payload']['runtime']['updateSourceIdentity']
+                self.assertEqual(identity, plugins._inventory(self.root)['runtime']['updateSourceIdentity'])
+                identities.append(identity)
+        self.assertEqual(len(set(identities)), len(sources))
+
+    def test_management_result_source_identity_matches_current_inventory(self):
+        first = self.local_source()
+        second = self.work / 'second-source'
+        shutil.copytree(first, second)
+        with mock.patch.dict(os.environ, {'PYMSS_STUDIO_PLUGINS_SOURCE': str(first)}):
+            code, events = self.manage('install', name='hello')
+        self.assertEqual(code, 0, events)
+        previous = events[-1]['payload']['runtime']['updateSourceIdentity']
+        with mock.patch.dict(os.environ, {'PYMSS_STUDIO_PLUGINS_SOURCE': str(second)}):
+            code, events = self.manage('check_updates')
+            current = plugins._inventory(self.root)['runtime']['updateSourceIdentity']
+        self.assertEqual(code, 0, events)
+        self.assertEqual(events[-1]['payload']['runtime']['updateSourceIdentity'], current)
+        self.assertNotEqual(previous, current)
+
+    def test_invalid_source_configuration_preserves_installed_inventory(self):
+        self.install(self.source())
+        previous = plugins._inventory(self.root)['runtime']['updateSourceIdentity']
+        override = json.dumps({'mode': 'local', 'localPath': 'relative'})
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {'PYMSS_STUDIO_PLUGIN_SOURCE_OVERRIDE': override}), redirect_stdout(output):
+            code = plugins.cmd_plugin_marketplace({})
+        self.assertEqual(code, 0, output.getvalue())
+        snapshot = json.loads(output.getvalue())['payload']
+        self.assertTrue(any(row['name'] == 'hello' for row in snapshot['installed']))
+        self.assertIn('absolute', snapshot['catalogError'])
+        self.assertNotEqual(previous, snapshot['runtime']['updateSourceIdentity'])
 
     def test_same_version_source_edits_are_detected_and_dependency_sidecars_are_ignored(self):
         root = self.local_source()

@@ -48,6 +48,10 @@ class RuntimeBindingTests(unittest.TestCase):
     def test_switching_runtime_keeps_the_installation_record_without_loading_its_view(self):
         self.install(self.source())
         cpu = self.root
+        receipt = cpu / "installed/hello/.pymss-install.json"
+        metadata = json.loads(receipt.read_text())
+        metadata.update(url="https://github.com/example/plugins", subpath="plugins/hello", ref="main")
+        receipt.write_text(json.dumps(metadata))
         before = (cpu / "installed/hello/.pymss-install.json").read_bytes()
         self.switch("cuda")
         row = self.row()
@@ -55,6 +59,9 @@ class RuntimeBindingTests(unittest.TestCase):
         self.assertEqual(row["availability"], "not_prepared")
         self.assertFalse(row["loaded"])
         self.assertFalse(row["prepared"])
+        self.assertEqual(row["sourceSubpath"], "plugins/hello")
+        self.assertEqual(row["sourceRef"], "main")
+        self.assertTrue(row["contentDigest"])
         self.assertEqual(row["availableBindings"][0]["runtime"], cpu.name)
         self.assertEqual((cpu / "installed/hello/.pymss-install.json").read_bytes(), before)
         self.assertFalse((self.root / "installed/hello").exists())

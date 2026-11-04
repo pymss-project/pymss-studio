@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useMessage } from 'naive-ui'
 import { CopyOutline, SearchOutline } from '@vicons/ionicons5'
@@ -9,14 +9,18 @@ import { logClock, type LogRecord } from '@/utils/logRecord'
 import { getLogLineLevels } from '@/utils/taskLog'
 import { pluginPhases, type PluginActivity, type PluginPhase } from './composable'
 
-const props = defineProps<{ show: boolean; records: readonly LogRecord[]; task: PluginActivity | null; tasks?: readonly PluginActivity[] }>()
+const props = defineProps<{ show: boolean; records: readonly LogRecord[]; task: PluginActivity | null; tasks?: readonly PluginActivity[]; initialTaskId?: string }>()
 const emit = defineEmits<{ 'update:show': [value: boolean]; cancel: [id?: string] }>()
 const { t } = useI18n()
 const message = useMessage()
 const search = ref('')
 const selectedId = ref<string>()
+watch([() => props.show, () => props.initialTaskId], ([show]) => {
+  if (show) selectedId.value = props.initialTaskId || props.task?.id
+}, { immediate: true })
 const selectedTask = computed(() => props.tasks?.find(task => task.id === selectedId.value) || props.task)
-const taskOptions = computed(() => [...(props.tasks || [])].reverse().map(task => ({ value: task.id, label: `${t(`plugins.actions.${task.action}`)} · ${task.name}` })))
+const taskOptions = computed(() => [...(props.tasks || [])].reverse().map(task => ({ value: task.id,
+  label: `${logClock(new Date(task.startedAt).toISOString())} · ${t(`plugins.actions.${task.action}`)}${task.name ? ` · ${task.name}` : ''} · ${t(task.status === 'running' ? `plugins.phases.${task.phase}` : `plugins.taskStates.${task.status}`)}` })))
 const taskRecords = computed(() => props.records.filter(record => !selectedTask.value?.id || record.context.pluginTaskId === selectedTask.value.id))
 const localized = computed(() => {
   const levels = getLogLineLevels(taskRecords.value.map(record => record.message))

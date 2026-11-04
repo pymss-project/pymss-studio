@@ -72,6 +72,23 @@ test('plugin source changes are durable before the settings method returns', asy
   } finally { settings.$dispose() }
 })
 
+test('plugin view mode defaults to a list and restores a saved card preference', async () => {
+  localStorage.setItem(key, JSON.stringify({ startupOnboardingSeen: true, pluginViewMode: 'invalid' }))
+  const settings = useSettingsStore(createPinia())
+  try {
+    await settings.initialize()
+    assert.equal(settings.pluginViewMode, 'list')
+    settings.pluginViewMode = 'card'
+    await saved()
+    assert.equal(persisted().pluginViewMode, 'card')
+    const restored = useSettingsStore(createPinia())
+    try {
+      await restored.initialize()
+      assert.equal(restored.pluginViewMode, 'card')
+    } finally { restored.$dispose() }
+  } finally { settings.$dispose() }
+})
+
 test('a failed source preference write restores the previous source', async () => {
   localStorage.setItem(key, JSON.stringify({ startupOnboardingSeen: true, pluginSource: 'github' }))
   const settings = useSettingsStore(createPinia())

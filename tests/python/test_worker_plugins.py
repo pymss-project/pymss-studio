@@ -14,7 +14,7 @@ from unittest import mock
 if __package__:
     from . import _bootstrap as _worker_test_bootstrap
 else:
-    import _bootstrap as _worker_test_bootstrap
+    import _bootstrap as _worker_test_bootstrap  # noqa: F401
 
 import worker_operations
 import worker_plugins as plugins
@@ -529,11 +529,13 @@ def setup(plugin):
         manifest_path.write_text(json.dumps(metadata))
         def check(*args, **kwargs):
             with runtime_lock(self.root / ".lock", timeout=0):
-                return {"remote_version": "2.0.0", "up_to_date": False}
-        with mock.patch.object(installer, "check_update", side_effect=check):
+                return {"version": "2.0.0", "resolved_commit": "a" * 40}
+        with mock.patch.object(installer, "_fetch_remote_meta", side_effect=check) as remote:
             code, events = self.manage("check_updates")
+        remote.assert_called_once()
         self.assertEqual(code, 0, events)
         self.assertFalse(events[-1]["payload"]["updates"]["hello"]["up_to_date"])
+        self.assertEqual(events[-1]["payload"]["updates"]["hello"]["status"], "update")
 
     def test_source_without_entrypoint_is_not_installed(self):
         source = self.source()

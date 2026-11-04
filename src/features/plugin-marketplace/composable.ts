@@ -6,6 +6,8 @@ import { localLogRecord, type LogRecord } from '@/utils/logRecord'
 import { getLogLineLevel } from '@/utils/taskLog'
 import type { PluginCategory, PluginLocales } from './presentation'
 import { useSettingsStore } from '@/stores/settings'
+import { canCheckPluginUpdate, pluginUpdateKey, type PluginUpdateState } from './updates'
+import { installedPluginKey } from './library'
 
 export type PluginRequirements = {
   sdkVersion: number | null
@@ -17,6 +19,7 @@ export type PluginRequirements = {
 export type PluginCompatibility = { compatible: boolean; reasons: string[] }
 export type CatalogPlugin = {
   name: string
+  version?: string | null
   url: string
   subpath?: string | null
   description: string
@@ -55,12 +58,19 @@ export type InstalledPlugin = {
   requirements?: PluginRequirements | null
   compatibility?: PluginCompatibility
   resolvedCommit?: string | null
+  contentDigest?: string | null
+  installedAt?: string | null
+  sourceRef?: string | null
+  sourceSubpath?: string | null
   contributions?: {
     graphs?: { id: string; file: string; operation: string }[]
     views?: { id: string; title: string; entry: string; entryPath?: string; placements: string[]; operation?: string | null; permissions: string[]; sdkVersion?: number; requiredCapabilities?: string[]; category?: string; icon?: string; pluginId?: string; revision?: string }[]
   }
 }
 export type PluginUpdate = {
+  status?: Exclude<PluginUpdateState, 'unchecked'>
+  checked_at?: string
+  target?: Record<string, unknown>
   local_version?: string | null
   remote_version?: string | null
   up_to_date?: boolean
@@ -73,7 +83,7 @@ export type PluginInventory = {
   installed: InstalledPlugin[]
   pluginsDir: string
   verificationError?: string | null
-  runtime: { identity: string; pythonPath: string; bindingDir?: string; managementSupported?: boolean }
+  runtime: { identity: string; pythonPath: string; bindingDir?: string; managementSupported?: boolean; updateSourceIdentity?: string }
   preinstalled?: { name: string; version: string; installed: boolean }[]
   preinstalledPending?: string[]
   preinstalledAvailable?: string[]
@@ -96,6 +106,7 @@ export const pluginPhases = ['queued', 'starting', 'working', 'preparing', 'chec
 export type PluginPhase = typeof pluginPhases[number]
 export type PluginActivity = {
   id?: string
+  runtime?: string
   action: PluginAction
   name: string
   phase: PluginPhase
@@ -133,7 +144,7 @@ let inventoryRequest: Promise<void> | undefined
 let catalogRequest: { generation: number; promise: Promise<void> } | undefined
 let unlisten: UnlistenFn | undefined
 let listening: Promise<void> | undefined
-type ManageOptions = { name?: string; target?: string; locale?: string; mirror?: string; expectedSource?: string; expectedRuntime?: string; installDependencies?: boolean; sourceRuntime?: string; sourceVersion?: string | null; sourceContent?: string | null }
+type ManageOptions = { name?: string; target?: string; locale?: string; mirror?: string; expectedSource?: string; expectedRuntime?: string; expectedUpdate?: PluginUpdate; installDependencies?: boolean; sourceRuntime?: string; sourceVersion?: string | null; sourceContent?: string | null }
 type TaskControl = {
   id: string
   workerId: string
@@ -156,8 +167,10 @@ let earlyEvents: WorkerEvent[] = []
 const earlyTerminals = new Map<string, WorkerEvent>()
 
 function appendLog(message: string, context: Record<string, unknown> = {}, level?: 'info' | 'error') {
-  if (message.trim()) logRecords.value = [...logRecords.value,
-    { ...localLogRecord(message, 'plugin.activity', level || getLogLineLevel(message) || 'info'), logger: 'studio.plugins', context }].slice(-160)
+  if (!message.trim()) return
+  const retained = new Set(logRecords.value.filter(record => record.context.pluginTaskId === context.pluginTaskId).slice(-159))
+  logRecords.value = [...logRecords.value.filter(record => record.context.pluginTaskId !== context.pluginTaskId || retained.has(record)),
+    { ...localLogRecord(message, 'plugin.activity', level || getLogLineLevel(message) || 'info'), logger: 'studio.plugins', context }]
 }
 
 function taskActivity(control: TaskControl) {
@@ -173,6 +186,16 @@ function taskError(control: TaskControl, message: string) {
   error.value = message
 }
 
+function applySnapshot(next: PluginMarketplace) {
+  const previous = snapshot.value
+  const before = new Map((previous?.installed || []).filter(plugin => plugin.managed).map(plugin => [plugin.name, pluginUpdateKey(plugin, previous!.runtime)]))
+  const after = new Map(next.installed.filter(plugin => plugin.managed).map(plugin => [plugin.name, pluginUpdateKey(plugin, next.runtime)]))
+  updates.value = Object.fromEntries(Object.entries(updates.value).filter(([name]) => before.has(name) && before.get(name) === after.get(name)))
+  snapshot.value = next
+}
+
+function clearUpdateChecks() { updates.value = {} }
+
 function finish(control: TaskControl, failure?: string, receivedInventory = false, cancelled = false) {
   if (!tasks.delete(control.id)) return
   earlyEvents = earlyEvents.filter(event => !event.taskId || !control.acceptedIds.has(event.taskId))
@@ -184,6 +207,14 @@ function finish(control: TaskControl, failure?: string, receivedInventory = fals
   if (!failure || cancelled) appendLog(cancelled ? 'Plugin operation cancelled' : 'Plugin operation completed', {
     pluginTaskId: control.id, pluginOutcome: cancelled ? 'cancelled' : 'succeeded' })
   if (failure) {
+    if (!cancelled && control.action === 'update' && control.options.expectedUpdate && control.options.name) {
+      delete updates.value[control.options.name]
+    }
+    if (!cancelled && control.action === 'check_updates') {
+      const failed = (snapshot.value?.installed || []).filter(plugin => canCheckPluginUpdate(plugin) && (!control.options.name || control.options.name === plugin.name))
+      const checked_at = new Date().toISOString()
+      updates.value = { ...updates.value, ...Object.fromEntries(failed.map(plugin => [plugin.name, { status: 'error' as const, error: failure, checked_at }])) }
+    }
     if (!cancelled) taskError(control, failure)
     if (!cancelled) appendLog(failure, { pluginTaskId: control.id }, 'error')
     control.reject(new Error(failure))
@@ -230,10 +261,13 @@ function handleEvent(event: WorkerEvent) {
             (!snapshot.value || snapshot.value.runtime.identity === inventory.runtime.identity)) {
           // Installations only add rows. A delayed snapshot must not erase a sibling's result.
           const installed = control.action === 'install'
-            ? [...new Map([...(snapshot.value?.installed || []), ...inventory.installed].map(plugin => [`${plugin.managed}:${plugin.name}`, plugin])).values()]
+            ? [...new Map([...(snapshot.value?.installed || []), ...inventory.installed].map(plugin => [installedPluginKey(plugin), plugin])).values()]
             : inventory.installed
-          snapshot.value = { catalog: [], catalogError: null, ...snapshot.value, ...inventory, installed }
-          updates.value = { ...updates.value, ...inventory.updates }
+          applySnapshot({ catalog: [], catalogError: null, ...snapshot.value, ...inventory, installed })
+          if (control.action === 'check_updates') {
+            const checked_at = new Date().toISOString()
+            updates.value = { ...updates.value, ...Object.fromEntries(Object.entries(inventory.updates || {}).map(([name, result]) => [name, { checked_at, ...result }])) }
+          }
           pluginRevision.value += 1
           finish(control, undefined, true)
         } else finish(control)
@@ -257,9 +291,9 @@ async function loadSnapshot(includeCatalog: boolean, prepare = true, forceVerify
     if (request !== sequence) return
     const runtimeChanged = snapshot.value?.runtime.identity !== result.runtime.identity
     if (runtimeChanged) updates.value = {}
-    snapshot.value = !includeCatalog && !runtimeChanged && snapshot.value
+    applySnapshot(!includeCatalog && !runtimeChanged && snapshot.value
       ? { ...result, catalog: snapshot.value.catalog, catalogError: snapshot.value.catalogError, catalogSource: snapshot.value.catalogSource }
-      : result
+      : result)
     if (runtimeChanged) pluginRevision.value += 1
     if (prepare && result.preinstalledPending?.length) {
       loading.value = false
@@ -308,10 +342,10 @@ async function loadCatalog() {
   try {
     const catalog = await invoke<Pick<PluginMarketplace, 'catalog' | 'catalogError' | 'catalogSource' | 'runtime'>>('plugin_marketplace', { payload: { catalogOnly: true } })
     if (request !== catalogSequence || generation !== sequence || snapshot.value?.runtime.identity !== runtime || catalog.runtime.identity !== runtime) return
-    snapshot.value = { ...snapshot.value, catalog: catalog.catalog, catalogError: catalog.catalogError, catalogSource: catalog.catalogSource }
+    applySnapshot({ ...snapshot.value, catalog: catalog.catalog, catalogError: catalog.catalogError, catalogSource: catalog.catalogSource })
   } catch (failure) {
     if (request === catalogSequence && generation === sequence && snapshot.value?.runtime.identity === runtime) {
-      snapshot.value = { ...snapshot.value, catalog: [], catalogSource: undefined, catalogError: String(failure) }
+      snapshot.value = { ...snapshot.value, catalog: [], catalogError: String(failure) }
     }
   } finally {
     if (request === catalogSequence) catalogLoading.value = false
@@ -367,22 +401,20 @@ async function manage(action: PluginAction, options: ManageOptions = {}) {
   let receivedInventory = false
   error.value = ''
   errorOwner = ''
-  if (!busy.value) { logRecords.value = []; activities.value = [] }
   const now = Date.now()
   const id = `plugin_manage_${now}_${Math.random().toString(36).slice(2, 10)}`
   let resolve!: TaskControl['resolve'], reject!: TaskControl['reject']
   const completion = new Promise<boolean>((success, failure) => { resolve = success; reject = failure })
   void completion.catch(() => undefined)
   activities.value = [...activities.value.filter(task => running(task)).concat(activities.value.filter(task => !running(task)).slice(-19)),
-    { id, action, name, phase: 'queued', status: 'running', error: '', startedAt: now, updatedAt: now, finishedAt: null }]
+    { id, action, name, runtime: snapshot.value?.runtime.identity, phase: 'queued', status: 'running', error: '', startedAt: now, updatedAt: now, finishedAt: null }]
+  const retainedIds = new Set(activities.value.map(task => task.id))
+  logRecords.value = logRecords.value.filter(record => retainedIds.has(record.context.pluginTaskId as string))
   tasks.set(id, { id, workerId: id, action, options, runtime: snapshot.value?.runtime.identity,
     acceptedIds: new Set([id]), awaitingAcknowledgement: false, dispatched: false, invoked: false, completion, resolve, reject })
   pump()
   try {
     receivedInventory = await completion
-    if (action !== 'check_updates') {
-      if (options.name) delete updates.value[options.name]
-    }
   } finally {
     // Failed imports and cancelled tasks may still have changed on-disk state.
     const operationError = error.value
@@ -426,5 +458,5 @@ registerWindowCloseGuard(async () => {
 
 export function usePluginMarketplace() {
   return { snapshot, updates, loading, catalogLoading, error, busy, exclusiveBusy, logs, logRecords, activity, activities,
-    ready: computed(() => snapshot.value !== null), refresh, refreshInventory, reloadRuntimeInventory, ensureInventory, openMarketplace, manage, cancel }
+    ready: computed(() => snapshot.value !== null), refresh, refreshInventory, reloadRuntimeInventory, ensureInventory, openMarketplace, clearUpdateChecks, manage, cancel }
 }

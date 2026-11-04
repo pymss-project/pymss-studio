@@ -37,6 +37,8 @@ globalThis.__pluginListen = async (_name, listener) => { callback = listener; re
 
 async function reset() {
   requests = []
+  market.activities.value = []
+  market.logRecords.value = []
   globalThis.__pluginInvoke = async (command, args) => {
     requests.push({ command, ...args })
     return command === 'plugin_marketplace' ? empty() : { started: true }
@@ -46,6 +48,18 @@ async function reset() {
 const nextTurn = () => new Promise(resolve => setImmediate(resolve))
 
 const installedResult = name => ({ ...empty(), updates: {}, installed: [{ name, managed: true, loaded: true, operations: [] }] })
+
+test('an installation result retains each read-only copy with the same plugin ID', async () => {
+  await reset()
+  const copies = ['/manual/a/analysis', '/manual/b/analysis'].map(path => ({ name: 'analysis', managed: false, loaded: true, path }))
+  market.snapshot.value.installed = copies
+  const completion = market.manage('install', { name: 'new-plugin' })
+  await nextTurn()
+  event('plugin_manage_result', { ...installedResult('new-plugin'), installed: [copies[1], ...installedResult('new-plugin').installed] })
+  await completion
+  assert.deepEqual(market.snapshot.value.installed.filter(plugin => !plugin.managed).map(plugin => plugin.path), copies.map(plugin => plugin.path))
+  assert.equal(market.snapshot.value.installed.filter(plugin => plugin.name === 'new-plugin').length, 1)
+})
 
 test('diagnostic catalog requests can suppress default preparation', async () => {
   await reset()
@@ -57,7 +71,7 @@ test('diagnostic catalog requests can suppress default preparation', async () =>
   assert.equal(requests.some(request => request.command === 'manage_plugin'), false)
 })
 
-test('catalog source survives inventory refresh and is cleared when catalog loading fails', async () => {
+test('catalog failures retain the last confirmed source for an explicitly stale display', async () => {
   await reset()
   const source = { supported: true, provider: 'gitcode', preference: 'auto', gitAvailable: true }
   globalThis.__pluginInvoke = async (command, args) => ({
@@ -72,9 +86,44 @@ test('catalog source survives inventory refresh and is cleared when catalog load
     return empty()
   }
   await market.openMarketplace(true)
-  assert.equal(market.snapshot.value.catalogSource, undefined)
+  assert.deepEqual(market.snapshot.value.catalogSource, source)
   assert.deepEqual(market.snapshot.value.catalog, [])
   assert.match(market.snapshot.value.catalogError, /Source unavailable/)
+})
+
+test('a later task keeps failed task details even when its own logs reach the limit', async () => {
+  await reset()
+  const first = market.manage('repair', { name: 'broken' })
+  const rejected = assert.rejects(first, /Missing dependency/)
+  await nextTurn()
+  const firstId = requests.at(-1).payload.taskId
+  event('error', { message: 'Missing dependency' }, firstId)
+  await rejected
+  const next = market.manage('install', { name: 'new' })
+  await nextTurn()
+  const nextId = requests.at(-1).payload.taskId
+  for (let i = 0; i < 180; i++) event('plugin_log', { message: `next task ${i}` }, nextId)
+  try {
+    assert.equal(market.activities.value.find(task => task.id === firstId).error, 'Missing dependency')
+    assert.ok(market.logRecords.value.some(record => record.context.pluginTaskId === firstId && record.message === 'Missing dependency'))
+    assert.equal(market.logRecords.value.filter(record => record.context.pluginTaskId === nextId).length, 160)
+  } finally {
+    event('plugin_manage_result', installedResult('new'), nextId)
+    await next
+  }
+})
+
+test('retained task history and its logs are pruned together after twenty completed tasks', async () => {
+  await reset()
+  for (let i = 0; i < 23; i++) {
+    const completion = market.manage('install', { name: `plugin-${i}` })
+    await nextTurn()
+    event('plugin_manage_result', installedResult(`plugin-${i}`))
+    await completion
+  }
+  assert.equal(market.activities.value.length, 20)
+  const ids = new Set(market.activities.value.map(task => task.id))
+  assert.ok(market.logRecords.value.every(record => ids.has(record.context.pluginTaskId)))
 })
 
 test('three installs overlap, queued work starts as a slot frees, and delayed inventories merge', async () => {
@@ -361,6 +410,58 @@ test('navigation keeps the task alive and records only a bounded activity log', 
   event('plugin_manage_result', { ...empty(), updates: { hello: { up_to_date: false, remote_version: '2.0.0' } } }, id)
   await completion
   assert.equal(market.updates.value.hello.remote_version, '2.0.0')
+})
+
+test('update checks survive unchanged snapshots and expire on contents, source or interpreter changes', async () => {
+  for (const change of [
+    value => { value.installed[0].contentDigest = 'changed' },
+    value => { value.installed[0].url = '/other-source' },
+    value => { value.runtime.pythonPath = '/other/python' },
+    value => { value.runtime.updateSourceIdentity = 'other-source' },
+  ]) {
+    await reset()
+    const inventory = { ...empty(), installed: [{ name: 'hello', managed: true, url: '/source', contentDigest: 'first' },
+      { name: 'hello', managed: false, path: '/manual/hello', url: '/external-source' }] }
+    globalThis.__pluginInvoke = async (command, args) => {
+      requests.push({ command, ...args })
+      return command === 'plugin_marketplace' ? structuredClone(inventory) : { started: true }
+    }
+    await market.refreshInventory()
+    const completion = market.manage('check_updates', { name: 'hello' })
+    await nextTurn()
+    event('plugin_manage_result', { ...inventory, updates: { hello: { status: 'latest', up_to_date: true } } })
+    await completion
+    assert.ok(market.updates.value.hello.checked_at)
+    await market.refreshInventory()
+    assert.equal(market.updates.value.hello.status, 'latest')
+    change(inventory)
+    await market.refreshInventory()
+    assert.equal(market.updates.value.hello, undefined)
+  }
+})
+
+test('a failed selective check replaces its old latest state and preserves other checks', async () => {
+  await reset()
+  const inventory = { ...empty(), installed: ['one', 'two'].map(name => ({ name, managed: true, url: `/source/${name}` })) }
+  globalThis.__pluginInvoke = async (command, args) => {
+    requests.push({ command, ...args })
+    return command === 'plugin_marketplace' ? structuredClone(inventory) : { started: true }
+  }
+  await market.refreshInventory()
+  const first = market.manage('check_updates')
+  await nextTurn()
+  event('plugin_manage_result', { ...inventory, updates: { one: { status: 'latest' }, two: { status: 'latest' } } })
+  await first
+  const retry = market.manage('check_updates', { name: 'one' })
+  const rejected = assert.rejects(retry, /Offline/)
+  await nextTurn()
+  assert.equal(requests.at(-1).payload.name, 'one')
+  event('error', { message: 'Offline' })
+  await rejected
+  assert.equal(market.updates.value.one.status, 'error')
+  assert.equal(market.updates.value.two.status, 'latest')
+  market.clearUpdateChecks()
+  assert.deepEqual(market.updates.value, {})
 })
 
 test('simultaneous page entries share one inventory request', async () => {

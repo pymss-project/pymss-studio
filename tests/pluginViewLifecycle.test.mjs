@@ -25,12 +25,12 @@ const names = new Set([
   'allowed', 'handleCall', 'postToFrame', 'onWindowMessage', 'syncBusy',
   'pluginSettingsKey', 'plainObject', 'boundedPath', 'boundedPaths',
   'cancelOwned', 'settleRun', 'closeRunningOperations', 'startBackground', 'workerError', 'isAllowedExternalUrl',
-  'pushTheme', 'syncOverlayLayout',
+  'pushTheme', 'syncOverlayLayout', 'overlayLayout',
 ])
 const snippets = source.statements.flatMap(node => {
   if (ts.isFunctionDeclaration(node) && names.has(node.name?.text)) return [node.getText(source)]
   if (ts.isClassDeclaration(node) && ['TaskCancelledError', 'WorkerRequestError'].includes(node.name?.text || '')) return [node.getText(source)]
-  if (ts.isVariableStatement(node) && node.declarationList.declarations.some(item => ['disposed', 'unregisterCloseGuard', 'MIN_VIEW_HEIGHT', 'MAX_VIEW_HEIGHT', 'THEME_TOKENS', 'sdkInfo'].includes(item.name.getText(source)))) return [node.getText(source)]
+  if (ts.isVariableStatement(node) && node.declarationList.declarations.some(item => ['disposed', 'unregisterCloseGuard', 'MIN_VIEW_HEIGHT', 'MAX_VIEW_HEIGHT', 'THEME_TOKENS', 'sdkInfo', 'pendingOverlayGeneration'].includes(item.name.getText(source)))) return [node.getText(source)]
   if (ts.isExpressionStatement(node) && ts.isCallExpression(node.expression)) {
     const call = node.expression
     if (['onMounted', 'onBeforeUnmount'].includes(call.expression.getText(source))) {
@@ -53,7 +53,7 @@ function host(overrides = {}) {
     permissions: () => ['operations'],
     frame: { value: { contentWindow: { postMessage: value => messages.push(structuredClone(value)) } } },
     src: { value: '' }, status: { value: 'loading' }, errorText: { value: '' }, measuredHeight: { value: 640 }, overlayOpen: { value: false },
-    window: { addEventListener() {}, removeEventListener() {} }, document: { documentElement: { classList: { contains: () => false } } }, getComputedStyle: () => ({ getPropertyValue: () => '' }),
+    window: { innerWidth: 1280, innerHeight: 900, addEventListener() {}, removeEventListener() {} }, document: { documentElement: { classList: { contains: () => false } } }, getComputedStyle: () => ({ getPropertyValue: () => '' }),
     MutationObserver: class { observe() {} disconnect() {} },
     getThemeOverrides: () => ({}),
     onWindowMessage() {}, pushTheme() {},
@@ -215,7 +215,7 @@ test('authorized log overlays preserve the form position and track host layout c
     data: { jsonrpc: '2.0', method: 'pymss.overlay', params: { open } } })
   overlay(true)
   assert.equal(state.overlayOpen.value, true)
-  assert.deepEqual(messages.at(-1), { jsonrpc: '2.0', method: 'host.overlay', params: { open: true, bounds } })
+  assert.deepEqual(messages.at(-1), { jsonrpc: '2.0', method: 'host.overlay', params: { open: true, bounds, viewport: { width: 1280, height: 900 } } })
   bounds = { left: 240, top: 72, width: 600 }
   overlay(true)
   assert.deepEqual(messages.at(-1).params.bounds, bounds)
@@ -555,5 +555,29 @@ test('only an authorized owning iframe can expand a modal and resize resumes aft
   assert.equal(state.measuredHeight.value, 720)
   controller.unmount()
   notify('pymss.overlay', { open: true })
+  assert.equal(state.overlayOpen.value, false)
+})
+
+test('synchronized overlays prepare coordinates before promoting the frame and reject stale acknowledgements', () => {
+  const { state, controller, messages } = host({ permissions: () => ['ui.overlay'] })
+  state.window.innerWidth = 1280
+  state.window.innerHeight = 900
+  state.frame.value.parentElement = { getBoundingClientRect: () => ({ left: 302, top: 156, width: 946 }) }
+  const notify = params => controller.onWindowMessage({ source: state.frame.value.contentWindow,
+    data: { jsonrpc: '2.0', method: 'pymss.overlay', params } })
+  notify({ open: true, synchronized: true, generation: 1 })
+  assert.equal(state.overlayOpen.value, false)
+  assert.equal(messages.at(-1).params.prepare, true)
+  assert.deepEqual(messages.at(-1).params.viewport, { width: 1280, height: 900 })
+  notify({ open: true, prepared: 2 })
+  assert.equal(state.overlayOpen.value, false)
+  notify({ open: true, prepared: 1 })
+  assert.equal(state.overlayOpen.value, true)
+  notify({ open: false })
+  notify({ open: true, prepared: 1 })
+  assert.equal(state.overlayOpen.value, false)
+  notify({ open: true, synchronized: true, generation: 2 })
+  notify({ open: false })
+  notify({ open: true, prepared: 2 })
   assert.equal(state.overlayOpen.value, false)
 })

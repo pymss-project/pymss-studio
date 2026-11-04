@@ -109,20 +109,6 @@ fn mime_type(path: &Path) -> &'static str {
     }
 }
 
-/// Resolved plugin view contribution served to the Studio frontend.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PluginView {
-    pub plugin_id: String,
-    pub view_id: String,
-    pub title: String,
-    /// Absolute filesystem path of the view entry (index.html) inside the plugin directory.
-    pub entry_path: String,
-    pub placements: Vec<String>,
-    pub operation: Option<String>,
-    pub permissions: Vec<String>,
-}
-
 /// Guarded resolution of a plugin view entry: the path must live inside the
 /// given plugins root (no `..` traversal, no absolute override from the webview).
 pub fn resolve_view(root: &Path, plugin_id: &str, view_id: &str) -> Result<PathBuf, String> {

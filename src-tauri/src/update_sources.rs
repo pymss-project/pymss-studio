@@ -28,6 +28,7 @@ pub fn metadata_name(channel: &str, generation: &str) -> String {
     format!("{channel}-{generation}-{}-update.json", platform_slug())
 }
 
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
 pub fn repair_manifest_endpoints(version: &str, filename: &str, provider: UpdateProvider) -> AppResult<Vec<Url>> {
     Version::parse(version)
         .map_err(|error| AppError::Worker(format!("Invalid repair version: {error}")))?;

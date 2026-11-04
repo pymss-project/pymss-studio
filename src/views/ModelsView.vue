@@ -1759,12 +1759,6 @@ onMounted(() => {
 /* ===== Toolbar ===== */
 .toolbar {
   margin-bottom: 14px;
-  padding: 10px;
-  border: 1px solid color-mix(in srgb, var(--outline) 58%, transparent);
-  border-radius: 16px;
-  background:
-    linear-gradient(180deg, rgba(255,255,255,0.03), transparent 58%),
-    color-mix(in srgb, var(--surface-1) 72%, transparent);
 }
 
 .toolbar-row {

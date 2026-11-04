@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -22,6 +23,60 @@ class PluginUpdateTests(unittest.TestCase):
     manage = marketplace.PluginMarketplaceTests.manage
     install = marketplace.PluginMarketplaceTests.install
     reset_runtime = staticmethod(marketplace.PluginMarketplaceTests.reset_runtime)
+
+    def test_reviewed_update_flows_through_worker_and_keeps_inventory_content_identity(self):
+        self.install(self.source())
+        self.source(version="2.0.0")
+        code, events = self.manage("check_updates", name="hello")
+        self.assertEqual(code, 0, events)
+        checked = events[-1]["payload"]["updates"]["hello"]
+        self.assertEqual(checked["status"], "update")
+        self.assertTrue(events[-1]["payload"]["installed"][0]["contentDigest"])
+        code, events = self.manage("update", name="hello", expectedUpdate=checked)
+        self.assertEqual(code, 0, events)
+        self.assertEqual(events[-1]["payload"]["installed"][0]["version"], "2.0.0")
+
+    def test_an_old_core_cannot_silently_ignore_a_reviewed_update(self):
+        with mock.patch.object(management, "UPDATE_REVIEW_VERSION", 0), mock.patch.object(plugins, "_service") as service:
+            code, events = self.manage("update", name="hello", expectedUpdate={"target": {"schemaVersion": 1}})
+        self.assertEqual(code, 1)
+        self.assertEqual(events[-1]["payload"]["code"], "PLUGIN_RUNTIME_INCOMPATIBLE")
+        service.assert_not_called()
+
+    def test_reviewed_official_update_keeps_the_checked_snapshot_through_the_worker(self):
+        from pymss.plugins import install as installer, marketplace
+
+        self.install(self.source())
+        receipt = self.root / "installed/hello/.pymss-install.json"
+        metadata = json.loads(receipt.read_text())
+        metadata.update(source="url", defaultRepository=True, url=marketplace.GITCODE_REPOSITORY,
+                        subpath="plugins/hello", resolved_commit="a" * 40)
+        receipt.write_text(json.dumps(metadata))
+        source = self.source(version="2.0.0")
+        entry = {"name": "hello", "url": marketplace.GITCODE_REPOSITORY, "subpath": "plugins/hello",
+                 "version": "2.0.0", "ref": "b" * 40}
+
+        def acquire(url, destination, *, subpath, ref, temporary_root):
+            self.assertEqual(url, marketplace.GITCODE_REPOSITORY)
+            self.assertEqual(subpath, "plugins/hello")
+            self.assertEqual(ref, "b" * 40)
+            shutil.copytree(source, destination)
+            return {"resolved_commit": ref}
+
+        with mock.patch.dict(os.environ, {"PYMSS_PLUGINS_REGISTRY": marketplace.GITHUB_REGISTRY, "PYMSS_PLUGINS_SOURCE": "auto"}), \
+             mock.patch.object(installer, "list_available", return_value=[entry]) as catalog, \
+             mock.patch.object(installer, "_clone", side_effect=acquire) as clone:
+            code, events = self.manage("check_updates", name="hello")
+            self.assertEqual(code, 0, events)
+            checked = json.loads(json.dumps(events[-1]["payload"]["updates"]["hello"]))
+            catalog.return_value = [{**entry, "url": marketplace.GITHUB_REPOSITORY, "version": "3.0.0", "ref": "c" * 40}]
+            code, events = self.manage("update", name="hello", expectedUpdate=checked)
+        self.assertEqual(code, 0, events)
+        catalog.assert_called_once()
+        clone.assert_called_once()
+        row = next(item for item in events[-1]["payload"]["installed"] if item["name"] == "hello" and item["managed"])
+        self.assertEqual(row["version"], "2.0.0")
+        self.assertEqual(row["resolvedCommit"], "b" * 40)
 
     def deferred_source(self, *, matches=True):
         source = self.source()

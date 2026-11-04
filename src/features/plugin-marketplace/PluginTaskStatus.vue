@@ -48,7 +48,7 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
 .plugin-activity-title span { color: var(--on-surface-muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .plugin-activity-time { flex-shrink: 0; color: var(--on-surface-muted); font-variant-numeric: tabular-nums; }
 .plugin-activity-idle { margin: 4px 0 0; color: var(--on-surface-muted); font-size: 12px; }
-.plugin-activity--failed .plugin-activity-icon { color: var(--error-color, #d86262); }
+.plugin-activity--failed .plugin-activity-icon { color: var(--danger); }
 .plugin-activity--cancelled .plugin-activity-icon { color: var(--on-surface-muted); }
 @media (max-width: 640px) { .plugin-activity { flex-wrap: wrap; gap: 10px; }.plugin-activity-body { flex-basis: calc(100% - 34px); }.plugin-activity-time { margin-left: 28px; }.plugin-activity > .n-button { margin-left: auto; } }
 </style>

@@ -70,6 +70,13 @@ const activePluginHost = computed(() => resolveActivePluginHost(
   pluginMarket.snapshot.value?.pluginsDir || '',
 ))
 const mobileSelectedValue = computed(() => activePluginTool.value || undefined)
+const activeToolPanelKey = computed(() => activePluginHost.value
+  ? `${activePluginHost.value.pluginsRoot}/${activePluginTool.value}/${activePluginHost.value.entry.view.revision || ''}/${activePluginHost.value.entry.availability || 'ready'}`
+  : 'empty')
+
+function deactivateLeavingTool(element: Element) {
+  (element as HTMLElement).inert = true
+}
 
 function toolLabel(entry: PluginToolEntry) {
   return pluginLocale(entry.locales, locale.value).title || entry.view.title || entry.view.id
@@ -211,7 +218,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="page tools-page audio-tools-page">
+  <div class="page tools-page audio-tools-page" :class="{ 'audio-tools-page--active': route.name === 'tools' }">
     <div class="page-header-compact">
       <div><h1>{{ t('tools.title') }}</h1><p>{{ t('tools.subtitle') }}</p></div>
     </div>
@@ -281,31 +288,34 @@ onMounted(async () => {
         </div>
         <div v-show="!inventoryLoading && !unavailableToolId">
           <n-alert v-if="pluginMarket.error.value" type="warning" :bordered="false">{{ pluginMarket.error.value }}</n-alert>
-          <PluginViewHost
-            v-if="activePluginHost && (!activePluginHost.entry.availability || activePluginHost.entry.availability === 'ready')"
-            :key="`${activePluginHost.pluginsRoot}/${activePluginTool}/${activePluginHost.entry.view.revision || ''}`"
-            :plugin-name="activePluginHost.entry.pluginName"
-            :plugins-root="activePluginHost.pluginsRoot"
-            :view="activePluginHost.entry.view"
-            @busy-change="onPluginBusy"
-          />
-          <section v-else-if="activePluginHost" class="plugin-tool-unavailable">
-            <h2>{{ toolLabel(activePluginHost.entry) }}</h2>
-            <p>{{ t(activePluginHost.entry.availability === 'not_prepared' ? 'plugins.prepareRuntimeHint' : 'plugins.unavailableRuntimeHint') }}</p>
-            <p v-if="activePluginHost.entry.error">{{ activePluginHost.entry.error }}</p>
-            <template v-if="activePluginHost.entry.availability === 'not_prepared' && activePluginHost.entry.availableBindings?.length">
-              <n-select v-if="activePluginHost.entry.sourceSelectionRequired" v-model:value="selectedPreparationSource"
-                :placeholder="t('plugins.chooseSourceVersion')" :disabled="preparingTool"
-                :options="activePluginHost.entry.availableBindings.map(item => ({ value: item.runtime, label: `${item.runtime} · ${item.version || '—'}` }))" />
-              <p>{{ t('plugins.prepareDependenciesHint') }}</p>
-              <n-button type="primary" :loading="preparingTool" :disabled="pluginMarket.busy.value || (activePluginHost.entry.sourceSelectionRequired && !selectedPreparationSource)" @click="prepareActiveTool">{{ t('plugins.prepareRuntime') }}</n-button>
-            </template>
-            <p v-else-if="activePluginHost.entry.availability === 'not_prepared'">{{ t('plugins.prepareSourceMissing') }}</p>
-            <n-button secondary @click="openPlugins">{{ t('nav.plugins') }}</n-button>
-          </section>
-          <n-empty v-else :description="t('tools.pluginToolUnavailable')">
-            <template #extra><n-button secondary @click="openPlugins">{{ t('nav.plugins') }}</n-button></template>
-          </n-empty>
+          <Transition name="tool-panel" mode="out-in" @before-leave="deactivateLeavingTool">
+            <div :key="activeToolPanelKey" class="audio-tool-panel">
+              <PluginViewHost
+                v-if="activePluginHost && (!activePluginHost.entry.availability || activePluginHost.entry.availability === 'ready')"
+                :plugin-name="activePluginHost.entry.pluginName"
+                :plugins-root="activePluginHost.pluginsRoot"
+                :view="activePluginHost.entry.view"
+                @busy-change="onPluginBusy"
+              />
+              <section v-else-if="activePluginHost" class="plugin-tool-unavailable">
+                <h2>{{ toolLabel(activePluginHost.entry) }}</h2>
+                <p>{{ t(activePluginHost.entry.availability === 'not_prepared' ? 'plugins.prepareRuntimeHint' : 'plugins.unavailableRuntimeHint') }}</p>
+                <p v-if="activePluginHost.entry.error">{{ activePluginHost.entry.error }}</p>
+                <template v-if="activePluginHost.entry.availability === 'not_prepared' && activePluginHost.entry.availableBindings?.length">
+                  <n-select v-if="activePluginHost.entry.sourceSelectionRequired" v-model:value="selectedPreparationSource"
+                    :placeholder="t('plugins.chooseSourceVersion')" :disabled="preparingTool"
+                    :options="activePluginHost.entry.availableBindings.map(item => ({ value: item.runtime, label: `${item.runtime} · ${item.version || '—'}` }))" />
+                  <p>{{ t('plugins.prepareDependenciesHint') }}</p>
+                  <n-button type="primary" :loading="preparingTool" :disabled="pluginMarket.busy.value || (activePluginHost.entry.sourceSelectionRequired && !selectedPreparationSource)" @click="prepareActiveTool">{{ t('plugins.prepareRuntime') }}</n-button>
+                </template>
+                <p v-else-if="activePluginHost.entry.availability === 'not_prepared'">{{ t('plugins.prepareSourceMissing') }}</p>
+                <n-button secondary @click="openPlugins">{{ t('nav.plugins') }}</n-button>
+              </section>
+              <n-empty v-else :description="t('tools.pluginToolUnavailable')">
+                <template #extra><n-button secondary @click="openPlugins">{{ t('nav.plugins') }}</n-button></template>
+              </n-empty>
+            </div>
+          </Transition>
         </div>
       </main>
     </div>

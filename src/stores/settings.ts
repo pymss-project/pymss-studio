@@ -118,6 +118,7 @@ type StoredSettings = {
   updateChannel?: UpdateChannel
   updateSource?: UpdateSource
   pluginSource?: 'auto' | 'github' | 'gitcode'
+  pluginViewMode?: 'list' | 'card'
   updateEndpointOverride?: string
 }
 
@@ -271,6 +272,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const updateChannel = ref<UpdateChannel>(DEFAULT_UPDATE_CHANNEL)
   const updateSource = ref<UpdateSource>('auto')
   const pluginSource = ref<'auto' | 'github' | 'gitcode'>('auto')
+  const pluginViewMode = ref<'list' | 'card'>('list')
   const updateEndpointOverride = ref('')
   const startupOnboardingSeen = ref(false)
   const pluginDefaultsPolicy = ref<'auto' | 'review'>('review')
@@ -316,6 +318,7 @@ export const useSettingsStore = defineStore('settings', () => {
     updateChannel: updateChannel.value,
     updateSource: updateSource.value,
     pluginSource: pluginSource.value,
+    pluginViewMode: pluginViewMode.value,
     updateEndpointOverride: updateEndpointOverride.value.trim() || undefined,
   }))
 
@@ -383,6 +386,7 @@ export const useSettingsStore = defineStore('settings', () => {
     updateChannel.value = stored?.updateChannel === 'prerelease' ? 'prerelease' : DEFAULT_UPDATE_CHANNEL
     updateSource.value = stored?.updateSource === 'github' || stored?.updateSource === 'modelscope' ? stored.updateSource : 'auto'
     pluginSource.value = stored?.pluginSource === 'github' || stored?.pluginSource === 'gitcode' ? stored.pluginSource : 'auto'
+    pluginViewMode.value = stored?.pluginViewMode === 'card' ? 'card' : 'list'
     updateEndpointOverride.value = String(stored?.updateEndpointOverride || '').trim()
     startupOnboardingSeen.value = stored?.startupOnboardingSeen === true
       || String(stored?.startupOnboardingSeenVersion || '').trim().length > 0
@@ -455,6 +459,7 @@ export const useSettingsStore = defineStore('settings', () => {
       updateChannel,
       updateSource,
       pluginSource,
+      pluginViewMode,
       updateEndpointOverride,
       pluginDefaultsPolicy,
       beginnerGuideInvitationSeen,
@@ -978,6 +983,7 @@ export const useSettingsStore = defineStore('settings', () => {
     updateChannel,
     updateSource,
     pluginSource,
+    pluginViewMode,
     updateEndpointOverride,
     startupOnboardingSeen,
     pluginDefaultsPolicy,

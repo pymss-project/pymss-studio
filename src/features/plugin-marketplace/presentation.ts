@@ -28,3 +28,8 @@ export function pluginSearchText(plugin: { name: string; description?: string; t
     ...Object.values(plugin.locales || {}).flatMap(value => [value.title, value.description, ...(value.tags || []), ...Object.values(value.operations || {})])]
     .filter(Boolean).join(' ').toLowerCase()
 }
+
+export function pluginViewTitle(plugin: { locales?: PluginLocales }, view: { id: string; title: string; operation?: string | null }, locale: string) {
+  const text = pluginLocale(plugin.locales, locale)
+  return (view.id === 'tool' ? text.title : view.operation ? text.operations?.[view.operation] : undefined) || view.title || view.id
+}

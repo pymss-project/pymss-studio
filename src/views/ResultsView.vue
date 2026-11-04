@@ -993,12 +993,6 @@ function formatDurationMs(value: number | undefined) {
   grid-template-columns: minmax(0, 1fr) 160px 190px auto;
   align-items: center;
   gap: 10px;
-  padding: 10px;
-  border: 1px solid color-mix(in srgb, var(--outline) 56%, transparent);
-  border-radius: 14px;
-  background:
-    linear-gradient(180deg, rgba(255,255,255,0.025), transparent 52%),
-    color-mix(in srgb, var(--surface-1) 72%, transparent);
 }
 
 .results-toolbar__count {
