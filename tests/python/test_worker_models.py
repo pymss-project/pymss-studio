@@ -65,6 +65,38 @@ CATALOG_ENTRY = worker_models.ModelEntry.from_dict({
 
 
 class CatalogTargetOverrideTests(unittest.TestCase):
+    def test_reclassified_model_still_uses_its_existing_download_directory(self):
+        entry = worker_models.ModelEntry.from_dict({
+            "name": "gilliaan_drumsV1.ckpt", "model_type": "bs_roformer", "supported": True,
+            "relpath": "music_stems/drum_stems/gilliaan_drumsV1.ckpt",
+            "config_relpath": "music_stems/drum_stems/gilliaan_drumsV1.yaml",
+            "primary_category": "single_instrument", "secondary_category": "drums_percussion",
+        })
+        with tempfile.TemporaryDirectory() as model_dir:
+            weights = Path(model_dir, entry.relpath)
+            weights.parent.mkdir(parents=True)
+            weights.write_bytes(b"weights")
+            config = Path(model_dir, entry.config_relpath)
+            config.write_text("training:\n  instruments: [drums, other]\n  target_instrument: drums\n", encoding="utf-8")
+            result = worker_models.model_to_dict(entry, model_dir)
+            self.assertTrue(result["downloaded"])
+            self.assertEqual(Path(result["modelPath"]), weights)
+            self.assertEqual(Path(result["configPath"]), config)
+            self.assertEqual(result["category"], "single_instrument/drums_percussion")
+
+    def test_sort_order_survives_catalog_loading_and_worker_serialization(self):
+        entry = worker_models.ModelEntry.from_dict({
+            "name": "family.ckpt", "relpath": "family.ckpt", "sort_key": "family_000",
+            "primary_category": "instrumental", "primary_category_cn": "伴奏",
+            "secondary_category_cn": "伴奏",
+        })
+        with tempfile.TemporaryDirectory() as model_dir:
+            result = worker_models.model_to_dict(entry, model_dir)
+        self.assertEqual(result["sortKey"], "family_000")
+        self.assertEqual(result["categoryCn"], "伴奏")
+        self.assertEqual(result["category"], "instrumental")
+        self.assertEqual(worker_models.ModelEntry.from_dict({"name": "old", "relpath": "old"}).sort_key, "")
+
     def test_target_override_survives_catalog_overlay_and_entry_serialization(self):
         base = {
             "models": [{

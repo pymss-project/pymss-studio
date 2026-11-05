@@ -6,6 +6,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { isTauriRuntime, loadAppStore, saveAppStore } from '@/utils/appStore'
 import { isMainTaskOwner } from '@/utils/taskOwner'
 import { matchesModelQuery } from '@/utils/modelSearch'
+import { matchesModelCategory } from '@/utils/modelCategory'
 import { MODEL_LIBRARY_PAGE_SIZES, normalizePageSize } from '@/utils/pagination'
 import { matchesModelSource, type ModelSourceFilter } from '@/utils/modelSource'
 import { useAppStore } from '@/stores/app'
@@ -31,6 +32,7 @@ export type ModelEntry = {
   primaryCategoryCn: string
   secondaryCategory: string
   secondaryCategoryCn: string
+  sortKey?: string
   targetStem: string
   configInstruments: string
   configTargetInstrument: string
@@ -495,11 +497,7 @@ export const useModelStore = defineStore('model', () => {
     const q = search.value.trim().toLowerCase()
     return models.value.filter((model) => {
       const matchesQuery = matchesModelQuery(model, q, modelPreferences.value[model.name]?.note || '')
-      const selectedCategory = category.value.trim().toLowerCase()
-      const matchesCategory = !selectedCategory
-        || model.category.toLowerCase() === selectedCategory
-        || model.primaryCategory.toLowerCase() === selectedCategory
-        || model.secondaryCategory.toLowerCase() === selectedCategory
+      const matchesCategory = matchesModelCategory(model, category.value)
       const matchesSupported = !supportedOnly.value || model.supported
       return matchesQuery && matchesCategory && matchesSupported && matchesModelSource(model, modelSource.value)
     })

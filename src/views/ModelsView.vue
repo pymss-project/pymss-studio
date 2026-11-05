@@ -36,10 +36,12 @@ import { useSettingsStore } from '@/stores/settings'
 import { useTaskStore } from '@/stores/task'
 import { useAppStore } from '@/stores/app'
 import { formatBytes, formatSpeedMBps } from '@/utils/format'
-import { buildModelCategoryOptionsFromPairs, getModelCategoryLabel } from '@/utils/modelCategory'
+import { buildModelCategoryOptionsFromModels, getModelCategoryLabel, hasModelCategoryOption } from '@/utils/modelCategory'
+import { compareModelDefaultOrder } from '@/utils/modelSort'
 import { MODEL_LIBRARY_PAGE_SIZES } from '@/utils/pagination'
 import { inferenceChunkSizeIssue, resolveInferenceChunkStep, resolveInferenceSampleStep } from '@/features/inference/sampleStep'
 import ModelProgressBlock from '@/components/ModelProgressBlock.vue'
+import ModelCategorySelect from '@/components/ModelCategorySelect.vue'
 import DownloadDetailModal from '@/components/DownloadDetailModal.vue'
 import CustomModelImportDialog from '@/components/CustomModelImportDialog.vue'
 import AlignedInferenceInputNumber from '@/components/AlignedInferenceInputNumber.vue'
@@ -59,8 +61,6 @@ const {
   selectedModel,
   search,
   category,
-  categories,
-  categoriesCn,
   isLoading,
   detailLoading,
   modelDir,
@@ -120,8 +120,11 @@ function updateInferenceDraftSize(key: 'overlap_size' | 'chunk_size', value: num
 }
 
 const categoryOptions = computed(() => {
-  return buildModelCategoryOptionsFromPairs(categories.value, categoriesCn.value, locale.value, t('common.all'))
+  return buildModelCategoryOptionsFromModels(modelStore.models, locale.value, t('common.all'))
 })
+watch([categoryOptions, isLoading], () => {
+  if (!isLoading.value && (modelStore.modelsLoaded || modelStore.models.length) && !hasModelCategoryOption(categoryOptions.value, category.value)) category.value = ''
+}, { immediate: true })
 
 // The imported count is shown on the option itself: it is the quickest answer to "did my import
 // land?", and it keeps the option from looking broken when there is nothing to show yet.
@@ -222,7 +225,7 @@ const sortedModels = computed(() => {
         return compareModelName(a.model, b.model)
       default:
         if (a.model.downloaded !== b.model.downloaded) return a.model.downloaded ? -1 : 1
-        return compareModelName(a.model, b.model)
+        return compareModelDefaultOrder(a.model, b.model, collator.value.compare)
     }
   })
   return decorated.map((d) => d.model)
@@ -1050,12 +1053,11 @@ onMounted(() => {
         >
           <template #prefix><n-icon :component="SearchOutline" /></template>
         </n-input>
-        <n-select
+        <ModelCategorySelect
           v-model:value="category"
           :options="categoryOptions"
           size="small"
           class="category-select"
-          :consistent-menu-width="false"
         />
         <n-select
           v-model:value="modelSource"

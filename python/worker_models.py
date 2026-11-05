@@ -51,6 +51,7 @@ class ModelEntry:
     classification_basis: str
     debug_source: str = ""
     target_instrument_override: str = ""
+    sort_key: str = ""
 
     @property
     def stem(self) -> str:
@@ -82,6 +83,7 @@ class ModelEntry:
             config_instruments=data.get("config_instruments", ""),
             config_target_instrument=data.get("config_target_instrument", ""),
             target_instrument_override=data.get("target_instrument_override", ""),
+            sort_key=data.get("sort_key", ""),
             classification_confidence=data.get("classification_confidence", ""),
             classification_basis=data.get("classification_basis", ""),
             debug_source=data.get("debug_source", ""),
@@ -843,14 +845,15 @@ def model_to_dict(entry: Any, model_dir: str | None = None, include_local_state:
         "supported": bool(getattr(entry, "supported", False)),
         "unsupportedReason": str(getattr(entry, "unsupported_reason", "") or ""),
         "category": str(getattr(entry, "category_path", "") or getattr(entry, "primary_category", "") or ""),
-        "categoryCn": " / ".join(filter(None, [
+        "categoryCn": " / ".join(dict.fromkeys(filter(None, [
             str(getattr(entry, "primary_category_cn", "") or ""),
             str(getattr(entry, "secondary_category_cn", "") or ""),
-        ])),
+        ]))),
         "primaryCategory": str(getattr(entry, "primary_category", "") or ""),
         "primaryCategoryCn": str(getattr(entry, "primary_category_cn", "") or ""),
         "secondaryCategory": str(getattr(entry, "secondary_category", "") or ""),
         "secondaryCategoryCn": str(getattr(entry, "secondary_category_cn", "") or ""),
+        "sortKey": str(getattr(entry, "sort_key", "") or ""),
         "targetStem": str(getattr(entry, "target_stem", "") or ""),
         "configInstruments": config_instruments,
         "configTargetInstrument": config_target_instrument,

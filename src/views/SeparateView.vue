@@ -44,13 +44,15 @@ import {
 import { useSettingsStore } from '@/stores/settings'
 import { useModelStore, type ModelDefaultInferenceParams, type ModelEntry } from '@/stores/model'
 import { useAppStore } from '@/stores/app'
-import { buildModelCategoryOptionsFromModels, getModelCategoryLabel } from '@/utils/modelCategory'
+import { buildModelCategoryOptionsFromModels, getModelCategoryLabel, hasModelCategoryOption, matchesModelCategory, type CategoryLikeModel } from '@/utils/modelCategory'
+import { compareModelDefaultOrder } from '@/utils/modelSort'
 import { matchesModelQuery } from '@/utils/modelSearch'
 import { getSeparateWorkflowInputIssue } from '@/utils/workflowInputs'
 import { sortStemOutputsByOrder } from '@/utils/stemOrder'
 import { retainAvailableModelNames } from '@/utils/modelSource'
 import { SEPARATE_MODEL_PAGE_SIZES } from '@/utils/pagination'
 import AppBrandMark from '@/components/AppBrandMark.vue'
+import ModelCategorySelect from '@/components/ModelCategorySelect.vue'
 import TaskLogConsole from '@/components/TaskLogConsole.vue'
 import AlignedInferenceInputNumber from '@/components/AlignedInferenceInputNumber.vue'
 import InferenceParameterLesson from '@/components/InferenceParameterLesson.vue'
@@ -247,7 +249,7 @@ const listedDownloadedModels = computed(() => {
     if (modelListSortMode.value === 'recent') return recentDelta || useDelta || favoriteDelta || compareModelName(a.name, b.name)
     if (modelListSortMode.value === 'name-desc') return compareModelName(b.name, a.name)
     if (modelListSortMode.value === 'name-asc') return compareModelName(a.name, b.name)
-    return useDelta || recentDelta || favoriteDelta || compareModelName(a.name, b.name)
+    return useDelta || recentDelta || favoriteDelta || compareModelDefaultOrder(a, b, compareModelName)
   })
 })
 const selectedModelListItem = computed(() => listedDownloadedModels.value.find(item => item.name === selectedModelName.value) || null)
@@ -733,21 +735,17 @@ const startStatusText = computed(() => {
   }
   return t('separate.outputDirectorySummary')
 })
-const modelCategoryOptions = computed(() => [
-  { label: t('common.all'), value: '' },
-  ...buildModelCategoryOptionsFromModels(listedDownloadedModels.value, locale.value),
-])
+const modelCategoryOptions = computed(() => buildModelCategoryOptionsFromModels(downloadedModels.value, locale.value, t('common.all')))
+watch([modelCategoryOptions, isLoading], () => {
+  if (!isLoading.value && !hasModelCategoryOption(modelCategoryOptions.value, modelCategoryFilter.value)) modelCategoryFilter.value = ''
+}, { immediate: true })
 const filteredDownloadedModels = computed(() => {
   const query = modelSearch.value.trim().toLowerCase()
-  const selectedCategory = modelCategoryFilter.value.trim().toLowerCase()
   return listedDownloadedModels.value.filter((item) => {
     // Notes are searchable here too: picking a model to run is exactly when "the one that was
     // good for vocals" is how someone remembers it.
     const matchesQuery = matchesModelQuery(item, query, modelNote(item.name))
-    const matchesCategory = !selectedCategory
-      || item.category.toLowerCase() === selectedCategory
-      || item.primaryCategory.toLowerCase() === selectedCategory
-      || item.secondaryCategory.toLowerCase() === selectedCategory
+    const matchesCategory = matchesModelCategory(item, modelCategoryFilter.value)
     return matchesQuery && matchesCategory
   })
 })
@@ -1400,7 +1398,7 @@ function resetOutputNaming() {
   customStemOrder.value = []
 }
 
-function categoryLabel(item: { categoryCn?: string; category?: string; primaryCategoryCn?: string; primaryCategory?: string } | null | undefined) {
+function categoryLabel(item: CategoryLikeModel | null | undefined) {
   return getModelCategoryLabel(item, locale.value, t('common.notSet'))
 }
 
@@ -2552,10 +2550,9 @@ async function retryCurrentTask() {
                     >
                       <template #prefix><n-icon :component="SearchOutline" /></template>
                     </n-input>
-                    <n-select
+                    <ModelCategorySelect
                       class="target-toolbar__filter"
                       v-model:value="modelCategoryFilter"
-                      :menu-props="{ class: 'model-picker__category-menu' }"
                       :options="modelCategoryOptions"
                     />
                     <n-select
