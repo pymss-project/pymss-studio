@@ -215,6 +215,20 @@ def setup(plugin):
         self.assertEqual(snapshot["catalogError"], "offline")
         self.assertEqual(snapshot["installed"][0]["name"], "hello")
 
+    def test_catalog_failure_retains_http_capabilities_without_claiming_a_selected_source(self):
+        from pymss.plugins import install as installer, marketplace
+        output = io.StringIO()
+        with mock.patch.object(installer, "list_available", side_effect=RuntimeError("rate limit")), \
+             mock.patch.object(marketplace, "source_info", return_value=None), \
+             mock.patch.object(marketplace, "source_capabilities", return_value={"httpProviders": ["github", "gitcode"]}, create=True), \
+             redirect_stdout(output):
+            code = plugins.cmd_plugin_marketplace({"catalogOnly": True})
+        snapshot = json.loads(output.getvalue())["payload"]
+        self.assertEqual(code, 0)
+        self.assertEqual(snapshot["catalogSource"]["httpProviders"], ["github", "gitcode"])
+        self.assertNotIn("provider", snapshot["catalogSource"])
+        self.assertEqual(snapshot["catalogError"], "rate limit")
+
     def test_catalog_normalizes_search_metadata(self):
         from pymss.plugins import install as installer
         output = io.StringIO()
@@ -369,6 +383,45 @@ def setup(plugin):
         snapshot = plugins._inventory(self.root, verify=True)
         self.assertFalse(snapshot["installed"][0]["loaded"])
         self.assertIn("broken after install", snapshot["installed"][0]["error"])
+        self.assertEqual(snapshot["installed"][0]["errorKind"], "load")
+
+    def test_missing_required_dependencies_are_classified_for_dependency_repair(self):
+        self.install(self.source())
+        with mock.patch.object(plugins, "_validate_requirements", side_effect=RuntimeError("Required package is missing")), \
+             mock.patch.object(plugins, "_deferred_dependency_operations", return_value=set()):
+            row = plugins._inventory(self.root)["installed"][0]
+        self.assertFalse(row["loaded"])
+        self.assertEqual(row["errorKind"], "dependency")
+        self.assertIn("Required package", row["error"])
+
+    def test_manifest_read_failures_are_classified_for_reinstallation(self):
+        self.install(self.source())
+        with mock.patch.object(plugins, "_read_manifest", side_effect=OSError("Cannot read plugin manifest")):
+            row = plugins._inventory(self.root)["installed"][0]
+        self.assertFalse(row["loaded"])
+        self.assertEqual(row["errorKind"], "load")
+        self.assertIn("Cannot read plugin manifest", row["error"])
+
+    def test_view_sdk_incompatibility_does_not_mark_the_loaded_plugin_as_corrupt(self):
+        self.install(self.source())
+        project = self.root / "installed/hello/pyproject.toml"
+        project.write_text(project.read_text() + '\n[tool.pymss.studio]\nsdk_version=999\n')
+        row = plugins._inventory(self.root)["installed"][0]
+        self.assertTrue(row["loaded"])
+        self.assertIsNone(row["errorKind"])
+        self.assertEqual(row["viewErrorKind"], "compatibility")
+        self.assertIn("SDK 999", row["viewError"])
+
+    def test_missing_view_entry_is_classified_for_reinstallation(self):
+        self.install(self.source())
+        project = self.root / "installed/hello/pyproject.toml"
+        project.write_text(project.read_text() + '\n[tool.pymss.studio]\nsdk_version=1\n'
+                           '[[tool.pymss.studio.views]]\nid="tool"\nentry="missing.html"\n')
+        row = plugins._inventory(self.root)["installed"][0]
+        self.assertTrue(row["loaded"])
+        self.assertIsNone(row["errorKind"])
+        self.assertEqual(row["viewErrorKind"], "load")
+        self.assertIn("inside the plugin", row["viewError"])
 
     def test_local_source_update_check_compares_its_declared_version(self):
         source = self.source()

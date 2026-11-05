@@ -93,4 +93,32 @@ describe('window close guards', () => {
       unregisterRecording()
     }
   })
+
+  it('recovers suspended work only after closure is cancelled', async () => {
+    const calls: string[] = []
+    const unregisterTask = registerWindowCloseGuard(() => { calls.push('stop') }, 70,
+      () => { calls.push('resume') })
+    const unregisterSave = registerWindowCloseGuard(() => {
+      calls.push('save')
+      throw new WindowClosePersistenceError('Save failed', async () => { calls.push('discard') })
+    })
+    try {
+      await assert.rejects(runWindowCloseGuards(async () => 'cancel'), /Save failed/)
+      assert.deepEqual(calls, ['stop', 'save', 'resume'])
+      calls.length = 0
+      await runWindowCloseGuards(async () => 'discard')
+      assert.deepEqual(calls, ['stop', 'save', 'discard'])
+    } finally { unregisterTask(); unregisterSave() }
+  })
+
+  it('does not retain cancellation recovery after a guard is unregistered', async () => {
+    let resumed = false
+    const unregister = registerWindowCloseGuard(() => {}, 70, () => { resumed = true })
+    unregister()
+    const unregisterFailure = registerWindowCloseGuard(() => { throw new Error('Close blocked') })
+    try {
+      await assert.rejects(runWindowCloseGuards(), /Close blocked/)
+      assert.equal(resumed, false)
+    } finally { unregisterFailure() }
+  })
 })

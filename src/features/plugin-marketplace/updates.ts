@@ -25,3 +25,23 @@ export function pluginUpdateKey(plugin: InstalledPlugin, runtime: PluginInventor
     plugin.name, plugin.managed, plugin.prepared, plugin.removalPending, plugin.version, plugin.source,
     plugin.url, plugin.sourceRef, plugin.sourceSubpath, plugin.resolvedCommit, plugin.contentDigest, plugin.installedAt])
 }
+
+export type PluginUpdateSelection = {
+  name: string
+  version: string | null
+  locales?: InstalledPlugin['locales']
+  installationKey: string
+  update: PluginUpdate
+}
+
+export function selectPluginUpdates(inventory: PluginInventory | null, updates: Record<string, PluginUpdate>): PluginUpdateSelection[] {
+  if (!inventory) return []
+  const names = new Set<string>()
+  return inventory.installed.flatMap(plugin => {
+    const update = updates[plugin.name]
+    if (names.has(plugin.name) || !canCheckPluginUpdate(plugin) || !canApplyPluginUpdate(update)) return []
+    names.add(plugin.name)
+    return [JSON.parse(JSON.stringify({ name: plugin.name, version: plugin.version, locales: plugin.locales,
+      installationKey: pluginUpdateKey(plugin, inventory.runtime), update })) as PluginUpdateSelection]
+  })
+}

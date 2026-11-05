@@ -766,6 +766,7 @@ def _inventory(root: Path, *, verify: bool = False, default_policy: str | None =
         enabled = plugin.parent.name == "installed" and intent.get("state", "enabled") == "enabled"
         meta, manifest, contributions, metadata = {}, None, {}, {}
         row_error = dependency_error = view_error = None
+        error_kind = view_error_kind = None
         requirements = None
         compatible = {"compatible": True, "reasons": []}
         try:
@@ -776,6 +777,7 @@ def _inventory(root: Path, *, verify: bool = False, default_policy: str | None =
             compatible = compatibility(core_requirements, profile)
             if not compatible["compatible"]:
                 row_error = " ".join(compatible["reasons"])
+                error_kind = "compatibility"
             try:
                 requirements = read_requirements(metadata)
                 view_compatibility = compatibility(requirements, profile)
@@ -783,10 +785,13 @@ def _inventory(root: Path, *, verify: bool = False, default_policy: str | None =
                     contributions = _manifest_contributions(plugin)
                 else:
                     view_error = " ".join(view_compatibility["reasons"])
+                    view_error_kind = "compatibility"
             except (ValueError, OSError) as error:
                 view_error = str(error)
+                view_error_kind = "load"
         except Exception as error:
             row_error = str(error)
+            error_kind = "load"
         if manifest is not None and row_error is None and enabled:
             try:
                 _validate_requirements(plugin)
@@ -796,6 +801,7 @@ def _inventory(root: Path, *, verify: bool = False, default_policy: str | None =
                     dependency_error = str(error)
                 else:
                     row_error = str(error)
+                    error_kind = "dependency"
         presentation = _presentation(metadata)
         for view in contributions.get("views", []):
             try:
@@ -805,6 +811,9 @@ def _inventory(root: Path, *, verify: bool = False, default_policy: str | None =
                 view["revision"] = str(meta.get("installed_at") or meta.get("version") or "")
         report = reports.get(plugin.name, {})
         loaded = enabled and row_error is None and report.get("loaded", True) is not False
+        reported_error = _describe_error(report.get("error")) if enabled else None
+        if error_kind is None and enabled and (reported_error or report.get("loaded") is False):
+            error_kind = "load"
         operations = _operation_ids(manifest or {}) if enabled else []
         titles = {item["id"]: item["title"] for item in (manifest or {}).get("operations", [])}
         rows.append({
@@ -823,10 +832,10 @@ def _inventory(root: Path, *, verify: bool = False, default_policy: str | None =
             "toolIcon": metadata.get("icon") if isinstance(metadata.get("icon"), str) else None,
             "locales": presentation["locales"], "description": (manifest or {}).get("description", ""),
             "dependencyError": (report.get("dependencyError") or dependency_error) if enabled else None,
-            "error": row_error or (_describe_error(report.get("error")) if enabled else None),
+            "error": row_error or reported_error, "errorKind": error_kind,
             "operations": operations,
             "operationTitles": {operation: titles.get(operation, operation) for operation in operations},
-            "contributions": contributions, "viewError": view_error,
+            "contributions": contributions, "viewError": view_error, "viewErrorKind": view_error_kind,
         })
     represented = {row["name"] for row in rows}
     for name, entry in state["plugins"].items():
@@ -860,14 +869,15 @@ def _inventory(root: Path, *, verify: bool = False, default_policy: str | None =
     }
 
 
-def _catalog_source_info() -> dict:
+def _catalog_source_info(*, failed: bool = False) -> dict:
     try:
-        from pymss.plugins.marketplace import source_info
+        import pymss.plugins.marketplace as marketplace
     except ModuleNotFoundError as error:
         if error.name == "pymss.plugins.marketplace":
             return {"supported": False}
         raise
-    return {"supported": True, **(source_info() or {"provider": "custom"})}
+    capabilities = getattr(marketplace, "source_capabilities", lambda: {})()
+    return {"supported": True, **capabilities, **(marketplace.source_info() or ({} if failed else {"provider": "custom"}))}
 
 
 def cmd_plugin_marketplace(payload: dict[str, Any]) -> int:
@@ -901,6 +911,7 @@ def cmd_plugin_marketplace(payload: dict[str, Any]) -> int:
                 snapshot["catalogSource"] = _catalog_source_info()
         except Exception as error:
             snapshot["catalog"], snapshot["catalogError"] = [], str(error)
+            snapshot["catalogSource"] = _catalog_source_info(failed=True)
         emit("plugin_marketplace", snapshot)
         return 0
     except Exception as error:

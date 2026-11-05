@@ -134,23 +134,30 @@ class PluginSourceTests(unittest.TestCase):
             self.assertFalse(result['up_to_date'])
             self.assertEqual(result['target']['candidate'], {'version': '2.0.0', 'commit': commit})
 
-    def test_unpinned_non_github_catalog_resolves_the_actual_update_commit(self):
+    def test_unpinned_catalog_resolves_the_actual_update_commit(self):
         from pymss.plugins import install as installer
+        from pymss.plugins import sources
         self.install(self.source())
         receipt = self.root / 'installed/hello/.pymss-install.json'
         value = json.loads(receipt.read_text())
         value['defaultRepository'] = True
         receipt.write_text(json.dumps(value))
-        url, commit = 'https://gitcode.com/example/plugins', 'b' * 40
-        with mock.patch.object(installer, 'list_available', return_value=[{
-            'name': 'hello', 'url': url, 'subpath': 'hello', 'version': '2.0.0', 'ref': 'stable',
-        }]), mock.patch.object(installer, '_fetch_remote_meta', return_value={
-            'version': '2.0.0', 'resolved_commit': commit,
-        }) as remote, redirect_stdout(io.StringIO()):
-            result = plugins._check_updates(self.root, None)['hello']
-        remote.assert_called_once_with(url, 'hello', ref='stable')
-        self.assertEqual(result['status'], 'update')
-        self.assertEqual(result['target']['candidate'], {'version': '2.0.0', 'commit': commit})
+        commit = 'b' * 40
+        for host in ('gitcode.com', 'git.example.invalid'):
+            url = f'https://{host}/example/plugins'
+            with self.subTest(host=host), mock.patch.object(installer, 'list_available', return_value=[{
+                'name': 'hello', 'url': url, 'subpath': 'hello', 'version': '2.0.0', 'ref': 'stable',
+            }]), mock.patch.object(installer, '_fetch_remote_meta', return_value={
+                'version': '2.0.0', 'resolved_commit': commit,
+            }) as remote, mock.patch.object(sources, 'resolve_source_commit', return_value=commit, create=True) as resolve, redirect_stdout(io.StringIO()):
+                result = plugins._check_updates(self.root, None)['hello']
+            self.assertEqual(remote.call_count + resolve.call_count, 1)
+            if remote.called:
+                remote.assert_called_once_with(url, 'hello', ref='stable')
+            if resolve.called:
+                resolve.assert_called_once_with(url, 'stable')
+            self.assertEqual(result['status'], 'update')
+            self.assertEqual(result['target']['candidate'], {'version': '2.0.0', 'commit': commit})
 
     def test_inventory_update_source_identity_tracks_configured_sources_without_fetching(self):
         identities = []

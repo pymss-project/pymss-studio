@@ -6,7 +6,7 @@ import ts from 'typescript'
 import { parse } from 'vue/compiler-sfc'
 import { computed, effectScope, ref, watch } from 'vue'
 import { pluginLocale, pluginSearchText, pluginViewTitle } from '../src/features/plugin-marketplace/presentation.ts'
-import { canApplyPluginUpdate, canCheckPluginUpdate, pluginUpdateKey, pluginUpdateState } from '../src/features/plugin-marketplace/updates.ts'
+import { canApplyPluginUpdate, canCheckPluginUpdate, pluginUpdateKey, pluginUpdateState, selectPluginUpdates } from '../src/features/plugin-marketplace/updates.ts'
 import { buildPluginLibrary, installedPluginKey, pluginNeedsAttention } from '../src/features/plugin-marketplace/library.ts'
 
 const script = parse(readFileSync(new URL('../src/views/PluginsView.vue', import.meta.url), 'utf8')).descriptor.scriptSetup.content
@@ -36,7 +36,7 @@ function page(t) {
     useDialog: () => ({ warning: value => confirmations.push(value), info: value => confirmations.push(value) }), useMessage: () => ({ success() {}, warning() {}, error: value => errors.push(value) }),
     invoke: async (...args) => { nativeCalls.push(args) },
     pluginLocale, pluginSearchText, pluginViewTitle, pluginCategories: [], normalizePluginCategory: value => value,
-    canApplyPluginUpdate, canCheckPluginUpdate, pluginUpdateKey, pluginUpdateState,
+    canApplyPluginUpdate, canCheckPluginUpdate, pluginUpdateKey, pluginUpdateState, selectPluginUpdates,
     buildPluginLibrary, installedPluginKey, pluginNeedsAttention,
     pluginToolCategories: () => ['analyze'], h() {}, NIcon: {},
     ...Object.fromEntries(['OpenOutline', 'FolderOpenOutline', 'PowerOutline', 'BuildOutline', 'TrashOutline'].map(name => [name, {}])),

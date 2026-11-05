@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test, { after } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
+import { selectPluginUpdates } from '../src/features/plugin-marketplace/updates.ts'
 
 const vite = await createServer({
   configFile: false,
@@ -39,6 +40,7 @@ async function reset() {
   requests = []
   market.activities.value = []
   market.logRecords.value = []
+  market.updateBatch.value = null
   globalThis.__pluginInvoke = async (command, args) => {
     requests.push({ command, ...args })
     return command === 'plugin_marketplace' ? empty() : { started: true }
@@ -48,6 +50,26 @@ async function reset() {
 const nextTurn = () => new Promise(resolve => setImmediate(resolve))
 
 const installedResult = name => ({ ...empty(), updates: {}, installed: [{ name, managed: true, loaded: true, operations: [] }] })
+
+test('creating the marketplace does not request inventory before it is used', () => {
+  assert.equal(market.inventoryRequested.value, false)
+  assert.equal(requests.length, 0)
+})
+
+test('inventory usage remains recorded after a failed query and a later runtime can recover', async () => {
+  market.snapshot.value = null
+  globalThis.__pluginInvoke = async () => { throw new Error('Runtime unavailable') }
+  await market.refreshInventory()
+  assert.equal(market.inventoryRequested.value, true)
+  assert.equal(market.ready.value, false)
+  assert.equal(market.busy.value, false)
+  assert.equal(market.loading.value, false)
+  globalThis.__pluginInvoke = async () => empty('available-runtime')
+  await market.reloadRuntimeInventory()
+  assert.equal(market.inventoryRequested.value, true)
+  assert.equal(market.snapshot.value.runtime.identity, 'available-runtime')
+  assert.equal(market.error.value, '')
+})
 
 test('an installation result retains each read-only copy with the same plugin ID', async () => {
   await reset()
@@ -724,4 +746,411 @@ test('committing plugin changes finish before window closure without being kille
   event('plugin_manage_result', { ...empty(), updates: {} })
   await Promise.all([completion, closing])
   assert.equal(closed, true)
+})
+
+async function batchFixture(names = ['one', 'two']) {
+  await reset()
+  const inventory = { ...empty(), installed: names.map(name => ({
+    name, managed: true, prepared: true, enabled: true, loaded: true, version: '1.0', url: `/source/${name}`, contentDigest: `${name}-before`,
+  })) }
+  globalThis.__pluginInvoke = async (command, args) => {
+    requests.push({ command, ...args })
+    return command === 'plugin_marketplace' ? JSON.parse(JSON.stringify(inventory)) : { started: true }
+  }
+  await market.refreshInventory()
+  market.updates.value = Object.fromEntries(names.map(name => [name, {
+    status: 'update', remote_version: '2.0', target: { schemaVersion: 1, candidate: { version: '2.0', commit: 'a'.repeat(40) } },
+  }]))
+  const selection = selectPluginUpdates(market.snapshot.value, market.updates.value)
+  const managed = () => requests.filter(request => request.command === 'manage_plugin')
+  const succeed = name => {
+    Object.assign(inventory.installed.find(plugin => plugin.name === name), { version: '2.0', contentDigest: `${name}-after` })
+    event('plugin_manage_result', { ...JSON.parse(JSON.stringify(inventory)), updates: {} }, managed().at(-1).payload.taskId)
+  }
+  return { inventory, selection, managed, succeed }
+}
+
+test('bulk updates run sequentially with reviewed targets and retain state across consumers', async () => {
+  const fixture = await batchFixture()
+  const completion = market.updatePlugins(fixture.selection)
+  await nextTurn()
+  assert.equal(fixture.managed().length, 1)
+  assert.equal(market.busy.value, true)
+  assert.equal(market.exclusiveBusy.value, true)
+  assert.strictEqual(usePluginMarketplace().updateBatch, market.updateBatch)
+  await assert.rejects(market.manage('install', { name: 'unrelated' }), /already running/)
+  await assert.rejects(market.updatePlugins(fixture.selection), /already running/)
+  market.updates.value.one.target.candidate.commit = 'b'.repeat(40)
+  fixture.succeed('one')
+  await nextTurn()
+  assert.equal(fixture.managed().length, 2)
+  assert.deepEqual(market.updateBatch.value.items.map(item => item.status), ['succeeded', 'running'])
+  for (const { payload } of fixture.managed()) {
+    assert.equal(payload.expectedRuntime, 'cpu-runtime')
+    assert.equal(payload.expectedUpdate.target.candidate.commit, 'a'.repeat(40))
+    assert.equal(payload.installDependencies, false)
+  }
+  fixture.succeed('two')
+  await completion
+  assert.equal(market.updateBatch.value.phase, 'finished')
+  assert.deepEqual(market.updateBatch.value.items.map(item => item.status), ['succeeded', 'succeeded'])
+  assert.equal(market.busy.value, false)
+})
+
+test('a failed bulk item refreshes its inventory, retains the error and continues', async () => {
+  const fixture = await batchFixture()
+  const completion = market.updatePlugins(fixture.selection, { installDependencies: true })
+  await nextTurn()
+  const firstId = fixture.managed()[0].payload.taskId
+  event('error', { message: 'Missing plugin dependency' }, firstId)
+  await nextTurn()
+  assert.equal(fixture.managed().length, 2)
+  assert.equal(fixture.managed()[1].payload.installDependencies, true)
+  fixture.succeed('two')
+  await completion
+  assert.deepEqual(market.updateBatch.value.items.map(item => item.status), ['failed', 'succeeded'])
+  assert.match(market.updateBatch.value.items[0].error, /Missing plugin dependency/)
+  assert.ok(market.logRecords.value.some(record => record.context.pluginTaskId === firstId && record.message === 'Missing plugin dependency'))
+  assert.equal(market.snapshot.value.installed.find(plugin => plugin.name === 'one').version, '1.0')
+})
+
+test('bulk updates skip stale remaining targets after environment, source or installation changes', async () => {
+  for (const change of [
+    value => { value.runtime.identity = 'cuda' },
+    value => { value.runtime.pythonPath = '/other/python' },
+    value => { value.runtime.updateSourceIdentity = 'other-source' },
+    value => { value.installed.find(plugin => plugin.name === 'two').contentDigest = 'changed' },
+    value => { value.installed = value.installed.filter(plugin => plugin.name !== 'two') },
+  ]) {
+    const fixture = await batchFixture()
+    const completion = market.updatePlugins(fixture.selection)
+    await nextTurn()
+    fixture.succeed('one')
+    change(market.snapshot.value)
+    await completion
+    assert.equal(fixture.managed().length, 1)
+    assert.deepEqual(market.updateBatch.value.items.map(item => item.status), ['succeeded', 'skipped'])
+  }
+})
+
+test('stopping bulk work lets the current item finish and prevents remaining workers', async () => {
+  const fixture = await batchFixture(['one', 'two', 'three'])
+  const completion = market.updatePlugins(fixture.selection)
+  await nextTurn()
+  market.stopBatchUpdates()
+  assert.equal(market.updateBatch.value.phase, 'stopping')
+  assert.equal(market.busy.value, true)
+  fixture.succeed('one')
+  await completion
+  assert.equal(fixture.managed().length, 1)
+  assert.deepEqual(market.updateBatch.value.items.map(item => item.status), ['succeeded', 'cancelled', 'cancelled'])
+  assert.equal(market.busy.value, false)
+})
+
+test('cancelling the active bulk task stops the remaining queue', async () => {
+  const fixture = await batchFixture()
+  const completion = market.updatePlugins(fixture.selection)
+  await nextTurn()
+  const id = fixture.managed()[0].payload.taskId
+  await market.cancel(id)
+  event('task_cancelled', {}, id)
+  await completion
+  assert.equal(fixture.managed().length, 1)
+  assert.deepEqual(market.updateBatch.value.items.map(item => item.status), ['cancelled', 'cancelled'])
+  assert.equal(market.error.value, '')
+})
+
+test('window closure stops queued updates and waits for the active publication', async () => {
+  const fixture = await batchFixture()
+  const completion = market.updatePlugins(fixture.selection)
+  await nextTurn()
+  const { runWindowCloseGuards } = await vite.ssrLoadModule('/src/utils/windowCloseGuards.ts')
+  event('plugin_stage', { phase: 'activating' }, fixture.managed()[0].payload.taskId)
+  let closed = false
+  const closing = runWindowCloseGuards().then(() => { closed = true })
+  await nextTurn()
+  assert.equal(closed, false)
+  fixture.succeed('one')
+  await Promise.all([completion, closing])
+  assert.equal(fixture.managed().length, 1)
+  assert.deepEqual(market.updateBatch.value.items.map(item => item.status), ['succeeded', 'cancelled'])
+  assert.equal(closed, true)
+})
+
+test('window closure does not launch inventory workers after batch cancellation or failure', async () => {
+  const { runWindowCloseGuards } = await vite.ssrLoadModule('/src/utils/windowCloseGuards.ts')
+  for (const terminal of ['task_cancelled', 'error']) {
+    const fixture = await batchFixture()
+    const completion = market.updatePlugins(fixture.selection)
+    await nextTurn()
+    const before = requests.filter(request => request.command === 'plugin_marketplace').length
+    const closing = runWindowCloseGuards()
+    await nextTurn()
+    event(terminal, terminal === 'error' ? { message: 'Update interrupted during shutdown' } : {}, fixture.managed()[0].payload.taskId)
+    await Promise.all([completion, closing])
+    assert.equal(requests.filter(request => request.command === 'plugin_marketplace').length, before, terminal)
+    assert.equal(fixture.managed().length, 1)
+    assert.equal(market.updateBatch.value.items[1].status, 'cancelled')
+  }
+})
+
+test('a runtime change during the final bulk item discards its old inventory and reloads the new runtime', async () => {
+  const fixture = await batchFixture(['one'])
+  const completion = market.updatePlugins(fixture.selection)
+  await nextTurn()
+  const next = empty('cuda-runtime')
+  globalThis.__pluginInvoke = async (command, args) => {
+    requests.push({ command, ...args })
+    return command === 'plugin_marketplace' ? next : { started: true }
+  }
+  const before = requests.filter(request => request.command === 'plugin_marketplace').length
+  const reload = market.reloadRuntimeInventory()
+  const cleared = market.snapshot.value === null
+  const blocked = market.loading.value
+  fixture.succeed('one')
+  await Promise.all([completion, reload])
+  assert.equal(cleared, true)
+  assert.equal(blocked, true)
+  assert.equal(market.snapshot.value.runtime.identity, 'cuda-runtime')
+  assert.equal(requests.filter(request => request.command === 'plugin_marketplace').length, before + 1)
+  assert.equal(market.busy.value, false)
+  assert.equal(market.loading.value, false)
+})
+
+test('a visible marketplace reloads its catalog without delaying the replacement inventory', async () => {
+  await reset()
+  requests = []
+  let resolveCatalog
+  globalThis.__pluginInvoke = async (command, args) => {
+    requests.push({ command, ...args })
+    if (args.payload.catalogOnly) return new Promise(resolve => { resolveCatalog = resolve })
+    return { ...empty('replacement'), catalog: [] }
+  }
+  const reload = market.reloadRuntimeInventory({ includeCatalog: true })
+  const opening = market.openMarketplace()
+  await reload
+  assert.equal(market.snapshot.value.runtime.identity, 'replacement')
+  assert.equal(market.loading.value, false)
+  assert.equal(market.catalogLoading.value, true)
+  await nextTurn()
+  assert.equal(requests.filter(request => request.payload.catalogOnly).length, 1)
+  resolveCatalog(empty('replacement'))
+  await opening
+  assert.equal(market.snapshot.value.catalog[0].name, 'hello')
+  assert.equal(market.catalogLoading.value, false)
+})
+
+test('a background runtime reload does not fetch the marketplace catalog', async () => {
+  await reset()
+  requests = []
+  globalThis.__pluginInvoke = async (command, args) => {
+    requests.push({ command, ...args })
+    return { ...empty('replacement'), catalog: [] }
+  }
+  await market.reloadRuntimeInventory()
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0].payload.includeCatalog, false)
+  assert.equal(market.catalogLoading.value, false)
+})
+
+test('a failed replacement catalog retains installed plugins and can be retried', async () => {
+  await reset()
+  let failCatalog = true
+  globalThis.__pluginInvoke = async (_command, { payload }) => {
+    if (payload.catalogOnly && failCatalog) throw new Error('Catalog unavailable')
+    return { ...empty('replacement'),
+      installed: [{ name: 'installed-plugin', managed: true, loaded: true }],
+      ...(!payload.catalogOnly && payload.includeCatalog === false ? { catalog: [] } : {}) }
+  }
+  await market.reloadRuntimeInventory({ includeCatalog: true })
+  await nextTurn()
+  assert.equal(market.snapshot.value.installed[0].name, 'installed-plugin')
+  assert.match(market.snapshot.value.catalogError, /Catalog unavailable/)
+  assert.equal(market.error.value, '')
+  assert.equal(market.loading.value, false)
+  assert.equal(market.catalogLoading.value, false)
+  failCatalog = false
+  await market.openMarketplace(true)
+  assert.equal(market.snapshot.value.catalog[0].name, 'hello')
+  assert.equal(market.snapshot.value.catalogError, null)
+})
+
+test('closing during a replacement inventory query does not start a catalog request', async () => {
+  await reset()
+  requests = []
+  let resolveInventory
+  globalThis.__pluginInvoke = async (command, args) => {
+    requests.push({ command, ...args })
+    return new Promise(resolve => { resolveInventory = resolve })
+  }
+  const reload = market.reloadRuntimeInventory({ includeCatalog: true })
+  await nextTurn()
+  const { runWindowCloseGuards } = await vite.ssrLoadModule('/src/utils/windowCloseGuards.ts')
+  const closing = runWindowCloseGuards()
+  resolveInventory({ ...empty('replacement'), catalog: [] })
+  await Promise.all([closing, reload])
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0].payload.catalogOnly, undefined)
+  assert.equal(market.catalogLoading.value, false)
+})
+
+test('a late catalog from a replaced runtime cannot erase the newest catalog', async () => {
+  await reset()
+  let resolveOldCatalog
+  let identity = 'first-runtime'
+  globalThis.__pluginInvoke = async (_command, { payload }) => {
+    if (!payload.catalogOnly) return { ...empty(identity), catalog: [] }
+    if (identity === 'first-runtime') return new Promise(resolve => { resolveOldCatalog = resolve })
+    return { ...empty(identity), catalog: [{ ...empty().catalog[0], name: 'new-catalog' }] }
+  }
+  const first = market.reloadRuntimeInventory({ includeCatalog: true })
+  const oldOpening = market.openMarketplace()
+  await first
+  await nextTurn()
+  identity = 'last-runtime'
+  await market.reloadRuntimeInventory({ includeCatalog: true })
+  await nextTurn()
+  resolveOldCatalog({ ...empty('first-runtime'), catalog: [{ ...empty().catalog[0], name: 'stale-catalog' }] })
+  await oldOpening
+  assert.equal(market.snapshot.value.runtime.identity, 'last-runtime')
+  assert.equal(market.snapshot.value.catalog[0].name, 'new-catalog')
+  assert.equal(market.catalogLoading.value, false)
+})
+
+test('runtime changes stop remaining bulk items and refresh after success, failure or cancellation', async () => {
+  for (const terminal of ['success', 'error', 'task_cancelled']) {
+    const fixture = await batchFixture()
+    const completion = market.updatePlugins(fixture.selection)
+    await nextTurn()
+    globalThis.__pluginInvoke = async (command, args) => {
+      requests.push({ command, ...args })
+      if (command === 'manage_plugin') queueMicrotask(() => event('error', { message: 'Wrong runtime' }, args.payload.taskId))
+      return command === 'plugin_marketplace' ? empty('new-runtime') : { started: true }
+    }
+    const reload = market.reloadRuntimeInventory()
+    const stopping = market.updateBatch.value.phase
+    if (terminal === 'success') fixture.succeed('one')
+    else event(terminal, terminal === 'error' ? { message: 'Old runtime failure' } : {}, fixture.managed()[0].payload.taskId)
+    const oldErrorVisible = market.error.value
+    await Promise.all([completion, reload])
+    assert.equal(stopping, 'stopping', terminal)
+    assert.equal(fixture.managed().length, 1, terminal)
+    assert.equal(market.updateBatch.value.items[1].status, 'cancelled', terminal)
+    assert.equal(market.snapshot.value.runtime.identity, 'new-runtime', terminal)
+    assert.equal(market.error.value, '', terminal)
+    assert.equal(oldErrorVisible, '', terminal)
+  }
+})
+
+test('repeated runtime changes only query the most recent runtime after active work finishes', async () => {
+  const fixture = await batchFixture(['one'])
+  const completion = market.updatePlugins(fixture.selection)
+  await nextTurn()
+  const before = requests.filter(request => request.command === 'plugin_marketplace').length
+  globalThis.__pluginInvoke = async (command, args) => {
+    requests.push({ command, ...args })
+    return empty('last-runtime')
+  }
+  const first = market.reloadRuntimeInventory()
+  const last = market.reloadRuntimeInventory()
+  fixture.succeed('one')
+  await Promise.all([completion, first, last])
+  assert.equal(market.snapshot.value.runtime.identity, 'last-runtime')
+  assert.equal(requests.filter(request => request.command === 'plugin_marketplace').length, before + 1)
+})
+
+test('queued management work is not dispatched into a replacement runtime', async () => {
+  await reset()
+  requests = []
+  globalThis.__pluginInvoke = async (command, args) => {
+    requests.push({ command, ...args })
+    if (command === 'manage_plugin') queueMicrotask(() => event('task_cancelled', {}, args.payload.taskId))
+    return command === 'plugin_marketplace' ? empty('replacement') : { taskId: args?.payload?.taskId }
+  }
+  const pending = market.manage('install', { name: 'old-runtime-plugin' })
+  const rejected = assert.rejects(pending, /cancelled/)
+  const reload = market.reloadRuntimeInventory()
+  await Promise.all([rejected, reload])
+  assert.equal(requests.filter(request => request.command === 'manage_plugin').length, 0)
+  assert.equal(market.snapshot.value.runtime.identity, 'replacement')
+})
+
+test('window closure suppresses a deferred runtime inventory reload', async () => {
+  const fixture = await batchFixture()
+  const completion = market.updatePlugins(fixture.selection)
+  await nextTurn()
+  const before = requests.filter(request => request.command === 'plugin_marketplace').length
+  const reload = market.reloadRuntimeInventory()
+  const { runWindowCloseGuards } = await vite.ssrLoadModule('/src/utils/windowCloseGuards.ts')
+  const closing = runWindowCloseGuards()
+  await nextTurn()
+  event('task_cancelled', {}, fixture.managed()[0].payload.taskId)
+  await Promise.all([completion, reload, closing])
+  assert.equal(requests.filter(request => request.command === 'plugin_marketplace').length, before)
+  assert.equal(market.loading.value, false)
+})
+
+test('cancelling window closure resumes the suppressed runtime inventory and catalog reload', async () => {
+  const fixture = await batchFixture(['one'])
+  const completion = market.updatePlugins(fixture.selection)
+  await nextTurn()
+  globalThis.__pluginInvoke = async (command, args) => {
+    requests.push({ command, ...args })
+    return command === 'plugin_marketplace'
+      ? { ...empty('replacement'), ...(!args.payload.catalogOnly ? { catalog: [] } : {}) }
+      : { started: true }
+  }
+  const before = requests.filter(request => request.command === 'plugin_marketplace').length
+  const reload = market.reloadRuntimeInventory({ includeCatalog: true })
+  const { registerWindowCloseGuard, runWindowCloseGuards, WindowClosePersistenceError } = await vite.ssrLoadModule('/src/utils/windowCloseGuards.ts')
+  const unregister = registerWindowCloseGuard(() => {
+    assert.equal(requests.filter(request => request.command === 'plugin_marketplace').length, before)
+    throw new WindowClosePersistenceError('Save failed', async () => {})
+  })
+  try {
+    const closing = assert.rejects(runWindowCloseGuards(async () => 'cancel'), /Save failed/)
+    await nextTurn()
+    event('task_cancelled', {}, fixture.managed()[0].payload.taskId)
+    await Promise.all([closing, completion, reload])
+    await nextTurn()
+    assert.equal(market.snapshot.value?.runtime.identity, 'replacement')
+    assert.equal(market.snapshot.value.catalog[0].name, 'hello')
+    assert.equal(market.loading.value, false)
+    assert.equal(market.error.value, '')
+  } finally { unregister() }
+})
+
+test('a failed replacement inventory query does not restore old plugin rows', async () => {
+  const fixture = await batchFixture(['one'])
+  const completion = market.updatePlugins(fixture.selection)
+  await nextTurn()
+  globalThis.__pluginInvoke = async () => { throw new Error('New runtime unavailable') }
+  const reload = market.reloadRuntimeInventory()
+  fixture.succeed('one')
+  await Promise.all([completion, reload])
+  assert.equal(market.snapshot.value, null)
+  assert.match(market.error.value, /New runtime unavailable/)
+  assert.equal(market.loading.value, false)
+})
+
+test('late recovery of an old failed task cannot restore its error after a runtime switch', async () => {
+  await reset()
+  let oldResponse, inventoryCalls = 0
+  globalThis.__pluginInvoke = async (command, args) => {
+    requests.push({ command, ...args })
+    if (command !== 'plugin_marketplace') return { started: true }
+    if (++inventoryCalls === 1) return new Promise(resolve => { oldResponse = resolve })
+    return empty('replacement-runtime')
+  }
+  const completion = market.manage('repair', { name: 'broken-old-plugin' })
+  const rejected = assert.rejects(completion, /Old dependency failure/)
+  await nextTurn()
+  event('error', { message: 'Old dependency failure' })
+  await nextTurn()
+  await market.reloadRuntimeInventory()
+  oldResponse(empty('old-runtime'))
+  await rejected
+  assert.equal(market.snapshot.value.runtime.identity, 'replacement-runtime')
+  assert.equal(market.error.value, '')
+  assert.equal(market.loading.value, false)
 })

@@ -510,7 +510,8 @@ a { color: inherit; text-decoration: none; }
 }
 
 /* ===== Page Transitions ===== */
-.page-enter-active, .page-leave-active { transition: 200ms cubic-bezier(.4,0,.2,1); }
+.page-enter-active { transition: 140ms cubic-bezier(.4,0,.2,1); }
+.page-leave-active { transition: 80ms cubic-bezier(.4,0,.2,1); }
 .page-enter-from, .page-leave-to { opacity: 0; transform: translateY(6px); }
 
 ::view-transition-old(root),

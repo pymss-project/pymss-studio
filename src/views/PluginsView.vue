@@ -7,22 +7,21 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { NIcon, useDialog, useMessage, type DropdownOption, type DropdownDividerOption } from 'naive-ui'
 import { ExtensionPuzzleOutline, RefreshOutline, SearchOutline, FolderOpenOutline, EllipsisHorizontalOutline, TerminalOutline, BuildOutline, TrashOutline, CheckmarkCircleOutline, PowerOutline, ChevronDownOutline, OpenOutline, ArrowForwardOutline, ListOutline, GridOutline } from '@vicons/ionicons5'
 import { usePluginMarketplace, type CatalogPlugin, type InstalledPlugin, type PluginAction, type PluginCompatibility, type PluginUpdate } from '@/features/plugin-marketplace/composable'
-import { useAppStore } from '@/stores/app'
 import { useSettingsStore } from '@/stores/settings'
 import PluginLogDialog from '@/features/plugin-marketplace/PluginLogDialog.vue'
 import { normalizePluginCategory, pluginCategories, pluginLocale, pluginSearchText, pluginViewTitle } from '@/features/plugin-marketplace/presentation'
 import { pluginToolCategories } from '@/features/plugin-marketplace/toolEntries'
-import { canApplyPluginUpdate, canCheckPluginUpdate, pluginUpdateKey, pluginUpdateState } from '@/features/plugin-marketplace/updates'
+import { canApplyPluginUpdate, canCheckPluginUpdate, pluginUpdateKey, pluginUpdateState, selectPluginUpdates, type PluginUpdateSelection } from '@/features/plugin-marketplace/updates'
 import { buildPluginLibrary, installedPluginKey, pluginNeedsAttention } from '@/features/plugin-marketplace/library'
 
 const { t, locale } = useI18n()
 const router = useRouter()
 const dialog = useDialog()
 const message = useMessage()
-const app = useAppStore()
 const settings = useSettingsStore()
 const preparationSources = ref<Record<string, string | null>>({})
-const { snapshot, updates, loading, catalogLoading, error, busy, exclusiveBusy, logs, logRecords, activity, activities, openMarketplace, refreshInventory, clearUpdateChecks, manage, cancel } = usePluginMarketplace()
+const { snapshot, updates, loading, catalogLoading, error, busy, exclusiveBusy, logs, logRecords, activity, activities, openMarketplace, refreshInventory, clearUpdateChecks, manage, cancel,
+  updateBatch, batchBusy, updatePlugins, stopBatchUpdates } = usePluginMarketplace()
 const statusFilter = ref<'all' | 'installed' | 'available' | 'attention'>('all')
 const recentInstalls = ref(new Map<string, string>())
 const pageElement = ref<HTMLElement | null>(null)
@@ -36,7 +35,8 @@ const switchingSource = ref(false)
 const sourceOptions = computed(() => [
   { label: t('plugins.sourceAuto'), value: 'auto' },
   { label: 'GitHub', value: 'github' },
-  { label: 'GitCode', value: 'gitcode', disabled: snapshot.value?.catalogSource?.gitAvailable === false },
+  { label: 'GitCode', value: 'gitcode', disabled: snapshot.value?.catalogSource?.gitAvailable === false
+    && !snapshot.value?.catalogSource?.httpProviders?.includes('gitcode') },
 ])
 const customSource = computed(() => snapshot.value?.catalogSource?.provider === 'custom')
 const sourceStatus = computed(() => {
@@ -77,6 +77,22 @@ const updateInstallation = ref('')
 const updateMode = ref<'update' | 'refetch'>('update')
 const reviewedUpdate = ref<PluginUpdate | null>(null)
 const installDependencies = ref(false)
+const showBatchUpdate = ref(false)
+const showBatchResults = ref(false)
+const batchSelection = ref<PluginUpdateSelection[]>([])
+const batchDependencies = ref(false)
+const updateCandidates = computed(() => selectPluginUpdates(snapshot.value, updates.value))
+const displayBatch = computed(() => updateBatch?.value && (batchBusy.value || (
+  updateBatch.value.runtime.identity === snapshot.value?.runtime.identity
+  && updateBatch.value.runtime.pythonPath === snapshot.value?.runtime.pythonPath
+  && updateBatch.value.runtime.bindingDir === snapshot.value?.runtime.bindingDir
+  && updateBatch.value.runtime.updateSourceIdentity === snapshot.value?.runtime.updateSourceIdentity)) ? updateBatch.value : null)
+const batchStats = computed(() => {
+  const items = updateBatch?.value?.items || []
+  return { total: items.length, completed: items.filter(item => item.status !== 'queued' && item.status !== 'running').length,
+    succeeded: items.filter(item => item.status === 'succeeded').length, failed: items.filter(item => item.status === 'failed').length,
+    skipped: items.filter(item => item.status === 'skipped').length, cancelled: items.filter(item => item.status === 'cancelled').length }
+})
 const updatePlugin = computed(() => snapshot.value?.installed.find(plugin => plugin.managed && plugin.name === updateName.value))
 const removedPreinstalled = computed(() => (snapshot.value?.preinstalled || [])
   .filter(plugin => !plugin.installed
@@ -118,7 +134,7 @@ const visibleEntries = computed(() => {
     .sort((a, b) => a.rank - b.rank || collator.compare(a.title, b.title) || a.entry.key.localeCompare(b.entry.key)).map(item => item.entry)
 })
 const installed = computed(() => visibleEntries.value.flatMap(entry => entry.installed ? [entry.installed] : []))
-const updateCount = computed(() => Object.values(updates.value).filter(canApplyPluginUpdate).length)
+const updateCount = computed(() => updateCandidates.value.length)
 const updateErrorCount = computed(() => Object.values(updates.value).filter(update => pluginUpdateState(update) === 'error').length)
 const lastUpdateCheck = computed(() => {
   const dates = Object.values(updates.value).map(update => Date.parse(update.checked_at || '')).filter(Number.isFinite)
@@ -174,16 +190,14 @@ function installLabel(name: string) {
 }
 
 onMounted(openMarketplace)
-watch(() => [app.runtimeInfo?.backend, app.runtimeInfo?.installState?.pythonPath], () => {
-  closePluginMenu()
-  if (!busy.value) void openMarketplace(true)
-})
 watch([statusFilter, search, category, installed, () => snapshot.value, () => settings.pluginViewMode], () => closePluginMenu(), { flush: 'sync' })
 watch(detailEntry, entry => { if (!entry) showDetails.value = false })
 watch(statusFilter, () => { recentInstalls.value = new Map() }, { flush: 'sync' })
-watch([() => snapshot.value?.runtime.identity, () => snapshot.value?.runtime.pythonPath, () => snapshot.value?.runtime.updateSourceIdentity], () => {
+watch([() => snapshot.value?.runtime.identity, () => snapshot.value?.runtime.pythonPath, () => snapshot.value?.runtime.bindingDir, () => snapshot.value?.runtime.updateSourceIdentity], () => {
   closePluginMenu()
   showDetails.value = false
+  showBatchUpdate.value = false
+  showBatchResults.value = false
   recentInstalls.value = new Map()
 }, { flush: 'sync' })
 onMounted(() => {
@@ -327,6 +341,10 @@ async function restoreBundled(name: string, key: string) {
 function canRepairPlugin(plugin: InstalledPlugin) {
   return plugin.managed && plugin.enabled !== false && plugin.prepared !== false && !plugin.removalPending && !incompatible(plugin)
     && !!(plugin.error || plugin.dependencyError) && !canOpenPluginView(plugin)
+}
+function needsReinstall(plugin: InstalledPlugin) {
+  return canCheckPluginUpdate(plugin) && plugin.enabled !== false && !incompatible(plugin)
+    && (plugin.errorKind === 'load' || plugin.viewErrorKind === 'load')
 }
 function closePluginMenu(restoreFocus = false) {
   const trigger = pluginMenu.value?.trigger
@@ -490,6 +508,28 @@ async function confirmUpdate() {
   })
 }
 
+function openBatchUpdate() {
+  if (disabled.value || !updateCandidates.value.length) return
+  batchSelection.value = updateCandidates.value
+  batchDependencies.value = false
+  showBatchUpdate.value = true
+}
+
+async function confirmBatchUpdate() {
+  if (disabled.value || !batchSelection.value.length) return
+  const selection = batchSelection.value
+  const dependencies = batchDependencies.value
+  showBatchUpdate.value = false
+  try {
+    await updatePlugins(selection, { installDependencies: dependencies, locale: locale.value })
+  } catch (failure) { message.error(String(failure)) }
+}
+
+function batchItemLabel(status: string) {
+  return t(status === 'skipped' ? 'plugins.batchSkipped' : status === 'queued' ? 'plugins.phases.queued'
+    : status === 'running' ? 'plugins.batchUpdating' : status === 'cancelled' ? 'plugins.batchStopped' : `plugins.taskStates.${status}`)
+}
+
 async function requestCancel(id?: string) {
   try { await cancel(id) }
   catch (failure) { message.error(String(failure)) }
@@ -504,7 +544,10 @@ async function requestCancel(id?: string) {
         <div class="plugins-actions">
 
           <n-button v-if="snapshot" :loading="!!updateCheck" :disabled="disabled || !snapshot.installed.some(canCheckPluginUpdate)" @click="perform('check_updates', undefined, undefined, { expectedRuntime: snapshot.runtime.identity })">
-            {{ t('plugins.checkUpdates') }}<template v-if="updateCount"> ({{ updateCount }})</template>
+            {{ t('plugins.checkUpdates') }}
+          </n-button>
+          <n-button v-if="updateCount || batchBusy" type="primary" :loading="batchBusy" :disabled="disabled || !updateCount" @click="openBatchUpdate">
+            {{ t('plugins.updateAll') }}<template v-if="updateCount"> ({{ updateCount }})</template>
           </n-button>
           <n-button :disabled="!activity && !logs.length" :aria-label="activeTasks.length ? `${t('tasks.logs')} · ${t('plugins.runningTasks', { count: activeTasks.length })}` : t('tasks.logs')" @click="openPluginLogs()"><template #icon><n-spin v-if="activeTasks.length" :size="14" aria-hidden="true" /><n-icon v-else :component="TerminalOutline" /></template>{{ t('tasks.logs') }}<span v-if="activeTasks.length" class="plugins-running-count" role="status" aria-live="polite">{{ t('plugins.runningTasks', { count: activeTasks.length }) }}</span></n-button>
           <n-button :disabled="installDisabled() || !snapshot" @click="showSource = true">{{ t('plugins.installSource') }}</n-button>
@@ -518,6 +561,14 @@ async function requestCancel(id?: string) {
     </div>
 
     <n-alert v-if="error" type="error" class="plugins-notice">{{ error }}</n-alert>
+    <n-alert v-if="displayBatch" :type="batchBusy ? 'info' : batchStats.failed || batchStats.skipped || batchStats.cancelled ? 'warning' : 'success'" :bordered="false" class="plugins-notice">
+      <div class="plugins-batch-status">
+        <span role="status" aria-live="polite">{{ t(batchBusy ? 'plugins.batchProgress' : 'plugins.batchSummary', batchStats) }}</span>
+        <n-button v-if="batchBusy" size="small" secondary :disabled="displayBatch.phase === 'stopping'" @click="stopBatchUpdates">{{ t('plugins.batchStop') }}</n-button>
+        <n-button v-else size="small" secondary @click="showBatchResults = true">{{ t('plugins.batchResults') }}</n-button>
+      </div>
+      <p v-if="displayBatch.phase === 'stopping'" class="plugin-update-note">{{ t('plugins.batchStopping') }}</p>
+    </n-alert>
     <n-alert v-if="!snapshot && !loading && /No active runtime/i.test(error)" type="info" class="plugins-notice">
       {{ t('plugins.runtimeRequired') }}
       <router-link to="/settings">{{ t('nav.settings') }}</router-link>
@@ -560,7 +611,7 @@ async function requestCancel(id?: string) {
               :disabled="busy || loading || catalogLoading || switchingSource || snapshot.catalogSource?.supported === false" @update:value="changePluginSource" />
             <span v-if="customSource" class="plugins-source-status">{{ t('plugins.sourceCustom') }}</span>
             <span v-else-if="!settings.pluginSource || settings.pluginSource === 'auto'" class="plugins-source-status">{{ t('plugins.sourceAutoHint') }}</span>
-            <span v-if="snapshot.catalogSource?.gitAvailable === false" class="plugins-source-status">{{ t('plugins.sourceGitRequired') }}</span>
+            <span v-if="snapshot.catalogSource?.gitAvailable === false && !snapshot.catalogSource.httpProviders?.includes('gitcode')" class="plugins-source-status">{{ t('plugins.sourceGitRequired') }}</span>
           </div>
         </n-popover>
         <span class="plugins-library-hint">{{ t('plugins.listHint') }}</span>
@@ -593,6 +644,7 @@ async function requestCancel(id?: string) {
                     <n-tag v-if="incompatible(plugin)" type="warning" size="small">{{ t('plugins.incompatible') }}</n-tag>
                     <n-tag v-else-if="plugin.removalPending" type="warning" size="small">{{ t('plugins.removalPending') }}</n-tag>
                     <n-tag v-else-if="plugin.prepared === false" type="warning" size="small">{{ t('plugins.notPrepared') }}</n-tag>
+                    <n-tag v-else-if="needsReinstall(plugin)" type="error" size="small">{{ t('plugins.repairRequired') }}</n-tag>
                     <n-tag v-else :type="plugin.enabled === false ? 'default' : plugin.loaded == null ? 'warning' : plugin.loaded ? 'success' : 'error'" size="small">{{ plugin.enabled === false ? t('plugins.disabled') : plugin.loaded == null ? t('plugins.notVerified') : plugin.loaded ? t('plugins.loaded') : t('plugins.loadFailed') }}</n-tag>
                     <n-tag v-if="canApplyPluginUpdate(pluginUpdate(plugin))" type="info" size="small">{{ t(pluginUpdateState(pluginUpdate(plugin)) === 'content' ? 'plugins.updateContentReady' : 'plugins.updateReady') }}</n-tag>
                     <n-tag v-else-if="pluginUpdateState(pluginUpdate(plugin)) === 'error'" type="warning" size="small">{{ t('plugins.updateCheckFailed') }}</n-tag>
@@ -615,6 +667,7 @@ async function requestCancel(id?: string) {
                   @click="prepareRuntime(plugin)">{{ t('plugins.prepareRuntime') }}</n-button>
                 <n-button v-else-if="plugin.preinstalled && plugin.prepared === false && !plugin.removalPending" type="primary" size="small" :loading="installing(plugin.name)" :disabled="disabled"
                   @click="restoreBundled(plugin.name, key)">{{ t('plugins.restorePreinstalled') }}</n-button>
+                <n-button v-else-if="needsReinstall(plugin)" size="small" secondary :disabled="disabled" @click="selectMore('refetch', plugin)">{{ t('plugins.refetch') }}</n-button>
                 <n-button v-else-if="canRepairPlugin(plugin)" size="small" secondary :disabled="disabled" @click="selectMore('repair', plugin)">{{ t('plugins.repair') }}</n-button>
                 <n-button v-else-if="plugin.contributions?.views?.length" type="primary" secondary size="small" :disabled="!canOpenPluginView(plugin)"
                   :aria-haspopup="plugin.contributions.views.length > 1 ? 'menu' : undefined"
@@ -633,7 +686,13 @@ async function requestCancel(id?: string) {
                 :options="(plugin.availableBindings || []).map(item => ({ value: item.runtime, label: `${item.runtime} · ${item.version || '—'}` }))" />
               <p class="plugins-help">{{ t(plugin.availableBindings?.length ? 'plugins.prepareDependenciesHint' : 'plugins.prepareSourceMissing') }}</p>
             </template>
-            <p v-if="plugin.error && !incompatible(plugin)" class="plugin-error">{{ plugin.error }}</p>
+            <div v-if="plugin.error && !incompatible(plugin)" class="plugin-load-error">
+              <p class="plugin-error">{{ t('plugins.loadErrorSummary') }}</p>
+              <details class="plugin-error-details">
+                <summary>{{ t('plugins.errorDetails') }}</summary>
+                <pre>{{ plugin.error }}</pre>
+              </details>
+            </div>
             <p v-if="plugin.viewError" class="plugins-help">{{ t('plugins.viewUnavailable') }} {{ plugin.viewError }}</p>
             <p v-if="incompatible(plugin)" class="plugin-error">{{ plugin.compatibility?.reasons.join('\n') }}</p>
             <p v-if="plugin.dependencyError" class="plugins-help" :title="plugin.dependencyError">{{ t('plugins.optionalBackendHint') }}</p>
@@ -738,6 +797,36 @@ async function requestCancel(id?: string) {
       <template #footer><div class="plugin-update-footer"><n-button @click="showUpdate = false">{{ t('common.cancel') }}</n-button><n-button type="primary" :disabled="disabled" @click="confirmUpdate">{{ t(updateMode === 'refetch' ? 'plugins.refetch' : reviewedUpdate?.status === 'content' ? 'plugins.syncSourceContent' : 'plugins.update') }}</n-button></div></template>
     </n-modal>
 
+    <n-modal v-model:show="showBatchUpdate" preset="card" :title="t('plugins.updateAll')" class="plugin-source-modal plugin-update-modal" style="width: min(560px, calc(100vw - 32px))">
+      <p class="plugin-update-description">{{ t('plugins.batchConfirm', { count: batchSelection.length }) }}</p>
+      <ul class="plugin-batch-list">
+        <li v-for="item in batchSelection" :key="item.name">
+          <strong>{{ catalogTitle(item) }}</strong>
+          <span>{{ item.version || t('plugins.unknownVersion') }} → {{ item.update.remote_version || t('plugins.unknownVersion') }}</span>
+        </li>
+      </ul>
+      <p class="plugin-update-assurance"><n-icon :component="CheckmarkCircleOutline" />{{ t('plugins.updateFilesHint') }}</p>
+      <details class="plugin-update-options">
+        <summary><n-icon :component="ChevronDownOutline" />{{ t('plugins.updateOptions') }}</summary>
+        <div class="plugin-update-options-body">
+          <n-checkbox v-model:checked="batchDependencies" :disabled="disabled">{{ t('plugins.updateDependencies') }}</n-checkbox>
+          <p class="plugin-update-note">{{ t(batchDependencies ? 'plugins.updateDependenciesHint' : 'plugins.updateDependenciesHelp') }}</p>
+        </div>
+      </details>
+      <template #footer><div class="plugin-update-footer"><n-button @click="showBatchUpdate = false">{{ t('common.cancel') }}</n-button><n-button type="primary" :disabled="disabled || !batchSelection.length" @click="confirmBatchUpdate">{{ t('plugins.updateAll') }}</n-button></div></template>
+    </n-modal>
+
+    <n-modal v-model:show="showBatchResults" preset="card" :title="t('plugins.batchResults')" class="plugin-source-modal" style="width: min(680px, calc(100vw - 32px))">
+      <p class="plugin-update-description">{{ t('plugins.batchSummary', batchStats) }}</p>
+      <ul class="plugin-batch-list plugin-batch-results">
+        <li v-for="item in displayBatch?.items || []" :key="item.name">
+          <div><strong>{{ catalogTitle(item) }}</strong><span>{{ batchItemLabel(item.status) }}</span></div>
+          <p v-if="item.status === 'failed' && item.error" class="plugin-error">{{ item.error }}</p>
+        </li>
+      </ul>
+      <template #footer><div class="plugin-update-footer"><n-button @click="showBatchResults = false">{{ t('common.close') }}</n-button></div></template>
+    </n-modal>
+
     <n-modal v-model:show="showSource" preset="card" :title="t('plugins.installSource')" class="plugin-source-modal" style="width: min(560px, calc(100vw - 32px))">
       <p class="plugins-help">{{ t('plugins.sourceHint') }}</p>
       <n-input v-model:value="source" :placeholder="t('plugins.sourcePlaceholder')" :disabled="installDisabled()" />
@@ -760,6 +849,13 @@ async function requestCancel(id?: string) {
 .plugins-running-count { margin-left: 6px; color: var(--on-surface-muted); font-size: 11px; }
 .plugin-running-task { max-width: 240px; }
 .plugins-notice { margin-bottom: 16px; }
+.plugins-batch-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.plugin-batch-list { display: grid; gap: 12px; max-height: min(42dvh, 360px); overflow: auto; margin: 16px 0; padding: 0; list-style: none; }
+.plugin-batch-list > li, .plugin-batch-results > li > div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.plugin-batch-list strong { min-width: 0; overflow-wrap: anywhere; }
+.plugin-batch-list span { flex-shrink: 0; color: var(--on-surface-muted); font-size: 12px; }
+.plugin-batch-results > li { display: block; }
+.plugin-batch-results .plugin-error { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .plugins-default-tools { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px 16px; }
 .plugins-default-tools > span { flex: 1; min-width: min(100%, 280px); }
 .plugins-default-tools > .n-button { flex-shrink: 0; }
@@ -809,7 +905,7 @@ async function requestCancel(id?: string) {
 .plugin-installed-actions { display: flex; align-items: center; gap: 4px; }
 .plugin-primary-state { color: var(--on-surface-muted); font-size: 12px; }
 .plugin-open-chevron { margin-left: 7px; }
-.plugin-library-entry > .plugins-help, .plugin-library-entry > .plugin-error { margin: 8px 0 0 48px; }
+.plugin-library-entry > .plugins-help, .plugin-library-entry > .plugin-error, .plugin-library-entry > .plugin-load-error { margin: 8px 0 0 48px; }
 .plugin-installed-card > .n-select { max-width: 400px; margin: 8px 0 0 48px; }
 .plugins-installed--card { grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)); gap: 14px; }
 .plugins-installed--card .plugin-library-entry { display: flex; flex-direction: column; min-height: 180px; padding: 18px; cursor: pointer; }
@@ -818,7 +914,7 @@ async function requestCancel(id?: string) {
 .plugins-installed--card .plugin-installed-icon { grid-row: 1; }
 .plugins-installed--card .plugin-installed-description { grid-column: 1 / -1; margin-top: 4px; }
 .plugins-installed--card .plugin-installed-actions { order: 2; justify-content: flex-end; margin: auto 0 0; padding-top: 16px; }
-.plugins-installed--card .plugin-library-entry > .plugins-help, .plugins-installed--card .plugin-library-entry > .plugin-error { margin-left: 0; }
+.plugins-installed--card .plugin-library-entry > .plugins-help, .plugins-installed--card .plugin-library-entry > .plugin-error, .plugins-installed--card .plugin-library-entry > .plugin-load-error { margin-left: 0; }
 .plugins-installed--card .plugin-installed-card > .n-select { max-width: 100%; margin-left: 0; }
 :global(.plugin-detail-modal .n-card-content), :global(.plugin-detail-modal .n-card__content) { scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--on-surface-muted) 35%, transparent) transparent; }
 @supports selector(::-webkit-scrollbar) {
@@ -846,6 +942,12 @@ async function requestCancel(id?: string) {
 .plugin-operation-list { margin: 0; padding-left: 18px; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
 .plugins-help { opacity: .65; font-size: 12px; }
 .plugin-error { color: var(--danger); white-space: pre-wrap; overflow-wrap: anywhere; }
+.plugin-load-error { min-width: 0; }
+.plugin-load-error > .plugin-error { margin: 0 0 6px; }
+.plugin-error-details { color: var(--on-surface-muted); font-size: 12px; }
+.plugin-error-details summary { cursor: pointer; }
+.plugin-error-details summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.plugin-error-details pre { max-height: 180px; overflow: auto; margin: 8px 0 0; padding: 10px 12px; border-radius: 6px; background: var(--surface-2); font: 12px/1.6 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .plugins-empty { display: flex; justify-content: center; padding: 60px 20px; }
 .plugin-update-description { margin: 0; color: var(--on-surface); font-size: 13px; line-height: 1.8; }
 .plugins-update-versions { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 20px; margin: 16px 0; }
@@ -875,7 +977,7 @@ async function requestCancel(id?: string) {
   .plugin-installed-toggle { grid-template-columns: 32px minmax(0, 1fr); gap: 10px; }
   .plugin-installed-icon { width: 32px; height: 32px; }
   .plugin-installed-actions { flex-wrap: wrap; margin-left: 42px; }
-  .plugin-library-entry > .plugins-help, .plugin-library-entry > .plugin-error, .plugin-installed-card > .n-select { margin-left: 42px; }
+  .plugin-library-entry > .plugins-help, .plugin-library-entry > .plugin-error, .plugin-library-entry > .plugin-load-error, .plugin-installed-card > .n-select { margin-left: 42px; }
   .plugin-installed-card > .n-select { max-width: calc(100% - 42px); }
 }
 </style>

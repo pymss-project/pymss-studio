@@ -4,7 +4,7 @@ import test from 'node:test'
 import vm from 'node:vm'
 import ts from 'typescript'
 import { computed, h, ref } from 'vue'
-import { registerWindowCloseGuard, runWindowCloseGuards, WindowClosePersistenceError } from '../src/utils/windowCloseGuards.ts'
+import { registerWindowCloseGuard, runWindowCloseGuards, runWindowCloseRecoveries, WindowClosePersistenceError } from '../src/utils/windowCloseGuards.ts'
 
 const component = readFileSync(new URL('../src/components/TitleBar.vue', import.meta.url), 'utf8')
 const script = component.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
@@ -14,10 +14,10 @@ const code = ts.transpileModule(source.statements.filter(item => !ts.isImportDec
 }).outputText
 const flush = async () => { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)) }
 
-function environment() {
+function environment({ closeFails = false } = {}) {
   const calls = [], prompts = [], errors = []
   const context = vm.createContext({
-    computed, h, ref, NButton: { name: 'Button' }, runWindowCloseGuards,
+    computed, h, ref, NButton: { name: 'Button' }, runWindowCloseGuards, runWindowCloseRecoveries,
     createLogger: () => ({ warn() {} }), useRoute: () => ({ name: 'editor' }),
     useI18n: () => ({ t: key => key }),
     useDialog: () => ({ warning(options) { prompts.push(options); return { destroy() { options.onClose?.() } } } }),
@@ -25,8 +25,11 @@ function environment() {
     useSettingsStore: () => ({ isModelDirMigrating: false }),
     useTaskStore: () => ({ runningTasks: [] }),
     window: { __TAURI_INTERNALS__: {} }, navigator: { platform: 'Win32' },
-    getCurrentWindow: () => ({ label: 'editor', async destroy() { calls.push('destroy') }, async close() { calls.push('close') } }),
-    async invoke(command) { calls.push(command) }, onMounted() {}, onUnmounted() {},
+    getCurrentWindow: () => ({ label: 'editor',
+      async destroy() { calls.push('destroy'); if (closeFails) throw new Error('Destroy failed') },
+      async close() { calls.push('close'); if (closeFails) throw new Error('Close failed') } }),
+    async invoke(command) { calls.push(command); if (closeFails && command === 'close_current_window') throw new Error('Native close failed') },
+    onMounted() {}, onUnmounted() {},
   })
   vm.runInContext(code, context)
   return {
@@ -70,6 +73,17 @@ test('retry runs persistence again and only then closes the native window', asyn
   await closing
   assert.equal(attempts, 2)
   assert.deepEqual(env.calls, ['close_current_window'])
+})
+
+test('native close failure resumes suspended work after all guards have passed', async t => {
+  const env = environment({ closeFails: true })
+  let resumed = 0
+  const remove = registerWindowCloseGuard(() => {}, 70, () => { resumed++ })
+  t.after(remove)
+  await env.close()
+  assert.deepEqual(env.calls, ['close_current_window', 'destroy', 'close'])
+  assert.equal(resumed, 1)
+  assert.deepEqual(env.errors, ['tasks.closeFailed'])
 })
 
 test('recovery keyboard actions stop background shortcuts, preserve Space activation and handle Escape', async t => {

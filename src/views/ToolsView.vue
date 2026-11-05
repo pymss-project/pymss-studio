@@ -12,8 +12,6 @@ import PluginViewHost from '@/features/plugin-marketplace/PluginViewHost.vue'
 import { pluginToolEntries, type PluginToolEntry } from '@/features/plugin-marketplace/toolEntries'
 import { pluginLocale } from '@/features/plugin-marketplace/presentation'
 import { recordFeatureVisit } from '@/utils/logger'
-import { useAppStore } from '@/stores/app'
-import { activeRuntimeEnvironment } from '@/utils/runtime'
 import { useSettingsStore } from '@/stores/settings'
 
 defineOptions({ name: 'ToolsView' })
@@ -22,7 +20,6 @@ const { t, locale } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const pluginMarket = usePluginMarketplace()
-const app = useAppStore()
 const settings = useSettingsStore()
 const preparingTool = ref(false)
 const selectedPreparationSource = ref<string | null>(null)
@@ -191,12 +188,10 @@ watch(pluginTools, entries => {
   else markUnavailable('')
 }, { immediate: true })
 
-watch([() => route.name, () => activeRuntimeEnvironment(app.runtimeInfo)?.pythonPath],
-  ([name, pythonPath], [previousName, previousPythonPath]) => {
+watch(() => route.name,
+  (name, previousName) => {
     if (!restored.value || pluginToolBusy.value) return
-    if (pythonPath !== previousPythonPath) {
-      void pluginMarket.reloadRuntimeInventory()
-    } else if (name === 'tools' && previousName !== 'tools') {
+    if (name === 'tools' && previousName !== 'tools') {
       void pluginMarket.refreshInventory()
     }
   },

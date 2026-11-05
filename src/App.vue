@@ -27,6 +27,7 @@ import type { WorkflowRuntimeBindings } from '@/workflows/workbench'
 import { activeRuntimeEnvironment, runtimeBackendLabel, runtimeCoreSyncAvailable, runtimeCoreUpdateAvailable as hasRuntimeCoreUpdate } from '@/utils/runtime'
 import { connectWorkerEvents } from '@/utils/events'
 import { useRenderDiagnosticState } from '@/features/diagnostics/renderState'
+import { usePluginMarketplace } from '@/features/plugin-marketplace/composable'
 
 const studioLog = createLogger('ui.App')
 
@@ -84,6 +85,17 @@ const deferredUpdatePrompt = computed(() => updates.updateIsPrerelease
   : t('settings.updateDeferredPrompt', { version: updates.latestVersion }))
 const manualUpdatePrompt = computed(() => updates.updateMessage || t('settings.updateManualInstallPrompt', { version: updates.latestVersion }))
 const activeRuntime = computed(() => activeRuntimeEnvironment(app.runtimeInfo))
+const pluginMarketplace = usePluginMarketplace()
+watch([() => activeRuntime.value?.backend || app.runtimeInfo?.installState?.backend,
+  () => activeRuntime.value?.pythonPath || app.runtimeInfo?.installState?.pythonPath,
+  () => activeRuntime.value?.installedAt || app.runtimeInfo?.installState?.installedAt,
+  () => activeRuntime.value?.overlayPath || app.runtimeInfo?.installState?.overlayPath,
+  () => activeRuntime.value?.pymssVersion || app.runtimeInfo?.pymssVersion,
+  () => activeRuntime.value?.pymssCoreVersion || app.runtimeInfo?.pymssCoreVersion], () => {
+  if (pluginMarketplace.inventoryRequested.value || pluginMarketplace.ready.value || pluginMarketplace.busy.value || pluginMarketplace.loading.value) {
+    void pluginMarketplace.reloadRuntimeInventory({ includeCatalog: route.path === '/plugins' })
+  }
+})
 const runtimeVersionUpdateAvailable = computed(() => hasRuntimeCoreUpdate(
   activeRuntime.value,
   app.runtimeCoreVersions,

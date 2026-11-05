@@ -10,7 +10,7 @@ import { invoke } from '@tauri-apps/api/core'
 import AppBrandMark from '@/components/AppBrandMark.vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useTaskStore } from '@/stores/task'
-import { runWindowCloseGuards, type WindowClosePersistenceError, type WindowCloseRecovery } from '@/utils/windowCloseGuards'
+import { runWindowCloseGuards, runWindowCloseRecoveries, type WindowClosePersistenceError, type WindowCloseRecovery } from '@/utils/windowCloseGuards'
 
 const studioLog = createLogger('ui.components.TitleBar')
 
@@ -117,6 +117,7 @@ async function performWindowClose() {
         return true
       } catch {
         allowForcedClose.value = false
+        await runWindowCloseRecoveries()
         return false
       }
     }

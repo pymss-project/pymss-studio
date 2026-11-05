@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { canApplyPluginUpdate, canCheckPluginUpdate, pluginUpdateKey, pluginUpdateState } from '../src/features/plugin-marketplace/updates.ts'
+import { canApplyPluginUpdate, canCheckPluginUpdate, pluginUpdateKey, pluginUpdateState, selectPluginUpdates } from '../src/features/plugin-marketplace/updates.ts'
 
 test('update checks distinguish unverified changes, failures and reviewed updates', () => {
   assert.equal(pluginUpdateState(), 'unchecked')
@@ -36,4 +36,28 @@ test('cached checks bind source, installation contents and execution environment
     assert.notEqual(pluginUpdateKey(plugin, { ...runtime, ...patch }), key)
   }
   assert.equal(pluginUpdateKey({ ...plugin, loaded: false, enabled: false }, runtime), key)
+})
+
+test('bulk selections include only managed reviewed updates and freeze their target', () => {
+  const plugin = { managed: true, version: '1.0', url: '/source', prepared: true }
+  const names = ['version', 'content', 'source', 'older', 'error', 'unchecked', 'unreviewed']
+  const inventory = { runtime: { identity: 'cpu', pythonPath: '/python' }, installed: [
+    { ...plugin, name: 'version', managed: false, path: '/readonly' },
+    ...names.map(name => ({ ...plugin, name })),
+    { ...plugin, name: 'unprepared', prepared: false }, { ...plugin, name: 'removed', removalPending: true },
+    { ...plugin, name: 'readonly', managed: false },
+  ] }
+  const target = { schemaVersion: 1, candidate: { commit: 'a'.repeat(40) } }
+  const updates = Object.fromEntries(['version', 'unprepared', 'removed', 'readonly', 'unreviewed'].map(name => [name, { status: 'update', target }]))
+  updates.content = { status: 'content', target }
+  updates.source = { status: 'source_changed', target }
+  updates.older = { status: 'older', target }
+  updates.error = { status: 'error', error: 'Offline' }
+  updates.unreviewed = { status: 'update' }
+  const selected = selectPluginUpdates(inventory, updates)
+  assert.deepEqual(selected.map(item => item.name), ['version', 'content'])
+  assert.equal(selected[0].installationKey, pluginUpdateKey(inventory.installed[1], inventory.runtime))
+  target.candidate.commit = 'b'.repeat(40)
+  assert.equal(selected[0].update.target.candidate.commit, 'a'.repeat(40))
+  assert.deepEqual(selectPluginUpdates(null, updates), [])
 })
