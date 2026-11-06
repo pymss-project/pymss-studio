@@ -31,7 +31,7 @@ pub(crate) fn recover_audio_output_temps(app: &AppHandle) {
 }
 
 fn requires_background_result(command: &str) -> bool {
-    matches!(command, "audio_tools" | "export_editor_mix" | "manage_plugin" | "run_operation")
+    matches!(command, "export_editor_mix" | "manage_plugin" | "run_operation")
 }
 
 fn take_cancelled_tasks(cancelled: &Mutex<HashSet<String>>, registered: &[String]) -> Vec<String> {
@@ -1126,10 +1126,6 @@ fn bind_log_envelope_scope(record: &mut LogRecord, envelope: &WorkerEnvelope) {
     }
 }
 
-pub(crate) fn log_worker_event(app: &AppHandle, command: &str, envelope: &mut WorkerEnvelope) {
-    log_worker_event_with_scope(app, command, envelope, None, None);
-}
-
 fn log_worker_event_with_scope(
     app: &AppHandle,
     command: &str,
@@ -1182,8 +1178,8 @@ fn log_worker_event_with_scope(
         .unwrap_or_default();
     let level = if envelope.event_type == "error" || envelope.event_type.ends_with("_failed") {
         "ERROR"
-    } else if envelope.event_type == "audio_tool_result"
-        && envelope.payload.get("failed").and_then(Value::as_array).is_some_and(|items| !items.is_empty()) {
+    } else if envelope.event_type == "operation_result"
+        && envelope.payload.pointer("/outputs/report/value/failed").and_then(Value::as_array).is_some_and(|items| !items.is_empty()) {
         "WARN"
     } else if envelope.event_type == "workflow_execution" && !execution.ends_with("progress") {
         // The terminal error event owns the exception; node lifecycle is context.
@@ -1285,9 +1281,15 @@ fn record_worker_event(command: &str, envelope: &WorkerEnvelope, level: &str) ->
             }
         }
     }
+    let result = if envelope.event_type == "operation_result" {
+        payload.pointer("/outputs/report/value").unwrap_or(payload)
+    } else { payload };
+    if let Some(succeeded) = result.get("succeeded").and_then(Value::as_u64) {
+        record.context.insert("succeeded".into(), succeeded.into());
+    }
     for (key, count_key) in [("failed", "failedCount"), ("skipped", "skippedCount"),
         ("warnings", "warningCount"), ("outputs", "outputCount"), ("items", "resultCount")] {
-        if let Some(items) = payload.get(key).and_then(Value::as_array) {
+        if let Some(items) = result.get(key).and_then(Value::as_array) {
             record.context.insert(count_key.into(), items.len().into());
         }
     }
@@ -1298,7 +1300,7 @@ fn is_significant_worker_event(event_type: &str) -> bool {
     ["started", "finished", "done", "failed", "cancelled"]
         .iter()
         .any(|suffix| event_type.ends_with(suffix))
-        || matches!(event_type, "task_start" | "audio_tool_result" | "editor_mix_exported")
+        || matches!(event_type, "task_start" | "operation_result" | "editor_mix_exported")
 }
 
 fn worker_lifecycle_level(command: &str) -> &'static str {
@@ -1309,7 +1311,7 @@ fn worker_lifecycle_level(command: &str) -> &'static str {
             | "separate_batch"
             | "infer_workflow"
             | "infer_workflow_batch"
-            | "audio_tools"
+            | "run_operation"
             | "export_editor_mix"
             | "install_runtime"
             | "update_runtime_core"
@@ -1387,7 +1389,6 @@ fn is_background_terminal_event(command: &str, event_type: &str) -> bool {
         "infer" | "infer_workflow" => {
             matches!(event_type, "error" | "task_done" | "task_cancelled")
         }
-        "audio_tools" => matches!(event_type, "error" | "audio_tool_result" | "task_cancelled"),
         "run_operation" => {
             matches!(event_type, "error" | "operation_result" | "task_cancelled")
         }
@@ -2160,7 +2161,7 @@ mod tests {
             "infer_workflow",
             "env_info",
             "list_models",
-            "audio_tools",
+            "run_operation",
             "test_connection",
             "update_runtime_core",
         ] {
@@ -2849,19 +2850,6 @@ mod tests {
     }
 
     #[test]
-    fn audio_tool_result_is_a_background_terminal_event() {
-        assert!(is_background_terminal_event(
-            "audio_tools",
-            "audio_tool_result"
-        ));
-        assert!(is_background_terminal_event("audio_tools", "error"));
-        assert!(!is_background_terminal_event(
-            "audio_tools",
-            "audio_tool_progress"
-        ));
-    }
-
-    #[test]
     fn operation_result_is_a_background_terminal_event() {
         assert!(is_background_terminal_event("run_operation", "operation_result"));
         assert!(is_background_terminal_event("run_operation", "error"));
@@ -3239,13 +3227,14 @@ mod tests {
         assert_eq!(record.context["nodeCount"], 5);
         assert_eq!(record.context["nodeProgress"], 0.25);
         let tool: super::WorkerEnvelope = serde_json::from_value(serde_json::json!({
-            "type": "audio_tool_result", "requestId": "tool-1",
-            "payload": {"operation": "asr", "action": "transcribe", "succeeded": 1,
+            "type": "operation_result", "requestId": "tool-1",
+            "payload": {"operation": "pymss.asr.tool", "outputs": {"report": {"kind": "object", "value": {"succeeded": 1,
                 "items": [{"text": "private transcript", "path": "private-input.wav"}],
-                "failed": [{"path": "other-private-input.wav"}], "warnings": ["warning"]}
+                "failed": [{"path": "other-private-input.wav"}], "warnings": ["warning"]}}}}
         })).unwrap();
-        let record = super::record_worker_event("audio_tools", &tool, "WARN");
-        assert_eq!(record.context["operation"], "asr");
+        let record = super::record_worker_event("run_operation", &tool, "WARN");
+        assert_eq!(record.context["operation"], "pymss.asr.tool");
+        assert_eq!(record.context["succeeded"], 1);
         assert_eq!(record.context["resultCount"], 1);
         assert_eq!(record.context["failedCount"], 1);
         assert_eq!(record.context["warningCount"], 1);

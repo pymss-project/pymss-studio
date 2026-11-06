@@ -125,7 +125,7 @@ test('serialized credentials remain hidden at the nesting limit without renaming
   assert.ok(!JSON.stringify({ records, console: output.mock.calls }).includes('private-suffix'))
 })
 
-test('feature visits send a structured record with only known page and tool names', async t => {
+test('feature visits record validated plugin view identifiers', async t => {
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'window')
   const calls: { command: string; args: any }[] = []
   Object.defineProperty(globalThis, 'window', { configurable: true, value: {
@@ -133,7 +133,7 @@ test('feature visits send a structured record with only known page and tool name
   } })
   t.after(() => { if (previous) Object.defineProperty(globalThis, 'window', previous); else Reflect.deleteProperty(globalThis, 'window') })
   recordFeatureVisit('workflow-node-editor')
-  recordFeatureVisit('tools', 'asr')
+  recordFeatureVisit('tools', 'pymss.asr/tool')
   await Promise.resolve()
   assert.equal(calls.length, 2)
   assert.ok(calls.every(call => call.command === 'write_frontend_log'))
@@ -149,7 +149,10 @@ test('feature visits send a structured record with only known page and tool name
     assert.equal(record.detail, undefined)
   }
   assert.deepEqual(page.context, { page: 'workflow-node-editor' })
-  assert.deepEqual(tool.context, { page: 'tools', tool: 'asr' })
+  assert.deepEqual(tool.context, { page: 'tools', tool: 'pymss.asr/tool' })
+  for (const id of ['pymss.analysis/spectrum', 'author.custom-audio/panel_v2', 'custom/tool']) recordFeatureVisit('tools', id)
+  await Promise.resolve()
+  assert.deepEqual(calls.slice(2).map(call => call.args.record.context.tool), ['pymss.analysis/spectrum', 'author.custom-audio/panel_v2', 'custom/tool'])
 })
 
 test('unknown feature identifiers and sensitive navigation values are rejected', async t => {
@@ -161,7 +164,9 @@ test('unknown feature identifiers and sensitive navigation values are rejected',
   t.after(() => { if (previous) Object.defineProperty(globalThis, 'window', previous); else Reflect.deleteProperty(globalThis, 'window') })
   for (const page of ['', 'unknown', '/editor?projectId=private-project', 'https://example.com/?token=private', 'D:\\private\\audio.wav']) recordFeatureVisit(page)
   for (const tool of ['', 'unknown', 'asr?token=private', 'D:\\private\\model.pt']) recordFeatureVisit('tools', tool)
-  recordFeatureVisit('editor', 'asr')
+  for (const tool of ['asr', 'pymss.asr/tool?token=private', 'pymss.asr/../private', 'pymss.asr/.private',
+    'pymss.asr/tool\n', 'pymss.asr/tool\r', 'pymss.asr/tool/private', `${'x'.repeat(256)}/tool`]) recordFeatureVisit('tools', tool)
+  recordFeatureVisit('editor', 'pymss.asr/tool')
   await Promise.resolve()
   assert.deepEqual(calls, [])
 })
@@ -172,7 +177,7 @@ test('feature visits do not invoke IPC in browser previews or without a window',
   Reflect.deleteProperty(globalThis, 'window')
   assert.doesNotThrow(() => recordFeatureVisit('separate'))
   Object.defineProperty(globalThis, 'window', { configurable: true, value: {} })
-  assert.doesNotThrow(() => recordFeatureVisit('tools', 'convert'))
+  assert.doesNotThrow(() => recordFeatureVisit('tools', 'pymss.convert/tool'))
 })
 
 test('feature visit logging failures never interrupt navigation', async t => {
@@ -183,7 +188,7 @@ test('feature visit logging failures never interrupt navigation', async t => {
     async () => { throw new Error('Log storage unavailable') },
   ]) {
     Object.defineProperty(globalThis, 'window', { configurable: true, value: { __TAURI_INTERNALS__: { invoke } } })
-    assert.doesNotThrow(() => recordFeatureVisit('tools', 'convert'))
+    assert.doesNotThrow(() => recordFeatureVisit('tools', 'pymss.convert/tool'))
     await Promise.resolve()
     await Promise.resolve()
   }

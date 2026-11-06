@@ -23,7 +23,6 @@ mod update_startup;
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 mod update_stream;
 mod python;
-mod rba;
 mod session_log;
 mod single_instance;
 mod state;
@@ -164,7 +163,6 @@ fn main() {
             commands::app_cmd::export_editor_mix,
             commands::app_cmd::start_editor_mix_export,
             commands::app_cmd::cancel_editor_mix_export,
-            commands::tempo_key::start_tempo_key_analysis,
             commands::app_cmd::start_operation_task,
             commands::app_cmd::list_operations,
             commands::app_cmd::list_nodes,

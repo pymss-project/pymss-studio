@@ -1,7 +1,6 @@
 use crate::model_dir_migration::ModelDirMigrationSession;
 use std::collections::{HashMap, HashSet};
 use std::process::Child;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 pub type SharedChild = Arc<Mutex<Child>>;
@@ -16,8 +15,6 @@ pub struct ProxySettings {
 
 pub struct AppState {
     pub tasks: Mutex<HashMap<String, SharedChild>>,
-    /// In-process tasks (no worker child), cancelled by flipping the flag.
-    pub native_tasks: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub cancelled_tasks: Mutex<HashSet<String>>,
     pub terminal_tasks: Mutex<HashSet<String>>,
     pub migrations: Arc<Mutex<HashMap<String, SharedMigrationSession>>>,
@@ -28,7 +25,6 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             tasks: Mutex::new(HashMap::new()),
-            native_tasks: Mutex::new(HashMap::new()),
             cancelled_tasks: Mutex::new(HashSet::new()),
             terminal_tasks: Mutex::new(HashSet::new()),
             migrations: Arc::new(Mutex::new(HashMap::new())),

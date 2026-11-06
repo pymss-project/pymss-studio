@@ -763,11 +763,9 @@ pub(crate) fn summarize_request(command: &str, payload: &Value) -> Value {
     let feature = match command {
         "infer" | "infer_batch" | "start_separation" => "separation",
         "infer_workflow" | "infer_workflow_batch" | "start_workflow_inference" => "workflow",
-        "audio_tools" | "start_audio_tool" | "detect_tempo_key" | "start_tempo_key_detection" => {
-            "audio-tools"
-        }
+        "run_operation" | "start_operation_task" => "plugin-operations",
         "export_editor_mix" | "start_editor_mix_export" => "editor-export",
-        "download_model" | "start_model_download" | "download_tool_model" => "model-download",
+        "download_model" | "start_model_download" => "model-download",
         "delete_model"
         | "delete_tool_model"
         | "import_custom_model"
@@ -814,55 +812,11 @@ pub(crate) fn summarize_request(command: &str, payload: &Value) -> Value {
             );
             result["taskIdsOmitted"] = json!(tasks.len().saturating_sub(MAX_ITEMS));
         }
-    } else if feature == "audio-tools" {
-        result["parameters"] = summary.pick(
-            payload,
-            &[
-                "operation",
-                "action",
-                "outputFormat",
-                "format",
-                "recursive",
-                "sortBy",
-                "sortDirection",
-                "sampleRate",
-                "channels",
-                "bitRate",
-                "threshold",
-                "minLength",
-                "minInterval",
-                "hopSize",
-                "maxSilKept",
-                "modelPreset",
-                "language",
-                "allowDownload",
-                "measurement",
-                "target",
-                "tolerance",
-                "maxTruePeak",
-                "useLimiter",
-                "lookahead",
-                "release",
-                "bpm",
-                "method",
-            ],
-        );
-        for key in [
-            "inputs",
-            "inputPath",
-            "referencePath",
-            "estimatedPath",
-            "outputDir",
-            "modelPath",
-            "vadModelPath",
-            "puncModelPath",
-        ] {
-            if let Some(value) = payload.get(key) {
-                result[key] = summary.paths(value);
-            }
-        }
-        if let Some(formats) = payload.get("outputFormats") {
-            result["outputFormats"] = summary.scalars(formats);
+    } else if feature == "plugin-operations" {
+        // Plugin port values and parameters may contain paths or transcribed text.
+        // Track the contract and counts without copying arbitrary plugin data.
+        for (key, count) in [("inputs", "inputCount"), ("params", "parameterCount")] {
+            result[count] = json!(payload.get(key).and_then(Value::as_object).map_or(0, |fields| fields.len()));
         }
     } else if feature == "editor-export" {
         result["parameters"] = summary.pick(payload, &["format", "projectId"]);
@@ -2214,14 +2168,22 @@ mod tests {
     }
 
     #[test]
-    fn tools_exports_runtime_and_settings_use_explicit_fields() {
-        let report = summarize_request(
-            "audio_tools",
-            &json!({"requestId": "asr", "operation": "asr", "modelPreset": "paraformer", "language": "zh", "inputPath": "/private/audio.wav", "hotword": "private words", "text": "private text", "tags": {"artist": "private artist"}}),
-        );
-        assert_eq!(report["parameters"]["language"], "zh");
-        assert_eq!(report["inputPath"]["items"][0], "audio.wav");
-        assert!(!report.to_string().contains("private"));
+    fn plugin_operations_exports_runtime_and_settings_use_explicit_fields() {
+        for command in ["run_operation", "start_operation_task"] {
+            let report = summarize_request(
+                command,
+                &json!({"requestId": "asr", "operation": "pymss.asr.tool",
+                    "inputs": {"request": {"inputPath": "/private/audio.wav", "hotword": "private words", "text": "private text"}},
+                    "params": {"language": "zh", "token": "private token"}, "outputDir": "/private/Client-Acme"}),
+            );
+            assert_eq!(report["feature"], "plugin-operations");
+            assert_eq!(report["operation"], "pymss.asr.tool");
+            assert_eq!(report["inputCount"], 1);
+            assert_eq!(report["parameterCount"], 2);
+            assert!(report.get("outputDir").is_none());
+            assert!(!report.to_string().contains("private"));
+            assert!(!report.to_string().contains("Client-Acme"));
+        }
         let export = summarize_request(
             "export_editor_mix",
             &json!({"taskId": "mix", "format": "flac", "audioParams": {"sampleRate": 48000}, "project": {"id": "p", "sources": [{"path": "/private/file"}], "tracks": [{"id": "1", "effects": {"reverb": 0.3}, "clips": [{"duration": 3}]}]}}),

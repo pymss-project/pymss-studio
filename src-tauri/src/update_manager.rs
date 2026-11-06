@@ -354,7 +354,6 @@ fn ensure_update_idle(state: &AppState, additional_windows: bool) -> AppResult<(
         return Err(AppError::Worker("APPLICATION_UPDATE_WINDOWS: Close additional editor windows before installing the application update".into()));
     }
     if !state.tasks.lock().map_err(|_| AppError::Worker("Task registry lock poisoned".into()))?.is_empty()
-        || !state.native_tasks.lock().map_err(|_| AppError::Worker("Task registry lock poisoned".into()))?.is_empty()
         || !state.migrations.lock().map_err(|_| AppError::Worker("Migration registry lock poisoned".into()))?.is_empty()
     {
         return Err(AppError::Worker("APPLICATION_UPDATE_BUSY: Wait for running tasks and model migrations to finish before updating".into()));
@@ -1946,13 +1945,18 @@ mod tests {
     }
 
     #[test]
-    fn application_update_rejects_native_tasks_and_additional_windows() {
+    fn application_update_rejects_worker_tasks_and_additional_windows() {
         let state = crate::state::AppState::new();
         assert!(super::ensure_update_idle(&state, false).is_ok());
         assert!(super::ensure_update_idle(&state, true).unwrap_err().to_string().contains("APPLICATION_UPDATE_WINDOWS"));
-        state.native_tasks.lock().unwrap().insert("audio-task".into(), std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--help").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        let child = std::sync::Arc::new(std::sync::Mutex::new(child));
+        state.tasks.lock().unwrap().insert("audio-task".into(), child.clone());
         assert!(super::ensure_update_idle(&state, false).unwrap_err().to_string().contains("APPLICATION_UPDATE_BUSY"));
-        state.native_tasks.lock().unwrap().clear();
+        state.tasks.lock().unwrap().clear();
+        child.lock().unwrap().wait().unwrap();
         assert!(super::ensure_update_idle(&state, false).is_ok());
     }
 

@@ -127,6 +127,36 @@ class ListOperationsTests(unittest.TestCase):
 
 
 class RunOperationTests(unittest.TestCase):
+    def test_unloaded_operation_has_a_recoverable_availability_error(self):
+        from pymss.operations import Runtime
+
+        output = io.StringIO()
+        with mock.patch.object(worker_operations, "_runtime", return_value=Runtime()), redirect_stdout(output):
+            code = worker_operations.cmd_run_operation({"operation": "pymss.tempo_key.detect_bpm", "requestId": "bpm-1"})
+        event = _read_event(output)
+        self.assertEqual(code, 1)
+        self.assertEqual(event["requestId"], "bpm-1")
+        self.assertEqual(event["payload"]["code"], "OPERATION_UNAVAILABLE")
+        self.assertTrue(event["payload"]["recoverable"])
+        self.assertIn("unknown operation", event["payload"]["message"])
+
+    def test_unprepared_provider_does_not_start_or_create_output(self):
+        runtime = mock.Mock()
+        runtime.describe_operation.return_value = {"inputs": {}}
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "not-created"
+            with mock.patch.object(worker_operations, "_runtime", return_value=runtime), \
+                    mock.patch("worker_plugins.validate_operation", side_effect=ValueError("Missing plugin dependency: av")), \
+                    redirect_stdout(output):
+                code = worker_operations.cmd_run_operation({"operation": "pymss.tempo_key.detect_bpm", "outputDir": str(destination)})
+            self.assertFalse(destination.exists())
+        event = _read_event(output)
+        self.assertEqual(code, 1)
+        self.assertEqual(event["payload"]["code"], "OPERATION_UNAVAILABLE")
+        self.assertIn("Missing plugin dependency", event["payload"]["message"])
+        runtime.run.assert_not_called()
+
     def test_run_operation_normalizes_file_input(self) -> None:
         import numpy as np
         import soundfile as sf

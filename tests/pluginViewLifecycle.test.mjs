@@ -248,7 +248,7 @@ test('progress and recovery replies snapshot nested reactive values without losi
   assert.deepEqual(messages[1].error.data.recovery.modelIds, ['selected-model'])
 })
 
-test('host SDK allowlists native audio and runtime tasks with owned terminal events', async () => {
+test('legacy audio analysis forwards to the plugin Operation with owned terminal events', async () => {
   let workerListener
   const calls = []
   const { controller, state } = host({
@@ -264,8 +264,8 @@ test('host SDK allowlists native audio and runtime tasks with owned terminal eve
   await assert.rejects(controller.handleCall(1, 'audio.analyze', { payload: { operation: 'merge' } }), /AUDIO_ANALYSIS_NOT_ALLOWED/)
   const audio = controller.handleCall(2, 'audio.analyze', { payload: { operation: 'tempo_key', inputs: ['/a.wav'] } })
   const [audioId] = state.runRequests.keys()
-  workerListener({ payload: { type: 'audio_tool_progress', taskId: audioId, payload: { completed: 1 } } })
-  workerListener({ payload: { type: 'audio_tool_result', taskId: audioId, payload: { items: [] } } })
+  workerListener({ payload: { type: 'operation_progress', taskId: audioId, payload: { operation: 'pymss.tempo_key.tool', fraction: 1 } } })
+  workerListener({ payload: { type: 'operation_result', taskId: audioId, payload: { operation: 'pymss.tempo_key.tool', outputs: { report: { kind: 'object', value: { items: [] } } } } } })
   assert.deepEqual(await audio, { items: [] })
 
   const packageTask = controller.handleCall(3, 'runtime.managePackage', { payload: { package: 'funasr', action: 'install' } })
@@ -276,7 +276,49 @@ test('host SDK allowlists native audio and runtime tasks with owned terminal eve
   await assert.rejects(controller.handleCall(5, 'runtime.packageStatus', { package: 'numpy' }), /PACKAGE_NOT_ALLOWED/)
   await controller.handleCall(6, 'models.deleteTool', { payload: { tool: 'asr', id: 'model' } })
   await assert.rejects(controller.handleCall(7, 'models.deleteTool', { payload: { tool: 'midi' } }), /TOOL_MODEL_NOT_ALLOWED/)
-  assert.ok(calls.some(([command]) => command === 'start_tempo_key_analysis'))
+  const analysis = calls.find(([command]) => command === 'start_operation_task')
+  assert.equal(analysis[1].payload.operation, 'pymss.tempo_key.tool')
+  assert.deepEqual(JSON.parse(JSON.stringify(analysis[1].payload.inputs)), { request: { operation: 'tempo_key', inputs: ['/a.wav'] } })
+  assert.equal(calls.some(([command]) => command === 'start_tempo_key_analysis'), false)
+})
+
+test('legacy MIDI BPM requests reuse the BPM-only plugin and reject multiple inputs', async () => {
+  let receive
+  const calls = []
+  const { controller, state } = host({
+    permissions: () => ['audio'],
+    listen: async (_event, callback) => { receive = callback; return () => {} },
+    invoke: async (command, args) => { calls.push([command, args]); return command.startsWith('start_') ? { taskId: args.payload.taskId } : undefined },
+  })
+  await controller.mount()
+  await assert.rejects(controller.handleCall(1, 'audio.analyze', { payload: { operation: 'midi', action: 'detect_bpm', inputs: ['/a.wav', '/b.wav'] } }), /INVALID_AUDIO_INPUTS/)
+  const job = controller.handleCall(2, 'audio.analyze', { payload: { operation: 'midi', action: 'detect_bpm', inputs: ['/a.wav'] } })
+  const [id] = state.runRequests.keys()
+  assert.equal(calls.at(-1)[0], 'start_operation_task')
+  assert.equal(calls.at(-1)[1].payload.operation, 'pymss.tempo_key.detect_bpm')
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1)[1].payload.inputs)), { audio: '/a.wav' })
+  receive({ payload: { type: 'operation_result', taskId: id, payload: { operation: 'pymss.tempo_key.detect_bpm', outputs: { report: { kind: 'object', value: { bpm: 119.95, roundedBpm: 120, duration: 4 } } } } } })
+  assert.deepEqual(JSON.parse(JSON.stringify(await job)), { operation: 'midi', action: 'detect_bpm', bpm: 119.95, roundedBpm: 120, duration: 4 })
+  assert.equal(state.runRequests.size, 0)
+})
+
+test('legacy analysis rejects mismatched plugin reports and preserves worker error codes', async () => {
+  let receive
+  const { controller, state } = host({
+    permissions: () => ['audio'],
+    listen: async (_event, callback) => { receive = callback; return () => {} },
+    invoke: async (command, args) => command.startsWith('start_') ? { taskId: args.payload.taskId } : undefined,
+  })
+  await controller.mount()
+  const bad = controller.handleCall(1, 'audio.analyze', { payload: { operation: 'tempo_key', inputs: ['/a.wav'] } })
+  let [id] = state.runRequests.keys()
+  receive({ payload: { type: 'operation_result', taskId: id, payload: { operation: 'unrelated', outputs: { report: { value: {} } } } } })
+  await assert.rejects(bad, /INVALID_ANALYSIS_REPORT/)
+  const failed = controller.handleCall(2, 'audio.analyze', { payload: { operation: 'tempo_key', inputs: ['/a.wav'] } })
+  ;[id] = state.runRequests.keys()
+  receive({ payload: { type: 'error', taskId: id, payload: { code: 'TEMPO_KEY_RBA_MISSING', message: 'Runtime missing' } } })
+  await assert.rejects(failed, error => error.code === 'TEMPO_KEY_RBA_MISSING')
+  assert.equal(state.runRequests.size, 0)
 })
 
 test('only the iframe operation owner can cancel after the native start acknowledgement', async () => {

@@ -8,10 +8,11 @@ const FEATURE_PAGES = new Set([
   'results', 'tools', 'debug', 'editor', 'settings',
   'plugins', 'plugin-workspace',
 ])
-const AUDIO_TOOLS = new Set(['convert', 'merge', 'sdr', 'midi', 'inspect', 'slicer', 'asr', 'loudness', 'tempo_key'])
+// Log bounded plugin/view identifiers, excluding query strings and control characters.
+const PLUGIN_TOOL_ID = /^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*\/[A-Za-z0-9_-][A-Za-z0-9._-]*(?![\s\S])/
 
 export function recordFeatureVisit(page: string, tool?: string) {
-  if (!FEATURE_PAGES.has(page) || (tool !== undefined && (page !== 'tools' || !AUDIO_TOOLS.has(tool)))) return
+  if (!FEATURE_PAGES.has(page) || (tool !== undefined && (page !== 'tools' || tool.length > 256 || !PLUGIN_TOOL_ID.test(tool)))) return
   if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
   const record: LogRecord = {
     schemaVersion: 1, id: `ui-${Date.now()}-${Math.random().toString(36).slice(2)}`,

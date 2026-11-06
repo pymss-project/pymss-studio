@@ -352,7 +352,7 @@ mod platform {
             let _workers = worker::acquire_application_update()?;
             if app.webview_windows().keys().any(|label| label != "main") { return Err(failure("Close additional editor windows before installing the application update")); }
             let state = app.state::<crate::state::AppState>();
-            if !state.native_tasks.lock().map_err(|_| failure("Task registry lock poisoned"))?.is_empty()
+            if !state.tasks.lock().map_err(|_| failure("Task registry lock poisoned"))?.is_empty()
                 || !state.migrations.lock().map_err(|_| failure("Migration registry lock poisoned"))?.is_empty()
             { return Err(failure("Wait for running tasks and model migrations to finish before updating")); }
             check_location(&target)?;

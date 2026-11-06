@@ -65,7 +65,6 @@
     "title": "音频工具",
     "subtitle": "音频转换、分析、识别与处理",
     "outputFormat": "输出格式",
-    "completed": "处理完成",
     "toolNavigation": "小工具导航",
     "categoryConvert": "转换",
     "categoryAnalyze": "分析",
@@ -73,14 +72,6 @@
     "categoryEdit": "编辑",
     "categoryPlugins": "其他工具",
     "pluginToolUnavailable": "此工具插件尚未就绪、已禁用或已卸载，请前往插件页面管理。",
-    "pluginOps": {
-      "unavailable": "当前 Python 运行时暂不支持 pymss 操作。请更新运行时核心后重试。",
-      "selectOperation": "选择操作",
-      "noOperations": "没有已注册的插件操作。",
-      "audioInput": "{name}（音频文件）",
-      "filePath": "音频文件路径",
-      "run": "运行"
-    },
     "noInstalledTools": "尚未安装工具",
     "noAvailableTools": "暂无可用工具",
     "enableToolsHint": "启用已安装的工具，或从官方插件目录安装所需工具。",

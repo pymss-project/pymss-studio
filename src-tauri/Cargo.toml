@@ -34,7 +34,6 @@ base64 = "0.22"
 minisign-verify = "0.2"
 semver = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
-rustfft = "6.4"
 sha2 = "0.10"
 pymss-audio-host = { path = "../native/audio-host", optional = true }
 

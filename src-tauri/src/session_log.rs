@@ -715,7 +715,7 @@ fn write_diagnostic_report_with_trigger(
         ("Selected Separation Options", report_store(app, "separate-state", |value| scalar_snapshot(value, &[
             "runMode", "ensembleEnabled", "ensembleStem", "ensembleType", "outputLayout", "useTta",
         ]))),
-        ("Audio Tool Preferences", report_store(app, "audio-tools", audio_tool_preferences)),
+        ("Plugin Tool Selection", report_store(app, "audio-tools", plugin_tool_preferences)),
         ("Models and Downloads", report_store(app, "model-state", model_download_snapshot)),
         ("Saved Application Update Choices", report_store(app, "update-state", |value| scalar_snapshot(value, &[
             "deferredVersion", "deferredAt", "lastAcceptedVersion",
@@ -766,12 +766,8 @@ fn scalar_snapshot(value: &serde_json::Value, keys: &[&str]) -> serde_json::Valu
     serde_json::Value::Object(fields)
 }
 
-fn audio_tool_preferences(value: &serde_json::Value) -> serde_json::Value {
-    scalar_snapshot(value, &[
-        "activeTool", "mergeSortBy", "mergeSortDirection", "asrModelMode", "asrPreset", "asrLanguage",
-        "loudnessMeasurement", "loudnessTarget", "loudnessTolerance", "loudnessMaxTruePeak",
-        "loudnessUseLimiter", "loudnessLookahead", "loudnessRelease",
-    ])
+fn plugin_tool_preferences(value: &serde_json::Value) -> serde_json::Value {
+    scalar_snapshot(value, &["activePluginTool"])
 }
 
 fn model_download_snapshot(value: &serde_json::Value) -> serde_json::Value {
@@ -833,17 +829,13 @@ fn backend_tasks_snapshot(app: &AppHandle) -> serde_json::Value {
     let Some(state) = app.try_state::<crate::state::AppState>() else {
         return serde_json::json!({"status": "not_initialized"});
     };
-    // Automatic reports can run while a native task holds its registry lock to emit an error.
+    // Automatic reports can run while a worker task holds its registry lock to emit an error.
     // A report must never block that task or report an unobserved registry as empty.
     let tasks = match state.tasks.try_lock() {
         Ok(tasks) => serde_json::json!({"count": tasks.len(), "taskIds": tasks.keys().take(24).collect::<Vec<_>>(), "truncated": tasks.len() > 24}),
         Err(_) => serde_json::json!({"status": "busy"}),
     };
-    let native = match state.native_tasks.try_lock() {
-        Ok(tasks) => serde_json::json!({"count": tasks.len(), "taskIds": tasks.keys().take(24).collect::<Vec<_>>(), "truncated": tasks.len() > 24}),
-        Err(_) => serde_json::json!({"status": "busy"}),
-    };
-    serde_json::json!({"workers": tasks, "nativeTasks": native})
+    serde_json::json!({"workers": tasks})
 }
 
 fn report_text(value: &str) -> String {
@@ -1248,6 +1240,15 @@ fn redact_url_credentials(value: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn plugin_tool_snapshot_keeps_current_selection_without_old_tool_parameters() {
+        let value = json!({"activePluginTool": "pymss.analysis/spectrum", "activeTool": "asr",
+            "asrPreset": "legacy", "loudnessTarget": -14, "modelPath": "/private/model.pt"});
+        assert_eq!(plugin_tool_preferences(&value), json!({"activePluginTool": "pymss.analysis/spectrum"}));
+        assert_eq!(plugin_tool_preferences(&json!({"activeTool": "asr"})), json!({}));
+        assert_eq!(value["activeTool"], "asr");
+    }
 
     fn diagnostic_tail(content: &str) -> DebugLogContent {
         DebugLogContent { path: "log.jsonl".into(), content: content.into(), size_bytes: content.len() as u64, truncated: false }

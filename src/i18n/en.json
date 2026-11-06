@@ -65,7 +65,6 @@
     "title": "Audio Tools",
     "subtitle": "Audio conversion, analysis, recognition, and processing",
     "outputFormat": "Output format",
-    "completed": "Processing completed",
     "toolNavigation": "Tool navigation",
     "categoryConvert": "Convert",
     "categoryAnalyze": "Analyze",
@@ -73,14 +72,6 @@
     "categoryEdit": "Edit",
     "categoryPlugins": "Other tools",
     "pluginToolUnavailable": "This tool plugin is not ready, disabled, or uninstalled. Manage it on the Plugins page.",
-    "pluginOps": {
-      "unavailable": "The current Python runtime has no pymss operations support. Update the runtime core and retry.",
-      "selectOperation": "Select operation",
-      "noOperations": "No plugin operations registered.",
-      "audioInput": "{name} (audio file)",
-      "filePath": "Audio file path",
-      "run": "Run"
-    },
     "noInstalledTools": "No tools installed",
     "noAvailableTools": "No tools available",
     "enableToolsHint": "Enable an installed tool or browse the official plugin catalog to add one.",

@@ -29,7 +29,7 @@ pub(crate) fn operation_feature(command: &str) -> Option<&'static str> {
     match command {
         "infer" | "infer_batch" | "separate" | "separate_batch" => Some("separation"),
         "infer_workflow" | "infer_workflow_batch" => Some("workflow"),
-        "audio_tools" => Some("audio-tools"),
+        "run_operation" => Some("plugin-operations"),
         "export_editor_mix" => Some("editor-export"),
         "install_runtime"
         | "activate_runtime"
@@ -271,7 +271,7 @@ impl DiagnosticContext {
             } else if record.event == "worker.exit"
                 || matches!(
                     record.event.as_str(),
-                    "audio_tool_result"
+                    "operation_result"
                         | "editor_mix_exported"
                         | "task_done"
                         | "task_finished"
@@ -552,21 +552,23 @@ mod tests {
         let mut operation = request("op-tools", "tools-1");
         operation
             .context
-            .insert("command".into(), "audio_tools".into());
+            .insert("command".into(), "run_operation".into());
         context.observe(&operation);
+        assert_eq!(context.snapshot()["operations"][0]["feature"], "plugin-operations");
         let mut result = LogRecord::new(
             "worker",
             Some("warn"),
             "worker",
-            "audio_tool_result",
+            "operation_result",
             "Some inputs failed",
         );
         result.task_id = Some("tools-1".into());
         result
             .context
-            .insert("command".into(), "audio_tools".into());
+            .insert("command".into(), "run_operation".into());
         result.context.insert("failedCount".into(), 1.into());
         context.observe(&result);
+        assert_eq!(context.snapshot()["operations"][0]["status"], "completed_with_errors");
         result.event = "worker.exit".into();
         result.level = Some("info".into());
         result.context.remove("failedCount");

@@ -78,7 +78,7 @@ type RunHandlers = {
   cancelPromise?: Promise<boolean>
   settled: Promise<void>
   resolveSettled: () => void
-  kind: 'operation' | 'audio' | 'package'
+  kind: 'operation' | 'package'
 }
 const runRequests = new Map<string, RunHandlers>()
 
@@ -161,7 +161,7 @@ function settleRun(requestId: string, failure?: Error, value?: unknown) {
 
 async function startBackground(
   rpcId: number,
-  command: 'start_operation_task' | 'start_tempo_key_analysis' | 'manage_optional_runtime_package',
+  command: 'start_operation_task' | 'manage_optional_runtime_package',
   kind: RunHandlers['kind'],
   payload: Record<string, unknown>,
 ) {
@@ -314,11 +314,23 @@ async function handleCall(id: number, method: string, params: Record<string, unk
       return value
     }
     case 'audio.analyze': {
+      // Compatibility for previously installed pages. Analysis itself belongs
+      // to the tempo_key plugin and follows the normal Operation lifecycle.
       const payload = params.payload
       if (!plainObject(payload) || (payload.operation !== 'tempo_key' && !(payload.operation === 'midi' && payload.action === 'detect_bpm'))) {
         throw new Error('AUDIO_ANALYSIS_NOT_ALLOWED')
       }
-      return await startBackground(id, 'start_tempo_key_analysis', 'audio', payload)
+      const inputs = boundedPaths(payload.inputs)
+      const bpmOnly = payload.operation === 'midi'
+      if (!inputs.length || (bpmOnly && inputs.length !== 1)) throw new Error('INVALID_AUDIO_INPUTS')
+      const operation = bpmOnly ? 'pymss.tempo_key.detect_bpm' : 'pymss.tempo_key.tool'
+      const response = await startBackground(id, 'start_operation_task', 'operation', {
+        operation, inputs: bpmOnly ? { audio: inputs[0] } : { request: { ...payload, inputs } }, params: {},
+      })
+      if (!plainObject(response) || response.operation !== operation || !plainObject(response.outputs)
+        || !plainObject(response.outputs.report) || !plainObject(response.outputs.report.value)) throw new Error('INVALID_ANALYSIS_REPORT')
+      const report = response.outputs.report.value
+      return bpmOnly ? { ...report, operation: 'midi', action: 'detect_bpm' } : report
     }
     case 'runtime.packageStatus': {
       if (params.package !== 'funasr') throw new Error('PACKAGE_NOT_ALLOWED')
@@ -491,8 +503,6 @@ onMounted(async () => {
         if (!handlers) return
         if (handlers.kind === 'operation' && workerEvent.type === 'operation_result') {
           settleRun(requestId, undefined, workerEvent.payload)
-        } else if (handlers.kind === 'audio' && workerEvent.type === 'audio_tool_result') {
-          settleRun(requestId, undefined, workerEvent.payload)
         } else if (handlers.kind === 'package' && workerEvent.type === 'optional_package_status') {
           settleRun(requestId, undefined, workerEvent.payload)
         } else if (workerEvent.type === 'error' || workerEvent.type === 'task_cancelled') {
@@ -502,10 +512,6 @@ onMounted(async () => {
             : workerError(workerEvent.payload || {}))
         } else if (workerEvent.type === 'operation_progress') {
           postToFrame({ jsonrpc: '2.0', method: 'task.progress', params: { ...(workerEvent.payload || {}), requestId, id: handlers.rpcId } })
-        } else if (handlers.kind === 'audio' && workerEvent.type === 'audio_tool_progress') {
-          postToFrame({ jsonrpc: '2.0', method: 'task.progress', params: {
-            requestId, id: handlers.rpcId, event: { type: workerEvent.type, payload: workerEvent.payload },
-          } })
         } else if (handlers.kind === 'package' && ['optional_package_stage', 'optional_package_log'].includes(workerEvent.type)) {
           postToFrame({ jsonrpc: '2.0', method: 'task.progress', params: {
             requestId, id: handlers.rpcId, event: { type: workerEvent.type, payload: workerEvent.payload },

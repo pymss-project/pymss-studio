@@ -2,8 +2,7 @@
 
 ``list_operations`` / ``describe_operation`` are quick one-shot queries.
 ``run_operation`` executes one operation with file-referenced inputs and
-emits ``operation_result`` as its terminal event (Rust treats it like
-``audio_tool_result``: terminal for the task, progress events optional).
+emits ``operation_result`` as its terminal event; progress events are optional.
 """
 
 from __future__ import annotations
@@ -158,7 +157,19 @@ def cmd_run_operation(payload: dict[str, Any]) -> int:
 
     try:
         runtime = _runtime()
-        spec = runtime.describe_operation(operation_id)
+        try:
+            spec = runtime.describe_operation(operation_id)
+            from worker_plugins import validate_operation
+            validate_operation(runtime, operation_id)
+        except Exception as exc:  # noqa: BLE001
+            # Static descriptions may outlive a provider that failed to load.
+            # Distinguish availability from failures inside a running operation.
+            code = getattr(exc, "code", None)
+            return emit_error(
+                code if isinstance(code, str) else "OPERATION_UNAVAILABLE",
+                str(exc), traceback.format_exc(), request_id=request_id, recoverable=True,
+                extra={"operation": operation_id},
+            )
         if expected_digest is not None:
             actual_digest = operation_metadata.spec_digest(spec)
             if actual_digest != expected_digest:
@@ -192,8 +203,6 @@ def cmd_run_operation(payload: dict[str, Any]) -> int:
             }, request_id=request_id)
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        from worker_plugins import validate_operation
-        validate_operation(runtime, operation_id)
         result = runtime.run(
             operation_id,
             inputs=inputs,
