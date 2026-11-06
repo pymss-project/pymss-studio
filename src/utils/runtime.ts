@@ -133,10 +133,10 @@ export function runtimeCoreUpdateAvailable(
   const manifestStatus = runtimeManifestStatus(env, currentManifestVersion)
   if (manifestStatus !== 'current' && manifestStatus !== 'older') return false
   const pymssVersion = env.pymssVersion || env.packageVersions?.pymss || ''
-  const pymssCoreVersion = env.pymssCoreVersion || env.packageVersions?.['pymss-core'] || ''
   return Boolean(
-    (comparison?.packages?.pymss?.currentVersion === pymssVersion && comparison.packages?.pymss?.updateAvailable)
-    || (comparison?.packages?.['pymss-core']?.currentVersion === pymssCoreVersion && comparison.packages?.['pymss-core']?.updateAvailable),
+    pymssVersion
+    && comparison?.packages?.pymss?.currentVersion === pymssVersion
+    && comparison.packages.pymss.updateAvailable,
   )
 }
 

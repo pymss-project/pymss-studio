@@ -48,8 +48,7 @@ with sync_playwright() as playwright:
               if(command==='runtime_info')return structuredClone(window.__runtime);
               if(command==='runtime_env_sizes')return {sizes:{},incompleteBackends:[]};
               if(command==='runtime_core_versions')return {packages:{
-                pymss:{currentVersion:'2.1.8',latestVersion:'2.1.8',updateAvailable:false},
-                'pymss-core':{currentVersion:'0.1.10',latestVersion:'0.1.11',updateAvailable:true}}};
+                pymss:{currentVersion:'2.1.8',latestVersion:'2.1.9',updateAvailable:true}}};
               if(command==='get_env_info')return {platform:window.__runtime.platform,pymssAvailable:true,
                 torchAvailable:true,torchVersion:'2.7.1',torchBackend:'cpu',pymssVersion:'2.1.8'};
               if(command==='get_build_info')return {version:'0.0.12',updateSupported:false};
@@ -81,7 +80,7 @@ with sync_playwright() as playwright:
           window.__corePlan={id:'runtime-permissions-plan',backend:'mlx',mirror:'pypi',mode:'update',
             pythonPath:window.__runtime.installedEnvironments[0].pythonPath,channel:'stable',
             currentVersions:{pymss:'2.1.8','pymss-core':'0.1.10'},
-            targetVersions:{pymss:'2.1.8','pymss-core':'0.1.11'},dependencyCount:1};
+            targetVersions:{pymss:'2.1.9','pymss-core':'0.1.11'},dependencyCount:1};
           window.__app.prepareRuntimeCoreUpdate=async()=>structuredClone(window.__corePlan);
           window.__app.discardRuntimeCorePlan=id=>{window.__discardedPlan=id;};
           window.__app.updateRuntimeCore=async(...args)=>{window.__appliedPlan=args;};

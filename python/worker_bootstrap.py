@@ -1238,11 +1238,15 @@ def _overlay_requirements(
     backend: str,
     base_versions: dict[str, str | None],
     target_pymss_version: str,
-    target_pymss_core_version: str,
+    target_pymss_core_version: str | None,
 ) -> list[str]:
+    core_requirement = (
+        f"pymss-core=={target_pymss_core_version}" if target_pymss_core_version else
+        str(_runtime_requirement("pymss-core", manifest.get("common", {}).get("pymss-core")))
+    )
     requirements = [
         _pin_manifest_requirement(manifest.get("common", {}).get("pymss"), target_pymss_version),
-        f"pymss-core=={target_pymss_core_version}",
+        core_requirement,
     ]
     for name, value in manifest.get("common", {}).items():
         if name in {"pymss", "pymss-core"}:
@@ -1669,16 +1673,18 @@ def cmd_runtime_core_versions(payload: dict[str, Any]) -> int:
     channel = "prerelease" if payload.get("channel") == "prerelease" else "stable"
     current = payload.get("versions") or {}
     packages: dict[str, dict[str, Any]] = {}
-    for name in ("pymss", "pymss-core"):
-        try:
-            latest = _latest_pypi_version(name, channel)
-            installed = current.get(name)
-            packages[name] = {
-                "latestVersion": latest, "currentVersion": installed,
-                "updateAvailable": bool(latest and installed and Version(latest) > Version(installed)),
-            }
-        except Exception as exc:
-            packages[name] = {"latestVersion": None, "error": str(exc)}
+    # pymss owns its core dependency. A standalone core release is not an
+    # application update and may intentionally be ahead of pymss's pinned core.
+    name = "pymss"
+    try:
+        latest = _latest_pypi_version(name, channel)
+        installed = current.get(name)
+        packages[name] = {
+            "latestVersion": latest, "currentVersion": installed,
+            "updateAvailable": bool(latest and installed and Version(latest) > Version(installed)),
+        }
+    except Exception as exc:
+        packages[name] = {"latestVersion": None, "error": str(exc)}
     _emit("runtime_core_versions", {"channel": channel, "packages": packages})
     return 0
 
@@ -2368,7 +2374,9 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
         else:
             targets = {
                 "pymss": target_core_version("pymss", "pymssVersion"),
-                "pymss-core": target_core_version("pymss-core", "pymssCoreVersion"),
+                # Updates resolve the dependency from pymss metadata; repair and
+                # sync preserve their explicit baseline/recovery versions.
+                "pymss-core": target_core_version("pymss-core", "pymssCoreVersion") if repair_dependencies else None,
             }
         target_pymss_version, target_pymss_core_version = targets["pymss"], targets["pymss-core"]
     except Exception as exc:
@@ -2475,13 +2483,12 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             target_pymss_core_version,
         )
         if prepare_only and mode == "update":
-            for index, name in enumerate(("pymss", "pymss-core")):
-                requirement = _runtime_requirement(name, manifest["common"][name])
-                requirement.specifier &= SpecifierSet(f"<={targets[name]}")
-                installed = package_versions.get(name)
-                if installed:
-                    requirement.specifier &= SpecifierSet(f">={installed}")
-                requirements[index] = str(requirement)
+            requirement = _runtime_requirement("pymss", manifest["common"]["pymss"])
+            requirement.specifier &= SpecifierSet(f"<={targets['pymss']}")
+            installed = package_versions.get("pymss")
+            if installed:
+                requirement.specifier &= SpecifierSet(f">={installed}")
+            requirements[0] = str(requirement)
         # Cancellation can terminate this bootstrap process before its finally block runs.
         # Runtime operations are serialized, so any staging directory left from an earlier
         # process is safe to reclaim before starting the next generation.
@@ -2565,14 +2572,11 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             for index, name in enumerate(("pymss", "pymss-core")):
                 if not targets[name]:
                     raise RuntimeError(f"Unable to resolve a compatible version of {name}")
-                if channel == "stable" and Version(targets[name]).is_prerelease and targets[name] != package_versions.get(name):
-                    raise RuntimeError("No stable core version is compatible with the current runtime")
+                if name == "pymss" and channel == "stable" and Version(targets[name]).is_prerelease and targets[name] != package_versions.get(name):
+                    raise RuntimeError("No stable pymss version is compatible with the current runtime")
                 requirements[index] = _pin_manifest_requirement(manifest["common"][name], targets[name])
-            if mode == "update" and not any(
-                not package_versions.get(name) or Version(version) > Version(package_versions[name])
-                for name, version in targets.items()
-            ):
-                raise RuntimeError("No newer core could be resolved from the selected package source. Check source availability and pip constraints before retrying.")
+            if mode == "update" and package_versions.get("pymss") and Version(targets["pymss"]) <= Version(package_versions["pymss"]):
+                raise RuntimeError("No newer pymss version could be resolved from the selected package source. Check source availability and pip constraints before retrying.")
             _save_core_update_plan({
                 "backend": backend, "pythonPath": str(python_path), "mode": mode,
                 "channel": channel, "mirror": mirror, "identity": identity,

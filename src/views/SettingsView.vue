@@ -213,11 +213,9 @@ const runtimeCurrentLabel = computed(() => {
 })
 const installedRuntimes = computed(() => app.runtimeInfo?.installedEnvironments || [])
 const latestPymssVersion = computed(() => app.runtimeCoreVersions?.packages?.pymss?.latestVersion || null)
-const latestPymssCoreVersion = computed(() => app.runtimeCoreVersions?.packages?.['pymss-core']?.latestVersion || null)
 const runtimeCoreVersionCheckReady = computed(() => (
   !app.runtimeCoreVersionsLoading
   && Boolean(latestPymssVersion.value)
-  && Boolean(latestPymssCoreVersion.value)
 ))
 
 type BackendCardState = 'active' | 'installed' | 'not_installed'
@@ -1772,7 +1770,6 @@ onMounted(async () => {
                   <span v-if="runtimeCoreVersionCheckReady && card.coreUpdateAvailable" class="runtime-env-card__accel runtime-env-card__accel--warn">
                     {{ t('settings.runtimeCoreUpdateAvailable', {
                       pymss: latestPymssVersion || t('settings.runtimeCoreVersionUnknown'),
-                      core: latestPymssCoreVersion || t('settings.runtimeCoreVersionUnknown'),
                     }) }}
                   </span>
                   <span v-if="runtimeAcceleratorReady(card.env, card.backend)" class="runtime-env-card__accel runtime-env-card__accel--ok">{{ t('settings.runtimeAcceleratorAvailable') }}</span>

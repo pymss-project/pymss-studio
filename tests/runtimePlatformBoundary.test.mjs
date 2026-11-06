@@ -160,6 +160,42 @@ test('unsupported platforms skip core update prompts', () => {
   assert.deepEqual(actions, [])
 })
 
+test('runtime version discovery is ready without a separate pymss-core release', () => {
+  for (const loading of [false, true]) {
+    const ready = componentComputed('../src/views/SettingsView.vue', 'runtimeCoreVersionCheckReady', {
+      app: { runtimeCoreVersionsLoading: loading },
+      latestPymssVersion: { value: '2.3.5' },
+      latestPymssCoreVersion: { value: null },
+    })
+    assert.equal(ready, !loading)
+  }
+  assert.equal(componentComputed('../src/views/SettingsView.vue', 'runtimeCoreVersionCheckReady', {
+    app: { runtimeCoreVersionsLoading: false },
+    latestPymssVersion: { value: null }, latestPymssCoreVersion: { value: '0.1.15' },
+  }), false)
+})
+
+test('startup update prompts announce pymss without promising an independent core upgrade', () => {
+  const prompt = componentComputed('../src/App.vue', 'runtimeCorePromptContent', {
+    runtimeManifestSyncRequired: { value: false },
+    activeRuntime: { value: { backend: 'cuda', pymssVersion: '2.3.4', pymssCoreVersion: '0.1.14' } },
+    app: { runtimeCoreVersions: { packages: {
+      pymss: { latestVersion: '2.3.5' }, 'pymss-core': { latestVersion: '0.1.15' },
+    } } },
+    runtimeBackendLabel: value => value,
+    t: (key, values) => ({ key, values }),
+  })
+  assert.equal(prompt.key, 'settings.runtimeCoreStartupPrompt')
+  assert.equal(prompt.values.pymss, '2.3.4')
+  assert.equal(prompt.values.latest, '2.3.5')
+  assert.equal('coreLatest' in prompt.values, false)
+  for (const locale of ['en', 'zh-CN']) {
+    const messages = JSON.parse(readFileSync(new URL(`../src/i18n/${locale}.json`, import.meta.url), 'utf8'))
+    assert.equal(messages.settings.runtimeCoreStartupPrompt.includes('{coreLatest}'), false)
+    assert.equal(messages.settings.runtimeCoreUpdateAvailable.includes('{core}'), false)
+  }
+})
+
 for (const backend of ['mlx', 'cpu']) {
   test(`${backend} startup requests confirmation and never starts a core synchronization`, () => {
     const actions = []

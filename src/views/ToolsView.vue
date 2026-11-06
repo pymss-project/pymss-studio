@@ -5,6 +5,7 @@ import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 import {
   ExtensionPuzzleOutline, SwapHorizontalOutline, InformationCircleOutline, AnalyticsOutline,
   CutOutline, GitMergeOutline, VolumeHighOutline, MicOutline, MusicalNoteOutline, PulseOutline,
+  ChevronDownOutline,
 } from '@vicons/ionicons5'
 import { loadPluginToolState, updatePluginToolState } from '@/features/plugin-marketplace/toolState'
 import { usePluginMarketplace } from '@/features/plugin-marketplace/composable'
@@ -29,6 +30,7 @@ const mountedPluginTool = ref<{ entry: PluginToolEntry; pluginsRoot: string } | 
 const pluginToolBusy = ref(false)
 const unavailableToolId = ref('')
 const restored = ref(false)
+const collapsedToolCategories = ref<string[]>([])
 const inventoryLoading = computed(() => !restored.value || pluginMarket.loading.value)
 let lastVisitedTool = ''
 
@@ -40,9 +42,14 @@ const categoryDefinitions = [
 ]
 
 const pluginTools = computed(() => pluginToolEntries(pluginMarket.snapshot.value?.installed || []))
-const categories = computed(() => categoryDefinitions.filter(category => pluginTools.value.some(entry => entry.category === category.id)))
-const categorizedTools = (category: string) => pluginTools.value.filter(entry => entry.category === category)
-const uncategorizedTools = computed(() => pluginTools.value.filter(entry => !entry.category))
+const categories = computed(() => {
+  const groups = categoryDefinitions.map(category => ({
+    ...category, entries: pluginTools.value.filter(entry => entry.category === category.id),
+  })).filter(category => category.entries.length)
+  const otherTools = pluginTools.value.filter(entry => !entry.category)
+  if (otherTools.length) groups.push({ id: 'other', titleKey: 'tools.categoryPlugins', entries: otherTools })
+  return groups
+})
 const hasInstalledPlugins = computed(() => pluginMarket.snapshot.value?.installed.some(plugin => plugin.managed))
 const switchingDisabled = computed(() => pluginToolBusy.value && Boolean(activePluginTool.value))
 const mobileToolOptions = computed(() => pluginTools.value.map(entry => ({ label: toolLabel(entry), value: entry.key })))
@@ -85,6 +92,13 @@ function toolIcon(entry: PluginToolEntry) {
     GitMergeOutline, VolumeHighOutline, MicOutline, MusicalNoteOutline, PulseOutline,
   }
   return icons[entry.icon as keyof typeof icons] || ExtensionPuzzleOutline
+}
+
+function toggleToolCategory(category: string) {
+  collapsedToolCategories.value = collapsedToolCategories.value.includes(category)
+    ? collapsedToolCategories.value.filter(id => id !== category)
+    : [...collapsedToolCategories.value, category]
+  void updatePluginToolState({ collapsedToolCategories: [...collapsedToolCategories.value] })
 }
 
 function replaceQuery(query: LocationQueryRaw) {
@@ -200,6 +214,11 @@ watch(() => route.name,
 onMounted(async () => {
   try {
     const [, stored] = await Promise.all([pluginMarket.ensureInventory(), loadPluginToolState()])
+    if (Array.isArray(stored?.collapsedToolCategories)) {
+      collapsedToolCategories.value = [...new Set(stored.collapsedToolCategories.filter(id =>
+        categoryDefinitions.some(category => category.id === id) || id === 'other',
+      ))]
+    }
     const restoredStored = restoreStoredTool(stored)
     if (typeof route.query.pluginView === 'string') applyRequestedPluginView()
     else if (!restoredStored) {
@@ -243,32 +262,34 @@ onMounted(async () => {
     <div class="audio-tools-workspace">
       <nav class="audio-tools-nav" :aria-label="t('tools.toolNavigation')">
         <section v-for="category in categories" :key="category.id">
-          <strong>{{ t(category.titleKey) }}</strong>
           <button
-            v-for="entry in categorizedTools(category.id)"
-            :key="entry.key"
             type="button"
-            :disabled="switchingDisabled && activePluginTool !== entry.key"
-            :class="{ active: activePluginTool === entry.key }"
-            @click="activatePluginTool(entry)"
+            class="audio-tools-group-toggle"
+            :class="{ 'has-active-tool': collapsedToolCategories.includes(category.id) && category.entries.some(entry => entry.key === activePluginTool) }"
+            :disabled="!restored"
+            :aria-expanded="!collapsedToolCategories.includes(category.id)"
+            :aria-controls="`audio-tools-category-${category.id}`"
+            @click="toggleToolCategory(category.id)"
           >
-            <n-icon :component="toolIcon(entry)" />
-            <span>{{ toolLabel(entry) }}</span>
+            <span class="audio-tools-group-title">{{ t(category.titleKey) }}</span>
+            <span class="audio-tools-group-count">{{ category.entries.length }}</span>
+            <n-icon class="audio-tools-group-chevron" :component="ChevronDownOutline" />
           </button>
-        </section>
-        <section v-if="uncategorizedTools.length">
-          <strong>{{ t('tools.categoryPlugins') }}</strong>
-          <button
-            v-for="entry in uncategorizedTools"
-            :key="entry.key"
-            type="button"
-            :disabled="switchingDisabled && activePluginTool !== entry.key"
-            :class="{ active: activePluginTool === entry.key }"
-            @click="activatePluginTool(entry)"
-          >
-            <n-icon :component="toolIcon(entry)" />
-            <span>{{ toolLabel(entry) }}</span>
-          </button>
+          <n-collapse-transition :show="!collapsedToolCategories.includes(category.id)">
+            <div :id="`audio-tools-category-${category.id}`" class="audio-tools-group-items" :inert="collapsedToolCategories.includes(category.id)">
+              <button
+                v-for="entry in category.entries"
+                :key="entry.key"
+                type="button"
+                :disabled="switchingDisabled && activePluginTool !== entry.key"
+                :class="{ active: activePluginTool === entry.key }"
+                @click="activatePluginTool(entry)"
+              >
+                <n-icon :component="toolIcon(entry)" />
+                <span>{{ toolLabel(entry) }}</span>
+              </button>
+            </div>
+          </n-collapse-transition>
         </section>
       </nav>
 

@@ -88,11 +88,21 @@ class RuntimeCoreVersionTests(unittest.TestCase):
         pinned = manifest()
         pinned["common"].update({"pymss": "pymss[proxy]==2.1.4", "pymss-core": "pymss-core==0.1.6"})
         with mock.patch.object(worker_bootstrap, "_manifest", return_value=pinned), \
-             mock.patch.object(worker_bootstrap, "_latest_pypi_version", side_effect=["2.2.0", "0.2.0"]) as latest, \
+             mock.patch.object(worker_bootstrap, "_latest_pypi_version", return_value="2.2.0") as latest, \
              mock.patch.object(worker_bootstrap, "_emit") as emit:
             self.assertEqual(worker_bootstrap.cmd_runtime_core_versions({}), 0)
-        self.assertEqual(latest.call_args_list, [mock.call("pymss", "stable"), mock.call("pymss-core", "stable")])
+        self.assertEqual(latest.call_args_list, [mock.call("pymss", "stable")])
         self.assertEqual(emit.call_args.args[1]["packages"]["pymss"]["latestVersion"], "2.2.0")
+
+    def test_a_standalone_core_release_does_not_trigger_an_update_check(self):
+        versions = {"pymss": "2.3.4", "pymss-core": "0.1.14"}
+        with mock.patch.object(worker_bootstrap, "_latest_pypi_version", return_value="2.3.4") as latest, \
+             mock.patch.object(worker_bootstrap, "_emit") as emit:
+            worker_bootstrap.cmd_runtime_core_versions({"versions": versions})
+        latest.assert_called_once_with("pymss", "stable")
+        packages = emit.call_args.args[1]["packages"]
+        self.assertFalse(packages["pymss"]["updateAvailable"])
+        self.assertNotIn("pymss-core", packages)
 
     def test_unavailable_index_is_not_reported_as_the_bundled_latest(self):
         with mock.patch.object(worker_bootstrap, "_latest_pypi_version", side_effect=OSError("unavailable")), \
@@ -269,7 +279,8 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
                     result = worker_bootstrap.cmd_update_runtime_core({**payload, "mode": "rollback", "planId": plans[-1]["id"]})
                     with mock.patch.object(worker_bootstrap, "_detect_gpu_vendors", return_value=[]):
                         self.assertTrue(worker_bootstrap._runtime_info_payload({})["rollbackAvailable"])
-            self.assertLessEqual(latest.call_count, 2)
+            self.assertLessEqual(latest.call_count, 1)
+            self.assertTrue(all(call.args[0] == "pymss" for call in latest.call_args_list))
             if result == 0 and not prepare_only:
                 self.assertEqual(audio_probe.call_count, 2 if rollback_after else 1)
                 self.assertEqual(audio_probe.call_args.args[0], python)
