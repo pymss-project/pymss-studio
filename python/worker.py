@@ -5,6 +5,7 @@ import sys
 
 from worker_protocol import debug_log, emit_error, load_payload, protocol_logging
 from worker_proxy import ProxyConfigError, configure_process_proxy, load_proxy_config, parse_proxy_config
+from worker_rocm import RocmWorkerAbort, rocm_worker_poisoned
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -15,6 +16,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def run_command(command: str, payload: dict) -> int:
+    if command == "runtime_hardware_inventory":
+        from worker_runtime_inventory import cmd_runtime_hardware_inventory
+        return cmd_runtime_hardware_inventory(payload)
+    if command in {"runtime_gpu_probe", "runtime_gpu_probe_report"}:
+        from worker_rocm_probe import cmd_runtime_gpu_probe, cmd_runtime_gpu_probe_report
+        return cmd_runtime_gpu_probe(payload) if command == "runtime_gpu_probe" else cmd_runtime_gpu_probe_report(payload)
     if command == "network_diagnostics":
         from worker_network_diagnostics import cmd_network_diagnostics
         return cmd_network_diagnostics(payload)
@@ -24,6 +31,15 @@ def run_command(command: str, payload: dict) -> int:
     if command == "runtime_info":
         from worker_bootstrap import cmd_runtime_info
         return cmd_runtime_info(payload)
+    if command == "runtime_install_plan":
+        from worker_bootstrap import cmd_runtime_install_plan
+        return cmd_runtime_install_plan(payload)
+    if command == "recover_runtime":
+        from worker_bootstrap import cmd_recover_runtime
+        return cmd_recover_runtime(payload)
+    if command == "rollback_runtime":
+        from worker_bootstrap import cmd_rollback_runtime
+        return cmd_rollback_runtime(payload)
     if command == "install_runtime":
         configure_process_proxy(load_proxy_config())
         from worker_bootstrap import cmd_install_runtime
@@ -175,6 +191,9 @@ def main(argv: list[str]) -> int:
             code = run_command(args.command, payload)
         debug_log("worker.exit", command=args.command, code=code)
         return code
+    except RocmWorkerAbort as aborted:
+        return emit_error(getattr(aborted.error, "code", "ROCM_CONTEXT_LOST"), str(aborted.error),
+                          task_id=payload.get("taskId"), extra={"workerRestartRequired": True})
     except ProxyConfigError as exc:
         debug_log("worker.exception", command=args.command, error=str(exc))
         return emit_error(exc.code, str(exc))
@@ -185,4 +204,12 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv))
+    exit_code = main(sys.argv)
+    if rocm_worker_poisoned():
+        # Do not run Torch/driver finalizers against a damaged HIP context.
+        # The parent owns process-tree cleanup and releases its runtime lease.
+        import os
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(exit_code or 1)
+    raise SystemExit(exit_code)

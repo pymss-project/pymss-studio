@@ -24,13 +24,30 @@ import re
 import shutil
 import tempfile
 import traceback
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from worker_protocol import emit, emit_error, task_logging
 from worker_paths import normalize_output_dir as _normalize_output_dir
+from worker_rocm import (
+    RocmCompatibilityError, RocmInferenceError, RocmWorkerAbort, assert_rocm_operation_succeeded,
+    begin_rocm_operation, rocm_worker_poisoned,
+)
+
+
+@contextmanager
+def _separator_cache_scope(manager: Any):
+    cache = manager.__enter__()
+    try:
+        yield cache
+    except BaseException as error:
+        if rocm_worker_poisoned() or not manager.__exit__(type(error), error, error.__traceback__):
+            raise
+    else:
+        if not rocm_worker_poisoned():
+            manager.__exit__(None, None, None)
 
 
 def _normalize_output_layout(value: Any) -> str:
@@ -315,6 +332,12 @@ class WorkbenchPublishError(RuntimeError):
 
 
 def _emit_workflow_failure(task_id: str, exc: Exception) -> int:
+    if isinstance(exc, (RocmInferenceError, RocmCompatibilityError)):
+        detail = traceback.format_exc()
+        if getattr(exc, "original_traceback", None):
+            detail = f"{exc.original_traceback}\n{detail}"
+        return emit_error(exc.code, str(exc), detail, task_id=task_id,
+                          extra={"workerRestartRequired": rocm_worker_poisoned(), "outputPolicy": "preserve_completed"})
     if isinstance(exc, WorkbenchPublishError):
         emit("error", {"code": "WORKFLOW_RUN_FAILED", "message": str(exc), "detail": traceback.format_exc(),
                        "nodeId": exc.node_id, "outputs": exc.outputs,
@@ -1300,7 +1323,7 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
             task_id, batch=isinstance(payload.get("tasks"), list) and bool(payload["tasks"]),
         ))
         if separator_cache is None:
-            separator_cache = cleanup.enter_context(graph.SeparatorCache(factory=_workflow_separator_factory))
+            separator_cache = cleanup.enter_context(_separator_cache_scope(graph.SeparatorCache(factory=_workflow_separator_factory)))
         # Negotiate the optional kernel protocol once. Published runtimes retain
         # their existing progress API; errors from the new API never trigger a retry.
         callbacks = {"execution_event_callback": _emit_execution(task_id, log_scope)} \
@@ -1333,6 +1356,7 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
             strict=True,
             separator_cache=separator_cache,
         )
+        assert_rocm_operation_succeeded()
         if ensemble_stem is not None:
             return _finalize_ensemble_output(
                 saved, payload=payload, input_path=primary, stem=ensemble_stem,
@@ -1453,11 +1477,15 @@ def cmd_infer_workflow(payload: dict[str, Any]) -> int:
             return emit_error("INPUT_NOT_FOUND", f"Input not found: {source_path}", task_id=task_id)
 
         emit("task_stage", {"stage": "separating", "message": "Running workflow", "progress": 35}, task_id=task_id)
+        begin_rocm_operation()
         result = _run_pymss(payload, task_id, input_path=input_path or None, inputs=inputs or None,
-                            output_dir=output_dir, output_layout=output_layout)
+                             output_dir=output_dir, output_layout=output_layout)
+        assert_rocm_operation_succeeded()
         emit("task_stage", {"stage": "writing_output", "message": "Collecting workflow outputs", "progress": 92}, task_id=task_id)
         emit("task_done", {**result, "outputRoot": output_dir}, task_id=task_id)
         return 0
+    except RocmWorkerAbort as aborted:
+        return _emit_workflow_failure(task_id, aborted.error)
     except Exception as exc:
         return _emit_workflow_failure(task_id, exc)
     finally:
@@ -1476,6 +1504,7 @@ def _cmd_infer_workflow_batch(payload: dict[str, Any], raw_tasks: list[Any]) -> 
         return emit_error("WORKFLOW_TASK_ID_MISSING", "Workflow task id is required")
 
     failed = False
+    terminal_task_ids: set[str] = set()
     batch_cleanup = ExitStack()
     try:
         definition = payload.get("workflow")
@@ -1486,9 +1515,9 @@ def _cmd_infer_workflow_batch(payload: dict[str, Any], raw_tasks: list[Any]) -> 
             # cache to one separator so different models do not accumulate
             # in GPU memory. Advanced graphs retain their native per-run scope.
             graph = _workflow_graph()
-            separator_cache = batch_cleanup.enter_context(graph.SeparatorCache(
+            separator_cache = batch_cleanup.enter_context(_separator_cache_scope(graph.SeparatorCache(
                 factory=_workflow_separator_factory, max_entries=1,
-            ))
+            )))
         for input_index, item in enumerate(raw_tasks, 1):
             if not isinstance(item, dict):
                 continue
@@ -1510,21 +1539,30 @@ def _cmd_infer_workflow_batch(payload: dict[str, Any], raw_tasks: list[Any]) -> 
             emit("task_stage", {"stage": "validating_input", "message": "Validating workflow input", "progress": 12}, task_id=task_id)
             try:
                 with task_logging(task_id):
+                    begin_rocm_operation()
                     result = _run_pymss({**payload, "taskId": task_id, "inputIndex": item.get("inputIndex", input_index),
                                         **({"workbenchOutputs": item.get("workbenchOutputs", payload.get("workbenchOutputs"))}
                                            if payload.get("workbench") is True else {})}, task_id,
                                         input_path=input_path or None,
                                         inputs=item_inputs or None,
                                         output_dir=output_dir, output_layout=output_layout,
-                                        **({"separator_cache": separator_cache} if separator_cache is not None else {}))
+                                         **({"separator_cache": separator_cache} if separator_cache is not None else {}))
+                    assert_rocm_operation_succeeded()
                     emit("task_stage", {"stage": "writing_output", "message": "Collecting workflow outputs", "progress": 92}, task_id=task_id)
                     emit("task_done", {**result, "outputRoot": output_dir}, task_id=task_id)
+                    terminal_task_ids.add(task_id)
             except Exception as exc:
                 failed = True
                 _emit_workflow_failure(task_id, exc)
+                terminal_task_ids.add(task_id)
             finally:
                 _cleanup_workflow_file(task_id)
         return 1 if failed else 0
+    except RocmWorkerAbort as aborted:
+        for item in raw_tasks:
+            if isinstance(item, dict) and item.get("taskId") and item["taskId"] not in terminal_task_ids:
+                _emit_workflow_failure(str(item["taskId"]), aborted.error)
+        return 1
     except Exception as exc:
         detail = traceback.format_exc()
         for item in raw_tasks:

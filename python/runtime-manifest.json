@@ -58,6 +58,106 @@
             "requirement": "torch==2.10.0",
             "indexUrl": "https://download.pytorch.org/whl/rocm7.1"
           }
+        },
+        "win32": {
+          "defaultProfile": "win-rocm100-multiarch",
+          "profiles": {
+            "win-rocm721": {
+              "id": "win-rocm721",
+              "revision": 1,
+              "platforms": [
+                "win32"
+              ],
+              "machine": [
+                "amd64",
+                "x86_64"
+              ],
+              "python": "3.12",
+              "installMode": "legacy",
+              "installationEnabled": true,
+              "upstreamChannel": "stable",
+              "validationStatus": "legacy",
+              "packages": {
+                "torch": "2.9.1+rocm7.2.1",
+                "torchaudio": "2.9.1+rocm7.2.1",
+                "torchvision": "0.24.1+rocm7.2.1",
+                "rocm": "7.2.1",
+                "rocm-sdk-core": "7.2.1",
+                "rocm-sdk-devel": "7.2.1",
+                "rocm-sdk-libraries-custom": "7.2.1"
+              },
+              "torch": {
+                "requirement": "torch==2.9.1",
+                "rocmRequirements": [
+                  "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_core-7.2.1-py3-none-win_amd64.whl",
+                  "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_devel-7.2.1-py3-none-win_amd64.whl",
+                  "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_libraries_custom-7.2.1-py3-none-win_amd64.whl",
+                  "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm-7.2.1.tar.gz"
+                ],
+                "requirements": [
+                  "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torch-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
+                  "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torchaudio-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
+                  "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torchvision-0.24.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
+                  "Pillow>=10.4,<13"
+                ],
+                "noDeps": true
+              }
+            },
+            "win-rocm100-multiarch": {
+              "id": "win-rocm100-multiarch",
+              "revision": 1,
+              "platforms": [
+                "win32"
+              ],
+              "machine": [
+                "amd64",
+                "x86_64"
+              ],
+              "python": "3.12",
+              "installMode": "multiarch",
+              "installationEnabled": true,
+              "releaseState": "preview",
+              "upstreamChannel": "stable",
+              "validationStatus": "preview",
+              "packages": {
+                "torch": "2.13.0+rocm10.0.0",
+                "torchvision": "0.28.0+rocm10.0.0",
+                "torchaudio": "2.11.0.2+rocm10.0.0",
+                "rocm": "10.0.0"
+              },
+              "availableTargets": [
+                "all",
+                "gfx1010",
+                "gfx1011",
+                "gfx1012",
+                "gfx1030",
+                "gfx1031",
+                "gfx1032",
+                "gfx1033",
+                "gfx1034",
+                "gfx1035",
+                "gfx1036",
+                "gfx1100",
+                "gfx1101",
+                "gfx1102",
+                "gfx1103",
+                "gfx1150",
+                "gfx1151",
+                "gfx1152",
+                "gfx1153",
+                "gfx1200",
+                "gfx1201",
+                "gfx908",
+                "gfx90a"
+              ],
+              "validatedTargets": [],
+              "torch": {
+                "requirement": "torch==2.13.0+rocm10.0.0",
+                "indexUrl": "https://stable.repo.amd.com/rocm/whl-next/",
+                "noDeps": false
+              }
+            }
+          }
         }
       },
       "torch": {
@@ -71,7 +171,8 @@
         "requirements": [
           "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torch-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
           "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torchaudio-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
-          "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torchvision-0.24.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl"
+          "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torchvision-0.24.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
+          "Pillow>=10.4,<13"
         ],
         "noDeps": true
       }

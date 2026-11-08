@@ -12,6 +12,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useAppStore, type RuntimeBackend } from '@/stores/app'
 import { formatBytes } from '@/utils/format'
 import { isTauriRuntime } from '@/utils/appStore'
+import { runtimeErrorSummary } from '@/utils/runtimeErrors'
 import {
   detectRuntimePlatform,
   preferredInstalledRuntimeBackend,
@@ -19,6 +20,8 @@ import {
   runtimeEnvironmentForBackend,
   runtimeBackendLabel as runtimeBackendName,
   runtimeSizeHint,
+  runtimeGpuReportForEnvironment,
+  runtimeGpuStatus,
 } from '@/utils/runtime'
 import {
   applyTheme,
@@ -102,17 +105,28 @@ watch(preferredRuntimeBackend, (backend) => {
 }, { immediate: true })
 
 const selectedBackendInstalled = computed(() => backendInstalled(selectedBackend.value))
-const selectedBackendReady = computed(() => !(app.runtimeInstallStatus === 'installing' && app.runtimeInstallBackend === selectedBackend.value)
-  && app.runtimeReadyForBackend(selectedBackend.value))
 const selectedRuntime = computed(() => runtimeEnvironmentForBackend(app.runtimeInfo, selectedBackend.value))
-const runtimeBusy = computed(() => runtimeChecking.value)
+const selectedRuntimeBroken = computed(() => selectedRuntime.value?.health === 'broken')
+const selectedBackendReady = computed(() => !selectedRuntimeBroken.value && !(selectedBackend.value === 'rocm' && app.runtimeInfo?.seedPreparationRequired) && !(app.runtimeInstallStatus === 'installing' && app.runtimeInstallBackend === selectedBackend.value)
+  && app.runtimeReadyForBackend(selectedBackend.value))
+const selectedGpuReport = computed(() => runtimeGpuReportForEnvironment(app.runtimeGpuProbeReport, selectedRuntime.value))
+const selectedGpuStatus = computed(() => runtimeGpuStatus(selectedGpuReport.value, selectedRuntime.value?.activationValidation))
+const selectedRocmActive = computed(() => selectedBackend.value === 'rocm' && selectedBackendInstalled.value
+  && String(app.runtimeInfo?.installedBackend || app.runtimeInfo?.installState?.backend || app.runtimeInstalledBackend) === 'rocm')
+const runtimeBusy = computed(() => runtimeChecking.value || app.runtimeGpuProbeStatus === 'running' || app.runtimeMaintenanceStatus === 'running')
+const runtimeGpuProgress = computed(() => ['inventory', 'mode', 'check'].includes(app.runtimeGpuProbeStage)
+  ? t(`settings.runtimeGpuStage_${app.runtimeGpuProbeStage}`) : app.runtimeGpuProbeStage || t('settings.runtimeGpuChecking'))
 const runtimeError = computed(() => runtimeActionError.value || app.runtimeInfoError)
 const runtimeStatusKey = computed(() => runtimeBusy.value ? 'onboarding.runtimeChecking'
-  : selectedBackendReady.value ? 'onboarding.runtimeReady'
+  : selectedRuntimeBroken.value ? 'settings.runtimeHealthBroken'
+  : selectedRocmActive.value ? `settings.runtimeGpuStatus_${selectedGpuStatus.value}`
+    : selectedBackendReady.value ? 'onboarding.runtimeReady'
     : selectedBackendInstalled.value ? 'onboarding.runtimeNeedsActivation'
       : app.runtimeManagementSupported ? 'onboarding.runtimeNeedsInstall' : 'onboarding.runtimeUnavailable')
 const runtimeRecommendationKey = computed(() => {
+  if (selectedRuntimeBroken.value) return 'settings.runtimeHealthBrokenHint'
   if (runtimePlatform.value.isMac) return 'onboarding.runtimeMacHint'
+  if (selectedRocmActive.value) return selectedGpuStatus.value === 'unavailable' ? 'settings.runtimeRocmActivationFailed' : 'onboarding.runtimeGpuHint'
   if (selectedBackendReady.value) return 'onboarding.runtimeReadyHint'
   if (selectedBackendInstalled.value) return 'onboarding.runtimeSwitchHint'
   if (runtimeRecommendedBackend.value === 'cuda') return 'onboarding.runtimeNvidiaHint'
@@ -122,6 +136,7 @@ const runtimeRecommendationKey = computed(() => {
 const primaryActionLabel = computed(() => {
   if (currentStep.value !== 'runtime') return t(currentStep.value === 'welcome' ? 'onboarding.begin' : 'common.next')
   if (runtimeBusy.value) return t('onboarding.runtimeChecking')
+  if (selectedBackend.value === 'rocm' && app.runtimeInfo?.seedPreparationRequired) return t('settings.runtimePrepareSeed')
   if (selectedBackendReady.value) return t('onboarding.startUsing')
   return t('onboarding.manageRuntime')
 })
@@ -313,6 +328,16 @@ async function refreshRuntime() {
   }
 }
 
+async function probeRuntimeGpu() {
+  if (runtimeBusy.value) return
+  runtimeActionError.value = ''
+  try { await app.startRuntimeGpuProbe() } catch (error) { runtimeActionError.value = error instanceof Error ? error.message : String(error) }
+}
+
+async function cancelRuntimeGpuProbe() {
+  try { await app.cancelRuntimeGpuProbe() } catch (error) { runtimeActionError.value = error instanceof Error ? error.message : String(error) }
+}
+
 async function finishOnboarding(event?: MouseEvent, skipRuntime = false, manageRuntime = false) {
   if (finishing.value || runtimeBusy.value || !canGoNext.value || (!skipRuntime && !selectedBackendReady.value)) return
   finishing.value = true
@@ -481,6 +506,11 @@ onMounted(() => {
             <div v-if="selectedBackendReady && !runtimeBusy" class="onboarding-readiness">
               <div><span>{{ t('onboarding.runtimeVersion') }}</span><strong>{{ selectedRuntime?.pymssVersion || app.runtimeInfo?.pymssVersion || '—' }}</strong></div>
               <p>{{ t('onboarding.readyToUse') }}</p>
+            </div>
+            <div v-if="selectedRocmActive" class="onboarding-readiness">
+              <n-button v-if="app.runtimeGpuProbeStatus !== 'running'" size="small" :disabled="runtimeBusy" @click="probeRuntimeGpu">{{ t('settings.runtimeGpuCheck') }}</n-button>
+              <template v-else><span role="status" aria-live="polite">{{ runtimeGpuProgress }}</span><n-button size="small" @click="cancelRuntimeGpuProbe">{{ t('common.cancel') }}</n-button></template>
+              <p v-if="app.runtimeGpuProbeStatus === 'error'" class="onboarding-runtime-error">{{ runtimeErrorSummary(app.runtimeGpuProbeError, t) }}</p>
             </div>
 
             <p v-if="!selectedBackendReady && !runtimeBusy" class="onboarding-hint">{{ t(app.runtimeManagementSupported ? 'onboarding.runtimeManageHint' : 'onboarding.runtimeReadOnlyHint') }}</p>

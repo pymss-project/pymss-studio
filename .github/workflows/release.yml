@@ -32,6 +32,27 @@ on:
         required: true
         default: false
         type: boolean
+      rocm_profile:
+        description: "Windows ROCm runtime profile"
+        type: string
+        default: "win-rocm100-multiarch"
+      rocm_revision:
+        description: "Windows ROCm profile revision"
+        type: number
+        default: 1
+      rocm_targets:
+        description: "Space-separated ROCm GPU targets; use all for multiarch, empty for legacy"
+        type: string
+        default: "all"
+      rocm_channel:
+        description: "Windows ROCm distribution channel"
+        type: choice
+        options: [legacy, preview, stable]
+        default: preview
+      rocm_preview_candidate:
+        description: "Create a prerelease-only runtime policy snapshot for the selected disabled candidate"
+        type: boolean
+        default: false
   push:
     tags:
       - "v*"
@@ -45,6 +66,11 @@ jobs:
     uses: ./.github/workflows/release-windows.yml
     with:
       version: ${{ github.event.inputs.version || github.ref_name }}
+      rocm_profile: ${{ inputs.rocm_profile || 'win-rocm100-multiarch' }}
+      rocm_profile_revision: ${{ fromJSON(github.event_name == 'workflow_dispatch' && toJSON(inputs.rocm_revision) || '1') }}
+      rocm_targets: ${{ fromJSON(github.event_name == 'workflow_dispatch' && toJSON(inputs.rocm_targets) || '"all"') }}
+      rocm_channel: ${{ inputs.rocm_channel || 'preview' }}
+      rocm_preview_candidate: ${{ github.event_name == 'workflow_dispatch' && inputs.rocm_preview_candidate == true }}
     secrets: inherit
 
   macos:
@@ -116,7 +142,7 @@ jobs:
           linux_result="${{ needs.linux.result }}"
           if [[ "$windows_result" != "success" && "$macos_result" != "success" && "$linux_result" != "success" ]]; then
             echo "RELEASE_PRERELEASE=true" >> "$GITHUB_ENV"
-          elif [[ "$version" == *-* ]]; then
+          elif [[ "${version%%+*}" == *-* ]]; then
             echo "RELEASE_PRERELEASE=true" >> "$GITHUB_ENV"
           else
             echo "RELEASE_PRERELEASE=${{ github.event_name == 'workflow_dispatch' && inputs.prerelease == true }}" >> "$GITHUB_ENV"
@@ -145,6 +171,13 @@ jobs:
           path: artifacts
           merge-multiple: true
           pattern: Pymss-Studio-${{ steps.release_meta.outputs.version }}-windows-x64-*-setup
+      - name: Download Windows ROCm runtime assets
+        if: needs.windows.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+          pattern: Pymss-Studio-${{ steps.release_meta.outputs.version }}-windows-x64-rocm-runtime-assets
       - name: Download Windows update archives
         if: needs.windows.result == 'success'
         uses: actions/download-artifact@v4

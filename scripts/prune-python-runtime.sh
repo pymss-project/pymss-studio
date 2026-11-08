@@ -3,6 +3,24 @@ set -euo pipefail
 
 RUNTIME_DIR="${1:?runtime dir required}"
 KEEP_VENV="${2:-}"
+BACKEND="cpu"
+for prune_option in "${@:2}"; do
+  case "$prune_option" in
+    --keep-venv) KEEP_VENV="--keep-venv" ;;
+    --backend=rocm) BACKEND="rocm" ;;
+  esac
+done
+# Exclude only ROCm payloads from destructive recursive passes. SDK/devel
+# archives, headers, device resources and SDK metadata are runtime inputs.
+ROCM_EXCLUDES=()
+if [[ "$BACKEND" == "rocm" ]]; then
+  ROCM_EXCLUDES=(
+    -not -path '*/site-packages/_rocm*' -not -path '*/site-packages/rocm*'
+    -not -path '*/site-packages/amd_torch_device*' -not -path '*/site-packages/_amd_torch_device*'
+    -not -path '*/site-packages/amd_torchvision_device*' -not -path '*/site-packages/_amd_torchvision_device*'
+    -not -path '*/site-packages/torch/include' -not -path '*/site-packages/torch/include/*'
+  )
+fi
 
 rm -rf \
   "$RUNTIME_DIR/Doc" \
@@ -48,11 +66,12 @@ find "$RUNTIME_DIR/lib" -maxdepth 1 -type d \( \
 \) -prune -exec rm -rf {} +
 find "$RUNTIME_DIR" -type d \( -name '__pycache__' -o -name 'test' -o -name 'tests' -o -name 'testsuite' -o -name 'examples' -o -name 'example' -o -name 'benchmarks' -o -name 'docs' -o -name 'doc' \) \
   -not -path '*/site-packages/torch/testing' \
+  "${ROCM_EXCLUDES[@]}" \
   -prune -exec rm -rf {} + || true
-find "$RUNTIME_DIR" -type f \( -name '*.pyc' -o -name '*.pyo' -o -name '*.a' -o -name '*.la' -o -name '*.h' -o -name '*.hpp' \) -delete || true
+find "$RUNTIME_DIR" -type f \( -name '*.pyc' -o -name '*.pyo' -o -name '*.a' -o -name '*.la' -o -name '*.h' -o -name '*.hpp' \) "${ROCM_EXCLUDES[@]}" -delete || true
 find -L "$RUNTIME_DIR" -type l -exec rm -f {} + || true
 find "$RUNTIME_DIR" -path '*/site-packages/torch/*' -type f -name '*.lib' -delete || true
-find "$RUNTIME_DIR" -path '*/site-packages/torch/include' -type d -prune -exec rm -rf {} + || true
+find "$RUNTIME_DIR" -path '*/site-packages/torch/include' -type d "${ROCM_EXCLUDES[@]}" -prune -exec rm -rf {} + || true
 find "$RUNTIME_DIR" -path '*/site-packages/torch/share' -type d -prune -exec rm -rf {} + || true
 find "$RUNTIME_DIR" -path '*/site-packages/torch/utils/benchmark' -type d -prune -exec rm -rf {} + || true
 # Keep pip: runtime core updates invoke the environment interpreter with "-m pip".
@@ -68,7 +87,7 @@ find "$RUNTIME_DIR" -type d -name 'site-packages' -print0 |
 # Keep package identity and installer markers for importlib.metadata, plugin discovery,
 # and future pip updates. Remove only WHEEL bookkeeping; ROCm ships many distributions,
 # so retaining every wheel metadata file makes the LZMA2 installer enumerate more files.
-find "$RUNTIME_DIR" -type d \( -name '*.dist-info' -o -name '*.egg-info' \) -print0 |
+find "$RUNTIME_DIR" -type d \( -name '*.dist-info' -o -name '*.egg-info' \) "${ROCM_EXCLUDES[@]}" -print0 |
   while IFS= read -r -d '' meta_dir; do
     find "$meta_dir" -maxdepth 1 -type f -iname 'WHEEL' -delete || true
   done

@@ -5,6 +5,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+#[cfg(windows)]
+use std::sync::OnceLock;
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
@@ -23,6 +25,20 @@ static JSON_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static JSON_WRITE_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(windows)]
 const PORTABLE_MARKER_FILE_NAME: &str = "pymss-studio.portable";
+#[cfg(windows)]
+static MANAGED_RUNTIME_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+fn directory_writable(path: &Path) -> AppResult<bool> {
+    let result = std::fs::create_dir_all(path).and_then(|()| {
+        tempfile::Builder::new().prefix(".pymss-write-check-").tempfile_in(path).map(drop)
+    });
+    match result {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied
+            || error.kind() == std::io::ErrorKind::ReadOnlyFilesystem => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -118,10 +134,18 @@ pub fn data_root_dir(app: &AppHandle) -> AppResult<PathBuf> {
     let env_root = std::env::var_os(DATA_ROOT_ENV)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
+    let mut portable = portable_data_root_dir()?;
+    if env_root.is_none() && !is_development_executable() {
+        if let Some(root) = portable.as_ref() {
+            if !directory_writable(root)? {
+                portable = None;
+            }
+        }
+    }
     Ok(resolve_data_root(
         env_root,
         development_data_root_dir()?,
-        portable_data_root_dir()?,
+        portable,
         legacy_data_root_dir(app)?,
         is_development_executable(),
     ))
@@ -210,8 +234,32 @@ pub fn runtime_envs_dir(app: &AppHandle) -> AppResult<PathBuf> {
     }
     #[cfg(not(any(feature = "vst-lab", target_os = "macos", target_os = "linux")))]
     {
-        Ok(runtime_root_dir(app)?.join("runtime-envs"))
+        if let Some(root) = MANAGED_RUNTIME_ROOT.get() {
+            return Ok(root.clone());
+        }
+        let bundled = runtime_root_dir(app)?.join("runtime-envs");
+        let user = data_root_dir(app)?.join("runtime-envs");
+        let already_managed = user.join(".pymss-managed-root.json").is_file()
+            || user.join("active-runtime.json").is_file();
+        let root = choose_windows_runtime_root(&bundled, &user, already_managed,
+            if already_managed { false } else { directory_writable(&bundled)? });
+        if root == user {
+            std::fs::create_dir_all(&root)?;
+            match std::fs::OpenOptions::new().create_new(true).write(true)
+                .open(root.join(".pymss-managed-root.json")) {
+                Ok(mut marker) => marker.write_all(b"{\"schemaVersion\":1}\n")?,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let _ = MANAGED_RUNTIME_ROOT.set(root.clone());
+        Ok(MANAGED_RUNTIME_ROOT.get().cloned().unwrap_or(root))
     }
+}
+
+#[cfg(windows)]
+fn choose_windows_runtime_root(bundled: &Path, user: &Path, already_managed: bool, writable: bool) -> PathBuf {
+    if already_managed || !writable { user.to_path_buf() } else { bundled.to_path_buf() }
 }
 
 pub fn active_runtime_file(app: &AppHandle) -> AppResult<PathBuf> {
@@ -797,6 +845,27 @@ mod tests {
 
     fn path(name: &str) -> PathBuf {
         PathBuf::from(name)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_runtime_root_preserves_writable_layout_and_existing_user_selection() {
+        let bundled = PathBuf::from("app/python-runtime/runtime-envs");
+        let user = PathBuf::from("user/runtime-envs");
+        assert_eq!(super::choose_windows_runtime_root(&bundled, &user, false, true), bundled);
+        assert_eq!(super::choose_windows_runtime_root(&bundled, &user, false, false), user);
+        assert_eq!(super::choose_windows_runtime_root(&bundled, &user, true, true), user);
+    }
+
+    #[test]
+    fn writeability_probe_preserves_directory_contents_and_does_not_hide_io_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let preserved = directory.path().join("user.json");
+        std::fs::write(&preserved, b"original").unwrap();
+        assert!(super::directory_writable(directory.path()).unwrap());
+        assert_eq!(std::fs::read(&preserved).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        assert!(super::directory_writable(&preserved).is_err());
     }
 
     #[test]

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
 import ts from 'typescript'
+import { runtimeErrorSummary } from '../src/utils/runtimeErrors.ts'
 
 const source = readFileSync(new URL('../src/stores/task.ts', import.meta.url), 'utf8')
 const parsed = ts.createSourceFile('task.ts', source, ts.ScriptTarget.Latest, true)
@@ -12,6 +13,7 @@ const code = ts.transpileModule(declaration.getText(parsed), { compilerOptions: 
 for (const locale of ['zh-CN', 'en']) {
   const messages = JSON.parse(readFileSync(new URL(`../src/i18n/${locale}.json`, import.meta.url), 'utf8'))
   const resolve = vm.runInNewContext(`${code}\nresolveTaskErrorMessage`, {
+    runtimeErrorSummary,
     i18n: { global: { t: (key, values = {}) => {
       const [group, name] = key.split('.')
       return Object.entries(values).reduce((text, [name, value]) => text.replaceAll(`{${name}}`, value), messages[group][name])
@@ -31,5 +33,18 @@ for (const locale of ['zh-CN', 'en']) {
     assert.match(message, /CPU/)
     assert.doesNotMatch(message, /AMD|ROCm/)
     assert.equal(resolve('UNKNOWN', 'original detail'), 'original detail')
+  })
+
+  test(`${locale} task errors explain ROCm failures and preserve the original diagnostic`, () => {
+    for (const code of ['ROCM_CONTEXT_LOST', 'ROCM_OUT_OF_MEMORY', 'ROCM_TARGET_MISSING', 'ROCM_RUNTIME_INCOMPATIBLE', 'ROCM_NATIVE_CHECK_FAILED']) {
+      const original = 'HIP diagnostic: device 0, operator dispatch failed'
+      const message = resolve(code, original)
+      assert.match(message, /HIP diagnostic: device 0, operator dispatch failed/)
+      assert.notEqual(message, original)
+      assert.doesNotMatch(message, /CPU|fallback/i)
+    }
+    assert.match(resolve('ROCM_CONTEXT_LOST', ''), locale === 'zh-CN' ? /重新创建任务/ : /Start a new task/)
+    assert.match(resolve('ROCM_OUT_OF_MEMORY', ''), locale === 'zh-CN' ? /分段长度.*并发/ : /segment size.*concurrent/)
+    assert.equal(resolve('OTHER_TASK_ERROR', 'Original error'), 'Original error')
   })
 }

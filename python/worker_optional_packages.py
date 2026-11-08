@@ -19,12 +19,23 @@ import sys
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from importlib import metadata
+from importlib import machinery, metadata
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 from worker_protocol import emit, emit_error
+from worker_runtime_profiles import (
+    BASE_ACCELERATOR_PACKAGES,
+    BASE_ACCELERATOR_PREFIXES,
+    accelerator_constraints,
+    accelerator_versions,
+    backend_spec,
+    is_base_accelerator_package,
+    resolve_profile_for_runtime,
+    runtime_fingerprints,
+    verify_accelerator_versions,
+)
 
 
 OPTIONAL_PACKAGES: dict[str, dict[str, str]] = {
@@ -63,6 +74,13 @@ def _apple_silicon_sidecar_status(runtime: RuntimeContext | None = None) -> dict
     if version and not tokenizer_version:
         tokenizer_version = _environment_version("sentencepiece", runtime)
     installed = supported(version, _MLX_FUNASR_REQUIREMENT) and supported(tokenizer_version, _MLX_TOKENIZER_REQUIREMENT)
+    issue = None if not version or installed else "version_mismatch"
+    if managed_version:
+        try:
+            _assert_component_overlay(_package_dir("funasr", runtime), runtime)
+        except (RuntimeError, ValueError):
+            installed = False
+            issue = "runtime_package_conflict"
     return {
         "package": "funasr",
         "requirement": _MLX_FUNASR_REQUIREMENT,
@@ -70,7 +88,7 @@ def _apple_silicon_sidecar_status(runtime: RuntimeContext | None = None) -> dict
         "present": bool(version),
         "version": version,
         "source": "managed" if managed_version else "environment" if environment_version else None,
-        "issue": None if not version or installed else "version_mismatch",
+        "issue": issue,
         "canUninstall": bool(managed_version),
         "runtimeIdentity": runtime.identity,
     }
@@ -84,6 +102,9 @@ class RuntimeContext:
     backend: str
     identity: str
     packages_dir: Path
+    base_fingerprint: str | None = None
+    profile_id: str | None = None
+    frozen_packages: tuple[tuple[str, str], ...] = ()
 
 
 def _runtime_envs_dir() -> Path:
@@ -126,21 +147,90 @@ def _active_runtime_backend() -> str:
 
 
 def _runtime_context() -> RuntimeContext:
-    executable = Path(sys.executable).resolve()
-    backend = _active_runtime_backend()
+    # Resolve the containing directory, preserving a venv's interpreter symlink.
+    executable = Path(sys.executable).parent.resolve() / Path(sys.executable).name
+    state = _runtime_state_for_executable(executable)
+    backend = str(state.get("backend") or _active_runtime_backend())
     identity = _runtime_identity(backend=backend, executable=executable)
     packages_root = _runtime_envs_dir() / "optional-packages"
+    fingerprint = str(state.get("baseFingerprint") or "")
+    if len(fingerprint) != 64 or any(value not in "0123456789abcdef" for value in fingerprint):
+        fingerprint = ""
+    profile_id = state.get("profileId") or None
+    recorded = state.get("resolvedAcceleratorPackages") or {}
+    frozen = accelerator_versions(recorded, recorded)
+    if backend == "rocm" and not fingerprint:
+        # Old component directories were only scoped by backend. Bind their
+        # replacements to actual metadata instead of reusing unknown binaries.
+        from worker_bootstrap import _manifest
+
+        provisional = RuntimeContext(executable, backend, identity, packages_root / identity)
+        installed = _environment_accelerator_versions(provisional)
+        torch_version = installed.get("torch") or _environment_version("torch", provisional)
+        if torch_version:
+            installed["torch"] = torch_version
+        profile = resolve_profile_for_runtime(_manifest(), backend, torch_version or "", profile_id=profile_id)
+        profile_id = profile["id"] if profile else None
+        fingerprint = runtime_fingerprints(
+            profile or {"id": "custom-rocm", "revision": 1}, platform.python_version(), installed,
+        )["baseFingerprint"]
+    if fingerprint:
+        identity = f"{identity}-base-{fingerprint[:24]}"
     # Older bundled installs had no user pointer until the first core update,
     # so components used the executable identity instead of the backend name.
     legacy_identity = _runtime_identity(backend="", executable=executable)
-    if not (packages_root / identity).exists() and (packages_root / legacy_identity).is_dir():
+    if not fingerprint and not (packages_root / identity).exists() and (packages_root / legacy_identity).is_dir():
         identity = legacy_identity
     return RuntimeContext(
         executable=executable,
         backend=backend,
         identity=identity,
         packages_dir=packages_root / identity,
+        base_fingerprint=fingerprint or None,
+        profile_id=profile_id,
+        frozen_packages=tuple(frozen.items()),
     )
+
+
+def _runtime_state_for_executable(executable: Path) -> dict[str, Any]:
+    """Only the current environment's cache or a matching pointer owns its ABI."""
+    environment_dir = executable.parent.parent if executable.parent.name.lower() in {"scripts", "bin"} else executable.parent
+    candidates = [(environment_dir / "pymss-runtime-state.json", True)]
+    active_file = str(os.environ.get("PYMSS_STUDIO_ACTIVE_RUNTIME_FILE") or "").strip()
+    if active_file:
+        candidates.append((Path(active_file), False))
+    bundled = str(os.environ.get("PYMSS_STUDIO_BUNDLED_RUNTIME_ENVS_DIR") or "").strip()
+    if bundled:
+        candidates.append((Path(bundled) / "active-runtime.json", False))
+    local_state: dict[str, Any] = {}
+    result: dict[str, Any] = {}
+    for file, local_cache in [candidates[0], *reversed(candidates[1:])]:
+        try:
+            state = json.loads(file.read_text(encoding="utf-8"))
+            if not isinstance(state, dict):
+                continue
+            python_path = state.get("pythonPath")
+            if python_path:
+                target = Path(python_path)
+                if not target.is_absolute():
+                    target = file.parent / target
+                target = target.parent.resolve() / target.name
+                if os.path.normcase(str(target)) != os.path.normcase(str(executable)):
+                    continue
+            elif not local_cache:
+                continue
+            if local_cache:
+                local_state = state
+            elif all(
+                key not in local_state or key not in state or local_state[key] == state[key]
+                for key in ("backend", "profileId", "profileRevision", "baseFingerprint", "torchVersion")
+            ):
+                result.update(state)
+        except (OSError, ValueError, TypeError):
+            continue
+    # The environment cache follows the installed files. An older activation
+    # pointer at the same executable path must not replace its ABI identity.
+    return {**result, **local_state}
 
 
 def _package_dir(name: str, runtime: RuntimeContext | None = None) -> Path:
@@ -169,7 +259,12 @@ def optional_package_paths(names: Iterable[str], runtime: RuntimeContext | None 
 def activate_optional_packages(
     runtime: RuntimeContext | None = None, *, names: Iterable[str] = OPTIONAL_PACKAGES,
 ) -> list[str]:
-    added = [str(directory) for directory in optional_package_paths(names, runtime)
+    runtime = runtime or _runtime_context()
+    directories = optional_package_paths(names, runtime)
+    for directory in directories:
+        if directory.is_dir():
+            _assert_component_overlay(directory, runtime, allow_audio=True)
+    added = [str(directory) for directory in directories
              if directory.is_dir() and str(directory) not in sys.path]
     sys.path[:0] = added
     importlib.invalidate_caches()
@@ -252,10 +347,129 @@ def _environment_version(name: str, runtime: RuntimeContext | None = None) -> st
             encoding="utf-8",
             errors="replace",
             env=environment,
+            timeout=30,
         )
     except Exception:
         return None
     return output.strip() or None
+
+
+def _environment_accelerator_versions(runtime: RuntimeContext) -> dict[str, str]:
+    """Read the captured interpreter without importing Torch or any sidecars."""
+    script = (
+        "import json, re\nfrom importlib import metadata\n"
+        f"names = {(*BASE_ACCELERATOR_PACKAGES, *dict(runtime.frozen_packages))!r}\n"
+        f"prefixes = {BASE_ACCELERATOR_PREFIXES!r}\n"
+        "versions = {}\n"
+        "for dist in metadata.distributions():\n"
+        " name = re.sub(r'[-_.]+', '-', dist.metadata.get('Name') or '').lower()\n"
+        " if name in names or name.startswith(prefixes): versions[name] = dist.version\n"
+        "print(json.dumps(versions))\n"
+    )
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["PYTHONNOUSERSITE"] = "1"
+    output = subprocess.check_output(
+        [str(runtime.executable), "-c", script], text=True, encoding="utf-8", errors="replace", env=environment,
+        timeout=30,
+    )
+    return accelerator_versions(json.loads(output), dict(runtime.frozen_packages))
+
+
+def _frozen_runtime_versions(runtime: RuntimeContext) -> dict[str, str]:
+    versions = _environment_accelerator_versions(runtime)
+    if runtime.frozen_packages:
+        verify_accelerator_versions(dict(runtime.frozen_packages), versions)
+    return dict(versions)
+
+
+def _same_version(actual: str | None, expected: str) -> bool:
+    from pip._vendor.packaging.version import InvalidVersion, Version
+
+    try:
+        return actual is not None and Version(actual) == Version(expected)
+    except InvalidVersion:
+        return False
+
+
+def _requirement_package(requirement: str) -> tuple[str, str | None]:
+    """Identify PEP 508 requirements and percent-encoded wheel URLs."""
+    from pip._vendor.packaging.requirements import InvalidRequirement, Requirement
+    from pip._vendor.packaging.utils import canonicalize_name, parse_wheel_filename
+    from urllib.parse import unquote, urlsplit
+
+    try:
+        parsed = Requirement(requirement)
+    except InvalidRequirement:
+        parsed = None
+    url = parsed.url if parsed else requirement
+    if url:
+        filename = unquote(urlsplit(url).path.rsplit("/", 1)[-1])
+        if filename.endswith(".whl"):
+            name, version, _, _ = parse_wheel_filename(filename)
+            if parsed and canonicalize_name(parsed.name) != name:
+                raise ValueError("The audio requirement name does not match its wheel")
+            return name, str(version)
+    if parsed is None:
+        raise ValueError("The runtime defines an invalid audio package requirement")
+    exact = [specifier.version for specifier in parsed.specifier if specifier.operator == "==" and "*" not in specifier.version]
+    return canonicalize_name(parsed.name), exact[0] if len(exact) == 1 else None
+
+
+def _audio_runtime_spec(runtime: RuntimeContext, torch_version: str | None = None) -> tuple[str, str, str | None]:
+    from worker_bootstrap import _manifest
+
+    torch_version = torch_version or _environment_version("torch", runtime)
+    if not torch_version:
+        raise RuntimeError("The active runtime does not include PyTorch")
+    manifest = _manifest()
+    spec = backend_spec(manifest, runtime.backend)
+    profile = resolve_profile_for_runtime(manifest, runtime.backend, torch_version, profile_id=runtime.profile_id)
+    if profile:
+        expected = profile["packages"]["torchaudio"]
+        torch_spec = profile["torch"]
+        for value in torch_spec.get("requirements") or []:
+            package_name, version = _requirement_package(str(value))
+            if package_name == "torchaudio":
+                if not _same_version(version, expected):
+                    raise RuntimeError("The runtime profile defines an incompatible torchaudio requirement")
+                return expected, str(value), str(torch_spec.get("indexUrl") or "").strip() or None
+        return expected, f"torchaudio=={expected}", str(torch_spec.get("indexUrl") or "").strip() or None
+    if runtime.backend == "rocm" and sys.platform == "win32":
+        raise RuntimeError("The installed ROCm build does not match a runtime profile with a verified torchaudio pairing")
+    # Existing CPU, CUDA and Linux ROCm channels pair matching Torch/audio
+    # releases. Preserve those channels; Windows ROCm is always explicit above.
+    return torch_version, f"torchaudio=={torch_version.split('+', 1)[0]}", str((spec.get("torch") or {}).get("indexUrl") or "").strip() or None
+
+
+def _assert_component_overlay(directory: Path, runtime: RuntimeContext, *, allow_audio: bool = False) -> None:
+    """Only the dedicated audio installer may supply an exact paired audio wheel."""
+    from pip._vendor.packaging.utils import canonicalize_name
+
+    if runtime.frozen_packages:
+        _frozen_runtime_versions(runtime)
+
+    audio = _sidecar_version("torchaudio", directory)
+    if audio:
+        if not allow_audio or not _same_version(audio, _audio_runtime_spec(runtime)[0]):
+            raise RuntimeError("The component shadows the fixed runtime package torchaudio with an incompatible build")
+    for distribution in metadata.distributions(path=[str(directory)]):
+        name = canonicalize_name(distribution.metadata.get("Name") or "")
+        if name == "torchaudio" and audio and allow_audio:
+            continue
+        if is_base_accelerator_package(name, dict(runtime.frozen_packages)) or name in {"pymss", "pymss-core"}:
+            raise RuntimeError(f"The component shadows the fixed runtime package {name}")
+    for path in directory.iterdir():
+        module = path.name
+        for suffix in (".py", *machinery.EXTENSION_SUFFIXES):
+            if module.endswith(suffix):
+                module = module.removesuffix(suffix)
+                break
+        if module == "torchaudio" and path.is_dir() and audio and allow_audio:
+            continue
+        if is_base_accelerator_package(module, dict(runtime.frozen_packages)) or module.startswith("_rocm_sdk") or canonicalize_name(module) in {"pymss", "pymss-core"}:
+            raise RuntimeError(f"The component shadows the fixed runtime module {module}")
 
 
 def _required_version(requirement: str) -> str | None:
@@ -287,6 +501,11 @@ def optional_package_status(name: Any, runtime: RuntimeContext | None = None) ->
     issue = None
     if version and expected_version and version != expected_version:
         issue = "version_mismatch"
+    if managed_version:
+        try:
+            _assert_component_overlay(directory, runtime, allow_audio=True)
+        except (RuntimeError, ValueError):
+            issue = "runtime_package_conflict"
     return {
         "package": normalized,
         "requirement": spec["requirement"],
@@ -359,8 +578,9 @@ def _resolve_install_requirements(
     runtime = runtime or _runtime_context()
     mlx_only = name == "funasr" and _is_apple_silicon()
     requirements = [requirement, _MLX_TOKENIZER_REQUIREMENT] if mlx_only else [requirement]
-    fixed = {}
+    fixed = _frozen_runtime_versions(runtime)
     audio_version = None
+    audio_source: tuple[str, str | None] | None = None
     if mlx_only:
         for package in ("mlx", "mlx-metal", "pymss", "pymss-core"):
             version = _environment_version(package, runtime)
@@ -370,10 +590,23 @@ def _resolve_install_requirements(
         torch_version = _environment_version("torch", runtime)
         if not torch_version:
             raise RuntimeError("The active runtime does not include PyTorch")
-        audio_version = torch_version.split("+", 1)[0]
-        fixed = {"torch": torch_version, "torchaudio": audio_version}
+        expected_audio, audio_requirement, audio_index = _audio_runtime_spec(runtime, torch_version)
+        explicit_pairing = runtime.backend == "rocm" and sys.platform == "win32"
+        audio_version = expected_audio if explicit_pairing else expected_audio.split("+", 1)[0]
+        fixed.update({"torch": torch_version, "torchaudio": audio_version})
+        for package in ("pymss", "pymss-core"):
+            version = _environment_version(package, runtime)
+            if version:
+                fixed[package] = version
+        if explicit_pairing and not _same_version(_environment_version("torchaudio", runtime), expected_audio):
+            audio_source = audio_requirement, audio_index
     constraints = report_path.with_suffix(".constraints.txt")
-    constraints.write_text("".join(f"{package}=={version}\n" for package, version in fixed.items()), encoding="utf-8")
+    constraints.write_text(accelerator_constraints(fixed), encoding="utf-8")
+    source_options: list[str] = []
+    if audio_source:
+        requirements.append(audio_source[0])
+        if audio_source[1] and audio_source[1] != index_url:
+            source_options.extend(["--extra-index-url", audio_source[1]])
     try:
         _run_process(
             [
@@ -390,6 +623,7 @@ def _resolve_install_requirements(
                 str(report_path),
                 "--index-url",
                 index_url,
+                *source_options,
                 *requirements,
             ],
             name,
@@ -400,7 +634,6 @@ def _resolve_install_requirements(
         constraints.unlink(missing_ok=True)
     report = json.loads(report_path.read_text(encoding="utf-8"))
     from pip._vendor.packaging.utils import canonicalize_name
-    from worker_bootstrap import _is_base_accelerator_package
 
     resolved: list[str] = []
     for item in report.get("install") or []:
@@ -413,21 +646,23 @@ def _resolve_install_requirements(
             raise RuntimeError(f"pip returned an invalid package name: {package_name}")
         normalized_name = canonicalize_name(package_name)
         if normalized_name == "torchaudio" and not mlx_only:
-            if version.split("+", 1)[0] != audio_version:
+            if not _same_version(version if "+" in (audio_version or "") else version.split("+", 1)[0], audio_version or ""):
                 raise RuntimeError("The component requires a torchaudio version incompatible with the fixed runtime package torch.")
             # The dedicated audio installer selects the wheel matching the
             # captured Torch backend, rather than taking the PyPI build here.
             continue
-        if _is_base_accelerator_package(normalized_name) or normalized_name in {"pymss", "pymss-core"}:
+        if is_base_accelerator_package(normalized_name, fixed) or normalized_name in {"pymss", "pymss-core"}:
             raise RuntimeError(f"The component requires changing the runtime package {package_name}. The base runtime was preserved.")
         resolved.append(f"{package_name}=={version}")
-    from pip._vendor.packaging.requirements import Requirement
     resolved_names = {
         canonicalize_name(value.partition("==")[0].strip())
         for value in resolved
     }
     for requested in requirements:
-        if canonicalize_name(Requirement(requested).name) not in resolved_names:
+        requested_name, _ = _requirement_package(requested)
+        if requested_name == "torchaudio" and not mlx_only:
+            continue
+        if requested_name not in resolved_names:
             # Reinstall requested components even if a broken base copy has matching metadata.
             resolved.append(requested)
     return resolved
@@ -435,23 +670,11 @@ def _resolve_install_requirements(
 
 def _torchaudio_requirement(runtime: RuntimeContext | None = None) -> tuple[str, str | None] | None:
     runtime = runtime or _runtime_context()
-    torch_version = _environment_version("torch", runtime)
-    if not torch_version:
-        raise RuntimeError("The active runtime does not include PyTorch")
-    version = torch_version.split("+", 1)[0]
+    expected, requirement, index_url = _audio_runtime_spec(runtime)
     torchaudio_version = _environment_version("torchaudio", runtime)
-    if torchaudio_version == torch_version:
+    if _same_version(torchaudio_version, expected):
         return None
-    from worker_bootstrap import _manifest
-    backend = runtime.backend
-    torch_spec = ((_manifest().get("backends") or {}).get(backend) or {}).get("torch") or {}
-    if backend == "rocm":
-        for requirement in torch_spec.get("requirements") or []:
-            if "/torchaudio-" in str(requirement).lower():
-                return str(requirement), None
-        if not torch_spec.get("indexUrl"):
-            raise RuntimeError("The active ROCm runtime does not define a compatible torchaudio wheel")
-    return f"torchaudio=={version}", str(torch_spec.get("indexUrl") or "").strip() or None
+    return requirement, index_url
 
 
 def _install_torchaudio(
@@ -474,6 +697,9 @@ def _install_torchaudio(
     command.append(package)
     _emit_stage(name, "install", f"Installing the compatible audio runtime: {package}", task_id)
     _run_process(command, name, "install", task_id=task_id)
+    if not _same_version(_sidecar_version("torchaudio", staging), _audio_runtime_spec(runtime)[0]):
+        raise RuntimeError("The audio package source did not provide the exact build required by the active runtime")
+    _assert_component_overlay(staging, runtime, allow_audio=True)
 
 
 def _install_package(
@@ -487,6 +713,7 @@ def _install_package(
     from worker_bootstrap import PYPI_MIRROR_URLS, _resolve_pypi_mirror
 
     runtime = runtime or _runtime_context()
+    frozen = _frozen_runtime_versions(runtime)
 
     selected_mirror, index_url = _resolve_pypi_mirror(mirror, locale)
     official = PYPI_MIRROR_URLS["pypi"]
@@ -521,6 +748,7 @@ def _install_package(
                     "--target", str(staging), "--index-url", index, *resolved,
                 ]
                 _run_process(command, name, "install", task_id=task_id)
+                _assert_component_overlay(staging, runtime)
                 last_error = None
                 break
             except Exception as error:
@@ -530,17 +758,26 @@ def _install_package(
         if not (name == "funasr" and _is_apple_silicon()):
             _install_torchaudio(staging, name, task_id, runtime)
         _emit_stage(name, "install", "Verifying the ASR runtime component", task_id)
+        audio_staged = _sidecar_version("torchaudio", staging)
+        verification = f"import sys; sys.path.insert(0, sys.argv[1]); {spec['verifyCode']}"
+        if audio_staged:
+            verification += (
+                "; from pathlib import Path; import torchaudio"
+                "; assert Path(torchaudio.__file__).resolve().is_relative_to(Path(sys.argv[1]).resolve()), 'The audio module was imported from another runtime'"
+            )
         _run_process(
             [
                 str(runtime.executable),
                 "-c",
-                f"import sys; sys.path.insert(0, sys.argv[1]); {spec['verifyCode']}",
+                verification,
                 str(staging),
             ],
             name,
             "install",
             task_id=task_id,
         )
+        _assert_component_overlay(staging, runtime, allow_audio=True)
+        verify_accelerator_versions(frozen, _environment_accelerator_versions(runtime))
         shutil.rmtree(target, ignore_errors=True)
         staging.rename(target)
         activate_optional_packages(runtime)

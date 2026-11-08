@@ -10,7 +10,7 @@ if __package__:
     from . import _bootstrap as _worker_test_bootstrap
     from .test_worker_bootstrap import MANIFEST, probe_result
 else:
-    import _bootstrap as _worker_test_bootstrap
+    import _bootstrap as _worker_test_bootstrap  # noqa: F401
     from test_worker_bootstrap import MANIFEST, probe_result
 
 import worker_bootstrap
@@ -131,6 +131,20 @@ class RuntimeProbeProtocolTests(unittest.TestCase):
         with mock.patch.object(worker_bootstrap.subprocess, "check_output", return_value=json.dumps(result)) as run:
             self.assertEqual(worker_bootstrap._probe_python_runtime(Path(sys.executable)), result)
         self.assertEqual(run.call_args.kwargs["stderr"], subprocess.PIPE)
+
+    def test_sdk_warnings_do_not_corrupt_the_framed_runtime_response(self):
+        result = probe_result("rocm")
+        result["acceleratorAvailable"] = False
+        output = ('[WARNING] offload-arch failed with return code 1\n[stderr]\n'
+                  + worker_bootstrap.RUNTIME_PROBE_MARKER + json.dumps(result) + '\nNative shutdown warning\n')
+        with mock.patch.object(worker_bootstrap.subprocess, "check_output", return_value=output):
+            self.assertEqual(worker_bootstrap._probe_python_runtime(Path(sys.executable)), result)
+
+    def test_multiple_framed_runtime_responses_are_rejected(self):
+        line = worker_bootstrap.RUNTIME_PROBE_MARKER + json.dumps(probe_result("cpu")) + '\n'
+        with mock.patch.object(worker_bootstrap.subprocess, "check_output", return_value=line * 2):
+            with self.assertRaisesRegex(ValueError, "multiple responses"):
+                worker_bootstrap._probe_python_runtime(Path(sys.executable))
 
     def test_missing_and_non_boolean_capability_fields_are_rejected(self):
         for field in ("pymssGraphAvailable", "acceleratorAvailable"):

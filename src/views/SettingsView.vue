@@ -13,7 +13,7 @@ import packageMeta from '../../package.json'
 import appLogo from '@/assets/app-logo-symbol-canvas.png'
 import { SYSTEM_LOCALE, setLocale, type LocaleSetting } from '@/i18n'
 import { useSettingsStore } from '@/stores/settings'
-import { useAppStore, type InstalledRuntime, type RuntimeBackend, type RuntimeCoreMode } from '@/stores/app'
+import { useAppStore, type InstalledRuntime, type RuntimeBackend, type RuntimeCoreMode, type RuntimeInstallPlan, type RuntimeInstallOptions } from '@/stores/app'
 import { runtimeErrorDetails, runtimeErrorSummary } from '@/utils/runtimeErrors'
 import { useUpdateStore } from '@/stores/update'
 import {
@@ -27,7 +27,11 @@ import {
   runtimeLoadError,
   runtimeBackendLabel as runtimeBackendName,
   runtimeSizeHint,
+  runtimeGpuReportForEnvironment,
+  runtimeGpuStatus,
   isKnownRuntimeBackend,
+  rocmDeviceTargets, rocmDefaultDeviceIds, rocmProfileSelectable, rocmPreferredProfileId, rocmInstallAction, rocmStableDeviceIds,
+  runtimeInstallPlanMatches, runtimeInstallOptionsFromPlan,
 } from '@/utils/runtime'
 import { useModelStore } from '@/stores/model'
 import { useTaskStore } from '@/stores/task'
@@ -176,6 +180,120 @@ const runtimeDeleting = ref<string | null>(null)
 const runtimeActivating = ref<string | null>(null)
 const runtimeLogDialogVisible = ref(false)
 const runtimeLogPre = ref<HTMLElement | null>(null)
+const runtimeGpuDialogVisible = ref(false)
+const runtimeGpuIncludeFp16 = ref(false)
+const runtimeGpuCancelling = ref(false)
+const runtimeMaintenancePreparing = ref(false)
+const runtimeGpuRunning = computed(() => app.runtimeGpuProbeStatus === 'running')
+const runtimeGpuProgress = computed(() => ['inventory', 'mode', 'check'].includes(app.runtimeGpuProbeStage)
+  ? t(`settings.runtimeGpuStage_${app.runtimeGpuProbeStage}`) : app.runtimeGpuProbeStage || t('settings.runtimeGpuChecking'))
+const runtimeMaintenanceRunning = computed(() => app.runtimeMaintenanceStatus === 'running')
+const runtimeGpuReport = computed(() => runtimeGpuReportForEnvironment(app.runtimeGpuProbeReport, runtimeEnvironmentForBackend(app.runtimeInfo, 'rocm')))
+const runtimeRecoveryNeeded = computed(() => app.runtimeInfo?.recoveryRequired || app.runtimeInfo?.runtimeMaintenancePending
+  || app.runtimeInfo?.recoveryError || app.runtimeMaintenanceError?.code === 'RUNTIME_RECOVERY_FAILED'
+  || ['RUNTIME_RECOVERY_FAILED', 'RUNTIME_RECOVERY_REQUIRED'].includes(app.runtimeInfoFailure?.code || ''))
+
+const rocmDialogVisible = ref(false)
+const rocmProfileId = ref('')
+const rocmManualTargets = ref<string[]>([])
+const rocmAcceptPreview = ref(false)
+const rocmForceRepair = ref(false)
+const rocmPlan = ref<RuntimeInstallPlan | null>(null)
+const rocmPlanLoading = ref(false)
+const rocmActionError = ref('')
+const rocmProfiles = computed(() => app.runtimeHardwareInventory?.profiles || [])
+const rocmProfile = computed(() => rocmProfiles.value.find(profile => profile.id === rocmProfileId.value))
+const rocmDevices = computed(() => (app.runtimeHardwareInventory?.devices || []).filter(device => device.vendor.toLowerCase() === 'amd'))
+const rocmEnvironment = computed(() => runtimeEnvironmentForBackend(app.runtimeInfo, 'rocm'))
+const rocmTargets = computed(() => app.runtimeInfo?.seedPreparationRequired && rocmProfileId.value === app.runtimeInfo.seedProfileId
+  ? app.runtimeInfo.seedInstalledTargets || []
+  : rocmProfile.value?.availableTargets.length ? rocmDeviceTargets(rocmDevices.value, app.selectedRocmDeviceIds, rocmManualTargets.value) : [])
+const rocmIdentityUnconfirmed = computed(() => app.selectedRocmDeviceIds.some(id => !rocmStableDeviceIds([id]).length))
+const rocmUnconfirmed = computed(() => rocmDevices.value.some(device => app.selectedRocmDeviceIds.includes(device.id)
+  && (device.architectureConfidence !== 'confirmed' || !device.gfx)))
+const rocmAction = computed(() => {
+  if (app.runtimeInfo?.seedPreparationRequired && rocmProfileId.value === app.runtimeInfo.seedProfileId) return 'prepareSeed'
+  if (!rocmProfile.value) return 'install'
+  const action = rocmInstallAction(rocmEnvironment.value, rocmProfile.value, rocmTargets.value)
+  return rocmForceRepair.value && action === 'useInstalled' ? 'install' : action
+})
+const rocmSelectionValid = computed(() => Boolean(rocmProfile.value && rocmProfileSelectable(rocmProfile.value)
+  && (rocmAction.value === 'prepareSeed' || !rocmProfile.value.availableTargets.length || (rocmTargets.value.length && (!rocmUnconfirmed.value || rocmManualTargets.value.length)))
+  && rocmTargets.value.every(target => rocmProfile.value!.availableTargets.includes(target))))
+const rocmProfileOptions = computed(() => rocmProfiles.value.map(profile => ({
+  value: profile.id, label: `${profile.id} · ${t(`settings.runtimeReleaseState_${profile.releaseState}`)}${profile.torchVersion ? ` · Torch ${profile.torchVersion}` : ''}`,
+  disabled: !rocmProfileSelectable(profile),
+})))
+const rocmTargetOptions = computed(() => (rocmProfile.value?.availableTargets || []).map(target => ({ value: target, label: target })))
+const rocmPlanReady = computed(() => Boolean(rocmPlan.value && rocmPlan.value.installationEnabled
+  && (!rocmPlan.value.requiresPreviewAcceptance || rocmAcceptPreview.value)))
+watch([rocmProfileId, rocmManualTargets, () => app.selectedRocmDeviceIds], () => {
+  rocmPlan.value = null
+  rocmAcceptPreview.value = false
+  rocmActionError.value = ''
+}, { deep: true })
+
+async function openRocmInstaller(repair = false) {
+  if (runtimeBusy.value) return
+  rocmDialogVisible.value = true
+  rocmForceRepair.value = repair
+  rocmPlan.value = null
+  rocmManualTargets.value = []
+  rocmActionError.value = ''
+  try {
+    const inventory = await app.loadRuntimeHardwareInventory()
+    app.selectedRocmDeviceIds = rocmDefaultDeviceIds(inventory.devices, app.selectedRocmDeviceIds)
+    const installedProfile = app.runtimeInfo?.seedPreparationRequired ? app.runtimeInfo.seedProfileId : rocmEnvironment.value?.profileId
+    const targets = rocmDeviceTargets(inventory.devices, app.selectedRocmDeviceIds)
+    rocmProfileId.value = rocmPreferredProfileId(inventory.profiles, inventory.defaultProfileId, installedProfile, targets, rocmEnvironment.value?.torchVersion)
+  } catch (error) { rocmActionError.value = runtimeErrorSummary(error, t) }
+}
+
+function rocmInstallOptions(): RuntimeInstallOptions {
+  return { profileId: rocmProfileId.value, targets: rocmTargets.value,
+    selectedDeviceIds: rocmStableDeviceIds(app.selectedRocmDeviceIds),
+    action: rocmAction.value === 'useInstalled' ? 'install' : rocmAction.value }
+}
+
+async function prepareRocmPlan() {
+  if (!rocmSelectionValid.value || rocmPlanLoading.value || runtimeBusy.value) return
+  if (rocmAction.value === 'useInstalled') {
+    rocmDialogVisible.value = false
+    await activateInstalledRuntime({ backend: 'rocm', env: rocmEnvironment.value }, rocmStableDeviceIds(app.selectedRocmDeviceIds))
+    return
+  }
+  const options = rocmInstallOptions()
+  rocmPlanLoading.value = true
+  rocmActionError.value = ''
+  try {
+    const plan = await app.runtimeInstallPlan('rocm', options)
+    if (!runtimeInstallPlanMatches(plan, options)) throw { code: 'RUNTIME_UPDATE_PLAN_STALE', message: 'Runtime installation selection changed.' }
+    rocmPlan.value = plan
+  } catch (error) { rocmActionError.value = runtimeErrorSummary(error, t) }
+  finally { rocmPlanLoading.value = false }
+}
+
+async function confirmRocmInstall() {
+  const plan = rocmPlan.value
+  if (!plan || !rocmPlanReady.value || runtimeBusy.value) return
+  if (!runtimeInstallPlanMatches(plan, rocmInstallOptions())) {
+    rocmPlan.value = null
+    rocmActionError.value = t('settings.runtimeCorePlanInvalid')
+    return
+  }
+  if (plan.requiresPreviousReplacement) {
+    const confirmed = await confirmRuntimeAction(t('settings.runtimeReinstallTitle'), t('settings.runtimeReplacePreviousContent', {
+      version: plan.previousProfile?.packages?.torch || plan.previousProfile?.id || t('common.unknown'),
+    }), t('common.confirm'))
+    if (!confirmed) return
+  }
+  try {
+    const options = runtimeInstallOptionsFromPlan(plan)
+    if (plan.requiresPreviewAcceptance) options.acceptPreview = rocmAcceptPreview.value && rocmProfile.value?.releaseState === 'preview'
+    await app.installRuntime('rocm', runtimeMirror.value, currentLocale.value, options)
+    rocmDialogVisible.value = false
+  } catch (error) { rocmActionError.value = runtimeErrorSummary(error, t) }
+}
 
 watch(() => app.runtimeInstallLogs.at(-1), () => {
   if (runtimeLogDialogVisible.value && runtimeLogPre.value) {
@@ -194,7 +312,9 @@ const runtimeCoreUpdating = computed(() => app.runtimeCoreUpdateStatus === 'upda
 const runtimeCoreErrorSummary = computed(() => runtimeErrorSummary(app.runtimeCoreUpdateError || app.runtimeCoreUpdateMessage, t))
 const runtimeCoreErrorDetails = computed(() => runtimeErrorDetails(app.runtimeCoreUpdateError || app.runtimeCoreUpdateMessage))
 // Runtime detection and install/switch/delete all access the runtime state, so only one may run at a time.
-const runtimeBusy = computed(() => runtimeDetecting.value || runtimeInstalling.value || runtimeCoreUpdating.value || runtimeCoreActionPending.value || runtimeActivating.value !== null || runtimeDeleting.value !== null)
+const runtimeBusy = computed(() => app.runtimeHardwareInventoryLoading || runtimeDetecting.value || runtimeInstalling.value || runtimeCoreUpdating.value || runtimeCoreActionPending.value
+  || runtimeGpuRunning.value || runtimeMaintenanceRunning.value || runtimeMaintenancePreparing.value
+  || runtimeActivating.value !== null || runtimeDeleting.value !== null)
 const runtimeCurrentError = computed(() => {
   const error = runtimeLoadError(app.runtimeInfo, app.envInfo)
   return error.toLowerCase().includes('winerror 1455') ? t('settings.runtimePageFileError') : error
@@ -404,24 +524,75 @@ function confirmRuntimeAction(title: string, content: string, positiveText: stri
 
 async function installBackend(backend: RuntimeBackend) {
   if (!app.runtimeManagementSupported || runtimeBusy.value) return
-  const target = runtimeBackendLabel(backend)
-  const sizeHint = t('settings.runtimeInstallSizeHint', { size: runtimeSizeHint(backend) })
-  const reinstall = installedRuntimes.value.some((entry) => entry.backend === backend)
-  // The worker writes active-runtime.json at the end of an install, so this also switches.
-  const switchHint = runtimeCurrentBackend.value === backend ? '' : ` ${t('settings.runtimeInstallActivatesHint')}`
-  const confirmed = await confirmRuntimeAction(
-    reinstall ? t('settings.runtimeReinstallTitle') : t('settings.runtimeInstallTitle'),
-    reinstall
-      ? `${t('settings.runtimeReinstallContent', { current: runtimeBackendLabel(runtimeCurrentBackend.value), target })} ${sizeHint}${switchHint}`
-      : `${t('settings.runtimeInstallContent', { backend: target })} ${sizeHint}${switchHint}`,
-    t('common.confirm'),
-  )
-  if (!confirmed) return
+  if (backend === 'rocm' && app.runtimeInfo?.platform !== 'linux') return openRocmInstaller(true)
+  runtimeMaintenancePreparing.value = true
   try {
-    await app.installRuntime(backend, runtimeMirror.value, currentLocale.value)
+    const plan = backend === 'rocm' ? await app.runtimeInstallPlan(backend) : null
+    if (plan && !plan.installationEnabled) {
+      message.warning(t('settings.runtimeProfileUnavailable'))
+      return
+    }
+    const target = runtimeBackendLabel(backend)
+    const sizeHint = t('settings.runtimeInstallSizeHint', { size: runtimeSizeHint(backend) })
+    const reinstall = installedRuntimes.value.some((entry) => entry.backend === backend)
+    const switchHint = !runtimeCurrentBackend.value ? ` ${t('settings.runtimeInstallActivatesHint')}` : ''
+    const confirmed = await confirmRuntimeAction(
+      reinstall ? t('settings.runtimeReinstallTitle') : t('settings.runtimeInstallTitle'),
+      reinstall
+        ? `${t('settings.runtimeReinstallContent', { current: target, target })} ${sizeHint}${switchHint}${plan?.requiresPreviousReplacement ? ` ${t('settings.runtimeReplacePreviousContent', { version: plan.previousProfile?.packages?.torch || plan.previousProfile?.id || t('common.unknown') })}` : ''}`
+        : `${t('settings.runtimeInstallContent', { backend: target })} ${sizeHint}${switchHint}${plan?.requiresPreviousReplacement ? ` ${t('settings.runtimeReplacePreviousContent', { version: plan.previousProfile?.packages?.torch || plan.previousProfile?.id || t('common.unknown') })}` : ''}`,
+      t('common.confirm'),
+    )
+    if (!confirmed) return
+    await app.installRuntime(backend, runtimeMirror.value, currentLocale.value, plan ? runtimeInstallOptionsFromPlan(plan) : {})
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error))
+  } finally {
+    runtimeMaintenancePreparing.value = false
   }
+}
+
+async function probeRuntimeGpu(includeFp16 = false) {
+  if (runtimeBusy.value) return
+  runtimeGpuIncludeFp16.value = includeFp16
+  runtimeGpuDialogVisible.value = true
+  try { await app.startRuntimeGpuProbe({ includeFp16 }) } catch (error) { message.error(runtimeErrorSummary(error, t)) }
+}
+
+async function cancelRuntimeGpuProbe() {
+  runtimeGpuCancelling.value = true
+  try { await app.cancelRuntimeGpuProbe() } catch (error) { message.error(runtimeErrorSummary(error, t)) }
+  finally { runtimeGpuCancelling.value = false }
+}
+
+function runtimeGpuCheckLabel(id: string) {
+  return ['allocation', 'stftIstft', 'conv', 'batchNorm', 'instanceNorm', 'sdpa', 'rnn'].includes(id)
+    ? t(`settings.runtimeGpuOperator_${id}`) : id
+}
+
+async function restoreRuntimeEnvironment() {
+  if (runtimeBusy.value) return
+  runtimeMaintenancePreparing.value = true
+  try {
+    const previous = app.runtimeInfo?.previousRuntime
+    const confirmed = await confirmRuntimeAction(t('settings.runtimeEnvironmentRollback'), t('settings.runtimeEnvironmentRollbackContent', {
+      current: runtimeEnvironmentForBackend(app.runtimeInfo, 'rocm')?.torchVersion || t('common.unknown'),
+      target: previous?.torchVersion || previous?.profileId || t('common.unknown'),
+    }), t('settings.runtimeEnvironmentRollback'))
+    if (confirmed) await app.rollbackRuntime()
+  } catch (error) { message.error(runtimeErrorSummary(error, t)) }
+  finally { runtimeMaintenancePreparing.value = false }
+}
+
+async function recoverRuntimeEnvironment() {
+  if (runtimeBusy.value) return
+  const confirmed = await confirmRuntimeAction(t('settings.runtimeRecover'), t('settings.runtimeRecoverContent'), t('settings.runtimeRecover'))
+  if (!confirmed) return
+  try { await app.recoverRuntime() } catch (error) { message.error(runtimeErrorSummary(error, t)) }
+}
+
+async function cancelRuntimeMaintenance() {
+  try { await app.cancelRuntimeMaintenance() } catch (error) { message.error(runtimeErrorSummary(error, t)) }
 }
 
 async function retryRuntimeInstall() {
@@ -435,7 +606,10 @@ async function retryRuntimeInstall() {
 
 watch(() => app.runtimeInstallStatus, (status, previous) => {
   if (previous !== 'installing') return
-  if (status === 'success') message.success(t('settings.runtimeInstallSuccess'))
+  if (status === 'success') {
+    if (app.runtimeInstallActivationValidation?.status === 'failed') message.warning(t('settings.runtimeRocmActivationFailed'))
+    else message.success(t('settings.runtimeInstallSuccess'))
+  }
   // Refresh on failure and cancellation too: an interrupted install leaves its venv behind,
   // and that leftover only becomes visible once sizes are re-measured.
   if (status === 'success' || status === 'error' || status === 'cancelled') {
@@ -500,6 +674,8 @@ const runtimeDiskTotalLabel = computed(() => {
 // Walking several multi-GB venvs takes visible time on a slow disk; say so rather than
 // leaving the section silently size-less.
 const runtimeDiskMeasuring = computed(() => app.runtimeEnvSizesLoading)
+const runtimeRollbackSizeLabel = computed(() => app.runtimeRollbackBytes === null ? ''
+  : app.runtimeRollbackBytes === 0 ? '0 B' : formatBytes(app.runtimeRollbackBytes))
 
 async function cancelRuntimeInstall() {
   try {
@@ -542,12 +718,16 @@ async function deleteRuntime(card: { backend: RuntimeBackend; env?: InstalledRun
   }
 }
 
-async function activateInstalledRuntime(card: { backend: RuntimeBackend; env?: InstalledRuntime }) {
+async function activateInstalledRuntime(card: { backend: RuntimeBackend; env?: InstalledRuntime }, selectedDeviceIds?: string[]) {
   if (!app.runtimeManagementSupported) return
   const backend = card.backend
   const active = runtimeEnvironmentForBackend(app.runtimeInfo, backend)
-  if (runtimeBusy.value || (runtimeCurrentBackend.value === backend && active === card.env)) return
-  const confirmed = await confirmRuntimeAction(
+  const sameEnvironment = runtimeCurrentBackend.value === backend && active === card.env
+  const storedDevices = sameEnvironment ? app.runtimeInfo?.installState?.selectedDeviceIds ?? card.env?.selectedDeviceIds : card.env?.selectedDeviceIds
+  const sameDevices = JSON.stringify(rocmStableDeviceIds(storedDevices || []))
+    === JSON.stringify(rocmStableDeviceIds(selectedDeviceIds || []))
+  if (runtimeBusy.value || (sameEnvironment && (selectedDeviceIds === undefined || (sameDevices && app.runtimeReadyForBackend(backend))))) return
+  const confirmed = sameEnvironment || await confirmRuntimeAction(
     t('settings.runtimeSwitchTitle'),
     t('settings.runtimeSwitchContent', {
       current: runtimeBackendLabel(runtimeCurrentBackend.value),
@@ -560,6 +740,7 @@ async function activateInstalledRuntime(card: { backend: RuntimeBackend; env?: I
   try {
     await app.activateRuntime(backend, {
       pythonPath: card.env?.pythonPath,
+      ...(selectedDeviceIds ? { selectedDeviceIds } : {}),
     })
     message.success(t('settings.runtimeActivateSuccess'))
     await Promise.all([app.checkRuntimeInfo(), app.loadRuntimeCoreVersions()])
@@ -1657,6 +1838,7 @@ onMounted(async () => {
                 <span class="about-eyebrow">{{ t('settings.runtime') }}</span>
                 <h2 class="about-hero__title">{{ !app.runtimeInfo && !app.envInfo && runtimeDetecting ? t('settings.runtimeChecking') : runtimeCurrentLabel }}</h2>
                 <p v-if="runtimeCurrentError" class="runtime-hero__desc runtime-hero__desc--error">{{ runtimeCurrentError }}</p>
+                <p v-else-if="app.runtimeInfo?.activationValidation?.status === 'failed'" class="runtime-hero__desc runtime-hero__desc--error">{{ t('settings.runtimeRocmActivationFailed') }}</p>
                 <p v-else class="runtime-hero__desc">{{ t('settings.runtimeDesc') }}</p>
               </div>
               <n-button size="small" secondary :loading="runtimeDetecting" :disabled="runtimeBusy" @click="detectRuntime" style="margin-left: auto; align-self: center;">
@@ -1703,6 +1885,10 @@ onMounted(async () => {
               </span>
             </div>
             <p v-if="app.runtimeInfoError" class="runtime-read-error">{{ app.runtimeInfoError }}</p>
+            <n-alert v-if="app.runtimeInstallActivationValidation?.status === 'failed'" type="warning" :bordered="false">
+              {{ t(app.runtimeInstallActivationValidation.reason === 'selectedDeviceMappingUnavailable' ? 'settings.runtimeRocmDeviceMappingUnavailable' : 'settings.runtimeRocmActivationFailed') }}
+              <details><summary>{{ t('settings.runtimeErrorDetails') }}</summary><pre class="runtime-core-error-details">{{ JSON.stringify(app.runtimeInstallActivationValidation, null, 2) }}</pre></details>
+            </n-alert>
             <Transition name="runtime-content" mode="out-in" @after-enter="locateRuntimeBackend">
             <div v-if="!app.runtimeInfo && app.runtimeInfoLoading" key="loading" class="runtime-envs-list" :aria-label="t('settings.runtimeChecking')" aria-busy="true">
               <div v-for="backend in runtimeBackendCatalog" :key="backend.backend" class="runtime-env-card runtime-env-card--skeleton">
@@ -1765,6 +1951,9 @@ onMounted(async () => {
                 </p>
 
                 <div v-if="card.env" class="runtime-env-card__meta">
+                  <span v-if="card.backend === 'rocm'">{{ t('settings.runtimeProfile', { profile: card.env.profileId || t('common.unknown') }) }}</span>
+                  <span v-if="card.backend === 'rocm' && card.env.installedTargets?.length">{{ t('settings.runtimeTargets', { targets: card.env.installedTargets.join(', ') }) }}</span>
+                  <span v-if="card.backend === 'rocm'">{{ t(card.health === 'broken' ? 'settings.runtimeDependenciesBroken' : 'settings.runtimeDependenciesInstalled') }}</span>
                   <span v-if="card.env.torchVersion">{{ t('settings.runtimeTorchVersion', { version: card.env.torchVersion }) }}</span>
                   <span>{{ runtimeCoreVersionLabel(card) }}</span>
                   <span v-if="runtimeCoreVersionCheckReady && card.coreUpdateAvailable" class="runtime-env-card__accel runtime-env-card__accel--warn">
@@ -1772,7 +1961,8 @@ onMounted(async () => {
                       pymss: latestPymssVersion || t('settings.runtimeCoreVersionUnknown'),
                     }) }}
                   </span>
-                  <span v-if="runtimeAcceleratorReady(card.env, card.backend)" class="runtime-env-card__accel runtime-env-card__accel--ok">{{ t('settings.runtimeAcceleratorAvailable') }}</span>
+                  <span v-if="card.backend === 'rocm'" class="runtime-env-card__accel" :class="{ 'runtime-env-card__accel--ok': runtimeGpuStatus(runtimeGpuReportForEnvironment(app.runtimeGpuProbeReport, card.env), card.env?.activationValidation) === 'available' }">{{ t(`settings.runtimeGpuStatus_${runtimeGpuStatus(runtimeGpuReportForEnvironment(app.runtimeGpuProbeReport, card.env), card.env?.activationValidation)}`) }}</span>
+                  <span v-else-if="runtimeAcceleratorReady(card.env, card.backend)" class="runtime-env-card__accel runtime-env-card__accel--ok">{{ t('settings.runtimeAcceleratorAvailable') }}</span>
                   <span v-else-if="card.backend !== 'cpu'" class="runtime-env-card__accel">{{ t('settings.runtimeAcceleratorUnavailable') }}</span>
                   <span v-if="card.diskLabel">{{ t('settings.runtimeDiskUsage', { size: card.diskLabel }) }}</span>
                 </div>
@@ -1784,6 +1974,13 @@ onMounted(async () => {
                 </div>
 
                 <div class="runtime-env-card__actions">
+                  <n-button v-if="card.backend === 'rocm' && app.runtimeInfo?.platform !== 'linux' && card.state !== 'not_installed'" size="tiny" secondary :disabled="runtimeBusy" @click="openRocmInstaller()">{{ t(app.runtimeInfo?.seedPreparationRequired ? 'settings.runtimePrepareSeed' : 'settings.runtimeRocmManage') }}</n-button>
+                  <n-button v-if="card.backend === 'rocm' && card.state === 'active'" size="tiny" secondary :disabled="runtimeBusy || card.health === 'broken'" :loading="runtimeGpuRunning" @click="probeRuntimeGpu()">{{ t('settings.runtimeGpuCheck') }}</n-button>
+                  <n-button v-if="card.backend === 'rocm' && card.state === 'active' && runtimeGpuReport" size="tiny" tertiary @click="runtimeGpuDialogVisible = true">{{ t('settings.runtimeGpuResults') }}</n-button>
+                  <template v-if="card.backend === 'rocm' && card.env?.source !== 'bundled' && app.runtimeInfo?.environmentRollbackAvailable">
+                    <n-button size="tiny" secondary :disabled="runtimeBusy" @click="restoreRuntimeEnvironment">{{ t('settings.runtimeEnvironmentRollback') }}</n-button>
+                    <span v-if="runtimeRollbackSizeLabel" class="runtime-env-card__accel">{{ t('settings.runtimeRollbackDiskUsage', { size: runtimeRollbackSizeLabel }) }}</span>
+                  </template>
                   <n-button
                     v-if="app.runtimeManagementSupported && card.state === 'not_installed'"
                     size="tiny"
@@ -1791,7 +1988,7 @@ onMounted(async () => {
                     type="primary"
                     :loading="card.installing"
                     :disabled="runtimeBusy || !app.runtimeInfo"
-                    @click="installBackend(card.backend)"
+                    @click="card.backend === 'rocm' && app.runtimeInfo?.platform !== 'linux' ? openRocmInstaller() : installBackend(card.backend)"
                   >
                     <template #icon><n-icon :component="DownloadOutline" /></template>
                     {{ card.installing ? t('settings.runtimeInstalling') : t('settings.runtimeInstallBackend') }}
@@ -1907,6 +2104,10 @@ onMounted(async () => {
                     </n-button>
                   </div>
                 </div>
+                <div v-if="card.backend === 'rocm' && runtimeGpuRunning" class="runtime-env-card__progress" role="status" aria-live="polite">
+                  <n-spin size="small" /><span class="runtime-env-card__progress-msg">{{ runtimeGpuProgress }}</span>
+                  <n-button size="tiny" tertiary :loading="runtimeGpuCancelling" @click="cancelRuntimeGpuProbe">{{ t('common.cancel') }}</n-button>
+                </div>
                 <div v-if="card.state === 'active' && runtimeCoreUpdating" class="runtime-env-card__progress">
                   <n-spin size="small" />
                   <span class="runtime-env-card__progress-msg">
@@ -1921,6 +2122,20 @@ onMounted(async () => {
               </div>
             </div>
             </Transition>
+            <n-alert v-if="runtimeRecoveryNeeded && app.runtimeManagementSupported" type="warning" :bordered="false">
+              <p>{{ t('settings.runtimeRecoveryRequired') }}</p>
+              <n-button size="small" :disabled="runtimeBusy" @click="recoverRuntimeEnvironment">{{ t('settings.runtimeRecover') }}</n-button>
+            </n-alert>
+            <n-alert v-if="runtimeMaintenanceRunning" type="info" :bordered="false" role="status" aria-live="polite">
+              {{ t(app.runtimeMaintenanceMode === 'rollback' ? 'settings.runtimeEnvironmentRestoring' : 'settings.runtimeRecovering') }}
+              <n-button v-if="app.runtimeMaintenanceMode === 'rollback'" size="tiny" tertiary @click="cancelRuntimeMaintenance">{{ t('common.cancel') }}</n-button>
+            </n-alert>
+            <n-alert v-if="app.runtimeMaintenanceStatus === 'error'" type="error" :bordered="false">
+              {{ runtimeErrorSummary(app.runtimeMaintenanceError, t) }}
+              <details class="runtime-error-details"><summary>{{ t('settings.runtimeErrorDetails') }}</summary><pre>{{ runtimeErrorDetails(app.runtimeMaintenanceError) }}</pre></details>
+              <n-button size="small" :disabled="runtimeBusy" @click="recoverRuntimeEnvironment">{{ t('settings.runtimeRecover') }}</n-button>
+            </n-alert>
+            <n-alert v-if="app.runtimeMaintenanceStatus === 'success' || app.runtimeMaintenanceStatus === 'cancelled'" :type="app.runtimeMaintenanceStatus === 'success' ? 'success' : 'info'" :bordered="false">{{ t(app.runtimeMaintenanceStatus === 'success' ? 'settings.runtimeCoreOperationSuccess' : 'settings.runtimeCoreOperationCancelled') }}</n-alert>
             <n-alert v-if="app.runtimeCoreUpdateStatus === 'success' || app.runtimeCoreUpdateStatus === 'cancelled'" :type="app.runtimeCoreUpdateStatus === 'success' ? 'success' : 'info'" :bordered="false">
               {{ t(app.runtimeCoreUpdateStatus === 'success' ? 'settings.runtimeCoreOperationSuccess' : 'settings.runtimeCoreOperationCancelled') }}
             </n-alert>
@@ -2230,6 +2445,40 @@ onMounted(async () => {
       </main>
     </div>
 
+    <n-modal v-model:show="rocmDialogVisible" preset="card" style="width:min(720px, 94vw)" :title="t('settings.runtimeRocmManage')" :mask-closable="!rocmPlanLoading" :closable="!rocmPlanLoading">
+      <div class="rocm-environment-selection">
+        <p class="text-muted text-sm">{{ t('settings.runtimeRocmSelectionHint') }}</p>
+        <n-spin v-if="app.runtimeHardwareInventoryLoading" size="small" />
+        <n-alert v-if="app.runtimeHardwareInventoryError" type="error">{{ runtimeErrorSummary(app.runtimeHardwareInventoryError, t) }}<n-button size="small" @click="openRocmInstaller(rocmForceRepair)">{{ t('onboarding.checkAgain') }}</n-button></n-alert>
+        <n-checkbox-group v-model:value="app.selectedRocmDeviceIds" :disabled="rocmPlanLoading || runtimeInstalling">
+          <n-space vertical>
+            <n-checkbox v-for="device in rocmDevices" :key="device.id" :value="device.id"><span>{{ device.name }}</span><small class="rocm-device-detail">{{ device.architectureConfidence === 'confirmed' && device.gfx ? device.gfx : t('settings.runtimeRocmArchitectureUnknown') }}<template v-if="device.driverVersion"> · {{ device.driverVersion }}</template></small></n-checkbox>
+          </n-space>
+        </n-checkbox-group>
+        <n-alert v-if="rocmIdentityUnconfirmed" type="warning">{{ t('settings.runtimeRocmDeviceIdentityUnknown') }}</n-alert>
+        <p v-if="!app.runtimeHardwareInventoryLoading && !rocmDevices.length" class="text-muted text-sm">{{ t('settings.runtimeRocmNoDevices') }}</p>
+        <label>{{ t('settings.runtimeRocmProfile') }}</label>
+        <n-select v-model:value="rocmProfileId" :options="rocmProfileOptions" :placeholder="t('settings.runtimeRocmProfile')" :disabled="rocmPlanLoading || runtimeInstalling" />
+        <template v-if="rocmProfile?.availableTargets.length && rocmAction !== 'prepareSeed'">
+          <label>{{ t('settings.runtimeRocmManualTargets') }}</label>
+          <n-select v-model:value="rocmManualTargets" multiple clearable :options="rocmTargetOptions" :placeholder="t('common.notSet')" :disabled="rocmPlanLoading || runtimeInstalling" />
+          <p class="text-muted text-sm">{{ t('settings.runtimeRocmSelectedTargets', { targets: rocmTargets.join(', ') || t('common.unknown') }) }}</p>
+          <n-alert v-if="rocmUnconfirmed && !rocmManualTargets.length" type="warning">{{ t('settings.runtimeRocmUnknownHint') }}</n-alert>
+        </template>
+        <n-alert v-if="rocmAction === 'useInstalled'" type="success">{{ t('settings.runtimeRocmAlreadyCovered') }}</n-alert>
+        <n-alert v-if="rocmAction === 'prepareSeed'" type="info">{{ t('settings.runtimePrepareSeedHint') }}</n-alert>
+        <div v-if="rocmPlan" class="rocm-plan-summary">
+          <strong>{{ t(rocmPlan.action === 'prepareSeed' ? 'settings.runtimePrepareSeed' : `settings.runtimeRocmAction_${rocmPlan.action || 'install'}`) }} · {{ rocmPlan.profileId }}</strong>
+          <p v-if="(rocmPlan.resolvedTargets || rocmPlan.targets || []).length">{{ t('settings.runtimeRocmResolvedTargets', { targets: (rocmPlan.resolvedTargets || rocmPlan.targets || []).join(', ') }) }}</p>
+          <p v-if="rocmPlan.downloadBytes !== null && rocmPlan.downloadBytes !== undefined">{{ t('settings.runtimeInstallSizeHint', { size: rocmPlan.downloadBytes === 0 ? '0 B' : formatBytes(rocmPlan.downloadBytes) }) }}</p>
+          <n-alert v-if="!rocmPlan.installationEnabled" type="warning">{{ t('settings.runtimeProfileUnavailable') }}</n-alert>
+          <n-checkbox v-if="rocmPlan.requiresPreviewAcceptance" v-model:checked="rocmAcceptPreview" :disabled="rocmProfile?.releaseState !== 'preview' || !rocmPlan.installationEnabled">{{ t('settings.runtimeRocmAcceptPreview') }}</n-checkbox>
+        </div>
+        <n-alert v-if="rocmActionError" type="error">{{ rocmActionError }}</n-alert>
+      </div>
+      <template #footer><n-space justify="end"><n-button :disabled="rocmPlanLoading" @click="rocmDialogVisible = false">{{ t('common.cancel') }}</n-button><n-button v-if="!rocmPlan" type="primary" :loading="rocmPlanLoading" :disabled="!rocmSelectionValid || runtimeBusy" @click="prepareRocmPlan">{{ t(rocmAction === 'useInstalled' ? 'settings.runtimeRocmUseInstalled' : 'settings.runtimeRocmReviewPlan') }}</n-button><n-button v-else type="primary" :disabled="!rocmPlanReady || runtimeBusy" @click="confirmRocmInstall">{{ t(rocmAction === 'prepareSeed' ? 'settings.runtimePrepareSeed' : 'common.confirm') }}</n-button></n-space></template>
+    </n-modal>
+
     <n-modal
       :show="isCheckingModelDir"
       style="width:min(420px, 88vw)"
@@ -2386,6 +2635,52 @@ onMounted(async () => {
       </template>
     </n-modal>
 
+    <n-modal v-model:show="runtimeGpuDialogVisible" style="width:min(760px, 92vw)" preset="card" :title="t('settings.runtimeGpuResults')">
+      <div class="runtime-gpu-report" :aria-busy="runtimeGpuRunning">
+        <p class="setting-row__hint">{{ t('settings.runtimeGpuScope') }}</p>
+        <n-checkbox v-model:checked="runtimeGpuIncludeFp16" :disabled="runtimeGpuRunning" :aria-disabled="runtimeGpuRunning">{{ t('settings.runtimeGpuIncludeFp16') }}</n-checkbox>
+        <div v-if="runtimeGpuRunning" class="runtime-env-card__progress" role="status" aria-live="polite">
+          <n-spin size="small" /><span class="runtime-env-card__progress-msg">{{ runtimeGpuProgress }}</span>
+        </div>
+        <n-alert v-else-if="app.runtimeGpuProbeStatus === 'error'" type="error" :bordered="false">
+          {{ runtimeErrorSummary(app.runtimeGpuProbeError, t) }}
+          <details class="runtime-error-details"><summary>{{ t('settings.runtimeErrorDetails') }}</summary><pre>{{ runtimeErrorDetails(app.runtimeGpuProbeError) }}</pre></details>
+        </n-alert>
+        <n-alert v-else-if="app.runtimeGpuProbeStatus === 'cancelled'" type="info" :bordered="false">{{ t('settings.runtimeCoreOperationCancelled') }}</n-alert>
+        <template v-if="runtimeGpuReport">
+          <n-alert :type="runtimeGpuStatus(runtimeGpuReport) === 'available' ? 'success' : 'warning'" :bordered="false">{{ t(`settings.runtimeGpuStatus_${runtimeGpuStatus(runtimeGpuReport)}`) }}</n-alert>
+          <p class="setting-row__hint">{{ t('settings.runtimeGpuCheckedAt', { date: formatDateTime(runtimeGpuReport.checkedAt) || runtimeGpuReport.checkedAt }) }}</p>
+          <p v-if="!runtimeGpuReport.cacheReusable" class="setting-row__hint">{{ t('settings.runtimeGpuFreshCheck') }}</p>
+          <p v-if="!runtimeGpuReport.deviceCapabilities.length">{{ t('settings.runtimeGpuNoDevices') }}</p>
+          <p v-if="runtimeGpuReport.message" class="setting-row__hint">{{ runtimeGpuReport.message }}</p>
+          <section v-for="device in runtimeGpuReport.deviceCapabilities" :key="device.index" class="runtime-gpu-device">
+            <strong>{{ device.name }} · {{ device.gfx || device.rawArchitecture || t('common.unknown') }}</strong>
+            <details v-for="mode in device.modes" :key="mode.mode" class="runtime-error-details">
+              <summary>{{ mode.mode === 'miopen' ? 'MIOpen' : 'Native HIP' }} · {{ t(mode.basicAvailable ? 'settings.runtimeGpuModeAvailable' : 'settings.runtimeGpuModeUnavailable') }}</summary>
+              <p v-if="mode.message && mode.status !== 'completed'" class="setting-row__hint">{{ mode.message }}</p>
+              <ul class="runtime-gpu-checks">
+                <li v-for="check in mode.checks" :key="`${check.id}:${check.precision || ''}`">
+                  <span>{{ runtimeGpuCheckLabel(check.id) }}<template v-if="check.precision"> ({{ check.precision }})</template> · {{ t(`settings.runtimeGpuCheck_${check.status}`) }}</span>
+                  <p v-if="check.message && check.status !== 'passed'">{{ check.message }}</p>
+                  <details v-if="check.status !== 'passed' && (check.exceptionType || check.detail)" class="runtime-error-details">
+                    <summary>{{ t('settings.runtimeErrorDetails') }}</summary>
+                    <pre>{{ [check.exceptionType, check.detail].filter(Boolean).join('\n') }}</pre>
+                  </details>
+                </li>
+              </ul>
+            </details>
+          </section>
+        </template>
+      </div>
+      <template #footer>
+        <div class="runtime-gpu-actions">
+          <n-button v-if="runtimeGpuRunning" :loading="runtimeGpuCancelling" @click="cancelRuntimeGpuProbe">{{ t('common.cancel') }}</n-button>
+          <n-button v-else :disabled="runtimeBusy" @click="probeRuntimeGpu(runtimeGpuIncludeFp16)">{{ t('settings.runtimeGpuCheck') }}</n-button>
+          <n-button @click="runtimeGpuDialogVisible = false">{{ t('common.close') }}</n-button>
+        </div>
+      </template>
+    </n-modal>
+
     <n-modal
       v-model:show="runtimeLogDialogVisible"
       style="width:min(760px, 92vw)"
@@ -2420,6 +2715,11 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.rocm-environment-selection { display: grid; gap: 12px; max-height: min(65vh, 620px); overflow-y: auto; padding-right: 4px; }
+.rocm-environment-selection p { margin: 0; }
+.rocm-device-detail { display: block; color: var(--on-surface-muted); overflow-wrap: anywhere; }
+.rocm-plan-summary { display: grid; gap: 8px; padding: 12px; background: var(--surface-2); border-radius: 8px; overflow-wrap: anywhere; }
+
 .page--settings {
   max-width: var(--page-max-width-reading);
 }
@@ -3408,6 +3708,12 @@ onMounted(async () => {
     font-size: 12px;
   }
 }
+.runtime-gpu-report { display: grid; gap: 12px; }
+.runtime-gpu-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.runtime-gpu-report p { margin: 0; }
+.runtime-gpu-device { display: grid; gap: 8px; border-top: 1px solid var(--outline); padding-top: 12px; }
+.runtime-gpu-checks { display: grid; gap: 8px; padding-left: 20px; overflow-wrap: anywhere; }
+.runtime-gpu-checks p { color: var(--on-surface-muted); font-size: 12px; white-space: pre-wrap; }
 
 .settings-card {
   border-color: color-mix(in srgb, var(--outline) 58%, transparent) !important;

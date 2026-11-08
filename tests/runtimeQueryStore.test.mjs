@@ -356,6 +356,31 @@ for (const platform of ['darwin', 'linux']) {
   })
 }
 
+test('prepared runtime installation preserves the active environment until its refresh completes', async () => {
+  const refresh = deferred()
+  const active = { ready: true, installedBackend: 'cpu', installState: { backend: 'cpu' }, logPath: 'cpu.log' }
+  const app = appStore(async command => {
+    if (command === 'start_runtime_install') return true
+    if (command === 'runtime_info') return refresh.promise
+    if (command === 'get_env_info') return { torchAvailable: true, torchBackend: 'cpu' }
+    if (command === 'runtime_core_versions') return {}
+    throw new Error(`unexpected ${command}`)
+  })
+  app.runtimeInfo = active
+  const taskId = await within(app.installRuntime('rocm'), 'prepared install dispatch')
+  app.handleRuntimeEvent({ type: 'runtime_install_finished', taskId, payload: {
+    activated: false, state: { backend: 'rocm' }, logPath: 'rocm.log',
+  } })
+  assert.equal(app.runtimeInstallStatus, 'success')
+  assert.equal(app.runtimeInfo.installedBackend, 'cpu')
+  assert.equal(app.runtimeInfo.installState.backend, 'cpu')
+  assert.equal(app.runtimeInfo.logPath, 'cpu.log')
+  refresh.resolve(active)
+  await within(app.checkRuntimeInfo(), 'prepared install active refresh')
+  await within(app.checkEnv(), 'prepared install environment refresh')
+  app.$dispose()
+})
+
 for (const action of [
   {
     label: 'runtime installation', command: 'start_runtime_install', finished: 'runtime_install_finished',
@@ -856,6 +881,30 @@ test('successful cancellation after start ACK releases a background operation wi
   assert.equal(await app.cancelRuntimeInstall(), true)
   await within(query, 'query after cancellation ACK')
   assert.deepEqual(calls, ['start_runtime_install', 'cancel_runtime_install', 'runtime_info'])
+})
+
+test('runtime cancellation keeps the UI and query queue pending until recovery acknowledgement', async () => {
+  const acknowledgement = deferred()
+  const calls = []
+  const app = appStore(async command => {
+    calls.push(command)
+    if (command === 'start_runtime_install') return true
+    if (command === 'cancel_runtime_install') return acknowledgement.promise
+    if (command === 'runtime_info') return { ready: true, installedBackend: 'cpu' }
+    throw new Error(`unexpected ${command}`)
+  })
+  await within(app.installRuntime('rocm'), 'runtime install start')
+  const cancellation = app.cancelRuntimeInstall()
+  const query = app.checkRuntimeInfo()
+  await pause()
+  assert.equal(app.runtimeInstallStatus, 'installing')
+  assert.deepEqual(calls, ['start_runtime_install', 'cancel_runtime_install'])
+  acknowledgement.resolve(true)
+  assert.equal(await within(cancellation, 'recovered runtime cancellation'), true)
+  await within(query, 'query after runtime recovery')
+  assert.equal(app.runtimeInstallStatus, 'cancelled')
+  assert.deepEqual(calls, ['start_runtime_install', 'cancel_runtime_install', 'runtime_info'])
+  app.$dispose()
 })
 
 test('cancellation requested before a start ACK waits for the ACK before sending cancel', async () => {
@@ -1473,4 +1522,292 @@ test('background environment listener failures remain visible in environment dia
   await assert.rejects(app.checkEnvInBackground(), /Listener registration failed/)
   assert.equal(app.envError, 'Listener registration failed')
   assert.equal(app.envLoading, false)
+})
+
+const { runtimeGpuStatus, runtimeGpuReportForEnvironment } = await vite.ssrLoadModule('/src/utils/runtime.ts')
+const gpuReport = {
+  probeVersion: 1, profileId: 'win-rocm721', baseFingerprint: 'base-a', targetFingerprint: 'target-a',
+  checkedAt: '2026-11-07T00:00:00Z', cacheReusable: false, status: 'partial',
+  deviceCapabilities: [{ index: 0, name: 'AMD Radeon', gfx: 'gfx1031', basicAvailable: true,
+    modes: [{ mode: 'miopen', status: 'partial', basicAvailable: true,
+      checks: [{ id: 'tensor', status: 'passed', requiredForBasic: true }, { id: 'attention', status: 'failed', requiredForBasic: false }] }] }],
+}
+
+test('GPU diagnostics use the runtime queue and leave dependency health intact on optional failure', async () => {
+  const calls = []
+  const app = appStore(async (command, args) => {
+    calls.push({ command, args })
+    if (command === 'start_runtime_gpu_probe') return true
+    if (command === 'runtime_info') return { ready: true }
+    throw new Error(`unexpected ${command}`)
+  })
+  app.runtimeInfo = { ready: true, installedBackend: 'rocm', installedEnvironments: [{ backend: 'rocm', health: 'ready' }] }
+  const taskId = await app.startRuntimeGpuProbe({ includeFp16: true })
+  assert.equal(app.runtimeGpuProbeStatus, 'running')
+  const query = app.checkRuntimeInfo()
+  await Promise.resolve()
+  assert.deepEqual(calls.map(call => call.command), ['start_runtime_gpu_probe'])
+  app.handleRuntimeEvent({ type: 'runtime_gpu_probe_stage', taskId, payload: { stage: 'operators', message: 'Checking operators' } })
+  assert.equal(app.runtimeGpuProbeStage, 'Checking operators')
+  app.handleRuntimeEvent({ type: 'runtime_gpu_probe_finished', taskId, payload: gpuReport })
+  assert.equal(app.runtimeGpuProbeStatus, 'success')
+  assert.equal(app.runtimeInfo.ready, true)
+  assert.equal(app.runtimeInfo.installedEnvironments[0].health, 'ready')
+  assert.equal(runtimeGpuStatus(app.runtimeGpuProbeReport), 'limited')
+  assert.equal(calls[0].args.payload.includeFp16, true)
+  await within(query, 'query after GPU diagnostic')
+  app.$dispose()
+})
+
+test('GPU diagnostics cancellation waits for acknowledgement then releases queued queries', async () => {
+  const ack = deferred()
+  const app = appStore(async command => {
+    if (command === 'start_runtime_gpu_probe') return true
+    if (command === 'cancel_runtime_gpu_probe') return ack.promise
+    if (command === 'runtime_info') return { ready: true }
+    throw new Error(`unexpected ${command}`)
+  })
+  await app.startRuntimeGpuProbe()
+  const query = app.checkRuntimeInfo()
+  const cancel = app.cancelRuntimeGpuProbe()
+  await Promise.resolve()
+  assert.equal(app.runtimeGpuProbeStatus, 'running')
+  ack.resolve(true)
+  assert.equal(await cancel, true)
+  assert.equal(app.runtimeGpuProbeStatus, 'cancelled')
+  assert.equal(app.runtimeGpuProbeReport, null)
+  await within(query, 'query after GPU cancellation')
+  app.$dispose()
+})
+
+test('GPU diagnostic error and late completions remain isolated from installation health', async () => {
+  const app = appStore(async command => command === 'runtime_info' ? { ready: true } : true)
+  app.runtimeInfo = { ready: true }
+  const taskId = await app.startRuntimeGpuProbe()
+  app.handleRuntimeEvent({ type: 'error', taskId, payload: { code: 'RUNTIME_GPU_PROBE_TIMEOUT', message: 'Operator timed out' } })
+  assert.equal(app.runtimeGpuProbeStatus, 'error')
+  assert.equal(app.runtimeGpuProbeError.code, 'RUNTIME_GPU_PROBE_TIMEOUT')
+  assert.equal(app.runtimeInfo.ready, true)
+  app.handleRuntimeEvent({ type: 'runtime_gpu_probe_finished', taskId, payload: gpuReport })
+  assert.equal(app.runtimeGpuProbeReport, null)
+  await within(app.checkRuntimeInfo(), 'query after GPU failure')
+  app.$dispose()
+})
+
+test('GPU diagnostics with no AMD hardware are unavailable while an absent or cancelled report is unverified', () => {
+  assert.equal(runtimeGpuStatus(null), 'unverified')
+  assert.equal(runtimeGpuStatus({ ...gpuReport, status: 'cancelled' }), 'unverified')
+  assert.equal(runtimeGpuStatus({ ...gpuReport, status: 'unavailable', deviceCapabilities: [] }), 'unavailable')
+  assert.equal(runtimeGpuStatus({ ...gpuReport, status: 'completed', deviceCapabilities: [{ ...gpuReport.deviceCapabilities[0], modes: [] }] }), 'available')
+})
+
+test('a GPU report cannot claim the capabilities of another profile or runtime fingerprint', () => {
+  const environment = { profileId: 'win-rocm721', baseFingerprint: 'base-a', targetFingerprint: 'target-a' }
+  assert.equal(runtimeGpuReportForEnvironment(gpuReport, environment), gpuReport)
+  assert.equal(runtimeGpuReportForEnvironment(gpuReport, { ...environment, profileId: 'win-rocm100' }), undefined)
+  assert.equal(runtimeGpuReportForEnvironment(gpuReport, { ...environment, baseFingerprint: 'base-b' }), undefined)
+  assert.equal(runtimeGpuReportForEnvironment(gpuReport, { ...environment, targetFingerprint: 'target-b' }), undefined)
+})
+
+test('ROCm reinstall forwards the concrete previous-version replacement authorization', async () => {
+  const calls = []
+  const app = appStore(async (command, args) => { calls.push({ command, args }); return true })
+  const taskId = await app.installRuntime('rocm', 'pypi', 'zh-CN', { replacePrevious: true })
+  assert.equal(calls[0].args.payload.replacePrevious, true)
+  app.handleRuntimeEvent({ type: 'task_cancelled', taskId })
+  app.$dispose()
+})
+
+test('environment rollback holds the runtime queue until completion and invalidates diagnostic results', async () => {
+  const calls = []
+  const app = appStore(async command => {
+    calls.push(command)
+    if (command === 'runtime_info') return { ready: true, environmentRollbackAvailable: true }
+    if (command === 'runtime_env_sizes') return { sizes: { rocm: 100 } }
+    return true
+  })
+  app.runtimeGpuProbeReport = gpuReport
+  const taskId = await app.rollbackRuntime()
+  const query = app.checkRuntimeInfo()
+  await Promise.resolve()
+  assert.deepEqual(calls, ['start_runtime_rollback'])
+  app.handleRuntimeEvent({ type: 'runtime_rollback_finished', taskId, payload: {} })
+  assert.equal(app.runtimeMaintenanceStatus, 'success')
+  assert.equal(app.runtimeGpuProbeReport, null)
+  await within(query, 'query after ROCm rollback')
+  app.$dispose()
+})
+
+test('recovery retains structured errors and can retry without blocking future runtime reads', async () => {
+  let fail = true
+  const app = appStore(async command => {
+    if (command === 'recover_runtime' && fail) throw { code: 'RUNTIME_RECOVERY_FAILED', message: 'File is busy', recoverable: true }
+    if (command === 'runtime_info') return { ready: true }
+    if (command === 'runtime_env_sizes') return { sizes: {} }
+    return {}
+  })
+  await assert.rejects(app.recoverRuntime(), value => value.code === 'RUNTIME_RECOVERY_FAILED')
+  assert.equal(app.runtimeMaintenanceStatus, 'error')
+  assert.equal(app.runtimeMaintenanceError.diagnostics.recoverable, true)
+  fail = false
+  await app.recoverRuntime()
+  assert.equal(app.runtimeMaintenanceStatus, 'success')
+  assert.equal(app.runtimeMaintenanceError, null)
+  await within(app.checkRuntimeInfo(), 'query after recovery retry')
+  app.$dispose()
+})
+
+test('runtime-info recovery failures preserve their code for the retry recovery entry', async () => {
+  const app = appStore(async () => { throw { code: 'RUNTIME_RECOVERY_FAILED', message: 'File is busy' } })
+  await assert.rejects(app.checkRuntimeInfo())
+  assert.equal(app.runtimeInfoFailure.code, 'RUNTIME_RECOVERY_FAILED')
+  app.$dispose()
+})
+
+
+test('a cancelled GPU report received as a terminal completion shows cancellation and releases the queue', async () => {
+  const app = appStore(async command => command === 'runtime_info' ? { ready: true } : true)
+  const taskId = await app.startRuntimeGpuProbe()
+  app.handleRuntimeEvent({ type: 'runtime_gpu_probe_finished', taskId, payload: { ...gpuReport, status: 'cancelled' } })
+  assert.equal(app.runtimeGpuProbeStatus, 'cancelled')
+  assert.equal(app.runtimeGpuProbeReport, null)
+  await within(app.checkRuntimeInfo(), 'query after cancelled GPU completion')
+  app.$dispose()
+})
+
+test('queued GPU cancellation skips dispatch and rollback cancellation uses the runtime-install cancellation route', async () => {
+  const pending = deferred()
+  const calls = []
+  const app = appStore(async command => {
+    calls.push(command)
+    if (command === 'runtime_info') return pending.promise
+    return true
+  })
+  const query = app.checkRuntimeInfo()
+  const gpu = app.startRuntimeGpuProbe()
+  assert.equal(await app.cancelRuntimeGpuProbe(), true)
+  pending.resolve({ ready: true })
+  await query
+  await gpu
+  assert.equal(calls.includes('start_runtime_gpu_probe'), false)
+  await app.rollbackRuntime()
+  assert.equal(await app.cancelRuntimeMaintenance(), true)
+  assert.equal(app.runtimeMaintenanceStatus, 'cancelled')
+  assert.equal(calls.includes('cancel_runtime_install'), true)
+  await within(app.checkRuntimeInfo(), 'query after rollback cancellation')
+  app.$dispose()
+})
+
+
+test('a cached GPU report with matching profile and unknown driver remains visible as history but unverified', () => {
+  const environment = { profileId: 'win-rocm721', baseFingerprint: 'base-a', targetFingerprint: 'target-a' }
+  const report = { ...gpuReport, fromCache: true, matchesCurrentRuntime: true, status: 'completed', cacheReusable: false,
+    deviceCapabilities: [{ ...gpuReport.deviceCapabilities[0], driverVersion: 'unknown', modes: [] }] }
+  assert.equal(runtimeGpuReportForEnvironment(report, environment), report, 'history remains available in the modal')
+  assert.equal(runtimeGpuStatus(report), 'unverified', 'matching base metadata does not validate an unknown cached driver')
+  assert.equal(runtimeGpuStatus({ ...report, fromCache: false }), 'available', 'an explicit fresh check can describe this session')
+  assert.equal(runtimeGpuStatus({ ...report, cacheReusable: true }), 'available')
+  assert.equal(runtimeGpuReportForEnvironment({ ...report, matchesCurrentRuntime: false }, environment), undefined)
+})
+
+
+test('runtime disk measurement exposes saved ROCm version usage and clears unknown legacy responses', async () => {
+  let response = { sizes: { rocm: 5368709120 }, environmentRollbackBytes: 2684354560 }
+  const app = appStore(async command => {
+    assert.equal(command, 'runtime_env_sizes')
+    return response
+  })
+  assert.equal(app.runtimeRollbackBytes, null)
+  await app.loadRuntimeEnvSizes()
+  assert.equal(app.runtimeRollbackBytes, 2684354560)
+  assert.deepEqual(app.runtimeEnvSizes, { rocm: 5368709120 })
+  response = { sizes: { rocm: 5368709120 } }
+  await app.loadRuntimeEnvSizes()
+  assert.equal(app.runtimeRollbackBytes, null)
+  response = { sizes: {}, environmentRollbackBytes: 0 }
+  await app.loadRuntimeEnvSizes()
+  assert.equal(app.runtimeRollbackBytes, 0)
+  response = { sizes: {}, environmentRollbackBytes: -1 }
+  await app.loadRuntimeEnvSizes()
+  assert.equal(app.runtimeRollbackBytes, null)
+  app.$dispose()
+})
+
+test('hardware inventory uses the runtime query queue without a Torch index payload', async () => {
+  const calls = []
+  const inventory = { schemaVersion: 1, platform: 'win32', devices: [{ id: 'pci-stable', vendor: 'amd', name: 'AMD', gfx: 'gfx1100', architectureSource: 'native', architectureConfidence: 'confirmed' }], profiles: [], errors: [] }
+  const app = appStore(async (command, args) => {
+    calls.push([command, args])
+    return command === 'runtime_hardware_inventory' ? inventory : { ready: true }
+  })
+  const [result] = await Promise.all([app.loadRuntimeHardwareInventory(), app.checkRuntimeInfo()])
+  assert.deepEqual(result, inventory)
+  assert.equal(app.runtimeHardwareInventory.devices[0].id, 'pci-stable')
+  assert.equal(app.runtimeHardwareInventoryLoading, false)
+  assert.equal(calls[0][0], 'runtime_hardware_inventory')
+  assert.deepEqual(calls[0][1], {})
+  assert.equal(calls[1][0], 'runtime_info')
+})
+
+test('ROCm plan and install forward target actions and all expected state guards through existing IPC', async () => {
+  const calls = []
+  const target = { profileId: 'multi', action: 'addTargets', targets: ['gfx1030'], selectedDeviceIds: ['hip-pci:0000:03:00.0', 'pnp:hash'], acceptPreview: true,
+    expectedProfileId: 'multi', expectedProfileRevision: 2, expectedBaseFingerprint: 'host', expectedTargetFingerprint: 'device' }
+  const app = appStore(async (command, args) => {
+    calls.push([command, args])
+    if (command === 'runtime_install_plan') return { backend: 'rocm', installationEnabled: true, ...target }
+    return undefined
+  })
+  await app.runtimeInstallPlan('rocm', target)
+  const taskId = await app.installRuntime('rocm', 'auto', 'zh-CN', target)
+  assert.deepEqual(calls[0], ['runtime_install_plan', { payload: { backend: 'rocm', ...target } }])
+  assert.deepEqual(calls[1], ['start_runtime_install', { payload: { taskId, backend: 'rocm', mirror: 'auto', locale: 'zh-CN', ...target } }])
+  app.handleRuntimeEvent({ type: 'runtime_install_finished', taskId, payload: { backend: 'rocm', activated: false } })
+  await pause()
+})
+
+test('GPU activation failures preserve the previous active runtime and the diagnostic result', async () => {
+  const original = { backend: 'cpu', health: 'ready', pythonPath: 'D:/cpu/python.exe' }
+  const app = appStore(async command => command === 'runtime_info' ? { installedBackend: 'cpu', installState: original, installedEnvironments: [original] } : undefined)
+  app.runtimeInfo = { installedBackend: 'cpu', installState: original, installedEnvironments: [original] }
+  const taskId = await app.installRuntime('rocm')
+  const activationValidation = { status: 'failed', reason: 'probeUnavailable', message: 'No compatible device', devices: [] }
+  app.handleRuntimeEvent({ type: 'runtime_install_finished', taskId, payload: { backend: 'rocm', activated: false, state: original, activationValidation, preparedState: { retained: false } } })
+  assert.equal(app.runtimeInstallStatus, 'success')
+  assert.deepEqual(app.runtimeInstallActivationValidation, activationValidation)
+  assert.equal(app.runtimeInfo.installedBackend, 'cpu')
+  await pause()
+})
+
+test('runtime installation IPC strips session identities and canonicalizes the physical device selection', async () => {
+  const calls = []
+  const app = appStore(async (command, args) => {
+    calls.push([command, args])
+    if (command === 'runtime_install_plan') return { backend: 'rocm', installationEnabled: true, ...args.payload }
+    return undefined
+  })
+  const selection = { selectedDeviceIds: ['pnp:second', 'session:unreliable', 'hip-pci:0000:03:00.0', 'pnp:second'] }
+  await app.runtimeInstallPlan('rocm', selection)
+  const taskId = await app.installRuntime('rocm', 'auto', 'en', selection)
+  assert.deepEqual(calls[0][1].payload.selectedDeviceIds, ['hip-pci:0000:03:00.0', 'pnp:second'])
+  assert.deepEqual(calls[1][1].payload.selectedDeviceIds, ['hip-pci:0000:03:00.0', 'pnp:second'])
+  assert.deepEqual(selection.selectedDeviceIds, ['pnp:second', 'session:unreliable', 'hip-pci:0000:03:00.0', 'pnp:second'])
+  app.handleRuntimeEvent({ type: 'runtime_install_finished', taskId, payload: { backend: 'rocm', activated: false } })
+  await pause()
+})
+
+test('runtime activation forwards an explicit physical selection and preserves omitted versus empty choices', async () => {
+  const calls = []
+  const app = appStore(async (command, args) => {
+    if (command === 'activate_runtime') calls.push(args.payload)
+    if (command === 'runtime_info') return { platform: 'win32', ready: true, torchBackend: 'rocm', installedBackend: 'rocm', acceleratorAvailable: true }
+    if (command === 'get_env_info') return { torchAvailable: true, pymssAvailable: true }
+    return undefined
+  })
+  await app.activateRuntime('rocm', { selectedDeviceIds: ['session:unknown', 'hip-pci:0000:04:00.0', 'hip-pci:0000:04:00.0'] }, { refreshCoreVersions: false })
+  await app.activateRuntime('rocm', { selectedDeviceIds: [] }, { refreshCoreVersions: false })
+  await app.activateRuntime('rocm', {}, { refreshCoreVersions: false })
+  assert.deepEqual(calls[0].selectedDeviceIds, ['hip-pci:0000:04:00.0'])
+  assert.deepEqual(calls[1].selectedDeviceIds, [])
+  assert.equal(Object.hasOwn(calls[2], 'selectedDeviceIds'), false)
 })

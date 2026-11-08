@@ -32,6 +32,7 @@ import { normalizeStemOutputs, stemFromOutputPath, type StemOutput } from '@/uti
 import { normalizeConcurrentSeparations } from '@/features/tasks/concurrency'
 import { isMainTaskOwner } from '@/utils/taskOwner'
 import { getSeparateWorkflowInputIssue } from '@/utils/workflowInputs'
+import { runtimeErrorSummary } from '@/utils/runtimeErrors'
 import { cloneWorkflow, prepareWorkbenchRun, workflowInputNodes, type WorkflowRuntimeBindings, type WorkflowWorkbenchSnapshot, type WorkflowNodeState } from '@/workflows/workbench'
 import { SEPARATE_MODEL_PAGE_SIZES, normalizePageSize } from '@/utils/pagination'
 
@@ -615,6 +616,9 @@ function resolveTaskErrorMessage(code: unknown, message: unknown, input?: string
   }
   if (code === 'RUNTIME_OUTDATED') return i18n.global.t('separate.runtimeOutdated')
   if (code === 'WORKER_NATIVE_CRASH') return i18n.global.t('separate.workerNativeCrash', { detail })
+  if (['ROCM_CONTEXT_LOST', 'ROCM_OUT_OF_MEMORY', 'ROCM_TARGET_MISSING', 'ROCM_RUNTIME_INCOMPATIBLE', 'ROCM_NATIVE_CHECK_FAILED'].includes(String(code))) {
+    return [runtimeErrorSummary({ code, message: detail }, key => i18n.global.t(key)), detail].filter(Boolean).join('\n')
+  }
   return detail || i18n.global.t('toast.taskFailed')
 }
 

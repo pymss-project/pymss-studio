@@ -19,6 +19,13 @@ const i18nDir = path.join(srcDir, 'i18n')
  */
 const DYNAMIC_KEY_PREFIXES = [
   'settings.themeAccent',
+  // Runtime views translate protocol action, release, stage, operator and result IDs.
+  'settings.runtimeRocmAction_',
+  'settings.runtimeReleaseState_',
+  'settings.runtimeGpuStatus_',
+  'settings.runtimeGpuStage_',
+  'settings.runtimeGpuOperator_',
+  'settings.runtimeGpuCheck_',
   'nav.',
   'workflows.advancedEditor.categories.',
   'workflows.advancedEditor.nodes.',
