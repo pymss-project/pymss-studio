@@ -2794,7 +2794,7 @@
     "editorPlaybackTitle": "Playback controls",
     "editorPlaybackDescription": "Playback, pause, and timeline seeking control listening. Master volume sets the overall level.",
     "editorMixTitle": "Track controls",
-    "editorMixDescription": "M mutes a track; S isolates soloed tracks. The track inspector controls volume, pan, and effects.",
+    "editorMixDescription": "M mutes a track; S solos one track at a time. The track inspector controls volume, pan, and effects.",
     "editorExportTitle": "Mix export",
     "editorExportDescription": "Renders the timeline as WAV or FLAC, with bit depth, sample rate, and peak protection settings.",
     "workflowEditorTitle": "Node editing",

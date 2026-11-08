@@ -2794,7 +2794,7 @@
     "editorPlaybackTitle": "播放控制",
     "editorPlaybackDescription": "播放、暂停和时间轴定位用于试听，主音量控制整体电平。",
     "editorMixTitle": "音轨控制",
-    "editorMixDescription": "M 静音单轨，S 仅监听独奏轨；音轨参数面板提供音量、声像和效果调整。",
+    "editorMixDescription": "M 静音单轨，S 切换单轨独奏；音轨参数面板提供音量、声像和效果调整。",
     "editorExportTitle": "混音导出",
     "editorExportDescription": "将时间轴混合为 WAV 或 FLAC，可设置位深、采样率和峰值保护。",
     "workflowEditorTitle": "节点编辑",
