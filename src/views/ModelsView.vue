@@ -24,6 +24,8 @@ import {
   LinkOutline,
   GridOutline,
   ListOutline,
+  CheckboxOutline,
+  CloseOutline,
 } from '@vicons/ionicons5'
 import {
   useModelStore,
@@ -39,6 +41,7 @@ import { formatBytes, formatSpeedMBps } from '@/utils/format'
 import { buildModelCategoryOptionsFromModels, getModelCategoryLabel, hasModelCategoryOption } from '@/utils/modelCategory'
 import { compareModelDefaultOrder } from '@/utils/modelSort'
 import { MODEL_LIBRARY_PAGE_SIZES } from '@/utils/pagination'
+import { BATCH_DOWNLOAD_CONCURRENCY } from '@/utils/downloadQueue'
 import { inferenceChunkSizeIssue, resolveInferenceChunkStep, resolveInferenceSampleStep } from '@/features/inference/sampleStep'
 import ModelProgressBlock from '@/components/ModelProgressBlock.vue'
 import ModelCategorySelect from '@/components/ModelCategorySelect.vue'
@@ -71,6 +74,7 @@ const {
   customModelCount,
   debugModelCount,
   downloadTasks,
+  downloadQueue,
   deleteTasks,
   modelStorageSummary,
   storageLoading,
@@ -771,6 +775,105 @@ async function downloadModel(model: ModelEntry, event?: MouseEvent) {
   }
 }
 
+// ---- Batch download: selection mode ----
+const batchSelectMode = ref(false)
+const batchSelected = ref<string[]>([])
+const batchSelectedSet = computed(() => new Set(batchSelected.value))
+const downloadQueueSet = computed(() => new Set(downloadQueue.value))
+
+function isQueuedDownload(modelName: string) {
+  return downloadQueueSet.value.has(modelName)
+}
+
+/** Whether a model can be picked for a batch download: a catalog model with nothing in flight. */
+function isBatchSelectable(model: ModelEntry) {
+  return model.supported && !model.downloaded && !isCustomModel(model) && !isModelBusy(model) && !isQueuedDownload(model.name)
+}
+
+function isBatchSelected(model: ModelEntry) {
+  return batchSelectedSet.value.has(model.name)
+}
+
+/** Selectable models across every page of the current filter, so "select all" means all results. */
+const batchSelectableModels = computed(() => sortedModels.value.filter(isBatchSelectable))
+const batchSelectablePageModels = computed(() => pagedModels.value.filter(isBatchSelectable))
+const batchSelectedModels = computed(() => modelStore.models.filter((model) => batchSelectedSet.value.has(model.name)))
+const batchSelectedBytes = computed(() => batchSelectedModels.value.reduce((sum, model) => sum + (model.sizeBytes || 0), 0))
+const batchAllSelected = computed(() => batchSelectableModels.value.length > 0
+  && batchSelectableModels.value.every((model) => batchSelectedSet.value.has(model.name)))
+const batchSomeSelected = computed(() => !batchAllSelected.value
+  && batchSelectableModels.value.some((model) => batchSelectedSet.value.has(model.name)))
+
+function setBatchSelected(model: ModelEntry, checked: boolean) {
+  if (checked && !isBatchSelectable(model)) return
+  batchSelected.value = checked
+    ? Array.from(new Set([...batchSelected.value, model.name]))
+    : batchSelected.value.filter((name) => name !== model.name)
+}
+
+function toggleBatchSelectAll(checked: boolean) {
+  batchSelected.value = checked ? batchSelectableModels.value.map((model) => model.name) : []
+}
+
+function selectBatchPage() {
+  batchSelected.value = Array.from(new Set([...batchSelected.value, ...batchSelectablePageModels.value.map((model) => model.name)]))
+}
+
+function clearBatchSelection() {
+  batchSelected.value = []
+}
+
+function toggleBatchSelectMode() {
+  batchSelectMode.value = !batchSelectMode.value
+  if (!batchSelectMode.value) batchSelected.value = []
+}
+
+function onModelCardClick(model: ModelEntry) {
+  if (batchSelectMode.value && isBatchSelectable(model)) {
+    setBatchSelected(model, !isBatchSelected(model))
+    return
+  }
+  selectModel(model)
+}
+
+// A selected model can finish downloading elsewhere (or start, or be removed); drop it so the
+// count and total size only describe what the batch will actually fetch.
+watch([() => modelStore.models, downloadTasks, deleteTasks, downloadQueue], () => {
+  if (!batchSelected.value.length) return
+  const byName = new Map(modelStore.models.map((model) => [model.name, model]))
+  const next = batchSelected.value.filter((name) => {
+    const model = byName.get(name)
+    return Boolean(model && isBatchSelectable(model))
+  })
+  if (next.length !== batchSelected.value.length) batchSelected.value = next
+}, { deep: true })
+
+function confirmBatchDownload() {
+  const names = batchSelectedModels.value.filter(isBatchSelectable).map((model) => model.name)
+  if (!names.length) return
+  dialog.info({
+    title: t('models.batchDownloadConfirmTitle'),
+    content: t('models.batchDownloadConfirmContent', {
+      count: names.length,
+      size: formatBytes(batchSelectedBytes.value),
+      concurrency: BATCH_DOWNLOAD_CONCURRENCY,
+    }),
+    positiveText: t('common.confirm'),
+    negativeText: t('common.cancel'),
+    onPositiveClick: () => {
+      const added = modelStore.enqueueBatchDownload(names)
+      if (added) message.success(t('models.batchDownloadQueued', { count: added }))
+      batchSelected.value = []
+      batchSelectMode.value = false
+    },
+  })
+}
+
+function removeQueuedModel(model: ModelEntry, event?: MouseEvent) {
+  event?.stopPropagation()
+  modelStore.removeQueuedDownload(model.name)
+}
+
 async function cancelDownloadModel(model: ModelEntry, event?: MouseEvent) {
   event?.stopPropagation()
   await modelStore.cancelDownload(model.name)
@@ -1031,6 +1134,15 @@ onMounted(() => {
           <template #icon><n-icon :component="AddCircleOutline" /></template>
           {{ t('models.customImport') }}
         </n-button>
+        <n-button
+          :type="batchSelectMode ? 'primary' : 'default'"
+          secondary
+          :aria-pressed="batchSelectMode"
+          @click="toggleBatchSelectMode"
+        >
+          <template #icon><n-icon :component="batchSelectMode ? CloseOutline : CheckboxOutline" /></template>
+          {{ batchSelectMode ? t('models.batchSelectExit') : t('models.batchSelect') }}
+        </n-button>
         <n-button secondary @click="openStorageManager">
           <template #icon><n-icon :component="ServerOutline" /></template>
           {{ t('models.storageManage') }}
@@ -1102,6 +1214,43 @@ onMounted(() => {
       </div>
     </div>
 
+    <!-- Batch selection bar -->
+    <div v-if="batchSelectMode" class="batch-bar" role="region" :aria-label="t('models.batchSelect')">
+      <n-checkbox
+        :checked="batchAllSelected"
+        :indeterminate="batchSomeSelected"
+        :disabled="!batchSelectableModels.length"
+        @update:checked="toggleBatchSelectAll"
+      >
+        {{ t('models.batchSelectAll', { count: batchSelectableModels.length }) }}
+      </n-checkbox>
+      <n-button size="small" quaternary :disabled="!batchSelectablePageModels.length" @click="selectBatchPage">
+        {{ t('models.batchSelectPage') }}
+      </n-button>
+      <n-button size="small" quaternary :disabled="!batchSelected.length" @click="clearBatchSelection">
+        {{ t('models.batchClearSelection') }}
+      </n-button>
+      <span class="batch-bar__summary text-sm text-muted">
+        <template v-if="batchSelected.length">
+          {{ t('models.batchSelectedSummary', { count: batchSelected.length, size: formatBytes(batchSelectedBytes) }) }}
+        </template>
+        <template v-else-if="!batchSelectableModels.length">{{ t('models.batchNoDownloadable') }}</template>
+        <template v-else>{{ t('models.batchSelectHint') }}</template>
+      </span>
+      <n-button size="small" type="primary" :disabled="!batchSelected.length" @click="confirmBatchDownload">
+        <template #icon><n-icon :component="CloudDownloadOutline" /></template>
+        {{ t('models.batchDownloadAction', { count: batchSelected.length }) }}
+      </n-button>
+    </div>
+
+    <!-- Waiting batch downloads stay visible after leaving selection mode. -->
+    <div v-if="downloadQueue.length" class="batch-queue-bar">
+      <span class="text-sm">{{ t('models.downloadQueueSummary', { count: downloadQueue.length }) }}</span>
+      <n-button size="tiny" quaternary @click="modelStore.clearDownloadQueue()">
+        {{ t('models.clearDownloadQueue') }}
+      </n-button>
+    </div>
+
     <!-- Body: Model Grid + Detail Drawer -->
     <div class="models-body">
       <!-- Loading Skeleton -->
@@ -1144,19 +1293,30 @@ onMounted(() => {
             :class="['model-card', {
               'model-card--selected': selectedModel === model.name,
               'model-card--unsupported': !model.supported,
-              'model-card--busy': isModelBusy(model)
+              'model-card--busy': isModelBusy(model),
+              'model-card--batch-selected': batchSelectMode && isBatchSelected(model),
+              'model-card--batch-disabled': batchSelectMode && !isBatchSelectable(model)
             }]"
             tabindex="0"
             :aria-label="t('models.viewDetailAria', { name: model.name })"
             :aria-current="selectedModel === model.name ? 'true' : undefined"
-            @click="selectModel(model)"
+            @click="onModelCardClick(model)"
             @contextmenu.stop.prevent="openModelContextMenu($event, model)"
             @keydown.enter.self.prevent="selectModel(model)"
-            @keydown.space.self.prevent="selectModel(model)"
+            @keydown.space.self.prevent="onModelCardClick(model)"
           >
           <!-- Card Header -->
           <div class="mc-header">
-            <div class="mc-title">
+            <div :class="['mc-title', { 'mc-title--selectable': batchSelectMode }]">
+              <n-checkbox
+                v-if="batchSelectMode"
+                class="mc-select"
+                :checked="isBatchSelected(model)"
+                :disabled="!isBatchSelectable(model)"
+                :aria-label="t('models.batchSelectModelAria', { name: model.name })"
+                @click.stop
+                @update:checked="(checked: boolean) => setBatchSelected(model, checked)"
+              />
               <span class="mc-name" :title="model.name"><template v-for="(part, index) in modelNameParts(model.name)" :key="index">{{ part }}<wbr /></template></span>
               <span v-if="modelNote(model)" class="mc-note" :title="modelNote(model)">{{ modelNote(model) }}</span>
             </div>
@@ -1270,6 +1430,18 @@ onMounted(() => {
                   @click.stop="downloadModel(model, $event)"
                 >
                   {{ downloadTasks[model.name]?.status === 'interrupted' ? t('models.continueDownload') : t('common.resume') }}
+                </n-button>
+              </div>
+            </template>
+
+            <template v-else-if="!model.downloaded && isQueuedDownload(model.name)">
+              <span class="mc-state mc-state--paused">
+                <span class="mc-state__dot" />
+                {{ t('models.downloadQueued') }}
+              </span>
+              <div class="mc-actions">
+                <n-button size="tiny" quaternary @click.stop="removeQueuedModel(model, $event)">
+                  {{ t('models.removeFromQueue') }}
                 </n-button>
               </div>
             </template>
@@ -1782,6 +1954,56 @@ onMounted(() => {
   align-items: center;
   gap: 7px;
   white-space: nowrap;
+}
+
+/* ===== Batch selection ===== */
+.batch-bar,
+.batch-queue-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--outline));
+  background: color-mix(in srgb, var(--primary-soft) 30%, var(--surface-1));
+}
+
+.batch-queue-bar {
+  padding: 4px 12px;
+  border-color: color-mix(in srgb, var(--outline) 58%, transparent);
+  background: color-mix(in srgb, var(--surface-2) 40%, transparent);
+}
+
+.batch-bar__summary {
+  flex: 1;
+  min-width: 160px;
+}
+
+.mc-title--selectable {
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 8px;
+}
+
+.mc-title--selectable > :not(.mc-select) {
+  grid-column: 2;
+}
+
+.mc-select {
+  grid-row: 1 / span 2;
+  align-self: start;
+  margin-top: 2px;
+}
+
+.model-card--batch-selected,
+.dark-theme .model-card--batch-selected {
+  border-color: var(--primary) !important;
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.model-card--batch-disabled {
+  cursor: default;
 }
 
 /* ===== Category Select ===== */

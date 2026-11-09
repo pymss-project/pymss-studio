@@ -16,6 +16,7 @@ import { inferenceChunkSizeIssue, normalizeInferenceParamMeta, type InferencePar
 /** How the model library lays its entries out. */
 export type ModelViewMode = 'card' | 'list'
 import { useSettingsStore } from '@/stores/settings'
+import { BATCH_DOWNLOAD_CONCURRENCY, enqueueDownloads, isActiveDownloadStatus, takeQueuedDownloads } from '@/utils/downloadQueue'
 
 const studioLog = createLogger('ui.stores.model')
 
@@ -458,6 +459,8 @@ export const useModelStore = defineStore('model', () => {
   const modelInferenceBaseSources = ref<Record<string, ModelEntry['defaultInferenceParamsSource']>>({})
   const modelPreferences = ref<Record<string, ModelPreference>>({})
   const downloadTaskIndex = ref<Record<string, string>>({})
+  /** Models waiting for a free slot in a batch download, in start order. Not persisted. */
+  const downloadQueue = ref<string[]>([])
   const deleteTasks = ref<Record<string, DeleteTask>>({})
   const deleteTaskIndex = ref<Record<string, string>>({})
   const modelStorageSummary = ref<ModelStorageSummary | null>(null)
@@ -1227,6 +1230,52 @@ export const useModelStore = defineStore('model', () => {
     return cancelled
   }
 
+  function canQueueDownload(name: string) {
+    const model = models.value.find((item) => item.name === name)
+    if (!model || !model.supported || model.downloaded || model.source === 'user') return false
+    return !isActiveDownloadStatus(downloadTasks.value[name]?.status)
+  }
+
+  /** Starts queued downloads while slots are free. */
+  function pumpDownloadQueue() {
+    while (downloadQueue.value.length) {
+      const activeCount = Object.values(downloadTasks.value).filter((task) => isActiveDownloadStatus(task.status)).length
+      const { start } = takeQueuedDownloads(downloadQueue.value, activeCount, BATCH_DOWNLOAD_CONCURRENCY)
+      const name = start[0]
+      if (!name) return
+      downloadQueue.value = downloadQueue.value.slice(1)
+      // A model can become downloaded or busy while it waits; skip it rather than restart it.
+      if (!canQueueDownload(name)) continue
+      // downloadModel marks the task 'preparing' before its first await, so the next iteration
+      // already counts it as active.
+      downloadModel(name).catch((err) => {
+        studioLog.warn('queued model download failed to start', { model: name, error: err instanceof Error ? err.message : String(err) })
+        // Without a runtime every queued model would fail the same way; stop instead of
+        // reporting the same error once per model.
+        if (!useAppStore().runtimeInfo?.ready) downloadQueue.value = []
+      }).finally(() => pumpDownloadQueue())
+    }
+  }
+
+  /** Queues models for download. Returns how many were added. */
+  function enqueueBatchDownload(names: string[]) {
+    const before = downloadQueue.value.length
+    downloadQueue.value = enqueueDownloads(downloadQueue.value, names, (name) => !canQueueDownload(name))
+    const added = downloadQueue.value.length - before
+    pumpDownloadQueue()
+    return added
+  }
+
+  function removeQueuedDownload(name: string) {
+    downloadQueue.value = downloadQueue.value.filter((item) => item !== name)
+  }
+
+  function clearDownloadQueue() {
+    downloadQueue.value = []
+  }
+
+  watch(downloadTasks, () => pumpDownloadQueue(), { deep: true })
+
   async function deleteModel(name: string, source: 'single' | 'batch' = 'single') {
     const existingTask = deleteTasks.value[name]
     if (existingTask && !isDeleteTaskTerminal(existingTask)) {
@@ -1668,6 +1717,10 @@ export const useModelStore = defineStore('model', () => {
     deleteModel,
     downloadModel,
     cancelDownload,
+    downloadQueue,
+    enqueueBatchDownload,
+    removeQueuedDownload,
+    clearDownloadQueue,
     deleteModels,
     deleteStorageModels,
     loadModelStorageSummary,
