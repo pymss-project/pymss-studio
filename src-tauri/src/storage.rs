@@ -575,6 +575,35 @@ fn legacy_workflow_index(workflow_list: &[Value], mutation: &Value) -> Option<us
         .or_else(|| legacy_entry.and_then(|_| workflow_list.iter().position(is_match)))
 }
 
+fn normalize_workflow_metadata(value: &Value) -> Option<Value> {
+    let source = value.as_object()?;
+    let guid = source.get("guid")?.as_str()?.trim();
+    if guid.len() != 36 || !guid.bytes().enumerate().all(|(index, byte)| {
+        if [8, 13, 18, 23].contains(&index) { byte == b'-' } else { byte.is_ascii_hexdigit() }
+    }) {
+        return None;
+    }
+    let mut metadata = serde_json::json!({ "guid": guid.to_ascii_lowercase() });
+    for (key, limit) in [("author", 200), ("version", 64), ("studioVersion", 128)] {
+        if let Some(value) = source.get(key) {
+            let text = value.as_str()?;
+            if text.encode_utf16().count() > limit || text.chars().any(|c| c < ' ') {
+                return None;
+            }
+            if !text.trim().is_empty() {
+                metadata[key] = Value::String(text.trim().to_string());
+            }
+        }
+    }
+    Some(metadata)
+}
+
+fn workflow_entry_metadata(entry: &Value) -> Option<Value> {
+    entry.get("metadata")
+        .or_else(|| entry.get("definition")?.get("_metadata"))
+        .and_then(normalize_workflow_metadata)
+}
+
 fn apply_workflow_mutation(mut state: Value, mutation: &Value) -> AppResult<Value> {
     if !state.is_object() {
         state = serde_json::json!({ "workflows": [], "selectedWorkflowId": "" });
@@ -644,6 +673,15 @@ fn apply_workflow_mutation(mut state: Value, mutation: &Value) -> AppResult<Valu
                     "actualUpdatedAt": actual_updated_at,
                 }));
             } else {
+                // A graph editor may save a snapshot captured before publication details changed.
+                let metadata = existing_index
+                    .and_then(|index| workflow_entry_metadata(&workflow_list[index]))
+                    .or_else(|| workflow_entry_metadata(&entry));
+                if let Some(metadata) = metadata {
+                    entry["metadata"] = metadata;
+                } else if entry.get("metadata").is_some_and(|value| !value.is_null()) {
+                    return Err(AppError::Worker("invalid workflow metadata".into()));
+                }
                 if let Some(index) = existing_index {
                     let created_at = workflow_list[index]
                         .get("createdAt")
@@ -669,6 +707,30 @@ fn apply_workflow_mutation(mut state: Value, mutation: &Value) -> AppResult<Valu
                 });
                 state_object.insert("selectedWorkflowId".into(), Value::String(workflow_id));
             }
+        }
+        "metadata" => {
+            let workflow_id = mutation.get("workflowId").and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .ok_or_else(|| AppError::Worker("workflow id is required".into()))?;
+            let index = workflow_list.iter()
+                .position(|entry| entry.get("id").and_then(Value::as_str) == Some(workflow_id))
+                .or_else(|| legacy_workflow_index(workflow_list, mutation))
+                .ok_or_else(|| AppError::Worker("workflow no longer exists".into()))?;
+            let mut metadata = mutation.get("metadata").and_then(normalize_workflow_metadata)
+                .ok_or_else(|| AppError::Worker("invalid workflow metadata".into()))?;
+            if let Some(existing) = workflow_entry_metadata(&workflow_list[index]) {
+                if mutation.get("requireMatchingGuid").and_then(Value::as_bool) == Some(true)
+                    && existing["guid"] != metadata["guid"]
+                {
+                    return Err(AppError::Worker(format!(
+                        "WORKFLOW_METADATA_GUID_CONFLICT:{}", existing["guid"].as_str().unwrap_or_default()
+                    )));
+                }
+                metadata["guid"] = existing["guid"].clone();
+            }
+            // Do not alter graph revisions, ordering or selection for a publication-only edit.
+            workflow_list[index]["metadata"] = metadata;
+            workflow_list[index]["id"] = Value::String(workflow_id.to_string());
         }
         "delete" => {
             let workflow_id = mutation
@@ -866,6 +928,135 @@ mod tests {
         assert_eq!(std::fs::read(&preserved).unwrap(), b"original");
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
         assert!(super::directory_writable(&preserved).is_err());
+    }
+
+    #[test]
+    fn workflow_metadata_preserves_graph_revision_selection_and_later_editor_saves() {
+        let guid = "0d971bdd-6b5b-4245-8dd0-aad662b657c9";
+        let entry = json!({
+            "id": "a", "name": "Original", "createdAt": 10, "updatedAt": 20,
+            "definition": { "version": 1, "steps": [] },
+            "metadata": { "guid": guid, "author": "Earlier author" },
+        });
+        let state = json!({ "workflows": [entry, { "id": "b", "updatedAt": 30 }], "selectedWorkflowId": "b" });
+        let result = super::apply_workflow_mutation(state.clone(), &json!({
+            "action": "metadata", "workflowId": "a",
+            "metadata": { "guid": "33333333-3333-4333-8333-333333333333", "author": "Publisher", "version": "1.0.0", "studioVersion": "0.0.25" },
+        })).unwrap();
+        let published = &result["state"]["workflows"][0];
+        assert_eq!(published["metadata"]["guid"], guid);
+        assert_eq!(published["updatedAt"], 20);
+        assert_eq!(published["definition"], entry["definition"]);
+        assert_eq!(result["state"]["selectedWorkflowId"], "b");
+        assert_eq!(result["state"]["workflows"][1], state["workflows"][1]);
+        let mut stale = entry;
+        stale["name"] = json!("Saved by editor");
+        stale["updatedAt"] = json!(40);
+        let saved = super::apply_workflow_mutation(result["state"].clone(), &json!({
+            "action": "upsert", "entry": stale, "expectedUpdatedAt": 20,
+        })).unwrap();
+        assert!(saved.get("conflict").is_none());
+        assert_eq!(saved["state"]["workflows"][0]["metadata"], published["metadata"]);
+        assert_eq!(saved["state"]["workflows"][0]["name"], "Saved by editor");
+    }
+
+    #[test]
+    fn workflow_metadata_supports_legacy_ids_and_existing_import_headers() {
+        let legacy = json!({ "name": "Legacy", "updatedAt": 20, "definition": {
+            "steps": [], "_metadata": { "guid": "0D971BDD-6B5B-4245-8DD0-AAD662B657C9" },
+        }});
+        let result = super::apply_workflow_mutation(json!({ "workflows": [legacy] }), &json!({
+            "action": "metadata", "workflowId": "assigned-id", "legacyIndex": 0, "legacyEntry": legacy,
+            "metadata": { "guid": "33333333-3333-4333-8333-333333333333", "author": "  Publisher  " },
+        })).unwrap();
+        let saved = &result["state"]["workflows"][0];
+        assert_eq!(saved["id"], "assigned-id");
+        assert_eq!(saved["metadata"]["guid"], "0d971bdd-6b5b-4245-8dd0-aad662b657c9");
+        assert_eq!(saved["metadata"]["author"], "Publisher");
+        assert_eq!(saved["updatedAt"], 20);
+    }
+
+    #[test]
+    fn workflow_metadata_validation_and_missing_targets_leave_files_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("workflows.json");
+        let original = br#"{"workflows":[{"id":"a","definition":{"steps":[]},"updatedAt":20}]}"#;
+        std::fs::write(&path, original).unwrap();
+        for metadata in [
+            json!({"guid": "invalid"}),
+            json!({"guid": "0d971bdd-6b5b-4245-8dd0-aad662b657c9", "author": "bad\nname"}),
+            json!({"guid": "0d971bdd-6b5b-4245-8dd0-aad662b657c9", "version": "x".repeat(65)}),
+            json!({"guid": "0d971bdd-6b5b-4245-8dd0-aad662b657c9", "studioVersion": 1}),
+        ] {
+            assert!(super::mutate_workflow_store_file(&path, &json!({
+                "action": "metadata", "workflowId": "a", "metadata": metadata,
+            })).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
+        assert!(super::mutate_workflow_store_file(&path, &json!({
+            "action": "metadata", "workflowId": "deleted", "metadata": {"guid": "0d971bdd-6b5b-4245-8dd0-aad662b657c9"},
+        })).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn workflow_metadata_export_guid_conflicts_leave_the_current_file_unchanged_and_allow_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("workflows.json");
+        let editor_guid = "0d971bdd-6b5b-4245-8dd0-aad662b657c9";
+        let exported_guid = "33333333-3333-4333-8333-333333333333";
+        let editor = json!({ "id": "a", "name": "Edited during export", "updatedAt": 21,
+            "definition": { "steps": [] }, "metadata": { "guid": editor_guid } });
+        std::fs::write(&path, serde_json::to_vec(&json!({ "workflows": [editor], "selectedWorkflowId": "a" })).unwrap()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut publication = json!({ "action": "metadata", "workflowId": "a", "requireMatchingGuid": true,
+            "metadata": { "guid": exported_guid, "author": "Publisher", "version": "1.0.0", "studioVersion": "0.0.99" } });
+        let error = super::mutate_workflow_store_file(&path, &publication).unwrap_err();
+        assert!(error.to_string().contains(&format!("WORKFLOW_METADATA_GUID_CONFLICT:{editor_guid}")));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        publication["metadata"]["guid"] = json!(editor_guid);
+        let retried = super::mutate_workflow_store_file(&path, &publication).unwrap();
+        assert_eq!(retried["state"]["workflows"][0]["metadata"], publication["metadata"]);
+        assert_eq!(retried["state"]["workflows"][0]["updatedAt"], 21);
+        assert_eq!(retried["state"]["workflows"][0]["definition"], editor["definition"]);
+    }
+
+    #[test]
+    fn workflow_metadata_first_export_and_editor_save_choose_one_guid_under_the_write_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("workflows.json");
+        let exported_guid = "33333333-3333-4333-8333-333333333333";
+        let editor_guid = "0d971bdd-6b5b-4245-8dd0-aad662b657c9";
+        std::fs::write(&path, br#"{"workflows":[{"id":"a","name":"Legacy","updatedAt":20,"definition":{"steps":[]}}],"selectedWorkflowId":"a"}"#).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let export_thread = {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                super::mutate_workflow_store_file(&path, &json!({ "action": "metadata", "workflowId": "a", "requireMatchingGuid": true,
+                    "metadata": { "guid": exported_guid, "author": "Publisher" } }))
+            })
+        };
+        let editor_thread = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                barrier.wait();
+                super::mutate_workflow_store_file(&path, &json!({ "action": "upsert", "expectedUpdatedAt": 20,
+                    "entry": { "id": "a", "name": "Edited", "updatedAt": 21, "definition": { "steps": [] }, "metadata": { "guid": editor_guid } } }))
+            }
+        });
+        let exported = export_thread.join().unwrap();
+        editor_thread.join().unwrap().unwrap();
+        let state = super::read_workflow_store_file(&path).unwrap();
+        assert_eq!(state["workflows"][0]["name"], "Edited");
+        match exported {
+            Ok(_) => assert_eq!(state["workflows"][0]["metadata"], json!({ "guid": exported_guid, "author": "Publisher" })),
+            Err(error) => {
+                assert!(error.to_string().contains("WORKFLOW_METADATA_GUID_CONFLICT"));
+                assert_eq!(state["workflows"][0]["metadata"], json!({ "guid": editor_guid }));
+            }
+        }
     }
 
     #[test]

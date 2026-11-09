@@ -1,5 +1,6 @@
 import { createDemoAudio, createDemoModels, createDemoWorkflow } from './demoData.ts'
 import type { TutorialAdapter } from './demoContext'
+import { normalizeWorkflowMetadata } from '../../workflows/metadata.ts'
 
 export type DemoConfig = { locale: string; themeMode: string; themeAccent: string; platform: string; progress: Record<string, unknown> }
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
@@ -134,8 +135,18 @@ export function createDemoRuntime(config: DemoConfig) {
       const state = copy(stores.get('workflow-state') || { workflows: [], selectedWorkflowId: '' })
       if (payload.action === 'upsert') {
         const entry = { ...payload.entry, updatedAt: Date.now() }
+        const existing = state.workflows.find((item: any) => item.id === entry.id)
+        if (existing?.metadata) entry.metadata = existing.metadata
         state.workflows = [entry, ...state.workflows.filter((item: any) => item.id !== entry.id)]
         state.selectedWorkflowId = entry.id
+      } else if (payload.action === 'metadata') {
+        const entry = state.workflows.find((item: any) => item.id === payload.workflowId)
+        const metadata = normalizeWorkflowMetadata(payload.metadata)
+        if (!entry || !metadata) throw new Error('Invalid workflow metadata')
+        if (payload.requireMatchingGuid && entry.metadata && entry.metadata.guid !== metadata.guid) {
+          throw new Error(`WORKFLOW_METADATA_GUID_CONFLICT:${entry.metadata.guid}`)
+        }
+        entry.metadata = { ...metadata, guid: entry.metadata?.guid ?? metadata.guid }
       } else if (payload.action === 'select') state.selectedWorkflowId = payload.workflowId
       else if (payload.action === 'delete') state.workflows = state.workflows.filter((item: any) => item.id !== payload.workflowId)
       else throw new Error('Unknown tutorial workflow operation')

@@ -8,6 +8,7 @@ import {
   CubeOutline,
   EllipsisHorizontalOutline,
   GitNetworkOutline,
+  InformationCircleOutline,
   ListOutline,
   MusicalNotesOutline,
   OpenOutline,
@@ -16,12 +17,15 @@ import {
   SettingsOutline,
 } from '@vicons/ionicons5'
 import { invoke } from '@tauri-apps/api/core'
+import packageMeta from '../../package.json'
 import { storeToRefs } from 'pinia'
 import WorkflowCreateChooser from '@/components/workflow/WorkflowCreateChooser.vue'
 import WorkflowOverviewPreview from '@/components/workflow/WorkflowOverviewPreview.vue'
+import WorkflowInfo from '@/components/workflow/WorkflowInfo.vue'
 import { useModelStore } from '@/stores/model'
 import { useWorkflowNodeStore } from '@/stores/workflowNodes'
 import {
+  WorkflowGuidConflictError,
   WorkflowRevisionConflictError,
   useWorkflowStore,
   type WorkflowEntry,
@@ -36,6 +40,8 @@ import { WorkflowEditorInUseError } from '@/utils/workflowEditorState'
 import { themeIsDark } from '@/utils/theme'
 import { hasInvalidSimpleStructure, isGraphWorkflowDefinition, isSimpleWorkflowDefinition } from '@/workflows/formats'
 import { litegraphToComfy } from '@/litegraph/graphAdapter'
+import { createWorkflowMetadata, parseWorkflowFile, serializeWorkflowFile, type WorkflowMetadata } from '@/workflows/metadata'
+import { isTauriRuntime } from '@/utils/appStore'
 import {
   countWorkflowSaveOutputs,
   getWorkflowDefinitionIssue,
@@ -60,6 +66,21 @@ const typeFilter = ref<WorkflowTypeFilter>('all')
 const importFileInputRef = ref<HTMLInputElement | null>(null)
 const createChooserOpen = ref(false)
 const settingsOpen = ref(false)
+const overviewInfoOpen = ref(false)
+const overviewInfoButton = ref<HTMLButtonElement | null>(null)
+const moreActionsElement = ref<HTMLElement | null>(null)
+const contextInfoOpen = ref(false)
+const contextInfoWorkflowId = ref('')
+const contextInfoX = ref(0)
+const contextInfoY = ref(0)
+const contextInfoWorkflow = computed(() => workflows.value.find(item => item.id === contextInfoWorkflowId.value))
+let contextMenuTrigger: HTMLElement | null = null
+let contextInfoReturnFocus: HTMLElement | null = null
+const exportDialogOpen = ref(false)
+const exportBusy = ref(false)
+const exportWorkflowId = ref('')
+const exportMetadata = ref<WorkflowMetadata>({ guid: '' })
+const exportStudioVersion = ref(packageMeta.version)
 type WorkflowCreateType = 'simple' | 'advanced'
 const contextMenuX = ref(0)
 const contextMenuY = ref(0)
@@ -218,6 +239,7 @@ function workflowMenuOptionsFor(current: WorkflowEntry | null): DropdownOption[]
       disabled: locked || (isSimpleDefinition && !canEditSimple),
     },
   ]
+  if (current.metadata) options.push({ key: 'info', label: t('workflows.workflowInfo') })
   options.push(
     { type: 'divider', key: 'workflow-actions-divider' },
     { key: 'duplicate', label: t('workflows.duplicate') },
@@ -230,6 +252,13 @@ function workflowMenuOptionsFor(current: WorkflowEntry | null): DropdownOption[]
 const workflowMenuOptions = computed(() => workflowMenuOptionsFor(contextWorkflow.value))
 const selectedWorkflowMenuOptions = computed(() => workflowMenuOptionsFor(selectedWorkflow.value))
 const selectedDescriptionPreview = computed(() => selectedWorkflow.value?.description.replace(/\s+/g, ' ').trim() || '')
+const selectedPublicationPreview = computed(() => {
+  const metadata = selectedWorkflow.value?.metadata
+  return [
+    metadata?.author,
+    metadata?.version ? `${t('workflows.workflowReleaseVersion')} ${metadata.version}` : '',
+  ].filter(Boolean).join(' · ')
+})
 
 // ---- Selected workflow overview data (simple-mode details; comfy graphs
 // show a read-only overview since their structure is free-form) ----
@@ -470,6 +499,9 @@ function selectWorkflowFromList(item: WorkflowEntry) {
 }
 
 function openWorkflowContextMenu(event: MouseEvent, item: WorkflowEntry) {
+  overviewInfoOpen.value = false
+  contextInfoOpen.value = false
+  contextMenuTrigger = event.currentTarget as HTMLElement
   contextWorkflow.value = item
   contextMenuVisible.value = false
   contextMenuX.value = event.clientX
@@ -482,6 +514,16 @@ function openWorkflowContextMenu(event: MouseEvent, item: WorkflowEntry) {
 function closeWorkflowContextMenu() {
   contextMenuVisible.value = false
   contextWorkflow.value = null
+}
+
+function closeOverviewInfo() {
+  overviewInfoOpen.value = false
+  overviewInfoButton.value?.focus({ preventScroll: true })
+}
+
+function closeContextInfo() {
+  contextInfoOpen.value = false
+  if (contextInfoReturnFocus?.isConnected) contextInfoReturnFocus.focus({ preventScroll: true })
 }
 
 function openWorkflowEditor(item: WorkflowEntry) {
@@ -505,6 +547,16 @@ function reopenActiveEditor() {
 }
 
 function handleWorkflowMenuSelect(key: string | number, current: WorkflowEntry | null) {
+  if (key === 'info' && current?.metadata) {
+    const fromContextMenu = contextMenuVisible.value
+    const bounds = moreActionsElement.value?.getBoundingClientRect()
+    contextInfoX.value = fromContextMenu ? contextMenuX.value : bounds?.left ?? 0
+    contextInfoY.value = fromContextMenu ? contextMenuY.value : bounds?.top ?? 0
+    contextInfoReturnFocus = fromContextMenu ? contextMenuTrigger : moreActionsElement.value?.querySelector('button') ?? null
+    overviewInfoOpen.value = false
+    contextInfoWorkflowId.value = current.id
+    contextInfoOpen.value = true
+  }
   closeWorkflowContextMenu()
   if (!current) return
 
@@ -634,8 +686,8 @@ function workflowFileBasename(fileName: string) {
     .trim()
 }
 
-function downloadJsonFile(fileName: string, payload: Record<string, unknown>) {
-  const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], { type: 'application/json;charset=utf-8' })
+function downloadJsonFile(fileName: string, content: string) {
+  const blob = new Blob([content], { type: 'application/json;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
@@ -655,7 +707,7 @@ async function handleImportWorkflow(event: Event) {
   if (!file) return
   try {
     const text = await file.text()
-    const parsed = JSON.parse(text) as Record<string, unknown>
+    const { definition: parsed, metadata } = parseWorkflowFile(text)
     if (!isGraphWorkflowDefinition(parsed) && !isSimpleWorkflowDefinition(parsed)) {
       throw new Error(t('workflows.workflowImportInvalid'))
     }
@@ -666,6 +718,7 @@ async function handleImportWorkflow(event: Event) {
       name: workflowFileBasename(file.name) || t('workflows.newWorkflow'),
       description: '',
       definition: parsed,
+      metadata,
     })
     editWorkflow(entry)
     message.success(t('workflows.workflowImportSuccess'))
@@ -676,41 +729,82 @@ async function handleImportWorkflow(event: Event) {
   }
 }
 
-async function exportWorkflowDefinition(
-  workflowName: string,
-  definition: Record<string, unknown>,
-) {
+async function confirmExportWorkflow() {
+  if (exportBusy.value) return
+  exportBusy.value = true
+  let fileSaved = false
   try {
-    const payload = isGraphWorkflowDefinition(definition)
-      ? { ...definition, ...litegraphToComfy(definition) }
-      : definition
-    const suffix = isGraphWorkflowDefinition(definition)
-      ? 'comfy-mss.json'
-      : 'pymss-workflow.json'
-    const fileName = `${workflowSlug(workflowName || t('workflows.untitled'))}.${suffix}`
-    const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
-    if (isTauri) {
-      const content = `${JSON.stringify(payload, null, 2)}\n`
-      const savedPath = await invoke<string | null>('save_text_file_dialog', {
-        defaultName: fileName,
-        content,
-      })
-      if (!savedPath) return
-    } else {
-      downloadJsonFile(fileName, payload)
-    }
+    const current = await workflow.exportWorkflow(exportWorkflowId.value, {
+      ...exportMetadata.value,
+      studioVersion: exportStudioVersion.value,
+    }, async (entry, metadata) => {
+      const definition = entry.definition
+      const payload = isGraphWorkflowDefinition(definition)
+        ? { ...definition, ...litegraphToComfy(definition) }
+        : definition
+      const suffix = isGraphWorkflowDefinition(definition)
+        ? 'comfy-mss.json'
+        : 'pymss-workflow.json'
+      const fileName = `${workflowSlug(entry.name || t('workflows.untitled'))}.${suffix}`
+      const content = serializeWorkflowFile(payload, metadata)
+      if (isTauriRuntime()) {
+        const savedPath = await invoke<string | null>('save_text_file_dialog', {
+          defaultName: fileName,
+          content,
+        })
+        if (!savedPath) return false
+      } else {
+        downloadJsonFile(fileName, content)
+      }
+      fileSaved = true
+      return true
+    })
+    if (!current) return
+    exportMetadata.value = { ...current.metadata! }
+    exportDialogOpen.value = false
     message.success(t('workflows.workflowExportSuccess'))
   } catch (error) {
-    message.error(`${t('workflows.workflowExportFailed')}: ${error instanceof Error ? error.message : String(error)}`)
+    if (error instanceof WorkflowGuidConflictError) {
+      exportMetadata.value.guid = error.actualGuid
+      message.warning(t('workflows.workflowExportGuidConflict'))
+      return
+    }
+    const label = fileSaved ? t('workflows.workflowExportMetadataSaveFailed') : t('workflows.workflowExportFailed')
+    message.error(`${label}: ${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    exportBusy.value = false
   }
 }
 
 async function exportWorkflowEntry(current: WorkflowEntry) {
-  if (!current) return
-  await exportWorkflowDefinition(current.name, current.definition)
+  if (exportBusy.value || exportDialogOpen.value) return
+  exportWorkflowId.value = current.id
+  exportMetadata.value = createWorkflowMetadata(current.metadata)
+  exportStudioVersion.value = packageMeta.version
+  exportDialogOpen.value = true
+  if (!isTauriRuntime()) return
+  exportBusy.value = true
+  try {
+    const info = await invoke<{ version: string }>('get_build_info')
+    exportStudioVersion.value = info.version || packageMeta.version
+  } catch {
+    // Development builds can use the version embedded by Vite.
+  } finally {
+    exportBusy.value = false
+  }
 }
 
-watch(selectedWorkflowId, () => { settingsOpen.value = false })
+watch(selectedWorkflowId, () => {
+  settingsOpen.value = false
+  overviewInfoOpen.value = false
+  contextInfoOpen.value = false
+})
+watch(() => contextInfoWorkflow.value?.metadata, metadata => {
+  if (!metadata) contextInfoOpen.value = false
+})
+watch(() => selectedWorkflow.value?.metadata, metadata => {
+  if (!metadata) overviewInfoOpen.value = false
+})
 
 const stopEditorCloseSubscription = workflow.$onAction(({ name: action, after }) => {
   if (action !== 'handleEditorClosed') return
@@ -867,6 +961,20 @@ watch([workflows, selectedWorkflowId], () => {
                   {{ selectedReady ? t('workflows.statusReady') : t('workflows.workflowValidationTitle') }}
                 </span>
               </div>
+              <n-popover v-if="selectedWorkflow.metadata" v-model:show="overviewInfoOpen" trigger="click" placement="bottom-start"
+                :show-arrow="false" to="body">
+                <template #trigger>
+                  <button ref="overviewInfoButton" class="wf-overview__publication" type="button"
+                    :title="selectedPublicationPreview || t('workflows.workflowInfo')" :aria-label="t('workflows.workflowInfo')"
+                    :aria-expanded="overviewInfoOpen" aria-haspopup="dialog" aria-controls="workflow-overview-info"
+                    @click="closeWorkflowContextMenu(); contextInfoOpen = false" @keydown.esc.stop.prevent="closeOverviewInfo">
+                    <span>{{ selectedPublicationPreview || t('workflows.workflowInfo') }}</span>
+                    <n-icon :component="InformationCircleOutline" />
+                  </button>
+                </template>
+                <WorkflowInfo v-if="overviewInfoOpen" id="workflow-overview-info" :key="selectedWorkflow.id"
+                  :workflow-name="selectedWorkflow.name" :metadata="selectedWorkflow.metadata" @close="closeOverviewInfo" />
+              </n-popover>
               <p v-if="selectedDescriptionPreview" class="wf-overview__description" :title="selectedWorkflow.description">{{ selectedDescriptionPreview }}</p>
               <n-button class="wf-settings-button" secondary :disabled="isNodeEditorOpen" @click="settingsOpen = true">
                 <template #icon><n-icon :component="SettingsOutline" /></template>
@@ -901,7 +1009,7 @@ watch([workflows, selectedWorkflowId], () => {
                 {{ t('workflows.openEditorAction') }}
               </n-button>
             </div>
-            <div class="wf-actionbar__more">
+            <div ref="moreActionsElement" class="wf-actionbar__more">
               <n-dropdown :key="selectedWorkflow.id" trigger="click" placement="top-end" to="body"
                 :options="selectedWorkflowMenuOptions" @select="(key: string | number) => handleWorkflowMenuSelect(key, selectedWorkflow)">
                 <n-button quaternary @click="closeWorkflowContextMenu">
@@ -940,6 +1048,41 @@ watch([workflows, selectedWorkflowId], () => {
       v-model:show="createChooserOpen"
       @select="selectWorkflowCreateType"
     />
+
+    <n-popover :show="contextInfoOpen && !!contextInfoWorkflow?.metadata" trigger="manual" placement="bottom-start"
+      :x="contextInfoX" :y="contextInfoY" :show-arrow="false" to="body" @clickoutside="contextInfoOpen = false">
+      <WorkflowInfo v-if="contextInfoOpen && contextInfoWorkflow?.metadata" :key="contextInfoWorkflow.id"
+        :workflow-name="contextInfoWorkflow.name" :metadata="contextInfoWorkflow.metadata" @close="closeContextInfo" />
+    </n-popover>
+
+    <n-modal v-model:show="exportDialogOpen" preset="card" :title="t('workflows.exportWorkflow')"
+      style="width: min(520px, calc(100vw - 48px)); max-height: calc(100dvh - 112px)"
+      :content-style="{ minHeight: 0, overflow: 'auto' }" :bordered="false"
+      :mask-closable="!exportBusy" :close-on-esc="!exportBusy" :closable="!exportBusy"
+      role="dialog" aria-modal="true" :aria-label="t('workflows.exportWorkflow')">
+      <n-form label-placement="top" @submit.prevent="confirmExportWorkflow">
+        <n-form-item :label="t('workflows.workflowAuthor')" label-for="workflow-export-author">
+          <n-input v-model:value="exportMetadata.author" :maxlength="200" :disabled="exportBusy"
+            :input-props="{ id: 'workflow-export-author' }" />
+        </n-form-item>
+        <n-form-item :label="t('workflows.workflowReleaseVersion')" label-for="workflow-export-version">
+          <n-input v-model:value="exportMetadata.version" placeholder="1.0.0" :maxlength="64" :disabled="exportBusy"
+            :input-props="{ id: 'workflow-export-version' }" />
+        </n-form-item>
+        <n-form-item label="GUID" label-for="workflow-export-guid">
+          <n-input :value="exportMetadata.guid" readonly :input-props="{ id: 'workflow-export-guid' }" />
+        </n-form-item>
+        <n-form-item :label="t('workflows.workflowStudioVersion')" label-for="workflow-export-studio-version">
+          <n-input :value="exportStudioVersion" readonly :input-props="{ id: 'workflow-export-studio-version' }" />
+        </n-form-item>
+      </n-form>
+      <template #footer>
+        <n-space justify="end">
+          <n-button :disabled="exportBusy" @click="exportDialogOpen = false">{{ t('common.cancel') }}</n-button>
+          <n-button type="primary" :loading="exportBusy" @click="confirmExportWorkflow">{{ t('workflows.exportWorkflow') }}</n-button>
+        </n-space>
+      </template>
+    </n-modal>
 
     <n-modal v-model:show="settingsOpen" preset="card" class="wf-settings-modal" :title="t('workflows.settingsTitle')"
       style="width: min(640px, calc(100vw - 48px)); max-height: calc(100dvh - 112px)"
@@ -1459,7 +1602,6 @@ watch([workflows, selectedWorkflowId], () => {
 
 .wf-overview__description {
   grid-column: 1 / -1;
-  grid-row: 2;
   margin: 0;
   color: var(--on-surface-muted);
   font-size: 13px;
@@ -1472,6 +1614,37 @@ watch([workflows, selectedWorkflowId], () => {
   white-space: normal;
   overflow-wrap: anywhere;
 }
+
+.wf-overview__publication {
+  grid-column: 1 / -1;
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--on-surface-muted);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wf-overview__publication span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-overview__publication .n-icon { flex-shrink: 0; font-size: 15px; }
+.wf-overview__publication:hover { color: var(--primary-strong); }
+.wf-overview__publication:focus-visible { outline: 2px solid var(--primary); outline-offset: 4px; border-radius: 2px; }
 
 .wf-settings-button { grid-column: 2; grid-row: 1; align-self: start; margin-top: 3px; }
 .wf-settings-modal .wf-param-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

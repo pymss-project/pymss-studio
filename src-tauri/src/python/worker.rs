@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -812,7 +812,10 @@ fn isolate_python_environment(cmd: &mut Command, cache_root: &Path) {
     for key in HOST_PYTHON_ENV_VARS {
         cmd.env_remove(key);
     }
-    cmd.env("PYTHONNOUSERSITE", "1")
+    // An interpreter flag also works for isolated/embedded Python, which can
+    // ignore PYTHONFAULTHANDLER inherited through the environment.
+    cmd.args(["-X", "faulthandler"])
+        .env("PYTHONNOUSERSITE", "1")
         .env("NUMBA_CACHE_DIR", cache_root.join("numba-cache"))
         .env("PIP_CACHE_DIR", cache_root.join("pip-cache"));
 }
@@ -1116,16 +1119,38 @@ fn emit_batch_stderr(app: &AppHandle, task_ids: &[String], line: String) {
     }
 }
 
-fn native_worker_failure(code: Option<i32>) -> Option<String> {
-    let status = code? as u32;
-    let reason = match status {
-        0xC0000005 => "Windows access violation",
-        0xC000001D => "Windows illegal instruction",
-        0xC0000409 => "Windows fail-fast termination",
-        0xC0000374 => "Windows heap corruption",
-        _ => return None,
+fn native_fault_status(line: &str) -> Option<i32> {
+    let reason = line.trim().strip_prefix("Windows fatal exception: ")?;
+    let status = match reason {
+        "access violation" => 0xC0000005_u32,
+        "illegal instruction" => 0xC000001D_u32,
+        _ => {
+            let hex = reason.strip_prefix("code 0x")?;
+            if hex.len() != 8 { return None; }
+            u32::from_str_radix(hex, 16).ok()?
+        }
     };
-    Some(format!("{reason} (0x{status:08X})"))
+    Some(status as i32)
+}
+
+fn native_worker_failure(code: Option<i32>, fault: Option<i32>) -> Option<String> {
+    // Windows faulthandler can report the native status but exit through the CRT
+    // with code 3. Retain that status independently of the bounded stderr tail.
+    // Handled first-chance faults can also print a header before an unrelated
+    // Python failure, so ordinary exit codes must keep their existing meaning.
+    let fault = if code == Some(3) { fault } else { None };
+    for code in [code, fault].into_iter().flatten() {
+        let status = code as u32;
+        let reason = match status {
+            0xC0000005 => "Windows access violation",
+            0xC000001D => "Windows illegal instruction",
+            0xC0000409 => "Windows fail-fast termination",
+            0xC0000374 => "Windows heap corruption",
+            _ => continue,
+        };
+        return Some(format!("{reason} (0x{status:08X})"));
+    }
+    None
 }
 
 fn worker_stage(envelope: &WorkerEnvelope, fallback_task_id: &str) -> Option<(String, String)> {
@@ -1710,11 +1735,16 @@ fn execute_worker_with_payload(
     let stderr_command = command.to_string();
     let stderr_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let stderr_lines_for_thread = Arc::clone(&stderr_lines);
+    let stderr_fault = Arc::new(AtomicI32::new(0));
+    let stderr_fault_for_thread = Arc::clone(&stderr_fault);
     let stderr_handle = stderr.map(|stderr| {
         std::thread::spawn(move || {
             read_lossy_lines(stderr, |line| {
                 if forward_python_terminal_log(&stderr_app, &line) {
                     return;
+                }
+                if let Some(status) = native_fault_status(&line) {
+                    stderr_fault_for_thread.store(status, Ordering::Release);
                 }
                 if let Ok(mut lines) = stderr_lines_for_thread.lock() {
                     lines.push(line.clone());
@@ -1824,7 +1854,8 @@ fn execute_worker_with_payload(
         return Err(err);
     }
     if !status.success() {
-        if let Some(message) = native_worker_failure(status.code()) {
+        let fault = stderr_fault.load(Ordering::Acquire);
+        if let Some(message) = native_worker_failure(status.code(), (fault != 0).then_some(fault)) {
             return Err(AppError::Worker(format!(
                 "WORKER_NATIVE_CRASH: {message}. Export diagnostics and check system application error events for the faulting module."
             )));
@@ -1976,14 +2007,21 @@ fn spawn_worker_background_inner(
     let stderr = child.stderr.take();
     let stderr_app = app.clone();
     let stderr_task_ids = registered_task_ids.clone();
+    let stderr_fault = Arc::new(AtomicI32::new(0));
+    let stderr_fault_for_thread = Arc::clone(&stderr_fault);
+    let (stderr_done, stderr_drained) = std::sync::mpsc::channel();
     let stderr_handle = stderr.map(|stderr| {
         std::thread::spawn(move || {
             read_lossy_lines(stderr, |line| {
                 if forward_python_terminal_log(&stderr_app, &line) {
                     return;
                 }
+                if let Some(status) = native_fault_status(&line) {
+                    stderr_fault_for_thread.store(status, Ordering::Release);
+                }
                 emit_batch_stderr(&stderr_app, &stderr_task_ids, line);
             });
+            let _ = stderr_done.send(());
         })
     });
     let shared_child = Arc::new(Mutex::new(child));
@@ -2230,6 +2268,11 @@ fn spawn_worker_background_inner(
                 }));
             }
         }
+        // A descendant can retain stderr after the Worker exits. Bound this
+        // drain so its inherited pipe cannot hide the task's failure event.
+        if exit_status.as_ref().is_some_and(|status| !status.success()) {
+            let _ = stderr_drained.recv_timeout(Duration::from_secs(1));
+        }
         let missing_terminal_task_ids = registered_task_ids
             .iter()
             .filter(|task_id| !terminal_task_ids.contains(*task_id))
@@ -2238,7 +2281,8 @@ fn spawn_worker_background_inner(
         if !missing_terminal_task_ids.is_empty() {
             match exit_status {
                 Some(status) if !status.success() => {
-                    if let Some(message) = native_worker_failure(status.code()) {
+                    let fault = stderr_fault.load(Ordering::Acquire);
+                    if let Some(message) = native_worker_failure(status.code(), (fault != 0).then_some(fault)) {
                         let mut details = serde_json::json!({ "exitStatus": status.to_string(), "exitCode": status.code() });
                         if let Some((stage_task_id, stage)) = &last_stage {
                             details["lastStage"] = stage.clone().into();
@@ -2309,14 +2353,31 @@ mod tests {
 
     #[test]
     fn native_worker_exit_codes_preserve_status_without_guessing_the_driver() {
-        let message = super::native_worker_failure(Some(0xC0000005_u32 as i32)).unwrap();
+        let message = super::native_worker_failure(Some(0xC0000005_u32 as i32), None).unwrap();
         assert!(message.contains("0xC0000005"));
         assert!(message.contains("access violation"));
         assert!(!message.contains("AMD") && !message.contains("ROCm"));
         for code in [None, Some(0), Some(1), Some(-9)] {
-            assert!(super::native_worker_failure(code).is_none());
+            assert!(super::native_worker_failure(code, None).is_none());
         }
-        assert!(super::native_worker_failure(Some(0xC000001D_u32 as i32)).unwrap().contains("illegal instruction"));
+        assert!(super::native_worker_failure(Some(0xC000001D_u32 as i32), None).unwrap().contains("illegal instruction"));
+        let fault = Some(0xC000001D_u32 as i32);
+        assert!(super::native_worker_failure(Some(3), fault).unwrap().contains("0xC000001D"));
+        for code in [None, Some(0), Some(1), Some(-9)] {
+            assert!(super::native_worker_failure(code, fault).is_none());
+        }
+    }
+
+    #[test]
+    fn native_fault_headers_accept_only_faulthandler_status_lines() {
+        for line in ["Windows fatal exception: code 0xc000001d", "Windows fatal exception: illegal instruction"] {
+            assert_eq!(super::native_fault_status(line), Some(0xC000001D_u32 as i32));
+        }
+        assert_eq!(super::native_fault_status("Windows fatal exception: access violation"), Some(0xC0000005_u32 as i32));
+        for line in ["illegal instruction", "Warning: Windows fatal exception: illegal instruction",
+                     "Windows fatal exception: code 0xc000001d extra", "Windows fatal exception: code 0x123"] {
+            assert!(super::native_fault_status(line).is_none(), "{line}");
+        }
     }
 
     #[test]
@@ -2947,6 +3008,31 @@ mod tests {
                 .unwrap();
             assert_eq!(value, Some(cache_root.join(directory).as_os_str()));
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn worker_native_fault_reports_the_active_python_frame() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut command = std::process::Command::new("python");
+        command.env("PYTHONFAULTHANDLER", "").arg("-I");
+        super::isolate_python_environment(&mut command, temporary.path());
+        command.current_dir(temporary.path()).args(["-c", r#"
+import ctypes, faulthandler
+ctypes.windll.kernel32.SetErrorMode(0x0002)
+assert faulthandler.is_enabled(), 'Worker native fault diagnostics are disabled'
+def trigger_worker_native_fault():
+    faulthandler._raise_exception(0xC000001D, 1)
+trigger_worker_native_fault()
+"#]);
+        let output = command.output().expect("Python is required for native fault validation");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "The native fault must terminate its disposable process");
+        let fault = stderr.lines().find_map(super::native_fault_status);
+        assert_eq!(fault, Some(0xC000001D_u32 as i32), "{stderr}");
+        let failure = super::native_worker_failure(output.status.code(), fault).expect("Native status was lost");
+        assert!(failure.contains("Windows illegal instruction (0xC000001D)"), "{failure}");
+        assert!(stderr.contains("trigger_worker_native_fault"), "{stderr}");
     }
 
     #[test]
