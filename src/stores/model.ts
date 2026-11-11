@@ -1167,6 +1167,7 @@ export const useModelStore = defineStore('model', () => {
   }
 
   async function downloadModel(name: string, force = false): Promise<boolean> {
+    removeQueuedDownload(name)
     const app = useAppStore()
     const settings = useSettingsStore()
     const existingTask = downloadTasks.value[name]
@@ -1234,6 +1235,8 @@ export const useModelStore = defineStore('model', () => {
     } catch (err) {
       const currentTask = downloadTasks.value[name]
       if (!currentTask || currentTask.taskId !== taskId || ['paused', 'cancelled'].includes(currentTask.status)) return false
+      // Stop waiting requests before asynchronous cleanup can release another download slot.
+      if (!app.runtimeInfo?.ready) clearDownloadQueue()
       // The command may have spawned the worker even if its IPC response was lost. A best-effort
       // cancellation prevents that worker from continuing after the UI has reported a failure.
       await invoke<boolean>('cancel_task', { taskId }).catch(() => false)
@@ -1258,8 +1261,10 @@ export const useModelStore = defineStore('model', () => {
   }
 
   async function cancelDownload(name: string, pause = false) {
+    const wasQueued = downloadQueue.value.includes(name)
+    removeQueuedDownload(name)
     const task = downloadTasks.value[name]
-    if (!task || !['preparing', 'downloading'].includes(task.status)) return false
+    if (!task || !['preparing', 'downloading'].includes(task.status)) return wasQueued
     if (task.status === 'preparing') {
       downloadTasks.value = {
         ...downloadTasks.value,
@@ -1305,9 +1310,6 @@ export const useModelStore = defineStore('model', () => {
       // already counts it as active.
       downloadModel(name).catch((err) => {
         studioLog.warn('queued model download failed to start', { model: name, error: err instanceof Error ? err.message : String(err) })
-        // Without a runtime every queued model would fail the same way; stop instead of
-        // reporting the same error once per model.
-        if (!useAppStore().runtimeInfo?.ready) downloadQueue.value = []
       }).finally(() => pumpDownloadQueue())
     }
   }

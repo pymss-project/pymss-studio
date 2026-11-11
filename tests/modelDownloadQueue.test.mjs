@@ -11,7 +11,7 @@ const source = ts.createSourceFile('model.ts', readFileSync(new URL('../src/stor
 const declaration = source.statements.find(statement => ts.isVariableStatement(statement)
   && statement.declarationList.declarations.some(item => item.name.getText(source) === 'useModelStore'))
 const body = declaration.declarationList.declarations[0].initializer.arguments[1].body
-const names = new Set(['downloadModel', 'deleteModel', 'deleteStorageModels', 'isDeleteTaskTerminal', 'isModelDeletionPending', 'canQueueDownload',
+const names = new Set(['downloadModel', 'cancelDownload', 'deleteModel', 'deleteStorageModels', 'isDeleteTaskTerminal', 'isModelDeletionPending', 'canQueueDownload',
   'pumpDownloadQueue', 'enqueueBatchDownload', 'removeQueuedDownload', 'clearDownloadQueue'])
 const functions = body.statements.filter(statement => ts.isFunctionDeclaration(statement) && names.has(statement.name?.text))
 assert.equal(functions.length, names.size)
@@ -37,7 +37,7 @@ function environment(t) {
     useAppStore: () => ({ runtimeInfo: { ready: true }, async checkRuntimeInfo() {} }),
     useSettingsStore: () => ({ modelDir: 'C:/Models', downloadSource: 'modelscope', downloadMethod: 'requests' }),
     watch(...args) { const stop = watch(...args); stops.push(stop); return stop },
-    async invoke(command, args) { calls.push({ command, ...args }); return { started: true } },
+    async invoke(command, args) { calls.push({ command, ...args }); return command === 'cancel_task' ? true : { started: true } },
     waitForDeleteTask: name => new Promise((resolve, reject) => waiting.set(name, { resolve, reject })),
     finalizeDeletedModel() {}, clearDeleteTask: name => { delete state.deleteTasks.value[name] },
     async deleteToolModel() {}, async loadModelStorageSummary() {},
@@ -173,4 +173,118 @@ test('a failed storage refresh does not leave completed deletion targets reserve
   h.finishDeletion('c')
   await rejected
   assert.equal(h.store.canQueueDownload('c'), true)
+})
+
+for (const pause of [false, true]) {
+  test(`manually starting a queued model removes its queue entry and ${pause ? 'pausing' : 'cancelling'} cannot restart it`, async t => {
+    const h = environment(t)
+    h.store.enqueueBatchDownload(['a', 'b', 'c'])
+    await flush()
+    assert.equal(await h.store.downloadModel('c'), true)
+    await flush()
+    assert.equal(await h.store.cancelDownload('c', pause), true)
+    h.state.downloadTasks.value.a.status = 'done'
+    await flush()
+    assert.deepEqual(Array.from(h.state.downloadQueue.value), [])
+    assert.deepEqual(h.started(), ['a', 'b', 'c'])
+    assert.equal(h.state.downloadTasks.value.c.status, pause ? 'paused' : 'cancelled')
+  })
+}
+
+test('cancelling a queued model without a running task removes it and reports success', async t => {
+  const h = environment(t)
+  h.store.enqueueBatchDownload(['a', 'b', 'c'])
+  await flush()
+  assert.equal(await h.store.cancelDownload('c'), true)
+  h.state.downloadTasks.value.a.status = 'done'
+  await flush()
+  assert.deepEqual(Array.from(h.state.downloadQueue.value), [])
+  assert.deepEqual(h.started(), ['a', 'b'])
+  assert.equal(await h.store.cancelDownload('missing'), false)
+})
+
+test('cancelling a manual queued download during preparation never starts its worker later', async t => {
+  const h = environment(t)
+  h.store.enqueueBatchDownload(['a', 'b', 'c'])
+  await flush()
+  let release
+  const runtimeCheck = new Promise(resolve => { release = resolve })
+  h.state.useAppStore = () => ({ runtimeInfo: { ready: true }, checkRuntimeInfo: () => runtimeCheck })
+  const starting = h.store.downloadModel('c')
+  assert.equal(h.state.downloadTasks.value.c.status, 'preparing')
+  assert.equal(await h.store.cancelDownload('c'), true)
+  h.state.downloadTasks.value.a.status = 'done'
+  await flush()
+  release()
+  await starting
+  await flush()
+  assert.deepEqual(Array.from(h.state.downloadQueue.value), [])
+  assert.deepEqual(h.started(), ['a', 'b'])
+})
+
+test('a failed manual start stays out of the queue while other queued models continue', async t => {
+  const h = environment(t)
+  h.store.enqueueBatchDownload(['a', 'b', 'c', 'd'])
+  await flush()
+  const invoke = h.state.invoke
+  h.state.invoke = async (command, args) => {
+    const result = await invoke(command, args)
+    if (command === 'start_model_download' && args.payload.model === 'c') throw new Error('Start failed')
+    return result
+  }
+  await assert.rejects(h.store.downloadModel('c'), /Start failed/)
+  h.state.downloadTasks.value.a.status = 'done'
+  await flush()
+  assert.deepEqual(h.started(), ['a', 'b', 'c', 'd'])
+  assert.equal(h.state.downloadTasks.value.c.status, 'error')
+})
+
+test('an unavailable runtime clears waiting downloads before failed tasks release their slots', async t => {
+  const h = environment(t)
+  h.state.useAppStore = () => ({ runtimeInfo: { ready: false }, async checkRuntimeInfo() {} })
+  h.store.enqueueBatchDownload(['a', 'b', 'c', 'd'])
+  await flush()
+  assert.deepEqual(Object.keys(h.state.downloadTasks.value), ['a', 'b'])
+  assert.deepEqual(Array.from(h.state.downloadQueue.value), [])
+  assert.deepEqual(h.started(), [])
+})
+
+test('downloads waiting for a runtime installation keep their queue and resume after activation', async t => {
+  const h = environment(t)
+  let release
+  const installation = new Promise(resolve => { release = resolve })
+  const app = { runtimeInfo: { ready: false }, runtimeInstallStatus: 'installing',
+    waitForRuntimeInstall: () => installation, async checkRuntimeInfo() {} }
+  h.state.useAppStore = () => app
+  h.store.enqueueBatchDownload(['a', 'b', 'c'])
+  await flush()
+  assert.deepEqual(Array.from(h.state.downloadQueue.value), ['c'])
+  assert.deepEqual(h.started(), [])
+  app.runtimeInfo.ready = true
+  app.runtimeInstallStatus = 'success'
+  release()
+  await flush()
+  assert.deepEqual(h.started(), ['a', 'b'])
+  h.state.downloadTasks.value.a.status = 'done'
+  await flush()
+  assert.deepEqual(h.started(), ['a', 'b', 'c'])
+})
+
+test('an unavailable runtime stops the queue before asynchronous worker cleanup finishes', async t => {
+  const h = environment(t)
+  const cleanup = []
+  h.state.downloadTasks.value.d = { status: 'downloading' }
+  h.state.useAppStore = () => ({ runtimeInfo: { ready: false }, async checkRuntimeInfo() {} })
+  h.state.invoke = async command => command === 'cancel_task'
+    ? new Promise(resolve => cleanup.push(() => resolve(true))) : { started: true }
+  h.store.enqueueBatchDownload(['a', 'b'])
+  await flush()
+  assert.equal(cleanup.length, 1)
+  h.state.downloadTasks.value.d.status = 'done'
+  await flush()
+  const attempted = Object.keys(h.state.downloadTasks.value).sort()
+  cleanup.forEach(resolve => resolve())
+  await flush()
+  assert.deepEqual(attempted, ['a', 'd'])
+  assert.deepEqual(Array.from(h.state.downloadQueue.value), [])
 })
