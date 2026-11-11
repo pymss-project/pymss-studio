@@ -411,12 +411,20 @@ export function initTheme(
   })
 }
 
+function isLinuxWebKit() {
+  return /Linux/i.test(navigator.platform)
+    && /AppleWebKit/i.test(navigator.userAgent)
+    && !/Chrom(?:e|ium)|Edg|Android/i.test(navigator.userAgent)
+}
+
 export async function runRippleViewTransition(
   update: () => void | Promise<void>,
   origin?: { x: number; y: number },
 ) {
   const doc = document as DocumentWithViewTransition
-  if (!origin || !doc.startViewTransition) {
+  // WebKitGTK can segfault in startViewTransition when accelerated compositing is unavailable.
+  // Skip the native API entirely: https://bugs.webkit.org/show_bug.cgi?id=324730
+  if (!origin || !doc.startViewTransition || isLinuxWebKit()) {
     await update()
     return
   }
