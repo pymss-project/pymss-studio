@@ -129,9 +129,14 @@ def resolve_report(python: Path, requirements: list[str], report: Path, index: s
 def _binary_record(path: Path, source: dict, provenance: dict, base_url: str) -> dict:
     name, version, _, tags = parse_wheel_filename(path.name)
     with zipfile.ZipFile(path) as archive:
-        names = [entry for entry in archive.namelist() if entry.endswith(".dist-info/METADATA")]
+        # Vendored libraries can include nested dist-info directories. Only
+        # root metadata identifies the distribution published by this wheel.
+        names = [entry for entry in archive.namelist()
+                 if entry.count("/") == 1 and entry.endswith(".dist-info/METADATA")]
         if len(names) != 1:
-            raise RuntimeError("Wheel must contain exactly one distribution metadata record")
+            raise RuntimeError(
+                f"Wheel must contain exactly one top-level distribution metadata record: {path.name} (found {len(names)})"
+            )
         metadata = BytesParser().parsebytes(archive.read(names[0]))
     if canonicalize_name(metadata["Name"]) != name or metadata["Version"] != str(version):
         raise RuntimeError("Wheel metadata differs from its filename")

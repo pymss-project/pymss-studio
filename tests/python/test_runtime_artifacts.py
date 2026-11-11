@@ -39,6 +39,64 @@ def wheel(directory, name, requires=(), *, version="1.0"):
     return path
 
 
+class RuntimeWheelMetadataTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        spec = importlib.util.spec_from_file_location("runtime_wheel_metadata_cli", ROOT / "scripts/runtime-artifacts.py")
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+
+    def record(self, path):
+        return self.module._binary_record(path, {}, {}, "https://example.invalid/releases/v1")
+
+    def test_nested_vendor_metadata_does_not_count_as_another_distribution(self):
+        path = wheel(self.directory, "vendor-host", ["host-dependency>=1"])
+        with zipfile.ZipFile(path, "a") as archive:
+            for name in ("vendor_one", "vendor_two"):
+                archive.writestr(f"vendor_host/_vendor/{name}-2.0.dist-info/METADATA",
+                                 f"Metadata-Version: 2.1\nName: {name}\nVersion: 2.0\nRequires-Dist: vendor-only>=9\n")
+        record = self.record(path)
+        self.assertEqual(record["name"], "vendor-host")
+        self.assertEqual(record["version"], "1.0")
+        self.assertEqual(record["dependencies"], ["host-dependency"])
+        self.assertEqual(record["sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def test_nested_metadata_cannot_replace_missing_root_metadata(self):
+        path = self.directory / "vendor_host-1.0-py3-none-any.whl"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("vendor_host/_vendor/vendor_host-1.0.dist-info/METADATA",
+                             "Metadata-Version: 2.1\nName: vendor-host\nVersion: 1.0\n")
+        with self.assertRaisesRegex(RuntimeError, "exactly one top-level") as error:
+            self.record(path)
+        self.assertIn(path.name, str(error.exception))
+
+    def test_multiple_root_distributions_remain_rejected(self):
+        path = wheel(self.directory, "vendor-host")
+        with zipfile.ZipFile(path, "a") as archive:
+            archive.writestr("another-2.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: another\nVersion: 2.0\n")
+        with self.assertRaisesRegex(RuntimeError, "exactly one top-level"):
+            self.record(path)
+
+    def test_duplicate_root_metadata_remains_rejected(self):
+        path = wheel(self.directory, "vendor-host")
+        with zipfile.ZipFile(path, "a") as archive:
+            with self.assertWarnsRegex(UserWarning, "Duplicate name"):
+                archive.writestr("vendor_host-1.0.dist-info/METADATA",
+                                 "Metadata-Version: 2.1\nName: vendor-host\nVersion: 1.0\n")
+        with self.assertRaisesRegex(RuntimeError, "exactly one top-level"):
+            self.record(path)
+
+    def test_root_metadata_must_still_match_the_wheel_identity(self):
+        path = self.directory / "vendor_host-1.0-py3-none-any.whl"
+        for name, version in (("another", "1.0"), ("vendor-host", "2.0")):
+            with self.subTest(name=name, version=version):
+                with zipfile.ZipFile(path, "w") as archive:
+                    archive.writestr("vendor_host-1.0.dist-info/METADATA",
+                                     f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n")
+                with self.assertRaisesRegex(RuntimeError, "differs from its filename"):
+                    self.record(path)
+
+
 class RuntimeArtifactTests(unittest.TestCase):
     def setUp(self):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
