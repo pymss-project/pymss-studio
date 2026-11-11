@@ -25,10 +25,18 @@ from worker_models import (
     config_path_for,
     get_any_model_entry,
     is_user_model_entry,
+    load_parameter_resolution,
     model_path_for,
 )
 from worker_protocol import ProtocolLogHandler, _as_bool, _as_float, _as_int, current_log_task_id, emit, emit_error, task_logging
 from worker_inference_constraints import InferenceParameterError, validate_chunk_size
+from worker_inference_snapshot import (
+    SNAPSHOT_PARAMS_VERSION,
+    compute_inference_fingerprint,
+    parse_inference_params_version,
+    validate_snapshot_against_resolution,
+    validate_snapshot_payload,
+)
 from worker_paths import normalize_output_dir as _normalize_output_dir
 
 
@@ -629,17 +637,27 @@ def _prepare_separator(
     source = payload.get("source") or "modelscope"
     download_method = payload.get("downloadMethod") or "aria2c"
     endpoint = payload.get("endpoint") or None
+    # Version dispatch runs before device probing so an invalid snapshot fails without touching
+    # Torch. v4 carries a frozen resolvedInference snapshot and bypasses the legacy sanitize/enrich
+    # path (which treats 0 as "Default"); v1-3 keep their historical meaning.
+    params_version = parse_inference_params_version(payload.get("inferenceParamsVersion"))
+    snapshot: dict[str, Any] | None = None
+    if params_version == SNAPSHOT_PARAMS_VERSION:
+        snapshot = validate_snapshot_payload(payload)
+        use_tta = bool(snapshot["useTta"])
+        inference_params = dict(snapshot["parameters"])
+    else:
+        use_tta = bool(payload.get("useTta", False))
+        inference_params = normalize_inference_params(
+            payload.get("inferenceParams"),
+            payload.get("inferenceParamsVersion"),
+        )
     device, device_ids, resolved_device_label = _resolve_separator_device(
         payload.get("device"), payload.get("deviceIds")
     )
     output_format = payload.get("outputFormat") or "wav"
     selected_stems = _normalize_selected_stems(payload.get("selectedStems"))
-    use_tta = bool(payload.get("useTta", False))
     debug = bool(payload.get("debug", False))
-    inference_params = normalize_inference_params(
-        payload.get("inferenceParams"),
-        payload.get("inferenceParamsVersion"),
-    )
     audio_params = normalize_audio_params(payload.get("audioParams"))
 
     emit("task_log", {
@@ -654,6 +672,7 @@ def _prepare_separator(
     emit("task_stage", {"stage": "loading_runtime", "message": "Loading separation runtime"}, task_id=task_id)
     StudioMSSeparator = _studio_separator_type()
     emit("task_stage", {"stage": "loading_model", "message": "Loading model"}, task_id=task_id)
+    downloaded_now = False
     try:
         resolved = _resolve_studio_model(model_name, model_dir, require_supported=True, require_exists=True)
     except Exception as resolve_exc:
@@ -676,6 +695,7 @@ def _prepare_separator(
                 task_id=task_id,
             )
             resolved = _resolve_studio_model(model_name, model_dir, require_supported=True, require_exists=True)
+            downloaded_now = True
         except Exception as download_exc:
             raise ModelDownloadError(str(download_exc)) from download_exc
     if not isinstance(resolved, dict):
@@ -685,11 +705,20 @@ def _prepare_separator(
     if not resolved_model_type or not resolved_model_path:
         missing = [key for key in ('model_type', 'model_path') if not resolved.get(key)]
         raise RuntimeError(f"resolve_model result for {model_name!r} is missing required field(s): {', '.join(missing)}")
-    runtime_inference_params = _enrich_inference_params_for_model(
-        model_type=resolved_model_type,
-        config_path=resolved.get('config_path'),
-        inference_params=inference_params,
-    )
+    if snapshot is not None:
+        runtime_inference_params = _snapshot_runtime_params(
+            snapshot,
+            model_type=resolved_model_type,
+            config_path=resolved.get('config_path'),
+            model_path=resolved_model_path,
+            downloaded_now=downloaded_now,
+        )
+    else:
+        runtime_inference_params = _enrich_inference_params_for_model(
+            model_type=resolved_model_type,
+            config_path=resolved.get('config_path'),
+            inference_params=inference_params,
+        )
     target_options = {}
     if resolved.get('target_instrument_override') is not None:
         target_options['target_instrument_override'] = resolved['target_instrument_override']
@@ -712,6 +741,27 @@ def _prepare_separator(
         output_naming=payload.get("outputNaming"),
         output_model=str(model_name or ""),
     )
+
+
+def _snapshot_runtime_params(
+    snapshot: dict[str, Any],
+    *,
+    model_type: str | None,
+    config_path: str | None,
+    model_path: str | None,
+    downloaded_now: bool = False,
+) -> dict[str, Any]:
+    """Validate a v4 snapshot against the model as it exists now and return it unchanged.
+
+    No rounding, defaulting or model-library re-merge happens here: the frozen parameters are
+    passed to pymss verbatim, so an explicit overlap_size=0 really means zero overlap."""
+    resolution = load_parameter_resolution(model_type, config_path, model_path)
+    accepted: tuple[str, ...] = ()
+    if downloaded_now:
+        # Metadata for a model whose weights were absent could only hash "no weights"; the task
+        # itself just fetched them, so that pre-download fingerprint is still the submitted one.
+        accepted = (compute_inference_fingerprint(model_type, config_path, model_path, ignore_model_stat=True),)
+    return validate_snapshot_against_resolution(snapshot, resolution, accepted_fingerprints=accepted)
 
 
 def normalize_inference_params(payload_params: Any, version: Any = None) -> dict[str, Any]:

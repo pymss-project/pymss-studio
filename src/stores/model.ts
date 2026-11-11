@@ -12,6 +12,7 @@ import { matchesModelSource, type ModelSourceFilter } from '@/utils/modelSource'
 import { useAppStore } from '@/stores/app'
 import { registerWindowCloseGuard } from '@/utils/windowCloseGuards'
 import { inferenceChunkSizeIssue, normalizeInferenceParamMeta, type InferenceParamMeta } from '@/features/inference/sampleStep'
+import { resolveParameters } from '@/features/inference/parameters'
 
 /** How the model library lays its entries out. */
 export type ModelViewMode = 'card' | 'list'
@@ -289,6 +290,8 @@ type StoredModelState = {
   modelDir?: string
   downloadTasks?: Record<string, DownloadTask>
   modelInferenceOverrides?: Record<string, ModelDefaultInferenceParams>
+  modelInferenceSchemaVersion?: number
+  legacyModelInferenceOverrides?: Record<string, ModelDefaultInferenceParams>
   modelInferenceBaseDefaults?: Record<string, ModelDefaultInferenceParams>
   modelInferenceBaseKnown?: Record<string, boolean>
   modelInferenceBaseSources?: Record<string, ModelEntry['defaultInferenceParamsSource']>
@@ -388,12 +391,13 @@ function normalizeDefaultInferenceParams(input?: Record<string, unknown> | null)
 }
 
 function normalizeModelEntry(model: ModelEntry): ModelEntry {
-  const rawDefaults = model.defaultInferenceParams as Record<string, unknown> | undefined
+  const meta = normalizeInferenceParamMeta(model.inferenceParamMeta)
+  const rawDefaults = (meta?.resolution?.defaults || model.defaultInferenceParams) as Record<string, unknown> | undefined
   return {
     ...model,
     defaultInferenceParams: normalizeDefaultInferenceParams(rawDefaults),
     defaultInferenceParamsResolved: rawDefaults !== undefined,
-    inferenceParamMeta: normalizeInferenceParamMeta(model.inferenceParamMeta),
+    inferenceParamMeta: meta,
   }
 }
 
@@ -453,6 +457,10 @@ export const useModelStore = defineStore('model', () => {
   const downloadErrors = ref<Record<string, string>>({})
   const downloadTasks = ref<Record<string, DownloadTask>>({})
   const modelInferenceOverrides = ref<Record<string, ModelDefaultInferenceParams>>({})
+  const legacyModelInferenceOverrides = ref<Record<string, ModelDefaultInferenceParams>>({})
+  const modelInferenceRevision = ref(0)
+  let inferenceMutationQueue: Promise<void> = Promise.resolve()
+  const metadataLoads = new Map<string, Promise<ModelEntry>>()
   const modelInferenceBaseDefaults = ref<Record<string, ModelDefaultInferenceParams>>({})
   const modelInferenceBaseKnown = ref<Record<string, boolean>>({})
   const modelInferenceBaseSources = ref<Record<string, ModelEntry['defaultInferenceParamsSource']>>({})
@@ -517,6 +525,8 @@ export const useModelStore = defineStore('model', () => {
       modelDir: modelDir.value,
       downloadTasks: downloadTasks.value,
       modelInferenceOverrides: modelInferenceOverrides.value,
+      modelInferenceSchemaVersion: 1,
+      legacyModelInferenceOverrides: legacyModelInferenceOverrides.value,
       modelInferenceBaseDefaults: modelInferenceBaseDefaults.value,
       modelInferenceBaseKnown: modelInferenceBaseKnown.value,
       modelInferenceBaseSources: modelInferenceBaseSources.value,
@@ -553,6 +563,19 @@ export const useModelStore = defineStore('model', () => {
     if (initialized.value) return
     const stored = await loadAppStore<StoredModelState>('model-state')
     modelInferenceOverrides.value = normalizeModelInferenceOverrides(stored?.modelInferenceOverrides)
+    legacyModelInferenceOverrides.value = normalizeModelInferenceOverrides(stored?.legacyModelInferenceOverrides)
+    if (!stored?.modelInferenceSchemaVersion) {
+      for (const [name, original] of Object.entries(modelInferenceOverrides.value)) {
+        const next = { ...original }
+        for (const key of ['batch_size', 'chunk_size', 'overlap_size', 'window_size'] as const) {
+          // Library controls in earlier releases used non-positive sizes as Default, not zero overlap.
+          if (typeof next[key] === 'number' && next[key]! <= 0) delete next[key]
+        }
+        if (JSON.stringify(next) !== JSON.stringify(original)) legacyModelInferenceOverrides.value[name] = { ...original }
+        if (Object.keys(next).length) modelInferenceOverrides.value[name] = next
+        else delete modelInferenceOverrides.value[name]
+      }
+    }
     modelInferenceBaseDefaults.value = normalizeModelInferenceOverrides(stored?.modelInferenceBaseDefaults)
     modelInferenceBaseKnown.value = {
       ...(stored?.modelInferenceBaseKnown || {}),
@@ -656,43 +679,57 @@ export const useModelStore = defineStore('model', () => {
     if (selectedInfo.value?.name === name) selectedInfo.value = normalizeModelEntryWithOverrides(selectedInfo.value, { rememberBase: false })
   }
 
-  async function setModelInferenceOverrides(name: string, overrides: ModelDefaultInferenceParams) {
-    const normalized = normalizeDefaultInferenceParams({
-      ...(modelInferenceOverrides.value[name] || {}),
-      ...overrides,
-    } as Record<string, unknown>)
-    if (!normalized) return
-    const entry = selectedInfo.value?.name === name ? selectedInfo.value : models.value.find(item => item.name === name)
-    const chunkIssue = inferenceChunkSizeIssue(normalized.chunk_size, entry?.inferenceParamMeta)
-    if (chunkIssue) throw new Error(`Invalid chunk size. Use ${chunkIssue.values} samples.`)
-    const previousOverrides = modelInferenceOverrides.value
-    modelInferenceOverrides.value = {
-      ...modelInferenceOverrides.value,
-      [name]: normalized,
-    }
-    refreshModelInferenceOverrides(name)
-    try {
-      await flushPersistState()
-    } catch (error) {
-      modelInferenceOverrides.value = previousOverrides
-      refreshModelInferenceOverrides(name)
-      throw error
-    }
+  function mutateInferenceOverrides(
+    build: () => Array<{ name: string; overrides?: ModelDefaultInferenceParams }>,
+    expectedRevision?: number,
+  ) {
+    const mutation = inferenceMutationQueue.catch(() => undefined).then(async () => {
+      if (expectedRevision !== undefined && expectedRevision !== modelInferenceRevision.value) throw new Error('MODEL_PARAMETERS_CHANGED')
+      const updates = build()
+      if (!updates.length) return
+      if (new Set(updates.map(item => item.name)).size !== updates.length) throw new Error('Duplicate model parameter updates')
+      const next = { ...modelInferenceOverrides.value }
+      for (const update of updates) {
+        const normalized = normalizeDefaultInferenceParams(update.overrides)
+        const entry = selectedInfo.value?.name === update.name ? selectedInfo.value : models.value.find(item => item.name === update.name)
+        if (normalized) {
+          if (entry?.inferenceParamMeta?.resolution) {
+            const result = resolveParameters(entry.inferenceParamMeta.resolution, normalized, 'model', {})
+            if (result.issues.length) throw new Error(`Invalid model parameters: ${result.issues[0]!.key}`)
+          } else {
+            const issue = inferenceChunkSizeIssue(normalized.chunk_size, entry?.inferenceParamMeta)
+            if (issue) throw new Error(`Invalid chunk size. Use ${issue.values} samples.`)
+          }
+          next[update.name] = normalized
+        } else delete next[update.name]
+      }
+      const previous = modelInferenceOverrides.value
+      modelInferenceOverrides.value = next
+      modelInferenceRevision.value += 1
+      updates.forEach(item => refreshModelInferenceOverrides(item.name))
+      try { await flushPersistState() }
+      catch (error) {
+        modelInferenceOverrides.value = previous
+        modelInferenceRevision.value += 1
+        updates.forEach(item => refreshModelInferenceOverrides(item.name))
+        throw error
+      }
+    })
+    inferenceMutationQueue = mutation
+    return mutation
   }
 
-  async function resetModelInferenceOverrides(name: string) {
-    if (!modelInferenceOverrides.value[name]) return
-    const previousOverrides = modelInferenceOverrides.value
-    const { [name]: _, ...rest } = modelInferenceOverrides.value
-    modelInferenceOverrides.value = rest
-    refreshModelInferenceOverrides(name)
-    try {
-      await flushPersistState()
-    } catch (error) {
-      modelInferenceOverrides.value = previousOverrides
-      refreshModelInferenceOverrides(name)
-      throw error
-    }
+  function setModelInferenceOverrides(name: string, overrides: ModelDefaultInferenceParams) {
+    return mutateInferenceOverrides(() => [{ name, overrides: { ...modelInferenceOverrides.value[name], ...overrides } }])
+  }
+
+  function replaceModelInferenceOverridesBatch(updates: Array<{ name: string; overrides?: ModelDefaultInferenceParams }>, expectedRevision: number) {
+    const snapshot = JSON.parse(JSON.stringify(updates)) as typeof updates
+    return mutateInferenceOverrides(() => snapshot, expectedRevision)
+  }
+
+  function resetModelInferenceOverrides(name: string) {
+    return mutateInferenceOverrides(() => [{ name }])
   }
 
   function getModelInferenceOverrides(name: string) {
@@ -820,8 +857,29 @@ export const useModelStore = defineStore('model', () => {
     }
   }
 
+  function ensureModelMetadata(name: string, force = false): Promise<ModelEntry> {
+    const directory = useSettingsStore().modelDir || null
+    const cached = selectedInfo.value?.name === name ? selectedInfo.value : models.value.find(item => item.name === name)
+    if (!force && cached?.inferenceParamMeta?.resolution) return Promise.resolve(cached)
+    const key = JSON.stringify([directory, name])
+    const pending = metadataLoads.get(key)
+    if (pending) return pending
+    const load = invoke<ModelEntry>('get_model_info', { payload: { model: name, modelDir: directory } }).then(info => {
+      if ((useSettingsStore().modelDir || null) !== directory) throw new Error('Model directory changed while loading parameters')
+      const previousFingerprint = cached?.inferenceParamMeta?.resolution?.fingerprint
+      const nextFingerprint = info.inferenceParamMeta?.resolution?.fingerprint
+      if (previousFingerprint !== nextFingerprint) delete modelInferenceBaseKnown.value[name]
+      const normalized = normalizeModelEntryWithOverrides(info)
+      const index = models.value.findIndex(item => item.name === name)
+      if (index >= 0) models.value[index] = normalized
+      if (selectedModel.value === name) selectedInfo.value = normalized
+      return normalized
+    }).finally(() => { if (metadataLoads.get(key) === load) metadataLoads.delete(key) })
+    metadataLoads.set(key, load)
+    return load
+  }
+
   function selectModel(modelOrName: string | ModelEntry) {
-    const settings = useSettingsStore()
     const name = typeof modelOrName === 'string' ? modelOrName : modelOrName.name
     selectedModel.value = name
 
@@ -830,7 +888,7 @@ export const useModelStore = defineStore('model', () => {
       : modelOrName
     if (listEntry) selectedInfo.value = listEntry
 
-    const hasResolvedDefaults = Boolean(listEntry?.defaultInferenceParamsResolved && listEntry.defaultInferenceParams)
+    const hasResolvedDefaults = Boolean(listEntry?.inferenceParamMeta?.resolution)
     const shouldRefreshBaseDefaults = Boolean(modelInferenceOverrides.value[name] && !modelInferenceBaseKnown.value[name])
     if (listEntry && hasResolvedDefaults && !shouldRefreshBaseDefaults && String(listEntry.configInstruments || '').trim()) {
       detailLoading.value = false
@@ -838,16 +896,7 @@ export const useModelStore = defineStore('model', () => {
     }
 
     detailLoading.value = true
-    return invoke<ModelEntry>('get_model_info', {
-      payload: {
-        model: name,
-        modelDir: settings.modelDir || null,
-      },
-    }).then((info) => {
-      const normalizedInfo = normalizeModelEntryWithOverrides(info)
-      if (selectedModel.value === name) selectedInfo.value = normalizedInfo
-      return normalizedInfo
-    }).catch((err) => {
+    return ensureModelMetadata(name).catch((err) => {
       error.value = err instanceof Error ? err.message : String(err)
       throw err
     }).finally(() => {
@@ -1640,6 +1689,8 @@ export const useModelStore = defineStore('model', () => {
     downloadErrors,
     downloadTasks,
     modelInferenceOverrides,
+    modelInferenceRevision,
+    replaceModelInferenceOverridesBatch,
     modelPreferences,
     deleteTasks,
     modelStorageSummary,
@@ -1652,6 +1703,7 @@ export const useModelStore = defineStore('model', () => {
     initialize,
     loadModels,
     selectModel,
+    ensureModelMetadata,
     setModelInferenceOverrides,
     resetModelInferenceOverrides,
     getModelInferenceOverrides,

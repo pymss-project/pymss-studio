@@ -1179,6 +1179,44 @@ def _workflow_separator_factory(**kwargs: Any) -> Any:
     return separator_type.from_model_name(model_name, **kwargs)
 
 
+def _workflow_snapshot_factory(payload: dict[str, Any]) -> Any:
+    """Bind resolved ensemble parameters without changing ordinary workflow inheritance."""
+    snapshots = payload.get("resolvedInferences")
+    if snapshots is None:
+        return _workflow_separator_factory
+    from worker_inference_constraints import InferenceParameterError
+    from worker_inference_snapshot import validate_snapshot_payload
+
+    if not isinstance(snapshots, dict) or not snapshots:
+        raise InferenceParameterError("resolvedInferences must contain model snapshots")
+
+    def create(**kwargs: Any) -> Any:
+        from worker_infer import _resolve_studio_model, _snapshot_runtime_params
+
+        name = kwargs.get("model_name")
+        snapshot = snapshots.get(name)
+        if not isinstance(snapshot, dict):
+            raise InferenceParameterError(f"Missing resolved inference snapshot for {name!r}")
+        validate_snapshot_payload({
+            "resolvedInference": snapshot,
+            "inferenceParams": snapshot.get("parameters"),
+            "useTta": snapshot.get("useTta"),
+        })
+        resolved = _resolve_studio_model(
+            str(name), kwargs.get("model_dir") or payload.get("modelDir"),
+            require_supported=True, require_exists=True,
+        )
+        parameters = _snapshot_runtime_params(
+            snapshot, model_type=resolved.get("model_type"),
+            config_path=resolved.get("config_path"), model_path=resolved.get("model_path"),
+        )
+        kwargs["inference_params"] = parameters
+        kwargs["use_tta"] = snapshot["useTta"]
+        return _workflow_separator_factory(**kwargs)
+
+    return create
+
+
 def _workflow_graph() -> Any:
     try:
         import pymss.graph as graph
@@ -1323,7 +1361,7 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
             task_id, batch=isinstance(payload.get("tasks"), list) and bool(payload["tasks"]),
         ))
         if separator_cache is None:
-            separator_cache = cleanup.enter_context(_separator_cache_scope(graph.SeparatorCache(factory=_workflow_separator_factory)))
+            separator_cache = cleanup.enter_context(_separator_cache_scope(graph.SeparatorCache(factory=_workflow_snapshot_factory(payload))))
         # Negotiate the optional kernel protocol once. Published runtimes retain
         # their existing progress API; errors from the new API never trigger a retry.
         callbacks = {"execution_event_callback": _emit_execution(task_id, log_scope)} \
@@ -1516,7 +1554,7 @@ def _cmd_infer_workflow_batch(payload: dict[str, Any], raw_tasks: list[Any]) -> 
             # in GPU memory. Advanced graphs retain their native per-run scope.
             graph = _workflow_graph()
             separator_cache = batch_cleanup.enter_context(_separator_cache_scope(graph.SeparatorCache(
-                factory=_workflow_separator_factory, max_entries=1,
+                factory=_workflow_snapshot_factory(payload), max_entries=1,
             )))
         for input_index, item in enumerate(raw_tasks, 1):
             if not isinstance(item, dict):

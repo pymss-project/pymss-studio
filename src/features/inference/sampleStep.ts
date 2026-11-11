@@ -1,7 +1,10 @@
+import { normalizeResolutionMetadata, type ParameterResolutionMetadata } from './parameters.ts'
+
 export type InferenceParamMeta = {
   recommendedSampleStep?: number
   source?: string
   chunkSizeConstraint?: { step: number; offset: number; min: number }
+  resolution?: ParameterResolutionMetadata
 }
 
 const MAX_INFERENCE_SAMPLE_VALUE = 1_048_576
@@ -11,7 +14,9 @@ export function normalizeInferenceParamMeta(input: unknown): InferenceParamMeta 
   if (!input || typeof input !== 'object') return undefined
   const source = input as Record<string, unknown>
   const rawStep = Number(source.recommendedSampleStep)
-  if (!Number.isFinite(rawStep) || rawStep < 1 || rawStep > MAX_INFERENCE_SAMPLE_VALUE) return undefined
+  const resolution = normalizeResolutionMetadata(source.resolution)
+  const hasStep = Number.isFinite(rawStep) && rawStep >= 1 && rawStep <= MAX_INFERENCE_SAMPLE_VALUE
+  if (!hasStep && !resolution) return undefined
   const recommendedSampleStep = Math.floor(rawStep)
   const rawSource = typeof source.source === 'string' ? source.source.trim() : ''
   const constraint = source.chunkSizeConstraint as Record<string, unknown> | undefined
@@ -23,9 +28,10 @@ export function normalizeInferenceParamMeta(input: unknown): InferenceParamMeta 
     && Number.isSafeInteger(min) && min > 0 && min <= MAX_INFERENCE_SAMPLE_VALUE
     && (min - offset) % step === 0
   return {
-    recommendedSampleStep,
+    ...(hasStep ? { recommendedSampleStep } : {}),
     ...(rawSource ? { source: rawSource } : {}),
     ...(validConstraint ? { chunkSizeConstraint: { step, offset, min } } : {}),
+    ...(resolution ? { resolution } : {}),
   }
 }
 

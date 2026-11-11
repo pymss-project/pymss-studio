@@ -35,6 +35,7 @@ import { getSeparateWorkflowInputIssue } from '@/utils/workflowInputs'
 import { runtimeErrorSummary } from '@/utils/runtimeErrors'
 import { cloneWorkflow, prepareWorkbenchRun, workflowInputNodes, type WorkflowRuntimeBindings, type WorkflowWorkbenchSnapshot, type WorkflowNodeState } from '@/workflows/workbench'
 import { SEPARATE_MODEL_PAGE_SIZES, normalizePageSize } from '@/utils/pagination'
+import { createInferenceSnapshot, normalizeCustomParameterIntent, resolveParameters, type CustomParameterIntent, type ParameterMode, type ParameterResolutionMetadata, type ResolvedInferenceSnapshot } from '@/features/inference/parameters'
 
 const studioLog = createLogger('ui.stores.task')
 
@@ -71,6 +72,8 @@ export type SeparationRunConfig = {
   audioParams: Record<string, string | number>
   inferenceParamsVersion?: number
   inferenceParams: Record<string, unknown>
+  resolvedInference?: ResolvedInferenceSnapshot
+  resolvedInferences?: Record<string, ResolvedInferenceSnapshot>
 }
 
 
@@ -175,6 +178,10 @@ type PersistedSeparateState = {
   modelListPageSize?: number
   useTta?: boolean
   inferenceParamsByModel?: Record<string, PersistedSeparateModelState>
+  parameterMode?: ParameterMode
+  customParameterIntent?: CustomParameterIntent
+  legacyParameterBackup?: Record<string, PersistedSeparateModelState>
+  legacyParameterChoices?: Record<string, 'keep' | 'import'>
 }
 
 type ModelInferenceUiDefaults = {
@@ -184,6 +191,7 @@ type ModelInferenceUiDefaults = {
 const AUDIO_EXTENSIONS = ['wav', 'mp3', 'flac', 'm4a', 'aac', 'ogg', 'opus']
 const VIDEO_EXTENSIONS = ['mp4', 'mkv', 'mov', 'avi', 'webm', 'flv']
 const CURRENT_INFERENCE_PARAMS_VERSION = 3
+const RESOLVED_INFERENCE_PARAMS_VERSION = 4
 const TERMINAL_STATUSES: TaskStatus[] = [...TERMINAL_TASK_STATUSES]
 const NORMAL_LOG_LIMIT = 300
 const DEVELOPER_LOG_LIMIT = 1200
@@ -490,7 +498,7 @@ function normalizeRunConfig(runConfig?: SeparationRunConfig): SeparationRunConfi
   }
   const version = next.inferenceParamsVersion || 0
   if (version >= CURRENT_INFERENCE_PARAMS_VERSION) {
-    next.inferenceParamsVersion = CURRENT_INFERENCE_PARAMS_VERSION
+    // Preserve snapshot and future protocol identities; execution rejects unsupported versions.
     return next
   }
 
@@ -551,37 +559,6 @@ function normalizeEditableNumberValue(
   if (typeof current !== 'number' || !Number.isFinite(current)) return null
   if (zeroMeansUnset && current <= 0) return null
   return current
-}
-
-function resolveNumberOverride(
-  defaults: ModelDefaultInferenceParams | undefined,
-  key: keyof ModelDefaultInferenceParams,
-  current: number | null | undefined,
-  options?: { zeroMeansUnset?: boolean },
-) {
-  const zeroMeansUnset = options?.zeroMeansUnset ?? false
-  const normalizedCurrent = normalizeEditableNumberValue(current, { zeroMeansUnset })
-  if (normalizedCurrent === null) return null
-  const defaultValue = defaults?.[key]
-  if (typeof defaultValue === 'number') return normalizedCurrent === defaultValue ? null : normalizedCurrent
-  return normalizedCurrent
-}
-
-function resolveBooleanOverride(defaults: ModelDefaultInferenceParams | undefined, key: keyof ModelDefaultInferenceParams, current: boolean) {
-  const defaultValue = defaults?.[key]
-  if (typeof defaultValue === 'boolean') return current === defaultValue ? null : current
-  return current ? true : null
-}
-
-function preferCurrentOverride<T>(
-  currentOverride: T | null,
-  modelOverrides: ModelDefaultInferenceParams,
-  key: keyof ModelDefaultInferenceParams,
-  useModelOverrideFallback: boolean,
-) {
-  if (currentOverride !== null) return currentOverride
-  if (!useModelOverrideFallback) return null
-  return Object.prototype.hasOwnProperty.call(modelOverrides, key) ? modelOverrides[key] as T : null
 }
 
 function applyModelDefaultsToUi(
@@ -674,7 +651,13 @@ export const useTaskStore = defineStore('task', () => {
   const selectedModelOverrides = ref<ModelDefaultInferenceParams>({})
   const selectedModelType = ref<string | null>(null)
   const selectedStemsCleared = ref(false)
-  const inferenceParamsDirty = ref(false)
+  const parameterMode = ref<ParameterMode>('model')
+  const customParameterIntent = ref<CustomParameterIntent>({})
+  const selectedParameterMetadata = ref<ParameterResolutionMetadata>()
+  const legacyParameterBackup = ref<Record<string, PersistedSeparateModelState>>({})
+  const legacyParameterChoices = ref<Record<string, 'keep' | 'import'>>({})
+  const selectedParameterModel = ref('')
+  const selectedParameterResolution = computed(() => resolveParameters(selectedParameterMetadata.value, selectedModelOverrides.value, parameterMode.value, customParameterIntent.value))
   const persistedSeparateModelState = ref<Record<string, PersistedSeparateModelState>>({})
 
   const inputPath = computed(() => inputFiles.value[0] || '')
@@ -699,7 +682,7 @@ export const useTaskStore = defineStore('task', () => {
 
   function separateStateSnapshot(): PersistedSeparateState {
     return {
-      version: 1,
+      version: 2,
       runMode: separateRunMode.value,
       ensembleEnabled: ensembleEnabled.value,
       ensembleModels: [...ensembleModels.value],
@@ -715,6 +698,10 @@ export const useTaskStore = defineStore('task', () => {
       modelListPageSize: modelListPageSize.value,
       useTta: useTta.value,
       inferenceParamsByModel: JSON.parse(JSON.stringify(persistedSeparateModelState.value)),
+      parameterMode: parameterMode.value,
+      customParameterIntent: JSON.parse(JSON.stringify(customParameterIntent.value)),
+      legacyParameterBackup: JSON.parse(JSON.stringify(legacyParameterBackup.value)),
+      legacyParameterChoices: { ...legacyParameterChoices.value },
     }
   }
 
@@ -889,6 +876,17 @@ export const useTaskStore = defineStore('task', () => {
       : 'usage'
     modelListPageSize.value = normalizePageSize(separateStored?.modelListPageSize, SEPARATE_MODEL_PAGE_SIZES, 12)
     useTta.value = separateStored?.useTta === true
+    parameterMode.value = separateStored?.parameterMode === 'custom' ? 'custom' : 'model'
+    customParameterIntent.value = normalizeCustomParameterIntent(separateStored?.customParameterIntent)
+    legacyParameterBackup.value = Object.fromEntries(Object.entries(separateStored?.legacyParameterBackup || {}).map(([name, value]) => [name, normalizePersistedModelState(value)]))
+    legacyParameterChoices.value = Object.fromEntries(Object.entries(separateStored?.legacyParameterChoices || {}).filter(([, value]) => value === 'keep' || value === 'import'))
+    if ((separateStored?.version || 1) < 2) {
+      for (const [name, value] of Object.entries(separateStored?.inferenceParamsByModel || {})) {
+        const legacy = normalizePersistedModelState(value)
+        const { selectedStems: _stems, selectedStemsCleared: _cleared, ...numbers } = legacy
+        if (Object.keys(numbers).length) legacyParameterBackup.value[name] = numbers
+      }
+    }
     persistedSeparateModelState.value = Object.fromEntries(
       Object.entries(separateStored?.inferenceParamsByModel || {})
         .map(([name, value]) => {
@@ -900,6 +898,7 @@ export const useTaskStore = defineStore('task', () => {
         }),
     )
     initialized.value = true
+    if ((separateStored?.version || 1) < 2 && Object.keys(legacyParameterBackup.value).length) await saveAppStore('separate-state', separateStateSnapshot())
     if (stored?.tasks?.some(task => task.resultHidden)) queuePersist()
   }
 
@@ -911,17 +910,6 @@ export const useTaskStore = defineStore('task', () => {
       queueSeparateStatePersist()
     },
     { deep: true },
-  )
-
-  watch(
-    [batch_size, overlap_size, num_overlap, chunk_size, standardize, normalize, window_size, aggression, enable_post_process,
-      post_process_threshold, high_end_process],
-    () => {
-      if (applyingModelDefaults) return
-      inferenceParamsDirty.value = true
-      const modelStore = useModelStore()
-      if (modelStore.selectedModel) saveCurrentModelState(modelStore.selectedModel)
-    },
   )
 
   watch(
@@ -948,63 +936,126 @@ export const useTaskStore = defineStore('task', () => {
     modelType?: string | null,
     saved?: PersistedSeparateModelState,
     modelOverrides?: ModelDefaultInferenceParams,
-    options: { force?: boolean } = {},
+    _options: { force?: boolean } = {},
   ) {
+    const store = useModelStore()
+    const name = store.selectedModel
+    const info = store.selectedInfo?.name === name ? store.selectedInfo : store.models.find(item => item.name === name)
     selectedModelDefaults.value = baseDefaults ? { ...baseDefaults } : {}
     selectedModelOverrides.value = modelOverrides ? { ...modelOverrides } : {}
     selectedModelType.value = modelType ?? null
-    const next = applyModelDefaultsToUi(baseDefaults, modelType)
-    const modelOverrideValue = <K extends keyof ModelDefaultInferenceParams>(key: K) => (
-      modelOverrides && Object.prototype.hasOwnProperty.call(modelOverrides, key) ? modelOverrides[key] : undefined
-    )
-    const modelDefaultValue = <K extends keyof ModelDefaultInferenceParams>(key: K) => (
-      baseDefaults && Object.prototype.hasOwnProperty.call(baseDefaults, key) ? baseDefaults[key] : undefined
-    )
-    const savedValue = <K extends keyof ModelDefaultInferenceParams & keyof PersistedSeparateModelState>(key: K, fallback: PersistedSeparateModelState[K]) => (
-      saved && Object.prototype.hasOwnProperty.call(saved, key) ? saved[key] : fallback
-    )
-    const modelOrSavedValue = <K extends keyof ModelDefaultInferenceParams & keyof PersistedSeparateModelState>(key: K) => {
-      const override = modelOverrideValue(key)
-      if (override !== undefined) return override
-      const modelDefault = modelDefaultValue(key)
-      if (modelDefault !== undefined) return modelDefault
-      return savedValue(key, next[key])
+    selectedParameterMetadata.value = info?.inferenceParamMeta?.resolution
+    selectedModelUiDefaults.value = { ...(baseDefaults || {}), ...(modelOverrides || {}) }
+    if (selectedParameterModel.value !== name) {
+      applyingModelDefaults = true
+      selectedStems.value = Array.isArray(saved?.selectedStems) ? [...saved.selectedStems] : []
+      selectedStemsCleared.value = saved?.selectedStemsCleared === true
+      selectedParameterModel.value = name
+      void nextTick(() => { applyingModelDefaults = false })
     }
-    const valueOrDefault = <T>(value: T | undefined, fallback: T): T => value === undefined ? fallback : value
-    const resolvedDefaults = {
-      batch_size: valueOrDefault(modelOrSavedValue('batch_size'), 1),
-      overlap_size: valueOrDefault(modelOrSavedValue('overlap_size'), 0),
-      num_overlap: valueOrDefault(modelOrSavedValue('num_overlap'), 0),
-      chunk_size: valueOrDefault(modelOrSavedValue('chunk_size'), 0),
-      standardize: valueOrDefault(modelOrSavedValue('standardize'), false),
-      normalize: valueOrDefault(modelOrSavedValue('normalize'), false),
-      window_size: valueOrDefault(modelOrSavedValue('window_size'), 0),
-      aggression: valueOrDefault(modelOrSavedValue('aggression'), 0),
-      enable_post_process: valueOrDefault(modelOrSavedValue('enable_post_process'), false),
-      post_process_threshold: valueOrDefault(modelOrSavedValue('post_process_threshold'), 0),
-      high_end_process: valueOrDefault(modelOrSavedValue('high_end_process'), false),
-    }
-    selectedModelUiDefaults.value = { ...resolvedDefaults }
-    if (inferenceParamsDirty.value && !options.force) return
+    syncResolvedParameterInputs()
+  }
 
-    applyingModelDefaults = true
-    batch_size.value = resolvedDefaults.batch_size
-    overlap_size.value = resolvedDefaults.overlap_size
-    num_overlap.value = resolvedDefaults.num_overlap
-    chunk_size.value = resolvedDefaults.chunk_size
-    standardize.value = resolvedDefaults.standardize
-    normalize.value = resolvedDefaults.normalize
-    window_size.value = resolvedDefaults.window_size
-    aggression.value = resolvedDefaults.aggression
-    enable_post_process.value = resolvedDefaults.enable_post_process
-    post_process_threshold.value = resolvedDefaults.post_process_threshold
-    high_end_process.value = resolvedDefaults.high_end_process
-    selectedStems.value = Array.isArray(saved?.selectedStems) ? [...saved.selectedStems] : []
-    selectedStemsCleared.value = saved?.selectedStemsCleared === true
-    inferenceParamsDirty.value = false
-    void nextTick(() => {
-      applyingModelDefaults = false
-    })
+  function syncResolvedParameterInputs() {
+    const result = selectedParameterResolution.value
+    const p = result.parameters
+    const fallback = applyModelDefaultsToUi(selectedModelUiDefaults.value as ModelDefaultInferenceParams, selectedModelType.value)
+    batch_size.value = typeof p.batch_size === 'number' ? p.batch_size : fallback.batch_size ?? 1
+    overlap_size.value = typeof p.overlap_size === 'number' ? p.overlap_size : fallback.overlap_size ?? 0
+    num_overlap.value = 0
+    chunk_size.value = typeof p.chunk_size === 'number' ? p.chunk_size : fallback.chunk_size ?? 0
+    standardize.value = typeof p.standardize === 'boolean' ? p.standardize : fallback.standardize ?? false
+    normalize.value = typeof p.normalize === 'boolean' ? p.normalize : fallback.normalize ?? false
+    window_size.value = typeof p.window_size === 'number' ? p.window_size : fallback.window_size ?? 0
+    aggression.value = typeof p.aggression === 'number' ? p.aggression : fallback.aggression ?? 0
+    enable_post_process.value = p.enable_post_process === true
+    post_process_threshold.value = typeof p.post_process_threshold === 'number' ? p.post_process_threshold : fallback.post_process_threshold ?? 0
+    high_end_process.value = p.high_end_process === true
+  }
+  watch(selectedParameterResolution, syncResolvedParameterInputs, { deep: true })
+
+  async function applyParameterSettings(mode: ParameterMode, intent: CustomParameterIntent, tta = useTta.value) {
+    const candidate = JSON.parse(JSON.stringify(intent)) as CustomParameterIntent
+    const resolution = resolveParameters(selectedParameterMetadata.value, selectedModelOverrides.value, mode, candidate)
+    if (resolution.issues.length) throw new Error(i18n.global.t(`parameterEditor.error.${resolution.issues[0]!.code}`, { field: resolution.issues[0]!.key }))
+    const previousMode = parameterMode.value, previousIntent = customParameterIntent.value, previousTta = useTta.value
+    parameterMode.value = mode
+    customParameterIntent.value = normalizeCustomParameterIntent(candidate)
+    useTta.value = tta
+    try { await saveAppStore('separate-state', separateStateSnapshot()) }
+    catch (error) { parameterMode.value = previousMode; customParameterIntent.value = previousIntent; useTta.value = previousTta; throw error }
+  }
+
+  function pendingLegacyParameters(name: string) {
+    return legacyParameterChoices.value[name] ? undefined : legacyParameterBackup.value[name]
+  }
+
+  function previewLegacyParameters(name: string) {
+    const store = useModelStore()
+    const entry = store.selectedInfo?.name === name ? store.selectedInfo : store.models.find(item => item.name === name)
+    const meta = entry?.inferenceParamMeta?.resolution
+    if (!meta) return undefined
+    const archived = legacyParameterBackup.value[name] || {}
+    const numeric: ModelDefaultInferenceParams = {}
+    for (const [key, value] of Object.entries(archived)) {
+      // Historical boolean semantics are ambiguous; leave those values in the archive.
+      if (typeof value !== 'number' || !Number.isFinite(value) || !Object.prototype.hasOwnProperty.call(meta.defaults, key) && key !== 'num_overlap') continue
+      if (value < 0 || (value === 0 && !['aggression', 'post_process_threshold'].includes(key))) continue
+      if (meta.capabilities[key]?.kind === 'fixed' || meta.capabilities[key]?.kind === 'unsupported') continue
+      Object.assign(numeric, { [key]: value })
+    }
+    const overrides = { ...numeric, ...store.getModelInferenceOverrides(name) }
+    const current = resolveParameters(meta, store.getModelInferenceOverrides(name), 'model', {})
+    const imported = resolveParameters(meta, overrides, 'model', {})
+    return { fingerprint: meta.fingerprint, archived, overrides, current, imported }
+  }
+
+  async function resolveLegacyParameters(name: string, choice: 'keep' | 'import') {
+    if (!pendingLegacyParameters(name)) return
+    // Persist the untouched archive before widening any old setting's scope.
+    await saveAppStore('separate-state', separateStateSnapshot())
+    if (choice === 'import') {
+      const store = useModelStore()
+      const reviewed = previewLegacyParameters(name)
+      const revision = store.modelInferenceRevision
+      const refreshed = await store.ensureModelMetadata(name, true)
+      if (reviewed && (reviewed.fingerprint !== refreshed.inferenceParamMeta?.resolution?.fingerprint || revision !== store.modelInferenceRevision)) throw new Error(i18n.global.t('parameterEditor.parametersChanged'))
+      const preview = previewLegacyParameters(name)
+      if (!preview) throw new Error(i18n.global.t('parameterEditor.metadataUnavailable'))
+      if (preview.imported.issues.length) throw new Error(i18n.global.t(`parameterEditor.error.${preview.imported.issues[0]!.code}`, { field: preview.imported.issues[0]!.key }))
+      await store.replaceModelInferenceOverridesBatch([{ name, overrides: preview.overrides }], store.modelInferenceRevision)
+    }
+    const previous = legacyParameterChoices.value
+    legacyParameterChoices.value = { ...previous, [name]: choice }
+    try { await saveAppStore('separate-state', separateStateSnapshot()) }
+    catch (error) { legacyParameterChoices.value = previous; throw error }
+  }
+
+  async function prepareInferenceSnapshot(name: string, context = { mode: parameterMode.value, intent: JSON.parse(JSON.stringify(customParameterIntent.value)) as CustomParameterIntent, useTta: useTta.value }): Promise<ResolvedInferenceSnapshot> {
+    if (pendingLegacyParameters(name)) throw new Error(i18n.global.t('parameterEditor.migrationRequired'))
+    const store = useModelStore()
+    const revision = store.modelInferenceRevision
+    const { mode, intent, useTta: tta } = context
+    const library = JSON.parse(JSON.stringify(store.getModelInferenceOverrides(name) || {})) as ModelDefaultInferenceParams
+    const info = await store.ensureModelMetadata(name, true)
+    if (revision !== store.modelInferenceRevision) throw new Error(i18n.global.t('parameterEditor.parametersChanged'))
+    const meta = info.inferenceParamMeta?.resolution
+    if (!meta) throw new Error(i18n.global.t('parameterEditor.metadataUnavailable'))
+    const resolved = resolveParameters(meta, library, mode, intent)
+    if (resolved.issues.length) throw new Error(i18n.global.t(`parameterEditor.error.${resolved.issues[0]!.code}`, { field: resolved.issues[0]!.key }))
+    return createInferenceSnapshot(meta, resolved, mode, intent, tta)
+  }
+
+  async function prepareInferenceSnapshots(names: string[]) {
+    const revision = useModelStore().modelInferenceRevision
+    const context = { mode: parameterMode.value, intent: JSON.parse(JSON.stringify(customParameterIntent.value)) as CustomParameterIntent, useTta: useTta.value }
+    const result: Record<string, ResolvedInferenceSnapshot> = {}
+    for (let index = 0; index < names.length; index += 4) {
+      const group = await Promise.all(names.slice(index, index + 4).map(async name => [name, await prepareInferenceSnapshot(name, context)] as const))
+      for (const [name, snapshot] of group) result[name] = snapshot
+    }
+    if (revision !== useModelStore().modelInferenceRevision) throw new Error(i18n.global.t('parameterEditor.parametersChanged'))
+    return result
   }
 
   function getCurrentUiInferenceDefaults() {
@@ -1067,7 +1118,7 @@ export const useTaskStore = defineStore('task', () => {
     return normalizeConcurrentSeparations(settings.maxConcurrentSeparations)
   }
 
-  function buildRunConfig(inferenceParams: Record<string, unknown>, modelType?: string | null, outputLayout: OutputLayout = 'folders', outputNaming?: OutputNamingConfig): SeparationRunConfig {
+  function buildRunConfig(inferenceParams: Record<string, unknown>, modelType?: string | null, outputLayout: OutputLayout = 'folders', outputNaming?: OutputNamingConfig, snapshot?: ResolvedInferenceSnapshot): SeparationRunConfig {
     const settings = useSettingsStore()
     const app = useAppStore()
     const runtimeDevice = settings.getRuntimeDeviceConfig(app.envInfo)
@@ -1083,11 +1134,12 @@ export const useTaskStore = defineStore('task', () => {
       deviceIds: runtimeDevice.deviceIds,
       outputFormat: settings.defaultFormat,
       selectedStems: [...selectedStems.value],
-      useTta: useTta.value,
+      useTta: snapshot?.useTta ?? useTta.value,
       debug: settings.developerMode,
       audioParams: settings.getAudioParams(),
-      inferenceParamsVersion: CURRENT_INFERENCE_PARAMS_VERSION,
-      inferenceParams,
+      inferenceParamsVersion: snapshot ? RESOLVED_INFERENCE_PARAMS_VERSION : CURRENT_INFERENCE_PARAMS_VERSION,
+      inferenceParams: { ...inferenceParams },
+      ...(snapshot ? { resolvedInference: JSON.parse(JSON.stringify(snapshot)) } : {}),
     }
   }
 
@@ -1171,7 +1223,7 @@ export const useTaskStore = defineStore('task', () => {
       : joinOutputPath(jobOutput, inputStemSegment(input, resultId, windowsPaths.value), windowsPaths.value)
   }
 
-  function createQueuedTask(input: string, model: string, inferenceParams: Record<string, unknown>, modelType?: string | null, jobId?: string, jobOutput?: string, outputLayout: OutputLayout = 'folders', outputNaming?: OutputNamingConfig, batchIndex?: number) {
+  function createQueuedTask(input: string, model: string, inferenceParams: Record<string, unknown>, modelType?: string | null, jobId?: string, jobOutput?: string, outputLayout: OutputLayout = 'folders', outputNaming?: OutputNamingConfig, batchIndex?: number, preparedConfig?: SeparationRunConfig) {
     const settings = useSettingsStore()
     const id = createRunId('sep')
     const resultId = createRunId('result')
@@ -1194,7 +1246,7 @@ export const useTaskStore = defineStore('task', () => {
       files: [],
       outputs: [],
       logs: [localLogRecord('Queued', 'task.queued', 'info', { taskId: id })],
-      runConfig: buildRunConfig(inferenceParams, modelType, outputLayout, outputNaming),
+      runConfig: preparedConfig ? JSON.parse(JSON.stringify(preparedConfig)) : buildRunConfig(inferenceParams, modelType, outputLayout, outputNaming),
     }
     tasks.value.unshift(task)
     rememberSessionTasks([task])
@@ -1243,6 +1295,7 @@ export const useTaskStore = defineStore('task', () => {
     const config = task.runConfig || buildRunConfig({})
     setTaskStatus(task.id, 'preparing', 'Preparing task')
     try {
+      if ((config.inferenceParamsVersion || 0) > RESOLVED_INFERENCE_PARAMS_VERSION) throw new Error(i18n.global.t('parameterEditor.futureProtocol'))
       if (config.runMode === 'workflow') {
         if (detectWorkflowFormat(config.workflowDefinition) === 'graph' && !countWorkflowSaveOutputs(config.workflowDefinition!)) {
           workflowMetadataWaits.add(task.id)
@@ -1256,6 +1309,7 @@ export const useTaskStore = defineStore('task', () => {
             taskId: task.id,
             workflowName: config.workflowName || task.model,
             workflow: config.workflowDefinition || {},
+            resolvedInferences: config.resolvedInferences,
             input: task.input || null,
             ...(config.workbench && !config.workbench.nativeGraph ? { workbench: true, inputs: config.workbench.inputs, workbenchOutputs: config.workbench.outputs } : {}),
             output: config.outputLayout === 'folders' ? (task.jobOutput || task.output) : task.output,
@@ -1296,6 +1350,7 @@ export const useTaskStore = defineStore('task', () => {
           audioParams: config.audioParams,
           inferenceParamsVersion: config.inferenceParamsVersion ?? CURRENT_INFERENCE_PARAMS_VERSION,
           inferenceParams: config.inferenceParams || {},
+          resolvedInference: config.resolvedInference,
         },
       })
       return true
@@ -1351,6 +1406,7 @@ export const useTaskStore = defineStore('task', () => {
           audioParams: config.audioParams,
           inferenceParamsVersion: config.inferenceParamsVersion ?? CURRENT_INFERENCE_PARAMS_VERSION,
           inferenceParams: config.inferenceParams || {},
+          resolvedInference: config.resolvedInference,
         },
       })
       return true
@@ -1400,6 +1456,7 @@ export const useTaskStore = defineStore('task', () => {
           taskId: primary.id,
           workflowName: config.workflowName || primary.model,
           workflow: config.workflowDefinition || {},
+          resolvedInferences: config.resolvedInferences,
           output: primary.jobOutput || primary.output,
           ...(config.workbench && !config.workbench.nativeGraph ? { workbench: true } : {}),
           tasks: batchTasks.map((task, index) => ({
@@ -1746,8 +1803,9 @@ export const useTaskStore = defineStore('task', () => {
     inputFiles.value = inputFiles.value.filter((p) => p !== path)
   }
 
-  function clearInputFiles() {
-    inputFiles.value = []
+  function clearInputFiles(paths?: string[]) {
+    const submitted = paths ? new Set(paths) : null
+    inputFiles.value = submitted ? inputFiles.value.filter(path => !submitted.has(path)) : []
   }
 
   function moveInputFile(fromIndex: number, toIndex: number) {
@@ -2075,162 +2133,6 @@ export const useTaskStore = defineStore('task', () => {
     scheduleQueue()
   }
 
-  function buildInferenceParams(modelType?: string | null): Record<string, unknown> {
-    const inferenceParams: Record<string, unknown> = {}
-    const defaults = selectedModelDefaults.value
-    const modelOverrides = selectedModelOverrides.value
-    const useModelOverrideFallback = !inferenceParamsDirty.value
-    const vrModel = isVrModelType(modelType)
-    const apolloModel = isApolloModelType(modelType)
-
-    const batchSizeOverride = preferCurrentOverride(
-      resolveNumberOverride(defaults, 'batch_size', batch_size.value, { zeroMeansUnset: true }),
-      modelOverrides,
-      'batch_size',
-      useModelOverrideFallback,
-    )
-    if (batchSizeOverride !== null) inferenceParams.batch_size = batchSizeOverride
-
-    if (vrModel) {
-      const windowSizeOverride = preferCurrentOverride(
-        resolveNumberOverride(defaults, 'window_size', window_size.value, { zeroMeansUnset: true }),
-        modelOverrides,
-        'window_size',
-        useModelOverrideFallback,
-      )
-      const aggressionOverride = preferCurrentOverride(
-        resolveNumberOverride(defaults, 'aggression', aggression.value),
-        modelOverrides,
-        'aggression',
-        useModelOverrideFallback,
-      )
-      const enablePostProcessOverride = preferCurrentOverride(
-        resolveBooleanOverride(defaults, 'enable_post_process', enable_post_process.value),
-        modelOverrides,
-        'enable_post_process',
-        useModelOverrideFallback,
-      )
-      const postProcessThresholdOverride = preferCurrentOverride(
-        resolveNumberOverride(defaults, 'post_process_threshold', post_process_threshold.value),
-        modelOverrides,
-        'post_process_threshold',
-        useModelOverrideFallback,
-      )
-      const highEndProcessOverride = preferCurrentOverride(
-        resolveBooleanOverride(defaults, 'high_end_process', high_end_process.value),
-        modelOverrides,
-        'high_end_process',
-        useModelOverrideFallback,
-      )
-      const normalizeOverride = preferCurrentOverride(
-        resolveBooleanOverride(defaults, 'normalize', normalize.value),
-        modelOverrides,
-        'normalize',
-        useModelOverrideFallback,
-      )
-
-      if (windowSizeOverride !== null) inferenceParams.window_size = windowSizeOverride
-      if (aggressionOverride !== null) inferenceParams.aggression = aggressionOverride
-      if (enablePostProcessOverride !== null) inferenceParams.enable_post_process = enablePostProcessOverride
-      if (postProcessThresholdOverride !== null) inferenceParams.post_process_threshold = postProcessThresholdOverride
-      if (highEndProcessOverride !== null) inferenceParams.high_end_process = highEndProcessOverride
-      if (normalizeOverride !== null) inferenceParams.normalize = normalizeOverride
-      return inferenceParams
-    }
-
-    const overlapSizeOverride = preferCurrentOverride(
-      resolveNumberOverride(defaults, 'overlap_size', overlap_size.value, { zeroMeansUnset: true }),
-      modelOverrides,
-      'overlap_size',
-      useModelOverrideFallback,
-    )
-    const numOverlapOverride = apolloModel
-      ? null
-      : preferCurrentOverride(
-          resolveNumberOverride(defaults, 'num_overlap', num_overlap.value, { zeroMeansUnset: true }),
-          modelOverrides,
-          'num_overlap',
-          useModelOverrideFallback,
-        )
-    const chunkSizeOverride = preferCurrentOverride(
-      resolveNumberOverride(defaults, 'chunk_size', chunk_size.value, { zeroMeansUnset: true }),
-      modelOverrides,
-      'chunk_size',
-      useModelOverrideFallback,
-    )
-    const standardizeOverride = preferCurrentOverride(
-      resolveBooleanOverride(defaults, 'standardize', standardize.value),
-      modelOverrides,
-      'standardize',
-      useModelOverrideFallback,
-    )
-    const normalizeOverride = preferCurrentOverride(
-      resolveBooleanOverride(defaults, 'normalize', normalize.value),
-      modelOverrides,
-      'normalize',
-      useModelOverrideFallback,
-    )
-
-    if (overlapSizeOverride !== null) inferenceParams.overlap_size = overlapSizeOverride
-    if (numOverlapOverride !== null) inferenceParams.num_overlap = numOverlapOverride
-    if (chunkSizeOverride !== null) inferenceParams.chunk_size = chunkSizeOverride
-    if (standardizeOverride !== null) inferenceParams.standardize = standardizeOverride
-    if (normalizeOverride !== null) inferenceParams.normalize = normalizeOverride
-    return inferenceParams
-  }
-
-  function modelInferenceParamsFromState(modelName: string, modelType?: string | null): Record<string, unknown> {
-    const modelStore = useModelStore()
-    if (modelStore.selectedModel === modelName) return buildInferenceParams(modelType)
-    const entry = modelStore.models.find(item => item.name === modelName) || null
-    const defaults = modelStore.hasKnownModelInferenceBase(modelName)
-      ? (modelStore.getModelBaseInferenceDefaults(modelName) || {})
-      : (entry?.defaultInferenceParams || {})
-    const overrides = modelStore.getModelInferenceOverrides(modelName) || {}
-    const saved = getSavedModelState(modelName) || {}
-    const source = { ...saved, ...overrides }
-    const params: Record<string, unknown> = {}
-    const vrModel = isVrModelType(modelType)
-    const apolloModel = isApolloModelType(modelType)
-
-    const numberParam = (key: keyof ModelDefaultInferenceParams, options?: { zeroMeansUnset?: boolean }) => {
-      const value = source[key]
-      if (typeof value !== 'number' || !Number.isFinite(value)) return
-      if (options?.zeroMeansUnset && value <= 0) return
-      if (defaults[key] === value) return
-      params[key] = value
-    }
-    const booleanParam = (key: keyof ModelDefaultInferenceParams) => {
-      const value = source[key]
-      if (typeof value !== 'boolean') return
-      if (defaults[key] === value) return
-      if (!value && defaults[key] === undefined) return
-      params[key] = value
-    }
-
-    numberParam('batch_size', { zeroMeansUnset: true })
-    if (vrModel) {
-      numberParam('window_size', { zeroMeansUnset: true })
-      numberParam('aggression')
-      numberParam('post_process_threshold')
-      booleanParam('enable_post_process')
-      booleanParam('high_end_process')
-      booleanParam('normalize')
-      return params
-    }
-
-    numberParam('overlap_size', { zeroMeansUnset: true })
-    if (!apolloModel) numberParam('num_overlap', { zeroMeansUnset: true })
-    numberParam('chunk_size', { zeroMeansUnset: true })
-    booleanParam('standardize')
-    booleanParam('normalize')
-    return params
-  }
-
-  function submitOne(input: string, model: string, inferenceParams: Record<string, unknown>, modelType?: string | null, jobId?: string, jobOutput?: string, outputLayout: OutputLayout = 'folders', outputNaming?: OutputNamingConfig, batchIndex?: number) {
-    return createQueuedTask(input, model, inferenceParams, modelType, jobId, jobOutput, outputLayout, outputNaming, batchIndex)
-  }
-
   async function startSeparation(options: { outputDir?: string; outputLayout?: OutputLayout; outputNaming?: OutputNamingConfig } = {}) {
     const modelStore = useModelStore()
     if (!inputFiles.value.length) {
@@ -2244,23 +2146,28 @@ export const useTaskStore = defineStore('task', () => {
       ? modelStore.selectedInfo
       : modelStore.models.find((item) => item.name === model) || null
     const modelType = selectedEntry?.modelType || null
-    normalizeInferenceInputsBeforeSubmit()
-    const inferenceParams = buildInferenceParams(modelType)
     const targets = [...inputFiles.value]
     const jobId = createRunId('job')
     const outputLayout = normalizeOutputLayout(options.outputLayout)
     const jobOutput = resolveOutputDirectory(options.outputDir, separateOutputDir.value, windowsPaths.value)
     const outputNaming = normalizeOutputNaming(options.outputNaming)
-    const createdTasks = targets.map((input, batchIndex) => submitOne(
+    const preparedConfig = buildRunConfig({}, modelType, outputLayout, outputNaming)
+    const snapshot = await prepareInferenceSnapshot(model)
+    preparedConfig.inferenceParams = { ...snapshot.parameters }
+    preparedConfig.inferenceParamsVersion = RESOLVED_INFERENCE_PARAMS_VERSION
+    preparedConfig.resolvedInference = snapshot
+    preparedConfig.useTta = snapshot.useTta
+    const createdTasks = targets.map((input, batchIndex) => createQueuedTask(
       input,
       model,
-      inferenceParams,
+      snapshot.parameters,
       modelType,
       jobId,
       jobOutput,
       outputLayout,
       outputNaming,
       batchIndex,
+      preparedConfig,
     ))
     modelStore.recordModelUse(model)
     scheduleQueue()
@@ -2291,18 +2198,18 @@ export const useTaskStore = defineStore('task', () => {
     if (!config.workbench) validateSeparateWorkflowInput(definition)
   }
 
-  async function startWorkflowInference(workflow: WorkflowEntry, options: { outputDir?: string; outputLayout?: OutputLayout; outputNaming?: OutputNamingConfig } = {}) {
+  async function startWorkflowInference(workflow: WorkflowEntry, options: { inputFiles?: string[]; outputDir?: string; outputLayout?: OutputLayout; outputNaming?: OutputNamingConfig; resolvedInferences?: Record<string, ResolvedInferenceSnapshot> } = {}) {
     if (!workflow?.id) {
       throw new Error('Workflow is required')
+    }
+    const targets = [...(options.inputFiles ?? inputFiles.value)]
+    if (!targets.length) {
+      throw new Error(i18n.global.t('separate.startHintNoInput'))
     }
     if (detectWorkflowFormat(workflow.definition) === 'graph' && !countWorkflowSaveOutputs(workflow.definition)) await useWorkflowNodeStore().load()
     const validationError = workflowDefinitionValidationError(workflow.definition)
     if (validationError) throw new Error(validationError)
     validateSeparateWorkflowInput(workflow.definition)
-    const targets = [...inputFiles.value]
-    if (!targets.length) {
-      throw new Error(i18n.global.t('separate.startHintNoInput'))
-    }
     const jobId = createRunId('job')
     const outputLayout = normalizeOutputLayout(options.outputLayout)
     const jobOutput = resolveOutputDirectory(options.outputDir, separateOutputDir.value, windowsPaths.value)
@@ -2316,6 +2223,11 @@ export const useTaskStore = defineStore('task', () => {
       outputNaming,
       batchIndex,
     ))
+    if (options.resolvedInferences) {
+      for (const created of createdTasks) {
+        created.runConfig!.resolvedInferences = JSON.parse(JSON.stringify(options.resolvedInferences))
+      }
+    }
     scheduleQueue()
     return { succeeded: targets.length, failed: 0, total: targets.length, jobId, tasks: createdTasks }
   }
@@ -2395,18 +2307,34 @@ export const useTaskStore = defineStore('task', () => {
         createdAt: existing.createdAt,
         updatedAt: existing.updatedAt,
       }, undefined, jobOutput, outputLayout, existing.runConfig.outputNaming)
+      task.runConfig = JSON.parse(JSON.stringify(existing.runConfig))
       scheduleQueue()
       return task
     }
     const modelStore = useModelStore()
-    modelStore.selectedModel = existing.model
     const retryParams = existing.runConfig?.inferenceParams || {}
     const persistedModelType = existing.runConfig?.modelType ?? null
     const modelEntry = modelStore.models.find((item) => item.name === existing.model) || null
     const modelType = modelEntry?.modelType || persistedModelType || null
     const task = createQueuedTask(existing.input, existing.model, retryParams, modelType, undefined, jobOutput, outputLayout, existing.runConfig?.outputNaming)
+    if (existing.runConfig) task.runConfig = JSON.parse(JSON.stringify(existing.runConfig))
     scheduleQueue()
     return task
+  }
+
+  async function rerunTaskWithCurrentParameters(taskId: string) {
+    const previous = tasks.value.find(item => item.id === taskId)
+    if (!previous || previous.runConfig?.runMode === 'workflow') return
+    const oldStems = [...(previous.runConfig?.selectedStems || [])]
+    const outputLayout = separateOutputLayout.value
+    const outputRoot = separateOutputDir.value
+    const snapshot = await prepareInferenceSnapshot(previous.model)
+    const entry = useModelStore().models.find(item => item.name === previous.model)
+    const config = buildRunConfig(snapshot.parameters, entry?.modelType || previous.runConfig?.modelType, outputLayout, undefined, snapshot)
+    config.selectedStems = oldStems
+    const created = createQueuedTask(previous.input, previous.model, snapshot.parameters, config.modelType, undefined, outputRoot, outputLayout, undefined, undefined, config)
+    scheduleQueue()
+    return created
   }
 
   return {
@@ -2446,6 +2374,16 @@ export const useTaskStore = defineStore('task', () => {
     modelListSortMode,
     modelListPageSize,
     useTta,
+    parameterMode,
+    customParameterIntent,
+    selectedParameterResolution,
+    legacyParameterBackup,
+    legacyParameterChoices,
+    pendingLegacyParameters,
+    previewLegacyParameters,
+    resolveLegacyParameters,
+    applyParameterSettings,
+    prepareInferenceSnapshots,
     batch_size,
     overlap_size,
     num_overlap,
@@ -2497,6 +2435,7 @@ export const useTaskStore = defineStore('task', () => {
     startSeparation,
     startWorkflowInference,
     retryTask,
+    rerunTaskWithCurrentParameters,
     scheduleQueue,
     applySelectedModelDefaults,
     saveCurrentModelState,

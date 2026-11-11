@@ -2,7 +2,8 @@
 import { createLogger } from '@/utils/logger'
 import { isTutorialFrame } from '@/features/onboarding/demoContext'
 
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useI18n } from 'vue-i18n'
 import { useMessage, useDialog, type DropdownOption } from 'naive-ui'
@@ -39,16 +40,25 @@ import { formatBytes, formatSpeedMBps } from '@/utils/format'
 import { buildModelCategoryOptionsFromModels, getModelCategoryLabel, hasModelCategoryOption } from '@/utils/modelCategory'
 import { compareModelDefaultOrder } from '@/utils/modelSort'
 import { MODEL_LIBRARY_PAGE_SIZES } from '@/utils/pagination'
-import { inferenceChunkSizeIssue, resolveInferenceChunkStep, resolveInferenceSampleStep } from '@/features/inference/sampleStep'
+import {
+  applyLibraryIntent,
+  resolveParameters,
+  type CustomParameterIntent,
+  type NativeParameters,
+  type ParameterResolutionMetadata,
+} from '@/features/inference/parameters'
 import ModelProgressBlock from '@/components/ModelProgressBlock.vue'
 import ModelCategorySelect from '@/components/ModelCategorySelect.vue'
 import DownloadDetailModal from '@/components/DownloadDetailModal.vue'
 import CustomModelImportDialog from '@/components/CustomModelImportDialog.vue'
-import AlignedInferenceInputNumber from '@/components/AlignedInferenceInputNumber.vue'
+import InferenceParameterFields from '@/components/InferenceParameterFields.vue'
+import { segmentIntersectsRect, type SelectionPoint } from '@/utils/selection'
 
 const studioLog = createLogger('ui.views.ModelsView')
 
 const { t, locale } = useI18n()
+const route = useRoute()
+const router = useRouter()
 const message = useMessage()
 const dialog = useDialog()
 const modelStore = useModelStore()
@@ -93,11 +103,6 @@ const storageSearch = ref('')
 const storageSort = ref<'size-desc' | 'size-asc' | 'name-asc' | 'name-desc'>('size-desc')
 const storageDownloadedOnly = ref(true)
 const selectedStorageModels = ref<string[]>([])
-const inferenceDraft = ref<Required<Pick<ModelDefaultInferenceParams, 'batch_size' | 'overlap_size' | 'chunk_size'>>>({
-  batch_size: 1,
-  overlap_size: 0,
-  chunk_size: 0,
-})
 const contextMenuX = ref(0)
 const contextMenuY = ref(0)
 const contextMenuVisible = ref(false)
@@ -106,18 +111,68 @@ const showNoteEditor = ref(false)
 const noteEditorModel = ref<ModelEntry | null>(null)
 const noteDraft = ref('')
 const showInferenceEditor = ref(false)
-const inferenceEditorModel = ref<ModelEntry | null>(null)
-const inferenceEditorMeta = computed(() => modelStore.models.find(item => item.name === inferenceEditorModel.value?.name)?.inferenceParamMeta
-  || inferenceEditorModel.value?.inferenceParamMeta)
-const inferenceEditorSampleStep = computed(() => inferenceEditorMeta.value?.recommendedSampleStep)
-const inferenceEditorOverlapStep = computed(() => resolveInferenceSampleStep(inferenceEditorMeta.value, 1))
-const inferenceEditorChunkStep = computed(() => resolveInferenceChunkStep(inferenceEditorMeta.value, 1024))
-const inferenceEditorChunkConstraint = computed(() => inferenceEditorMeta.value?.chunkSizeConstraint)
-const inferenceEditorChunkIssue = computed(() => inferenceChunkSizeIssue(inferenceDraft.value.chunk_size, inferenceEditorMeta.value))
+/** Name of the model whose library defaults are being edited; the entry itself is read live from the store. */
+const inferenceEditorName = ref('')
+/** Local copy of the saved native overrides. Restoring a field deletes from this copy only. */
+const inferenceLibraryDraft = ref<Record<string, number | boolean>>({})
+/** Fields the user explicitly edited in this dialog session (sparse; absence = keep library value). */
+const inferenceEditorIntent = ref<CustomParameterIntent>({})
+/** Library revision the draft was taken from; saving with a stale revision is rejected by the store. */
+const inferenceEditorRevision = ref(0)
+const inferenceEditorLoading = ref(false)
+const inferenceEditorLoadError = ref('')
+const inferenceEditorSaving = ref(false)
+const inferenceEditorModel = computed(() => findModelEntry(inferenceEditorName.value))
+const inferenceEditorMeta = computed(() => resolutionOf(inferenceEditorModel.value))
+const inferenceEditorResolved = computed(() => resolveParameters(inferenceEditorMeta.value, inferenceLibraryDraft.value, 'custom', inferenceEditorIntent.value))
+const inferenceEditorDirty = computed(() => Object.keys(inferenceEditorIntent.value).length > 0
+  || !sameNativeProfile(inferenceLibraryDraft.value, modelStore.getModelInferenceOverrides(inferenceEditorName.value)))
+const inferenceEditorBlocked = computed(() => !inferenceEditorMeta.value
+  || !canEditModelParameters(inferenceEditorModel.value)
+  || inferenceEditorResolved.value.issues.length > 0
+  || intentProblems(inferenceEditorMeta.value, inferenceEditorResolved.value.parameters, inferenceEditorIntent.value).length > 0)
 
-function updateInferenceDraftSize(key: 'overlap_size' | 'chunk_size', value: number | null) {
-  inferenceDraft.value[key] = value as number
+/* ---- Batch parameter editing ---- */
+type BatchRowStatus = 'ok' | 'unchanged' | 'ineligible' | 'loading' | 'loadFailed' | 'metadataMissing' | 'invalid' | 'notApplicable'
+type BatchChange = { key: string; before: number | boolean | undefined; after: number | boolean | undefined }
+type BatchPreviewRow = {
+  name: string
+  status: BatchRowStatus
+  fingerprint?: string
+  profile?: NativeParameters
+  changes: BatchChange[]
+  fields: string[]
+  sampleRate?: number
 }
+type BatchPreview = { kind: 'edit' | 'reset'; revision: number; intent: CustomParameterIntent; rows: BatchPreviewRow[] }
+const BATCH_METADATA_CONCURRENCY = 4
+const batchSelectMode = ref(false)
+const batchSelection = ref<string[]>([])
+const batchSelectionSet = computed(() => new Set(batchSelection.value))
+const modelGrid = ref<HTMLElement | null>(null)
+type BatchDragSelection = {
+  pointerId: number
+  startName: string
+  origin: SelectionPoint
+  previous: SelectionPoint
+  targetSelected: boolean
+  active: boolean
+  visited: Set<string>
+}
+let batchDragSelection: BatchDragSelection | null = null
+let suppressBatchClick = false
+let batchListenersAttached = false
+let modelPageActive = true
+const showBatchEditor = ref(false)
+const batchIntent = ref<CustomParameterIntent>({})
+const batchReferenceName = ref('')
+const batchLoadState = ref<Record<string, 'loading' | 'error'>>({})
+const batchPreview = ref<BatchPreview | null>(null)
+const batchExcluded = ref<string[]>([])
+const batchStaleNames = ref<string[]>([])
+const batchApplying = ref(false)
+/** Bumped whenever the batch dialog is reopened, so late metadata responses cannot touch a newer session. */
+let batchSession = 0
 
 const categoryOptions = computed(() => {
   return buildModelCategoryOptionsFromModels(modelStore.models, locale.value, t('common.all'))
@@ -284,7 +339,6 @@ const storageModels = computed<StorageListItem[]>(() => {
 })
 
 const allStorageModelsByKey = computed(() => new Map(allStorageModels.value.map(item => [item.selectionKey, item])))
-
 const selectedStorageBytes = computed(() => selectedStorageModels.value
   .map(key => allStorageModelsByKey.value.get(key))
   .filter((item): item is NonNullable<typeof item> => Boolean(item))
@@ -478,7 +532,7 @@ const modelMenuOptions = computed<DropdownOption[]>(() => {
   const options: DropdownOption[] = [
     { key: 'detail', label: t('models.viewDetail') },
     { key: 'note', label: t('models.editNote') },
-    { key: 'inference', label: t('models.editInferenceDefaults') },
+    { key: 'inference', label: t('models.editInferenceDefaults'), disabled: !canEditModelParameters(model) },
     {
       key: 'open-directory',
       label: t('models.openModelDir'),
@@ -528,96 +582,574 @@ const modelMenuOptions = computed<DropdownOption[]>(() => {
   return options
 })
 
-function inferenceValue(model: ModelEntry | null | undefined, key: keyof typeof inferenceDraft.value, fallback: number) {
-  const value = model?.defaultInferenceParams?.[key]
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+/* ---- Model parameter helpers (shared by the single and batch editors) ---- */
+
+/** Native key each custom intent field writes; used to report fields a model does not have. */
+const INTENT_NATIVE_KEYS: Record<string, string> = {
+  chunkMilliseconds: 'chunk_size',
+  overlapBasisPoints: 'overlap_size',
+  batchSize: 'batch_size',
+  standardize: 'standardize',
+  normalize: 'normalize',
 }
 
-function resolveInferenceDraft(model: ModelEntry | null | undefined) {
-  return {
-    batch_size: inferenceValue(model, 'batch_size', 1),
-    overlap_size: inferenceValue(model, 'overlap_size', 0),
-    chunk_size: inferenceValue(model, 'chunk_size', 0),
+function findModelEntry(name: string | null | undefined): ModelEntry | null {
+  if (!name) return null
+  if (selectedInfo.value?.name === name) return selectedInfo.value
+  return modelStore.models.find(item => item.name === name) || null
+}
+
+function resolutionOf(model: ModelEntry | null | undefined): ParameterResolutionMetadata | undefined {
+  return model?.inferenceParamMeta?.resolution
+}
+
+function cloneNativeProfile(value: Record<string, unknown> | null | undefined): Record<string, number | boolean> {
+  const next: Record<string, number | boolean> = {}
+  for (const [key, item] of Object.entries(value || {})) {
+    if (typeof item === 'boolean' || (typeof item === 'number' && Number.isFinite(item))) next[key] = item
+  }
+  return next
+}
+
+function sameNativeProfile(a: Record<string, unknown> | null | undefined, b: Record<string, unknown> | null | undefined) {
+  const left = cloneNativeProfile(a), right = cloneNativeProfile(b)
+  const keys = new Set([...Object.keys(left), ...Object.keys(right)])
+  for (const key of keys) if (left[key] !== right[key]) return false
+  return true
+}
+
+/** Native keys of intent fields that this model cannot take: absent from its parameters or not editable. */
+function intentProblems(metadata: ParameterResolutionMetadata | undefined, parameters: NativeParameters, intent: CustomParameterIntent) {
+  const keys = [
+    ...Object.keys(intent).filter(key => key !== 'vr').map(key => INTENT_NATIVE_KEYS[key] || key),
+    ...Object.keys(intent.vr || {}),
+  ]
+  return keys.filter((key) => {
+    if (!Object.prototype.hasOwnProperty.call(parameters, key)) return true
+    const kind = metadata?.capabilities[key]?.kind
+    return kind !== 'free' && kind !== 'lattice'
+  })
+}
+
+/** Has saved model-library overrides — this is a marker only and never changes precedence. */
+function hasInferenceOverride(model: ModelEntry | null | undefined) {
+  const overrides = model?.name ? modelStore.getModelInferenceOverrides(model.name) : undefined
+  return Boolean(overrides && Object.keys(overrides).length)
+}
+
+/** Only installed, supported models that are not being removed or rewritten can take parameter edits. */
+function canEditModelParameters(model: ModelEntry | null | undefined) {
+  if (!model || !model.supported || !model.downloaded) return false
+  if (isDeletingModel(model.name)) return false
+  const task = downloadTasks.value[model.name]
+  return !(task && task.status !== 'done')
+}
+
+/** An empty profile means "no saved overrides", which removes the entry (and its blue marker). */
+function toLibraryOverrides(profile: NativeParameters | undefined): ModelDefaultInferenceParams | undefined {
+  if (!profile || !Object.keys(profile).length) return undefined
+  const next: Record<string, number | boolean> = { ...profile }
+  return next as ModelDefaultInferenceParams
+}
+
+function errorText(error: unknown) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function isRevisionConflict(error: unknown) {
+  return errorText(error).includes('MODEL_PARAMETERS_CHANGED')
+}
+
+async function mapWithConcurrency<T>(items: string[], limit: number, worker: (item: string) => Promise<T>) {
+  const results: PromiseSettledResult<T>[] = new Array(items.length)
+  let cursor = 0
+  async function next(): Promise<void> {
+    while (cursor < items.length) {
+      const index = cursor++
+      try { results[index] = { status: 'fulfilled', value: await worker(items[index]!) } }
+      catch (reason) { results[index] = { status: 'rejected', reason } }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => next()))
+  return results
+}
+
+function formatNativeValue(key: string, value: number | boolean | undefined, sampleRate?: number) {
+  if (value === undefined) return '—'
+  if (typeof value === 'boolean') return value ? t('parameterEditor.modelLibrary.on') : t('parameterEditor.modelLibrary.off')
+  const text = Number(value.toFixed(6)).toLocaleString(undefined, { maximumFractionDigits: 6 })
+  if ((key === 'chunk_size' || key === 'overlap_size') && sampleRate) {
+    const seconds = Number((value / sampleRate).toFixed(3)).toLocaleString(undefined, { maximumFractionDigits: 3 })
+    return t('parameterEditor.modelLibrary.samplesWithSeconds', { samples: text, seconds })
+  }
+  return text
+}
+
+/* ---- Single model editor ---- */
+
+async function loadInferenceEditorMetadata(force = false) {
+  const name = inferenceEditorName.value
+  if (!name) return
+  inferenceEditorLoading.value = true
+  inferenceEditorLoadError.value = ''
+  try {
+    await modelStore.ensureModelMetadata(name, force)
+  } catch (error) {
+    if (inferenceEditorName.value === name) inferenceEditorLoadError.value = errorText(error)
+  } finally {
+    if (inferenceEditorName.value === name) inferenceEditorLoading.value = false
   }
 }
 
-function syncInferenceDraft(model: ModelEntry | null | undefined) {
-  inferenceDraft.value = resolveInferenceDraft(model)
+function resetInferenceEditorDraft() {
+  const name = inferenceEditorName.value
+  inferenceLibraryDraft.value = cloneNativeProfile(modelStore.getModelInferenceOverrides(name))
+  inferenceEditorRevision.value = modelStore.modelInferenceRevision
 }
 
-function hasInferenceOverride(model: ModelEntry | null | undefined) {
-  return Boolean(model?.name && modelStore.getModelInferenceOverrides(model.name))
-}
-
-function hasInferenceDraftChanges(model: ModelEntry | null | undefined) {
-  const defaults = resolveInferenceDraft(model)
-  return inferenceDraft.value.batch_size !== defaults.batch_size
-    || inferenceDraft.value.overlap_size !== defaults.overlap_size
-    || inferenceDraft.value.chunk_size !== defaults.chunk_size
-}
-
-function canResetInferenceDefaults(model: ModelEntry | null | undefined) {
-  return hasInferenceOverride(model) || hasInferenceDraftChanges(model)
+/** Clear every saved override in the draft (applied on Save, discarded on Cancel). */
+function restoreAllInferenceDefaults() {
+  inferenceLibraryDraft.value = {}
+  inferenceEditorIntent.value = {}
 }
 
 async function saveInferenceDefaults() {
-  const model = inferenceEditorModel.value
-  if (!model) return
-  if (inferenceEditorChunkIssue.value) {
-    message.warning(t('inference.invalidChunkSize', inferenceEditorChunkIssue.value))
+  const name = inferenceEditorName.value
+  const metadata = inferenceEditorMeta.value
+  if (!name || !metadata || inferenceEditorBlocked.value) return
+  let profile: NativeParameters
+  try {
+    profile = applyLibraryIntent(metadata, inferenceLibraryDraft.value, inferenceEditorIntent.value)
+  } catch (error) {
+    studioLog.warn('Model parameter draft did not resolve', error)
+    message.warning(t('parameterEditor.modelLibrary.draftInvalid'))
     return
   }
+  inferenceEditorSaving.value = true
   try {
-    await modelStore.setModelInferenceOverrides(model.name, inferenceDraft.value)
-    if (selectedModel.value === model.name) {
-      const selected = modelStore.selectedInfo?.name === model.name ? modelStore.selectedInfo : model
-      taskStore.applySelectedModelDefaults(
-        modelStore.getModelBaseInferenceDefaults(model.name) || selected.defaultInferenceParams,
-        selected.modelType,
-        taskStore.getSavedModelState(model.name),
-        modelStore.getModelInferenceOverrides(model.name),
-        { force: true },
-      )
+    const refreshed = await modelStore.ensureModelMetadata(name, true)
+    if (resolutionOf(refreshed)?.fingerprint !== metadata.fingerprint) {
+      message.warning(t('parameterEditor.parametersChanged'))
+      return
     }
+    await modelStore.replaceModelInferenceOverridesBatch(
+      [{ name, overrides: toLibraryOverrides(profile) }],
+      inferenceEditorRevision.value,
+    )
+    inferenceEditorSaving.value = false
     closeInferenceEditor()
     message.success(t('models.inferenceDefaultsSaved'))
   } catch (error) {
+    if (isRevisionConflict(error)) {
+      // Someone else saved meanwhile: rebase the draft on the stored values and let the user review again.
+      resetInferenceEditorDraft()
+      message.warning(t('parameterEditor.modelLibrary.revisionChanged'))
+      return
+    }
     studioLog.error('Failed to persist model inference defaults', error)
     message.error(t('models.inferenceDefaultsSaveFailed'))
+  } finally {
+    inferenceEditorSaving.value = false
   }
 }
+
+/* ---- Batch editor ---- */
+
+const editableBatchSelection = computed(() => batchSelection.value.filter(name => canEditModelParameters(findModelEntry(name))))
+const batchSelectableOnPage = computed(() => pagedModels.value.filter(model => canEditModelParameters(model) || isBatchSelected(model.name)))
+const batchSelectedOnPage = computed(() => pagedModels.value.filter(model => isBatchSelected(model.name)).length)
+const batchOutsidePage = computed(() => batchSelection.value.length - batchSelectedOnPage.value)
+const allBatchPageSelected = computed(() => batchSelectableOnPage.value.length > 0 && batchSelectableOnPage.value.every(model => isBatchSelected(model.name)))
+const someBatchPageSelected = computed(() => batchSelectedOnPage.value > 0 && !allBatchPageSelected.value)
+
+function isBatchSelected(name: string) {
+  return batchSelectionSet.value.has(name)
+}
+
+function setBatchSelected(name: string, checked: boolean) {
+  if (checked && !canEditModelParameters(modelStore.models.find(model => model.name === name))) return
+  if (isBatchSelected(name) === checked) return
+  const next = batchSelection.value.filter(item => item !== name)
+  if (checked) next.push(name)
+  batchSelection.value = next
+}
+
+function toggleBatchSelectMode() {
+  finishBatchDragSelection()
+  batchSelectMode.value = !batchSelectMode.value
+  if (batchSelectMode.value) showDetail.value = false
+  if (!batchSelectMode.value) batchSelection.value = []
+}
+
+function selectEditableOnPage(checked: boolean) {
+  finishBatchDragSelection()
+  const next = new Set(batchSelection.value)
+  for (const model of pagedModels.value) {
+    if (!checked) next.delete(model.name)
+    else if (canEditModelParameters(model)) next.add(model.name)
+  }
+  batchSelection.value = [...next]
+}
+
+function handleModelCardClick(model: ModelEntry, event: MouseEvent | KeyboardEvent) {
+  if (event.type === 'keydown') suppressBatchClick = false
+  if (!batchSelectMode.value) { selectModel(model); return }
+  if (event.type === 'click' && window.getSelection()?.toString()) return
+  setBatchSelected(model.name, !isBatchSelected(model.name))
+}
+
+function resetBatchClickSuppression() { suppressBatchClick = false }
+
+function consumeBatchClick(event: MouseEvent) {
+  if (!suppressBatchClick || event.detail === 0) { suppressBatchClick = false; return }
+  suppressBatchClick = false
+  event.preventDefault()
+  event.stopPropagation()
+}
+
+function startBatchDragSelection(event: PointerEvent, model: ModelEntry) {
+  if (!batchSelectMode.value || event.pointerType !== 'mouse' || event.button !== 0) return
+  if (!canEditModelParameters(model) && !isBatchSelected(model.name)) return
+  finishBatchDragSelection()
+  suppressBatchClick = false
+  const origin = { x: event.clientX, y: event.clientY }
+  batchDragSelection = { pointerId: event.pointerId, startName: model.name, origin, previous: origin,
+    targetSelected: !isBatchSelected(model.name), active: false, visited: new Set() }
+}
+
+function handleBatchPointerMove(event: PointerEvent) {
+  const state = batchDragSelection
+  if (!state || event.pointerId !== state.pointerId) return
+  if ((event.buttons & 1) === 0 || !batchSelectMode.value || document.querySelector('[role="dialog"], .n-modal-mask')) {
+    finishBatchDragSelection(event)
+    return
+  }
+  const point = { x: event.clientX, y: event.clientY }
+  if (!state.active && Math.hypot(point.x - state.origin.x, point.y - state.origin.y) < 5) return
+  state.active = true
+  event.preventDefault()
+  window.getSelection()?.removeAllRanges()
+  document.documentElement.classList.add('models-drag-selecting')
+  const next = new Set(batchSelection.value)
+  const entries = new Map(pagedModels.value.map(model => [model.name, model]))
+  const apply = (name: string) => {
+    if (state.visited.has(name)) return
+    state.visited.add(name)
+    const model = entries.get(name)
+    if (state.targetSelected) { if (model && canEditModelParameters(model)) next.add(name) }
+    else next.delete(name)
+  }
+  apply(state.startName)
+  const viewport = modelGrid.value?.closest('.app-content')?.getBoundingClientRect()
+  for (const element of modelGrid.value?.querySelectorAll<HTMLElement>('[data-batch-model]') ?? []) {
+    const name = element.dataset.batchModel!
+    if (state.visited.has(name)) continue
+    const bounds = element.getBoundingClientRect()
+    const rect = { left: Math.max(bounds.left, viewport?.left ?? 0), top: Math.max(bounds.top, viewport?.top ?? 0),
+      right: Math.min(bounds.right, viewport?.right ?? window.innerWidth), bottom: Math.min(bounds.bottom, viewport?.bottom ?? window.innerHeight) }
+    if (rect.right > rect.left && rect.bottom > rect.top && segmentIntersectsRect(state.previous, point, rect)) apply(name)
+  }
+  if (next.size !== batchSelectionSet.value.size || [...next].some(name => !batchSelectionSet.value.has(name))) batchSelection.value = [...next]
+  state.previous = point
+}
+
+function finishBatchDragSelection(event?: PointerEvent) {
+  const state = batchDragSelection
+  if (event && state && event.pointerId !== state.pointerId) return
+  if (state && (state.active || event?.type !== 'pointerup')) suppressBatchClick = true
+  batchDragSelection = null
+  document.documentElement.classList.remove('models-drag-selecting')
+}
+
+function handleBatchWindowChange() { finishBatchDragSelection() }
+function handleBatchKeydown(event: KeyboardEvent) {
+  if (event.defaultPrevented || event.key !== 'Escape' || !batchSelectMode.value || document.querySelector('[role="dialog"], .n-modal-mask')) return
+  event.preventDefault()
+  toggleBatchSelectMode()
+}
+
+function attachBatchListeners() {
+  if (batchListenersAttached) return
+  batchListenersAttached = true
+  window.addEventListener('pointermove', handleBatchPointerMove, { passive: false })
+  window.addEventListener('pointerup', finishBatchDragSelection)
+  window.addEventListener('pointercancel', finishBatchDragSelection)
+  window.addEventListener('blur', handleBatchWindowChange)
+  window.addEventListener('resize', handleBatchWindowChange)
+  window.addEventListener('keydown', handleBatchKeydown)
+}
+function detachBatchListeners() {
+  finishBatchDragSelection()
+  if (!batchListenersAttached) return
+  batchListenersAttached = false
+  window.removeEventListener('pointermove', handleBatchPointerMove)
+  window.removeEventListener('pointerup', finishBatchDragSelection)
+  window.removeEventListener('pointercancel', finishBatchDragSelection)
+  window.removeEventListener('blur', handleBatchWindowChange)
+  window.removeEventListener('resize', handleBatchWindowChange)
+  window.removeEventListener('keydown', handleBatchKeydown)
+}
+watch(batchSelectMode, enabled => { if (enabled && modelPageActive) attachBatchListeners(); else detachBatchListeners() })
+watch([pagedModels, modelViewMode], () => finishBatchDragSelection())
+onActivated(() => { modelPageActive = true; if (batchSelectMode.value) attachBatchListeners() })
+onDeactivated(() => { modelPageActive = false; detachBatchListeners() })
+onBeforeUnmount(detachBatchListeners)
+
+const batchReferenceOptions = computed(() => batchSelection.value
+  .filter(name => resolutionOf(findModelEntry(name)))
+  .map(name => ({ label: name, value: name })))
+const batchReferenceModel = computed(() => findModelEntry(batchReferenceName.value))
+const batchReferenceMeta = computed(() => resolutionOf(batchReferenceModel.value))
+const batchMetadataLoading = computed(() => Object.values(batchLoadState.value).includes('loading'))
+const batchIntentEmpty = computed(() => {
+  const { vr, ...rest } = batchIntent.value
+  return !Object.keys(rest).length && !Object.keys(vr || {}).length
+})
+
+function pickBatchReference() {
+  if (batchReferenceOptions.value.some(option => option.value === batchReferenceName.value)) return
+  batchReferenceName.value = batchReferenceOptions.value[0]?.value || ''
+}
+
+async function loadBatchMetadata(names: string[], force = false) {
+  const session = batchSession
+  batchLoadState.value = { ...batchLoadState.value, ...Object.fromEntries(names.map(name => [name, 'loading' as const])) }
+  const results = await mapWithConcurrency(names, BATCH_METADATA_CONCURRENCY, name => modelStore.ensureModelMetadata(name, force))
+  if (session !== batchSession) return results
+  const next = { ...batchLoadState.value }
+  results.forEach((result, index) => {
+    const name = names[index]!
+    if (result.status === 'fulfilled') delete next[name]
+    else {
+      next[name] = 'error'
+      studioLog.warn(`Failed to load parameter metadata for ${name}`, result.reason)
+    }
+  })
+  batchLoadState.value = next
+  pickBatchReference()
+  return results
+}
+
+function openBatchEditor() {
+  if (!batchSelection.value.length) return
+  batchSession += 1
+  batchIntent.value = {}
+  batchPreview.value = null
+  batchExcluded.value = []
+  batchStaleNames.value = []
+  batchLoadState.value = {}
+  batchReferenceName.value = ''
+  showBatchEditor.value = true
+  const names = batchSelection.value.filter(name => canEditModelParameters(findModelEntry(name)))
+  pickBatchReference()
+  void loadBatchMetadata(names)
+}
+
+function closeBatchEditor() {
+  if (batchApplying.value) return
+  batchSession += 1
+  showBatchEditor.value = false
+  batchPreview.value = null
+}
+
+function handleBatchEditorUpdate(value: boolean) {
+  if (!value) closeBatchEditor()
+}
+
+function buildBatchRow(name: string, intent: CustomParameterIntent, kind: BatchPreview['kind']): BatchPreviewRow {
+  const model = findModelEntry(name)
+  const row: BatchPreviewRow = { name, status: 'ok', changes: [], fields: [] }
+  if (!canEditModelParameters(model)) return { ...row, status: 'ineligible' }
+  const load = batchLoadState.value[name]
+  if (load === 'loading') return { ...row, status: 'loading' }
+  const metadata = resolutionOf(model)
+  if (!metadata) return { ...row, status: load === 'error' ? 'loadFailed' : 'metadataMissing' }
+  row.fingerprint = metadata.fingerprint
+  row.sampleRate = metadata.sampleRate
+  const library = cloneNativeProfile(modelStore.getModelInferenceOverrides(name))
+  // Reset removes each model's overrides; the reference model and shared draft do not participate.
+  let profile: NativeParameters = {}
+  if (kind === 'edit') {
+    const requested = resolveParameters(metadata, library, 'custom', intent)
+    if (requested.issues.length) return { ...row, status: 'invalid', fields: [...new Set(requested.issues.map(issue => issue.key))] }
+    const unsupported = [...new Set([...requested.skipped, ...intentProblems(metadata, requested.parameters, intent)])]
+    if (unsupported.length) return { ...row, status: 'notApplicable', fields: unsupported }
+    try { profile = applyLibraryIntent(metadata, library, intent) }
+    catch { return { ...row, status: 'invalid', fields: [] } }
+  }
+  const before = resolveParameters(metadata, library, 'model', {}).parameters
+  const after = resolveParameters(metadata, profile, 'model', {})
+  if (after.issues.length) return { ...row, status: 'invalid', fields: [...new Set(after.issues.map(issue => issue.key))] }
+  const keys = new Set([...Object.keys(before), ...Object.keys(after.parameters)])
+  for (const key of keys) {
+    if (before[key] !== after.parameters[key]) row.changes.push({ key, before: before[key], after: after.parameters[key] })
+  }
+  row.profile = profile
+  if (!row.changes.length && sameNativeProfile(profile, library)) row.status = 'unchanged'
+  return row
+}
+
+function buildBatchPreview(kind: BatchPreview['kind']) {
+  if (batchApplying.value || batchMetadataLoading.value || (kind === 'edit' && batchIntentEmpty.value)) return
+  const intent = kind === 'reset' ? {} : JSON.parse(JSON.stringify(batchIntent.value)) as CustomParameterIntent
+  batchPreview.value = {
+    kind,
+    revision: modelStore.modelInferenceRevision,
+    intent,
+    rows: batchSelection.value.map(name => buildBatchRow(name, intent, kind)),
+  }
+  batchStaleNames.value = []
+  batchExcluded.value = batchExcluded.value.filter(name => batchSelection.value.includes(name))
+}
+
+function previewBatch() {
+  buildBatchPreview(batchPreview.value?.kind || 'edit')
+}
+
+function previewBatchReset() {
+  if (batchMetadataLoading.value || batchApplying.value) return
+  batchExcluded.value = []
+  buildBatchPreview('reset')
+}
+
+function backToBatchEdit() {
+  batchPreview.value = null
+  batchStaleNames.value = []
+}
+
+function isBatchRowBlocking(row: BatchPreviewRow) {
+  return row.status !== 'ok' && row.status !== 'unchanged'
+}
+
+function setBatchExcluded(name: string, excluded: boolean) {
+  const next = batchExcluded.value.filter(item => item !== name)
+  if (excluded) next.push(name)
+  batchExcluded.value = next
+}
+
+async function retryBatchMetadata(name: string) {
+  await loadBatchMetadata([name], true)
+  if (batchPreview.value) previewBatch()
+}
+
+const batchIncludedRows = computed(() => (batchPreview.value?.rows || []).filter(row => !batchExcluded.value.includes(row.name)))
+const batchBlockingRows = computed(() => batchIncludedRows.value.filter(isBatchRowBlocking))
+const batchChangedRows = computed(() => batchIncludedRows.value.filter(row => row.status === 'ok'))
+const batchDefaultCount = computed(() => batchIncludedRows.value.filter(row => row.status === 'unchanged').length)
+const batchPreviewStale = computed(() => Boolean(batchPreview.value
+  && (batchPreview.value.revision !== modelStore.modelInferenceRevision || batchStaleNames.value.length)))
+const canApplyBatch = computed(() => Boolean(batchPreview.value)
+  && !batchPreviewStale.value
+  && !batchBlockingRows.value.length
+  && batchChangedRows.value.length > 0
+  && !batchApplying.value)
+
+const BATCH_STATUS_KEYS: Record<BatchRowStatus | 'stale', string> = {
+  ok: 'parameterEditor.batch.status.ok',
+  unchanged: 'parameterEditor.batch.status.unchanged',
+  ineligible: 'parameterEditor.batch.status.ineligible',
+  loading: 'parameterEditor.batch.status.loading',
+  loadFailed: 'parameterEditor.batch.status.loadFailed',
+  metadataMissing: 'parameterEditor.batch.status.metadataMissing',
+  invalid: 'parameterEditor.batch.status.invalid',
+  notApplicable: 'parameterEditor.batch.status.notApplicable',
+  stale: 'parameterEditor.batch.status.stale',
+}
+const BATCH_REASON_KEYS: Partial<Record<BatchRowStatus, string>> = {
+  ineligible: 'parameterEditor.batch.reason.ineligible',
+  loading: 'parameterEditor.batch.reason.loading',
+  loadFailed: 'parameterEditor.batch.reason.loadFailed',
+  metadataMissing: 'parameterEditor.batch.reason.metadataMissing',
+  invalid: 'parameterEditor.batch.reason.invalid',
+  notApplicable: 'parameterEditor.batch.reason.notApplicable',
+}
+
+function batchStatusLabel(row: BatchPreviewRow) {
+  if (batchPreview.value?.kind === 'reset' && !batchStaleNames.value.includes(row.name)) {
+    if (row.status === 'ok') return t('parameterEditor.batch.status.willReset')
+    if (row.status === 'unchanged') return t('parameterEditor.batch.status.alreadyDefault')
+  }
+  return t(BATCH_STATUS_KEYS[batchStaleNames.value.includes(row.name) ? 'stale' : row.status])
+}
+
+/** Why a row blocks the batch; the field list names the native keys involved. */
+function batchReason(row: BatchPreviewRow) {
+  const key = BATCH_REASON_KEYS[row.status]
+  if (!key) return ''
+  const fields = row.fields.join(', ')
+  return fields ? `${t(key)} ${t('parameterEditor.batch.reasonFields', { fields })}` : t(key)
+}
+
+function batchStatusType(row: BatchPreviewRow) {
+  if (batchStaleNames.value.includes(row.name)) return 'warning'
+  if (row.status === 'ok') return 'success'
+  if (row.status === 'unchanged') return 'default'
+  if (row.status === 'loading') return 'info'
+  return 'error'
+}
+
+async function applyBatch() {
+  const preview = batchPreview.value
+  if (!preview || !canApplyBatch.value) return
+  const rows = batchChangedRows.value
+  batchApplying.value = true
+  try {
+    if (preview.revision !== modelStore.modelInferenceRevision) {
+      message.warning(t('parameterEditor.batch.revisionChanged'))
+      return
+    }
+    // Re-read each model's metadata so a config edited after the preview cannot receive stale native values.
+    const names = rows.map(row => row.name)
+    const results = await mapWithConcurrency(names, BATCH_METADATA_CONCURRENCY, name => modelStore.ensureModelMetadata(name, true))
+    if (batchPreview.value !== preview) return
+    const stale = rows.filter((row, index) => {
+      const result = results[index]!
+      return result.status !== 'fulfilled' || resolutionOf(result.value)?.fingerprint !== row.fingerprint
+        || !canEditModelParameters(findModelEntry(row.name))
+    }).map(row => row.name)
+    if (stale.length) {
+      batchStaleNames.value = stale
+      message.warning(t('parameterEditor.batch.metadataChanged', { count: stale.length }))
+      return
+    }
+    await modelStore.replaceModelInferenceOverridesBatch(
+      rows.map(row => ({
+        name: row.name,
+        overrides: toLibraryOverrides(row.profile),
+      })),
+      preview.revision,
+    )
+    message.success(t(preview.kind === 'reset' ? 'parameterEditor.batch.restored' : 'parameterEditor.batch.applied', { count: rows.length }))
+    batchApplying.value = false
+    closeBatchEditor()
+    batchSelection.value = []
+    batchSelectMode.value = false
+  } catch (error) {
+    if (isRevisionConflict(error)) {
+      message.warning(t('parameterEditor.batch.revisionChanged'))
+      return
+    }
+    studioLog.error('Failed to apply batch model parameters', error)
+    message.error(t('parameterEditor.batch.applyFailed'))
+  } finally {
+    batchApplying.value = false
+  }
+}
+
+// Drop selections whose model disappeared (directory change, removal) so the batch never targets ghosts.
+watch(() => modelStore.models.map(model => model.name), (names) => {
+  const known = new Set(names)
+  if (batchSelection.value.some(name => !known.has(name))) batchSelection.value = batchSelection.value.filter(name => known.has(name))
+})
+
+// Editing the shared intent after a preview invalidates that preview.
+watch(batchIntent, () => { if (batchPreview.value && !batchApplying.value) backToBatchEdit() }, { deep: true })
 
 function storageModelTypeLabel(item: StorageListItem) {
   if (item.kind === 'catalog') return item.downloaded ? t('models.downloaded') : t('models.notDownloaded')
   if (item.role === 'vad') return t('models.storageAsrVadModel')
   if (item.role === 'punctuation') return t('models.storageAsrPunctuationModel')
   return t('models.storageAsrRecognitionModel')
-}
-
-async function resetInferenceDefaults() {
-  const model = inferenceEditorModel.value
-  if (!model) return
-  try {
-    if (hasInferenceOverride(model)) {
-      await modelStore.resetModelInferenceOverrides(model.name)
-    }
-    const latest = modelStore.models.find((item) => item.name === model.name) || model
-    syncInferenceDraft(latest)
-    if (selectedModel.value === model.name) {
-      const selected = modelStore.selectedInfo?.name === model.name ? modelStore.selectedInfo : latest
-      taskStore.applySelectedModelDefaults(
-        modelStore.getModelBaseInferenceDefaults(model.name) || selected.defaultInferenceParams,
-        selected.modelType,
-        taskStore.getSavedModelState(model.name),
-        modelStore.getModelInferenceOverrides(model.name),
-        { force: true },
-      )
-    }
-    message.success(t('models.inferenceDefaultsReset'))
-  } catch (error) {
-    studioLog.error('Failed to restore model inference defaults', error)
-    message.error(t('models.inferenceDefaultsResetFailed'))
-  }
 }
 
 async function loadModels() {
@@ -675,19 +1207,30 @@ function saveModelNote() {
 }
 
 function openInferenceEditor(model: ModelEntry) {
-  inferenceEditorModel.value = model
-  syncInferenceDraft(model)
+  if (!canEditModelParameters(model)) {
+    message.warning(t('parameterEditor.modelLibrary.notEditable'))
+    return
+  }
+  inferenceEditorName.value = model.name
+  inferenceEditorIntent.value = {}
+  inferenceEditorLoadError.value = ''
+  resetInferenceEditorDraft()
   showInferenceEditor.value = true
+  // Loads metadata only; it never changes the model selected for separation.
+  if (!resolutionOf(model)) void loadInferenceEditorMetadata()
 }
 
 function closeInferenceEditor() {
+  if (inferenceEditorSaving.value) return
   showInferenceEditor.value = false
-  inferenceEditorModel.value = null
+  inferenceEditorName.value = ''
+  inferenceEditorIntent.value = {}
+  inferenceLibraryDraft.value = {}
+  inferenceEditorLoading.value = false
 }
 
 function handleInferenceEditorUpdate(value: boolean) {
-  showInferenceEditor.value = value
-  if (!value) inferenceEditorModel.value = null
+  if (!value) closeInferenceEditor()
 }
 
 async function revealModelDirectory(model: ModelEntry) {
@@ -916,6 +1459,8 @@ async function openStorageManager() {
   }
 }
 
+
+
 function openModelDir() {
   const path = modelStorageSummary.value?.modelDir || modelDir.value || settings.modelDir
   if (path) void taskStore.revealPath(path)
@@ -1000,6 +1545,19 @@ onMounted(() => {
   showDetail.value = false
   if (!modelStore.models.length) void loadModels()
 })
+
+watch(() => route.query.parameters, async value => {
+  if (typeof value !== 'string' || !value.trim()) return
+  try {
+    if (!modelStore.modelsLoaded) await modelStore.loadModels()
+    const entry = findModelEntry(value)
+    if (entry) openInferenceEditor(entry)
+    else message.warning(t('parameterEditor.modelLibrary.notEditable'))
+    const query = { ...route.query }
+    delete query.parameters
+    await router.replace({ query })
+  } catch (error) { message.error(errorText(error)) }
+}, { immediate: true })
 </script>
 
 <template>
@@ -1017,7 +1575,29 @@ onMounted(() => {
         </div>
         <p>{{ t('models.subtitle') }}</p>
       </div>
-      <div class="header-actions" data-guide="model-management">
+      <div
+        v-if="batchSelectMode"
+        class="header-actions batch-select-bar"
+        role="region"
+        :aria-label="t('parameterEditor.batch.title')"
+      >
+        <n-checkbox :checked="allBatchPageSelected" :indeterminate="someBatchPageSelected" :disabled="!batchSelectableOnPage.length"
+          :title="t('parameterEditor.batch.selectHint')" @update:checked="selectEditableOnPage">{{ t('parameterEditor.batch.selectPage') }}</n-checkbox>
+        <div class="batch-select-bar__selection">
+          <span class="batch-select-bar__count" aria-live="polite" aria-atomic="true">
+            {{ t('parameterEditor.batch.selectedCount', { count: batchSelection.length }) }}
+            <span v-if="batchOutsidePage">{{ t('parameterEditor.batch.outsidePage', { count: batchOutsidePage }) }}</span>
+          </span>
+          <n-button v-if="batchSelection.length" text size="small" :title="t('parameterEditor.batch.clearAllPages')" @click="batchSelection = []">
+            {{ t('parameterEditor.batch.clearSelection') }}
+          </n-button>
+        </div>
+        <n-button type="primary" :disabled="!editableBatchSelection.length" @click="openBatchEditor">
+          {{ t('parameterEditor.batch.editSelected') }}
+        </n-button>
+        <n-button secondary @click="toggleBatchSelectMode">{{ t('parameterEditor.batch.exitSelect') }}</n-button>
+      </div>
+      <div v-else class="header-actions" data-guide="model-management">
         <n-tooltip v-if="!customModelsSupported" trigger="hover">
           <template #trigger>
             <n-button secondary disabled>
@@ -1034,6 +1614,13 @@ onMounted(() => {
         <n-button secondary @click="openStorageManager">
           <template #icon><n-icon :component="ServerOutline" /></template>
           {{ t('models.storageManage') }}
+        </n-button>
+        <n-button
+          secondary
+          :aria-pressed="false"
+          @click="toggleBatchSelectMode"
+        >
+          {{ t('parameterEditor.batch.enterSelect') }}
         </n-button>
         <n-button secondary :loading="isLoading" data-guide="model-library-fallback" @click="loadModels">
           <template #icon><n-icon :component="RefreshOutline" /></template>
@@ -1136,31 +1723,55 @@ onMounted(() => {
 
       <!-- Model Grid -->
       <template v-else>
-        <div :class="['model-grid', `model-grid--${modelViewMode}`]">
+        <div ref="modelGrid" :class="['model-grid', `model-grid--${modelViewMode}`]" @pointerdown.capture="resetBatchClickSuppression" @click.capture="consumeBatchClick">
           <div
             v-for="model in pagedModels"
             :key="model.name"
+            :data-batch-model="model.name"
             :data-guide="model.supported ? 'model-library' : undefined"
             :class="['model-card', {
-              'model-card--selected': selectedModel === model.name,
+              'model-card--selected': !batchSelectMode && selectedModel === model.name,
+              'model-card--selecting': batchSelectMode,
+              'model-card--batch-selected': batchSelectMode && isBatchSelected(model.name),
+              'model-card--batch-ineligible': batchSelectMode && !canEditModelParameters(model) && !isBatchSelected(model.name),
               'model-card--unsupported': !model.supported,
               'model-card--busy': isModelBusy(model)
             }]"
             tabindex="0"
-            :aria-label="t('models.viewDetailAria', { name: model.name })"
-            :aria-current="selectedModel === model.name ? 'true' : undefined"
-            @click="selectModel(model)"
-            @contextmenu.stop.prevent="openModelContextMenu($event, model)"
-            @keydown.enter.self.prevent="selectModel(model)"
-            @keydown.space.self.prevent="selectModel(model)"
+            role="button"
+            :aria-label="t(batchSelectMode ? 'parameterEditor.batch.selectModelAria' : 'models.viewDetailAria', { name: model.name })"
+            :aria-current="!batchSelectMode && selectedModel === model.name ? 'true' : undefined"
+            :aria-pressed="batchSelectMode ? isBatchSelected(model.name) : undefined"
+            :aria-disabled="batchSelectMode && !canEditModelParameters(model) && !isBatchSelected(model.name) ? true : undefined"
+            :title="batchSelectMode && !canEditModelParameters(model) ? t('parameterEditor.modelLibrary.notEditable') : undefined"
+            @click="handleModelCardClick(model, $event)"
+            @contextmenu.stop.prevent="!batchSelectMode && openModelContextMenu($event, model)"
+            @keydown.enter.self.prevent="handleModelCardClick(model, $event)"
+            @keydown.space.self.prevent="handleModelCardClick(model, $event)"
           >
+          <div v-if="batchSelectMode" class="mc-batch-select" @pointerdown.stop="startBatchDragSelection($event, model)" @click.stop>
+            <n-checkbox class="mc-batch-check" :checked="isBatchSelected(model.name)"
+              :disabled="!canEditModelParameters(model) && !isBatchSelected(model.name)"
+              :title="canEditModelParameters(model) ? t('parameterEditor.batch.selectModel') : t('parameterEditor.modelLibrary.notEditable')"
+              :aria-label="t('parameterEditor.batch.selectModelAria', { name: model.name })"
+              @update:checked="(value: boolean) => setBatchSelected(model.name, value)" />
+          </div>
           <!-- Card Header -->
           <div class="mc-header">
             <div class="mc-title">
-              <span class="mc-name" :title="model.name"><template v-for="(part, index) in modelNameParts(model.name)" :key="index">{{ part }}<wbr /></template></span>
+              <span class="mc-name" :title="model.name"><n-tooltip v-if="hasInferenceOverride(model)" trigger="hover">
+                <template #trigger>
+                  <span
+                    class="mc-override-dot"
+                    role="img"
+                    :aria-label="t('parameterEditor.modelLibrary.customizedBadge')"
+                  />
+                </template>
+                {{ t('parameterEditor.modelLibrary.customizedTooltip') }}
+              </n-tooltip><template v-for="(part, index) in modelNameParts(model.name)" :key="index">{{ part }}<wbr /></template></span>
               <span v-if="modelNote(model)" class="mc-note" :title="modelNote(model)">{{ modelNote(model) }}</span>
             </div>
-            <div class="mc-controls">
+            <div v-if="!batchSelectMode" class="mc-controls">
               <n-button
                 quaternary
                 circle
@@ -1375,40 +1986,183 @@ onMounted(() => {
         aria-modal="true"
         @close="closeInferenceEditor"
       >
-        <div v-if="inferenceEditorModel" class="model-inference-modal__body">
-          <strong class="model-inference-modal__name">{{ inferenceEditorModel.name }}</strong>
-          <p class="model-inference-modal__hint">{{ t('models.inferenceDefaultsHint') }}</p>
-          <div class="inference-editor-grid">
-            <label class="inference-editor-field">
-              <span>{{ t('inference.batchSize') }}</span>
-              <n-input-number v-model:value="inferenceDraft.batch_size" :min="1" :max="32" />
-            </label>
-            <label class="inference-editor-field">
-              <span>{{ t('inference.overlapSize') }}</span>
-              <AlignedInferenceInputNumber :value="inferenceDraft.overlap_size" :step="inferenceEditorOverlapStep" :alignment-step="inferenceEditorSampleStep" @update:value="updateInferenceDraftSize('overlap_size', $event)" />
-            </label>
-            <label class="inference-editor-field">
-              <span>{{ t('inference.chunkSize') }}</span>
-              <AlignedInferenceInputNumber :value="inferenceDraft.chunk_size" :step="inferenceEditorChunkStep" :alignment-step="inferenceEditorChunkConstraint?.step || inferenceEditorSampleStep" :alignment-offset="inferenceEditorChunkConstraint?.offset" :alignment-min="inferenceEditorChunkConstraint?.min" @update:value="updateInferenceDraftSize('chunk_size', $event)" />
-            </label>
-          </div>
-          <n-alert v-if="inferenceEditorChunkIssue" type="warning" :show-icon="false" style="margin-top:12px">
-            {{ t('inference.invalidChunkSize', inferenceEditorChunkIssue) }}
+        <div v-if="inferenceEditorName" class="model-inference-modal__body">
+          <strong class="model-inference-modal__name">{{ inferenceEditorName }}</strong>
+          <p class="model-inference-modal__hint">{{ t('parameterEditor.modelLibrary.hint') }}</p>
+          <n-alert v-if="!canEditModelParameters(inferenceEditorModel)" type="warning" :bordered="false" class="model-inference-modal__alert">
+            {{ t('parameterEditor.modelLibrary.notEditable') }}
           </n-alert>
+          <div v-if="!inferenceEditorLoading && !inferenceEditorMeta" class="model-inference-modal__refresh">
+            <n-alert :type="inferenceEditorLoadError ? 'error' : 'warning'" :bordered="false">
+              {{ inferenceEditorLoadError
+                ? t('parameterEditor.modelLibrary.metadataLoadFailed', { error: inferenceEditorLoadError })
+                : t('parameterEditor.modelLibrary.metadataRefreshNeeded') }}
+            </n-alert>
+            <n-button size="small" secondary @click="loadInferenceEditorMetadata(true)">
+              <template #icon><n-icon :component="RefreshOutline" /></template>
+              {{ t('parameterEditor.modelLibrary.refreshMetadata') }}
+            </n-button>
+          </div>
+          <InferenceParameterFields
+            v-else
+            :metadata="inferenceEditorMeta"
+            :library="inferenceLibraryDraft"
+            mode="custom"
+            :intent="inferenceEditorIntent"
+            :loading="inferenceEditorLoading"
+            :disabled="!canEditModelParameters(inferenceEditorModel) || inferenceEditorSaving"
+            @update:intent="inferenceEditorIntent = $event"
+          />
         </div>
         <template #footer>
           <div class="model-inference-modal__footer">
             <n-button
               secondary
-              :disabled="!canResetInferenceDefaults(inferenceEditorModel)"
-              @click="resetInferenceDefaults"
+              :disabled="inferenceEditorSaving || (!Object.keys(inferenceLibraryDraft).length && !Object.keys(inferenceEditorIntent).length)"
+              @click="restoreAllInferenceDefaults"
             >
               {{ t('models.inferenceDefaultsReset') }}
             </n-button>
             <span class="model-inference-modal__footer-spacer" />
-            <n-button secondary @click="closeInferenceEditor">{{ t('common.cancel') }}</n-button>
-            <n-button type="primary" :disabled="!inferenceEditorModel" @click="saveInferenceDefaults">
+            <n-button secondary :disabled="inferenceEditorSaving" @click="closeInferenceEditor">{{ t('common.cancel') }}</n-button>
+            <n-button
+              type="primary"
+              :loading="inferenceEditorSaving"
+              :disabled="inferenceEditorBlocked || !inferenceEditorDirty"
+              @click="saveInferenceDefaults"
+            >
               {{ t('common.save') }}
+            </n-button>
+          </div>
+        </template>
+      </n-card>
+    </n-modal>
+
+    <!-- Batch parameter editor: edit a shared sparse intent, preview per model, then save once. -->
+    <n-modal :show="showBatchEditor" :mask-closable="!batchApplying" @update:show="handleBatchEditorUpdate">
+      <n-card
+        class="model-inference-modal model-batch-modal"
+        :title="t('parameterEditor.batch.title')"
+        :bordered="false"
+        :closable="!batchApplying"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="t('parameterEditor.batch.title')"
+        @close="closeBatchEditor"
+      >
+        <div class="model-inference-modal__body">
+          <p class="model-inference-modal__hint" aria-live="polite">
+            {{ batchPreview?.kind === 'reset'
+              ? t('parameterEditor.batch.resetHint', { count: batchChangedRows.length, unchanged: batchDefaultCount })
+              : t('parameterEditor.batch.hint', { count: batchSelection.length }) }}
+          </p>
+
+          <template v-if="!batchPreview">
+            <div class="batch-reference-row">
+              <span class="text-sm">{{ t('parameterEditor.batch.referenceModel') }}</span>
+              <n-select
+                v-model:value="batchReferenceName"
+                size="small"
+                :options="batchReferenceOptions"
+                :loading="batchMetadataLoading"
+                :placeholder="t('parameterEditor.batch.referencePlaceholder')"
+                :consistent-menu-width="false"
+              />
+            </div>
+            <p class="text-sm text-muted">{{ t('parameterEditor.batch.referenceHint') }}</p>
+            <n-alert v-if="!batchMetadataLoading && !batchReferenceMeta" type="warning" :bordered="false">
+              {{ t('parameterEditor.batch.noReference') }}
+            </n-alert>
+            <InferenceParameterFields
+              v-else
+              :metadata="batchReferenceMeta"
+              :library="batchReferenceName ? modelStore.getModelInferenceOverrides(batchReferenceName) : undefined"
+              mode="custom"
+              :intent="batchIntent"
+              :loading="batchMetadataLoading && !batchReferenceMeta"
+              @update:intent="batchIntent = $event"
+            />
+          </template>
+
+          <template v-else>
+            <n-alert v-if="batchPreviewStale" type="warning" :bordered="false" class="model-inference-modal__alert">
+              {{ t('parameterEditor.batch.previewStale') }}
+            </n-alert>
+            <n-alert v-else-if="batchBlockingRows.length" type="error" :bordered="false" class="model-inference-modal__alert">
+              {{ t('parameterEditor.batch.blocked', { count: batchBlockingRows.length }) }}
+            </n-alert>
+            <div class="batch-preview-list">
+              <div
+                v-for="row in batchPreview.rows"
+                :key="row.name"
+                :class="['batch-preview-row', { 'batch-preview-row--excluded': batchExcluded.includes(row.name), 'batch-preview-row--default': batchPreview.kind === 'reset' && row.status === 'unchanged' }]"
+              >
+                <div class="batch-preview-row__head">
+                  <strong class="batch-preview-row__name" :title="row.name">{{ row.name }}</strong>
+                  <n-tag size="small" :bordered="false" round :type="batchStatusType(row)">{{ batchStatusLabel(row) }}</n-tag>
+                  <span class="batch-select-bar__spacer" />
+                  <n-button
+                    v-if="row.status === 'loadFailed' || row.status === 'metadataMissing'"
+                    size="tiny"
+                    quaternary
+                    :disabled="batchApplying"
+                    @click="retryBatchMetadata(row.name)"
+                  >
+                    {{ t('parameterEditor.modelLibrary.refreshMetadata') }}
+                  </n-button>
+                  <n-button
+                    size="tiny"
+                    quaternary
+                    :disabled="batchApplying"
+                    @click="setBatchExcluded(row.name, !batchExcluded.includes(row.name))"
+                  >
+                    {{ batchExcluded.includes(row.name) ? t('parameterEditor.batch.include') : t('parameterEditor.batch.exclude') }}
+                  </n-button>
+                </div>
+                <p v-if="isBatchRowBlocking(row)" class="batch-preview-row__reason">{{ batchReason(row) }}</p>
+                <p v-else-if="batchPreview.kind === 'reset' && row.status === 'ok'" class="batch-preview-row__reason">
+                  {{ t('parameterEditor.batch.clearOverrides') }}
+                </p>
+                <table v-if="row.changes.length" class="batch-preview-table">
+                  <thead>
+                    <tr>
+                      <th>{{ t('parameterEditor.batch.columnField') }}</th>
+                      <th>{{ t('parameterEditor.batch.columnBefore') }}</th>
+                      <th>{{ t('parameterEditor.batch.columnAfter') }}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="change in row.changes" :key="change.key">
+                      <td><code>{{ change.key }}</code></td>
+                      <td>{{ formatNativeValue(change.key, change.before, row.sampleRate) }}</td>
+                      <td>{{ formatNativeValue(change.key, change.after, row.sampleRate) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+        </div>
+        <template #footer>
+          <div class="model-inference-modal__footer">
+            <n-button v-if="!batchPreview" secondary :disabled="batchMetadataLoading || batchApplying" @click="previewBatchReset">
+              {{ t('parameterEditor.batch.restoreDefaults') }}
+            </n-button>
+            <n-button v-if="batchPreview" secondary :disabled="batchApplying" @click="backToBatchEdit">
+              {{ t('parameterEditor.batch.backToEdit') }}
+            </n-button>
+            <span class="model-inference-modal__footer-spacer" />
+            <n-button secondary :disabled="batchApplying" @click="closeBatchEditor">{{ t('common.cancel') }}</n-button>
+            <n-button
+              v-if="!batchPreview || batchPreviewStale"
+              type="primary"
+              :disabled="(batchPreview?.kind !== 'reset' && batchIntentEmpty) || batchMetadataLoading || batchApplying"
+              @click="previewBatch"
+            >
+              {{ batchPreview ? t('parameterEditor.batch.repreview') : t('parameterEditor.batch.preview') }}
+            </n-button>
+            <n-button v-else type="primary" :loading="batchApplying" :disabled="!canApplyBatch" @click="applyBatch">
+              {{ t(batchPreview.kind === 'reset' ? 'parameterEditor.batch.confirmReset' : 'parameterEditor.batch.confirmApply', { count: batchChangedRows.length }) }}
             </n-button>
           </div>
         </template>
@@ -2361,7 +3115,7 @@ onMounted(() => {
 }
 
 .model-inference-modal {
-  width: min(560px, calc(100vw - 48px));
+  width: min(660px, calc(100vw - 48px));
   border-radius: 18px;
 }
 
@@ -2369,6 +3123,8 @@ onMounted(() => {
   display: grid;
   gap: 10px;
   min-width: 0;
+  max-height: min(64vh, 640px);
+  overflow-y: auto;
 }
 
 .model-inference-modal__name {
@@ -2386,25 +3142,138 @@ onMounted(() => {
   line-height: 1.5;
 }
 
-.inference-editor-grid {
+.model-inference-modal__refresh {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  justify-items: start;
+  gap: 8px;
+}
+
+.model-batch-modal {
+  width: min(720px, calc(100vw - 48px));
+}
+
+/* Marker only: "this model has saved library parameters". It carries no precedence meaning. */
+.mc-override-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  vertical-align: middle;
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 22%, transparent);
+}
+
+.mc-batch-select { position: absolute; top: 9px; left: 10px; width: 32px; height: 32px; display: grid; place-items: center; z-index: 1; }
+.mc-batch-check { width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center; }
+.model-grid--card .model-card--selecting .mc-header { padding-left: 36px; }
+.model-grid--list .model-card--selecting { padding-left: 52px; grid-template-columns: minmax(0, 1fr) minmax(112px, 160px) minmax(230px, 280px); grid-template-areas: "header tags bottom" "meta tags bottom"; }
+.model-grid--list .mc-batch-select { top: 50%; transform: translateY(-50%); }
+.model-card.model-card--batch-selected, .model-card.model-card--batch-selected:hover { border-color: var(--primary-border); background: color-mix(in srgb, var(--primary-soft) 55%, var(--surface-1)); box-shadow: inset 3px 0 var(--primary); }
+.model-card--batch-ineligible { cursor: not-allowed; }
+.model-card--batch-ineligible .mc-name { color: var(--on-surface-muted); }
+@container model-library (max-width: 760px) {
+  .model-grid--list .model-card--selecting { grid-template-columns: minmax(0, 1fr); grid-template-areas: "header" "tags" "meta" "bottom"; }
+}
+:global(html.models-drag-selecting), :global(html.models-drag-selecting *) { user-select: none !important; cursor: pointer !important; }
+
+.header-actions.batch-select-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  max-width: 100%;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--primary-border) 52%, var(--outline));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--primary-softer) 42%, var(--surface-1));
+}
+
+.batch-select-bar__selection {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+
+.batch-select-bar__count {
+  color: var(--on-surface-muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.batch-select-bar__count > span {
+  margin-left: 4px;
+}
+
+.batch-select-bar__spacer {
+  flex: 1 1 auto;
+}
+
+.batch-reference-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
   gap: 10px;
 }
 
-.inference-editor-field {
+.batch-preview-list {
+  display: grid;
+  gap: 10px;
+}
+
+.batch-preview-row {
   display: grid;
   gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--outline);
+  border-radius: 12px;
+}
+
+.batch-preview-row--excluded {
+  opacity: 0.55;
+}
+
+.batch-preview-row--default {
+  color: var(--on-surface-muted);
+}
+
+.batch-preview-row__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
 }
 
-.inference-editor-field > span {
+.batch-preview-row__name {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-preview-row__reason {
+  margin: 0;
   color: var(--on-surface-muted);
   font-size: 12px;
 }
 
-.inference-editor-field :deep(.n-input-number) {
+.batch-preview-table {
   width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.batch-preview-table th,
+.batch-preview-table td {
+  padding: 4px 6px;
+  text-align: left;
+  border-top: 1px solid var(--outline);
+}
+
+.batch-preview-table th {
+  color: var(--on-surface-muted);
+  font-weight: 500;
 }
 
 .model-inference-modal__footer {
@@ -2759,7 +3628,7 @@ onMounted(() => {
 }
 
 @media (max-width: 720px) {
-  .inference-editor-grid {
+  .batch-reference-row {
     grid-template-columns: 1fr;
   }
 

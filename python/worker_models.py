@@ -15,7 +15,8 @@ from worker_platform import description as platform_description
 
 import yaml
 
-from worker_inference_constraints import chunk_size_constraint
+from worker_inference_constraints import InferenceParameterError, chunk_size_constraint
+from worker_inference_snapshot import build_parameter_resolution
 from worker_protocol import WORKER_VERSION, _as_bool, _as_float, _as_int, emit, emit_error, import_available
 
 
@@ -633,15 +634,53 @@ def resolve_inference_param_meta(
     entry: Any,
     config_path: Path | None,
     config_data: dict[str, Any] | None = None,
+    model_path: Path | None = None,
 ) -> dict[str, Any]:
-    model_type = str(getattr(entry, "model_type", "") or "").strip().lower()
-    if model_type == "vr" or not config_path or not config_path.is_file():
-        return {}
-    try:
-        config = config_data if config_data is not None else _load_yaml_config(config_path)
-    except Exception:
-        return {}
+    """Legacy hop/constraint hints plus the versioned ``resolution`` metadata.
 
+    ``model_path`` must be the same path execution resolves, so both fingerprints stat the same
+    file. Nothing here loads weights or imports the inference runtime."""
+    model_type = str(getattr(entry, "model_type", "") or "").strip().lower()
+    config: dict[str, Any] | None = None
+    if config_path and config_path.is_file():
+        try:
+            config = config_data if config_data is not None else _load_yaml_config(config_path)
+        except Exception:
+            return {}
+    metadata = _legacy_inference_step_meta(model_type, config) if model_type != "vr" and config is not None else {}
+    try:
+        resolution = build_parameter_resolution(
+            model_type, config, config_path=config_path if config is not None else None, model_path=model_path,
+        )
+    except Exception:
+        resolution = None
+    if resolution:
+        metadata["resolution"] = resolution
+    return metadata
+
+
+def load_parameter_resolution(
+    model_type: str | None,
+    config_path: str | Path | None,
+    model_path: str | Path | None,
+) -> dict[str, Any] | None:
+    """Execution-side twin of the metadata path: same YAML loader, builder and fingerprint."""
+    path = Path(config_path) if config_path else None
+    config: dict[str, Any] | None = None
+    if path is not None and path.is_file():
+        try:
+            config = _load_yaml_config(path)
+        except Exception as exc:
+            raise InferenceParameterError(f"Model config {path} could not be read: {exc}") from exc
+    try:
+        return build_parameter_resolution(
+            model_type, config, config_path=path if config is not None else None, model_path=model_path,
+        )
+    except Exception as exc:
+        raise InferenceParameterError(f"Inference parameter metadata could not be resolved: {exc}") from exc
+
+
+def _legacy_inference_step_meta(model_type: str, config: dict[str, Any]) -> dict[str, Any]:
     candidates: list[tuple[str, Any]] = []
     if model_type in {"mel_band_roformer", "mel_band_conformer", "bs_roformer", "bs_conformer", "bs_roformer_hyperace"}:
         candidates.append(("model.stft_hop_length", _nested_config_value(config, "model", "stft_hop_length")))
@@ -835,7 +874,7 @@ def model_to_dict(entry: Any, model_dir: str | None = None, include_local_state:
         config_instruments = resolved_instruments or config_instruments
         config_target_instrument = resolved_target or config_target_instrument
     default_inference_params = resolve_default_inference_params(entry, model_path, config_path, config_data)
-    inference_param_meta = resolve_inference_param_meta(entry, config_path, config_data)
+    inference_param_meta = resolve_inference_param_meta(entry, config_path, config_data, model_path)
     default_inference_params_source = "config" if config_path and config_path.is_file() else "runtime_fallback"
     return {
         "name": str(getattr(entry, "name", "") or ""),
