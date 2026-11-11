@@ -64,7 +64,7 @@ class RuntimeSeedTests(unittest.TestCase):
         moved.parent.mkdir()
         self.managed.rename(moved)
         python = seed.bound_bootstrap_python(moved / "rocm", moved, self.base / "python.exe")
-        self.assertTrue(python.is_relative_to(moved))
+        self.assertTrue(python.is_relative_to(moved.resolve()))
         binding = json.loads((moved / "rocm/pymss-bootstrap-binding.json").read_text())
         seed.bind_environment(moved / "rocm", moved, binding)
         self.assertIn(str(python), (moved / "rocm/pyvenv.cfg").read_text())

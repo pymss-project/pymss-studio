@@ -513,7 +513,7 @@ class RuntimeOperationTests(unittest.TestCase):
             binding = state["bootstrapBinding"]
             bound = self.root / binding["root"] / "python.exe"
             self.assertTrue(bound.is_file())
-            self.assertIn(str(bound), (self.root / "rocm/pyvenv.cfg").read_text())
+            self.assertIn(str(bound.resolve()), (self.root / "rocm/pyvenv.cfg").read_text())
             self.assertEqual((source / "pymss-runtime-state.json").read_bytes(), source_state)
         self.assertEqual(self.commands, [])
 
@@ -592,8 +592,8 @@ class RuntimeOperationTests(unittest.TestCase):
 
             def probe_restored(*args):
                 cfg = (moved / "rocm/pyvenv.cfg").read_text()
-                self.assertIn(str(expected_base), cfg)
-                self.assertNotIn(str(old_root), cfg)
+                self.assertIn(str(expected_base.resolve()), cfg)
+                self.assertNotIn(str(old_root.resolve()), cfg)
                 return self.probe(*args)
 
             with mock.patch.object(bootstrap, "RUNTIME_ENVS_DIR", moved), \

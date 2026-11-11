@@ -174,7 +174,7 @@ class RocmWorkerTransactionTests(unittest.TestCase):
         def probe(_python, _extras, selected_overlay=None):
             result = copy.deepcopy(self.probed)
             if selected_overlay:
-                self.assertEqual(selected_overlay, overlay)
+                self.assertEqual(selected_overlay, overlay.resolve())
                 result["pymssVersion"] = "2.4.0"
                 result["packageVersions"]["pymss"] = "2.4.0"
             return result
@@ -216,7 +216,7 @@ class RocmWorkerTransactionTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PATH": os.pathsep.join([str(other), str(regular)])}):
             environment = bootstrap._probe_environment(python_path=self.python)
         self.assertEqual(environment["PATH"].split(os.pathsep), [
-            str(self.python.parent.parent / "sdk/bin"), str(self.python.parent.parent / "sdk/lib"), str(regular),
+            str((self.python.parent.parent / "sdk/bin").resolve()), str((self.python.parent.parent / "sdk/lib").resolve()), str(regular),
         ])
 
 

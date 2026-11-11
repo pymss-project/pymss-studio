@@ -248,6 +248,67 @@ class RuntimeTransactionTests(unittest.TestCase):
             self.tx.previous_manifest()
         self.assertTrue(external.is_dir())
 
+    @unittest.skipUnless(os.name == "nt", "Windows short-path aliases")
+    def test_short_root_alias_accepts_owned_paths_without_allowing_junctions(self):
+        import ctypes
+
+        root = self.root / "runtime environments with long names"
+        root.mkdir()
+        get_short = ctypes.windll.kernel32.GetShortPathNameW
+        get_short.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+        get_short.restype = ctypes.c_uint
+        buffer = ctypes.create_unicode_buffer(32768)
+        if not get_short(str(root), buffer, len(buffer)):
+            self.skipTest("Short-path aliases are unavailable on this volume")
+        alias = Path(buffer.value)
+        if alias == root:
+            self.skipTest("8.3 name generation is disabled on this volume")
+        self.assertEqual(alias.resolve(), root.resolve())
+        transaction = RocmTransaction(alias, alias / "active-runtime.json")
+        self.assertEqual(transaction.checked(alias / "rocm"), root.resolve() / "rocm")
+        with self.assertRaises(RuntimeRecoveryError):
+            transaction.checked(self.root / "unmanaged")
+
+        external = self.root / "external environment"
+        external.mkdir()
+        marker = external / "keep.txt"
+        marker.write_text("keep", encoding="utf-8")
+        link = root / "rocm"
+        result = subprocess.run(
+            ["cmd", "/d", "/c", "mklink", "/J", str(link), str(external)],
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with self.assertRaisesRegex(RuntimeRecoveryError, "links or junctions"):
+            transaction.checked(alias / "rocm" / "keep.txt")
+        self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
+
+    @unittest.skipUnless(os.name == "nt", "Windows extended path prefixes")
+    def test_extended_root_commits_an_unprefixed_interpreter_path(self):
+        root = self.root.resolve()
+        extended = Path("\\\\?\\" + str(root))
+        self.assertTrue(extended.samefile(root))
+        self.tx = RocmTransaction(extended, self.active)
+        self.install()
+        self.assertEqual(self.tag(), "new")
+        self.assertEqual(self.tag(self.tx.previous / "environment"), "original")
+        self.assertFalse(self.tx.journal.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows extended path prefixes")
+    def test_extended_root_cannot_commit_a_foreign_interpreter(self):
+        self.tx = RocmTransaction(Path("\\\\?\\" + str(self.root.resolve())), self.active)
+        self.tx.begin("install", activate=True)
+        active = self.candidate(self.tx, "new")
+        foreign = self.root / "foreign/Scripts/python.exe"
+        foreign.parent.mkdir(parents=True)
+        foreign.write_bytes(b"unrelated interpreter")
+        active["pythonPath"] = str(foreign)
+        with self.assertRaisesRegex(RuntimeRecoveryError, "commit could not be verified"):
+            self.tx.commit(active)
+        self.assertTrue(self.tx.journal.exists())
+        self.assertEqual(self.tag(self.tx._slot("backup") / "environment"), "original")
+        self.assertEqual(foreign.read_bytes(), b"unrelated interpreter")
+
     def test_real_process_crash_before_and_after_pointer_commit_recovers(self):
         code = """
 import json, os, sys

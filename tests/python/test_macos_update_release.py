@@ -31,6 +31,15 @@ MANIFEST = json.loads((ROOT / "python/runtime-manifest.json").read_text(encoding
 
 
 class MacosUpdateReleaseTests(unittest.TestCase):
+    def test_latest_runner_preserves_the_arm64_macos14_release_contract(self):
+        workflow = (ROOT / ".github/workflows/release-macos.yml").read_text(encoding="utf-8")
+        job_config = workflow.split("    steps:", 1)[0]
+        self.assertIn("- os: macos-latest\n            arch: arm64", job_config)
+        self.assertIn('MACOSX_DEPLOYMENT_TARGET: "14.0.0"', job_config)
+        self.assertIn('if [ "$(uname -m)" != "arm64" ]', workflow)
+        config = json.loads((ROOT / "src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
+        self.assertEqual(config["bundle"]["macOS"]["minimumSystemVersion"], "14.0.0")
+
     @unittest.skipUnless(BASH_EXECUTABLE, "Bash is required for application verification checks")
     def test_installer_verifies_replacement_resources_and_installed_identity_separately(self):
         installer = (ROOT / "scripts/install-macos-update.sh").read_text(encoding="utf-8")

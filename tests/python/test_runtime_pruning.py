@@ -98,7 +98,7 @@ class RuntimePruningTests(unittest.TestCase):
 
     def test_posix_prune_keeps_runtime_versions_and_records(self) -> None:
         runtime, site_packages = self._write_sample_runtime(windows=False)
-        bash = shutil.which("bash")
+        bash = ("/bin/bash" if sys.platform == "darwin" else shutil.which("bash"))
         if bash is None:
             self.skipTest("bash is required for the POSIX pruning script test")
         script = Path(__file__).resolve().parents[2] / "scripts" / "prune-python-runtime.sh"
@@ -162,7 +162,7 @@ class RuntimePruningTests(unittest.TestCase):
             command = [shell, "-NoProfile", "-File", str(script_dir / "prune-python-runtime.ps1"),
                        "-RuntimeDir", str(runtime), "-Backend", "rocm"]
         else:
-            shell = shutil.which("bash")
+            shell = ("/bin/bash" if sys.platform == "darwin" else shutil.which("bash"))
             if shell is None:
                 self.skipTest("Bash is required")
             command = [shell, str(script_dir / "prune-python-runtime.sh"), str(runtime), "--backend=rocm"]
@@ -182,7 +182,7 @@ class RuntimePruningTests(unittest.TestCase):
         self._check_rocm_resources(windows=False)
 
     def _check_posix_xmlrpc_survives_pruning(self, *, keep_venv: bool) -> None:
-        bash = shutil.which("bash")
+        bash = ("/bin/bash" if sys.platform == "darwin" else shutil.which("bash"))
         if bash is None:
             self.skipTest("bash is required for the POSIX pruning script test")
         runtime = (self.root / "xmlrpc-runtime").resolve()
@@ -230,7 +230,7 @@ print(json.dumps({'origin': xmlrpc.client.__file__}))
         self._check_posix_xmlrpc_survives_pruning(keep_venv=True)
 
     def _check_posix_native_tk_pruning(self, *, keep_venv: bool) -> None:
-        bash = shutil.which("bash")
+        bash = ("/bin/bash" if sys.platform == "darwin" else shutil.which("bash"))
         if bash is None:
             self.skipTest("bash is required for the POSIX pruning script test")
         runtime, site_packages = self._write_sample_runtime(windows=False)

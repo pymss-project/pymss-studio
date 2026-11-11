@@ -58,6 +58,7 @@ def _restore(path: Path, content: str | None) -> None:
 
 class RocmTransaction:
     def __init__(self, root: Path, active_file: Path):
+        self._configured_root = root
         self.root = root.resolve()
         self.active = active_file.absolute()
         self.current = self.root / "rocm"
@@ -67,10 +68,16 @@ class RocmTransaction:
 
     def checked(self, path: Path) -> Path:
         """Only direct owned paths; never traverse junctions or directory symlinks."""
-        try:
-            relative = path.relative_to(self.root)
-        except ValueError as error:
-            raise RuntimeRecoveryError("Runtime transaction path escapes the managed root") from error
+        # Keep the configured spelling for lexical validation: Windows may expand
+        # an 8.3 root in resolve(). Resolve only after checking child links below.
+        for root in (self.root, self._configured_root):
+            try:
+                relative = path.relative_to(root)
+                break
+            except ValueError:
+                continue
+        else:
+            raise RuntimeRecoveryError("Runtime transaction path escapes the managed root")
         candidate = self.root
         for part in relative.parts:
             candidate /= part
@@ -78,7 +85,7 @@ class RocmTransaction:
                 raise RuntimeRecoveryError("Runtime transaction paths cannot contain links or junctions")
         if not path.resolve().is_relative_to(self.root):
             raise RuntimeRecoveryError("Runtime transaction path escapes the managed root")
-        return path
+        return candidate
 
     def _active_checked(self) -> Path:
         # The active pointer may be explicitly configured outside the runtime root.
@@ -224,7 +231,7 @@ class RocmTransaction:
             return (pointer.get("environmentTransactionId") == self.record["id"]
                     and pointer.get("backend") == "rocm" and python.is_file()
                     and python.parent.name.lower() in {"scripts", "bin"}
-                    and python.parent.parent.resolve() == self.current.resolve())
+                    and python.parent.parent.samefile(self.current))
         except (OSError, ValueError, KeyError, TypeError):
             return False
 

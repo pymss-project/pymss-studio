@@ -59,7 +59,7 @@ AVAILABLE_TARGET_FAMILIES = []
         self.assertTrue(all(selected.name in value and other.name not in value for value in report["nativeToolDirs"]))
         self.assertTrue(all(not Path(value).is_absolute() and "\\" not in value for value in report["nativeLibraryDirs"]))
         absolute = paths.resolve_rocm_native_paths(self.environment, report)
-        self.assertIn(str(selected / "lib/llvm/bin"), absolute["nativeToolDirs"])
+        self.assertIn(str((selected / "lib/llvm/bin").resolve()), absolute["nativeToolDirs"])
 
     def test_discovery_and_persisted_relative_paths_survive_relocation(self):
         self._official_sdk()
@@ -70,7 +70,7 @@ AVAILABLE_TARGET_FAMILIES = []
         after = paths.discover_rocm_native_paths(moved, relocated_python)
         self.assertEqual(after, report)
         for value in paths.resolve_rocm_native_paths(moved, report)["nativeToolDirs"]:
-            self.assertTrue(Path(value).is_relative_to(moved))
+            self.assertTrue(Path(value).is_relative_to(moved.resolve()))
 
     def test_missing_sdk_uses_only_local_legacy_payloads(self):
         self._sdk_package("_rocm_sdk_core_legacy")
