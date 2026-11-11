@@ -47,6 +47,10 @@ function Get-ManifestRequirement {
         [string]$Name
     )
     $property = $runtimeManifest.common.PSObject.Properties[$Name]
+    if ($runtimeManifest.releaseCore -and $runtimeManifest.releaseCore.requirements) {
+        $pin = $runtimeManifest.releaseCore.requirements.PSObject.Properties[$Name]
+        if ($pin) { $property = $pin }
+    }
     if (!$property) {
         throw "Runtime manifest is missing common requirement '$Name'"
     }

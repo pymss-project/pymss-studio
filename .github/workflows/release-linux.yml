@@ -7,6 +7,10 @@ on:
         description: Release version
         required: true
         type: string
+      core_manifest_artifact:
+        description: Shared resolved runtime manifest
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -21,6 +25,11 @@ jobs:
       APPIMAGE_EXTRACT_AND_RUN: '1'
     steps:
       - uses: actions/checkout@v4
+      - name: Download shared core snapshot
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.core_manifest_artifact }}
+          path: python
       - name: Install Linux build and media dependencies
         run: |
           sudo apt-get update

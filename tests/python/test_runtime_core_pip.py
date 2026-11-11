@@ -27,6 +27,12 @@ class OfflineCoreUpdateTests(unittest.TestCase):
     def test_locked_core_is_resolved_without_checking_standalone_core_releases(self):
         self.run_offline_update(bundled=False, core_requirement="pymss-core==0.1.7")
 
+    def test_new_pymss_can_bind_an_older_core_than_the_studio_release_and_still_roll_back(self):
+        self.run_offline_update(bundled=True, core_requirement="pymss-core==0.1.5", expected_core="0.1.5")
+
+    def test_real_repair_resolves_an_installed_mismatched_core_from_pymss_metadata(self):
+        self.run_offline_update(bundled=True, expected_core="0.1.6", repair_mismatched=True)
+
     def test_read_only_bundled_runtime_updates_and_rolls_back_through_user_overlays(self):
         self.run_offline_update(bundled=True)
 
@@ -50,7 +56,7 @@ class OfflineCoreUpdateTests(unittest.TestCase):
         self.run_offline_update(bundled=True, pruned=True)
 
     def run_offline_update(self, *, bundled, pruned=False, replace_bundle=False, temporary_parent=None, apple_silicon=False,
-                           core_requirement="pymss-core>=0.1.7,<0.2"):
+                           core_requirement="pymss-core>=0.1.7,<0.2", expected_core="0.1.7", repair_mismatched=False):
         root = Path(self.enterContext(tempfile.TemporaryDirectory(dir=temporary_parent)))
         backend = "mlx" if apple_silicon else "cpu"
         envs = root / "runtime-envs"
@@ -97,6 +103,7 @@ class OfflineCoreUpdateTests(unittest.TestCase):
             wheel("setuptools", "78.1.0")
         wheel("pymss", "2.1.4", ["pymss-core==0.1.6", "torch>=2"])
         wheel("pymss-core", "0.1.6", ["torch>=2"])
+        wheel("pymss-core", "0.1.5", ["torch>=2"])
         wheel("pymss", "2.2.0", [core_requirement, "new-audio-dependency>=1", "torch>=2"])
         wheel("pymss-core", "0.1.7", ["torch>=2"])
         wheel("pymss-core", "0.2.0", ["torch>=2"])
@@ -119,6 +126,12 @@ class OfflineCoreUpdateTests(unittest.TestCase):
             *(["mlx==0.31.0"] if apple_silicon else []),
         ], env=child_env, capture_output=True, text=True, timeout=90)
         self.assertEqual(seed.returncode, 0, seed.stderr)
+        if repair_mismatched:
+            corrupt = subprocess.run([
+                str(python), "-m", "pip", "install", "--disable-pip-version-check", "--no-index", "--find-links", str(wheels),
+                "--no-deps", "--force-reinstall", "pymss-core==0.2.0",
+            ], env=child_env, capture_output=True, text=True, timeout=90)
+            self.assertEqual(corrupt.returncode, 0, corrupt.stderr)
         if pruned:
             subprocess.run([
                 shutil.which("bash"), str(Path(__file__).resolve().parents[2] / "scripts/prune-python-runtime.sh"),
@@ -131,7 +144,8 @@ class OfflineCoreUpdateTests(unittest.TestCase):
         manifest = {
             "manifestVersion": "2026.10.2", "baseGeneration": 1,
             "python": f"{sys.version_info.major}.{sys.version_info.minor}",
-            "common": {"pymss": "pymss[proxy]==2.1.4", "pymss-core": "pymss-core==0.1.6"},
+            "common": {"pymss": "pymss[proxy]==2.1.4", "pymss-core": "pymss-core"},
+            "releaseCore": {"requirements": {"pymss": "pymss[proxy]==2.1.4", "pymss-core": "pymss-core==0.1.6"}},
             "backends": {backend: {
                 "platforms": [sys.platform], "torch": {"requirement": "torch==2.7.1"},
                 "extras": ["mlx"] if apple_silicon else [],
@@ -243,6 +257,8 @@ class OfflineCoreUpdateTests(unittest.TestCase):
 
         def offline_popen(command, *args, **kwargs):
             if "pip" in command and "install" in command:
+                if "--dry-run" in command:
+                    self.assertFalse(any(value.startswith("pymss-core") for value in command))
                 command = [*command, "--disable-pip-version-check", "--no-index", "--find-links", str(wheels)]
                 installs.append(command)
             return real_popen(command, *args, **kwargs)
@@ -256,19 +272,25 @@ class OfflineCoreUpdateTests(unittest.TestCase):
              mock.patch.object(optional_packages, "_is_apple_silicon", return_value=apple_silicon), \
              mock.patch.object(worker.subprocess, "Popen", side_effect=offline_popen), \
              contextlib.redirect_stdout(io.StringIO()) as output:
-            payload = {"backend": backend, "pythonPath": str(python), "mirror": "pypi", "mode": "update", "taskId": "offline-pip"}
+            payload = {"backend": backend, "pythonPath": str(python), "mirror": "pypi",
+                       "mode": "repair" if repair_mismatched else "update", "taskId": "offline-pip"}
             self.assertEqual(worker.cmd_update_runtime_core({**payload, "prepareOnly": True}), 0, output.getvalue())
-            latest.assert_called_once_with("pymss", "stable")
+            if repair_mismatched:
+                latest.assert_not_called()
+            else:
+                latest.assert_called_once_with("pymss", "stable")
             plan = next(json.loads(line)["payload"] for line in output.getvalue().splitlines() if json.loads(line)["type"] == "runtime_core_update_plan")
-            self.assertEqual(plan["targetVersions"], {"pymss": "2.2.0", "pymss-core": "0.1.7"})
+            self.assertEqual(plan["targetVersions"], {"pymss": "2.1.4" if repair_mismatched else "2.2.0", "pymss-core": expected_core})
             self.assertEqual(json.loads(active.read_text(encoding="utf-8"))["pymssVersion"], "2.1.4")
             latest.side_effect = AssertionError("Confirmed installation must not query upstream")
             self.assertEqual(worker.cmd_update_runtime_core({**payload, "planId": plan["id"]}), 0, output.getvalue())
             installed = json.loads(active.read_text(encoding="utf-8"))
-            self.assertEqual(installed["pymssCoreVersion"], "0.1.7")
-            self.assertTrue((Path(installed["overlayPath"]) / "new_audio_dependency").is_dir())
+            self.assertEqual(installed["pymssCoreVersion"], expected_core)
+            if not repair_mismatched:
+                self.assertTrue((Path(installed["overlayPath"]) / "new_audio_dependency").is_dir())
             loaded = subprocess.run(
-                [str(python), "-c", "import pymss, new_audio_dependency; print(pymss.__file__)"],
+                [str(python), "-c", ("import pymss" if repair_mismatched else "import pymss, new_audio_dependency")
+                 + "; print(pymss.__file__)"],
                 env=worker._probe_environment(Path(installed["overlayPath"]), python_path=python),
                 capture_output=True, text=True, timeout=30, check=True,
             )
@@ -276,6 +298,18 @@ class OfflineCoreUpdateTests(unittest.TestCase):
                 Path(loaded.stdout.strip()).resolve().is_relative_to(Path(installed["overlayPath"]).resolve()),
                 f"The worker loaded the core outside the active overlay: {loaded.stdout.strip()}",
             )
+            if repair_mismatched:
+                worker._verify_runtime_pip_check(python, Path(installed["overlayPath"]))
+                committed = active.read_bytes()
+                self.assertEqual(worker.cmd_update_runtime_core({**payload, "mode": "rollback", "prepareOnly": True}), 0)
+                rollback_plans = [json.loads(line)["payload"] for line in output.getvalue().splitlines()
+                                  if json.loads(line)["type"] == "runtime_core_update_plan"]
+                self.assertEqual(worker.cmd_update_runtime_core({**payload, "planId": rollback_plans[-1]["id"]}), 1)
+                self.assertEqual(active.read_bytes(), committed)
+                after = {path.relative_to(base).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+                         for path in base.rglob("*") if path.is_file()}
+                self.assertEqual(after, baseline, "Repair must not change the base runtime")
+                return
             if replace_bundle:
                 with mock.patch.dict(os.environ, {
                     "PIP_NO_INDEX": "1", "PIP_FIND_LINKS": wheels.as_uri(), "PIP_CONFIG_FILE": os.devnull,

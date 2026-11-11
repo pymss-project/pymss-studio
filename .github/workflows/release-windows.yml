@@ -7,6 +7,10 @@ on:
         description: Release version
         required: true
         type: string
+      core_manifest_artifact:
+        description: Shared resolved runtime manifest
+        required: true
+        type: string
       rocm_profile:
         description: Versioned ROCm recipe identifier
         type: string
@@ -93,6 +97,11 @@ jobs:
       PYMSS_ROCM_PREVIEW_CANDIDATE: ${{ inputs.rocm_preview_candidate }}
     steps:
       - uses: actions/checkout@v4
+      - name: Download shared core snapshot
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.core_manifest_artifact }}
+          path: python
       - uses: ./.github/actions/setup-release-env
       - name: Restore verified source download cache
         uses: actions/cache@v4
@@ -217,6 +226,14 @@ jobs:
       - name: Prepare bootstrap runtime + CUDA environment seed
         shell: pwsh
         run: ./scripts/prepare-python-runtime.ps1 -Variant cuda -InitialBackend cuda
+      - name: Verify prepared CUDA core snapshot
+        shell: pwsh
+        run: |
+          $env:PYTHONDONTWRITEBYTECODE = '1'
+          & 'python-runtime/runtime-envs/cuda/Scripts/python.exe' -I scripts/resolve-release-core.py python/runtime-manifest.json --verify
+          if ($LASTEXITCODE -ne 0) { throw 'Prepared runtime differs from the release core snapshot' }
+          & 'python-runtime/runtime-envs/cuda/Scripts/python.exe' -I -m pip check
+          if ($LASTEXITCODE -ne 0) { throw 'Prepared runtime has incompatible dependencies' }
 
       - name: Sync build version metadata
         shell: pwsh
@@ -395,6 +412,14 @@ jobs:
       - name: Prepare bootstrap runtime + CPU environment seed
         shell: pwsh
         run: ./scripts/prepare-python-runtime.ps1 -Variant default -InitialBackend cpu
+      - name: Verify prepared CPU core snapshot
+        shell: pwsh
+        run: |
+          $env:PYTHONDONTWRITEBYTECODE = '1'
+          & 'python-runtime/runtime-envs/cpu/Scripts/python.exe' -I scripts/resolve-release-core.py python/runtime-manifest.json --verify
+          if ($LASTEXITCODE -ne 0) { throw 'Prepared runtime differs from the release core snapshot' }
+          & 'python-runtime/runtime-envs/cpu/Scripts/python.exe' -I -m pip check
+          if ($LASTEXITCODE -ne 0) { throw 'Prepared runtime has incompatible dependencies' }
 
       - name: Sync build version metadata
         shell: pwsh
@@ -720,6 +745,12 @@ jobs:
         run: |
           $targets = @($env:PYMSS_ROCM_TARGETS -split '\s+' | Where-Object { $_ })
           ./scripts/prepare-python-runtime.ps1 -Variant rocm -InitialBackend rocm -RocmProfile $env:PYMSS_ROCM_PROFILE -RocmTargets $targets -RocmChannel $env:PYMSS_ROCM_CHANNEL -RuntimeArtifactLock "python/runtime-locks/$env:PYMSS_ROCM_PROFILE.json" -RuntimeArtifactWheelhouse 'release/rocm-runtime-assets/wheels'
+      - name: Verify prepared ROCM core snapshot
+        shell: pwsh
+        run: |
+          $env:PYTHONDONTWRITEBYTECODE = '1'
+          & 'python-runtime/runtime-envs/rocm/Scripts/python.exe' -I scripts/resolve-release-core.py python/runtime-manifest.json --verify
+          if ($LASTEXITCODE -ne 0) { throw 'Prepared runtime differs from the release core snapshot' }
       - name: Sync build version metadata
         shell: pwsh
         env:

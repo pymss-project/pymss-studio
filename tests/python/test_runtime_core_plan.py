@@ -74,7 +74,6 @@ class CorePlanTests(unittest.TestCase):
         final = probe("cpu", pymss="2.2.0", core="0.1.7")
         status, commands, *_ = self.case.run_update(
             latest_versions={"pymss": "2.2.0"}, overlay_probe=final,
-            expected_resolution_cores=("pymss-core>=0.1.6",),
         )
         self.assertEqual(status, 0)
         self.assertIn("pymss[proxy]==2.2.0", commands[0])

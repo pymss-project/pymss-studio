@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import importlib.util
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -19,6 +22,112 @@ class WindowsReleaseTests(unittest.TestCase):
         self.windows = yaml.safe_load(
             (ROOT / ".github/workflows/release-windows.yml").read_text(encoding="utf-8")
         )["jobs"]
+
+    def test_release_preflight_keeps_all_platforms_and_distributes_one_core_snapshot(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+        triggers = workflow.get("on", workflow.get(True))
+        self.assertEqual(set(triggers["workflow_dispatch"]["inputs"]),
+                         {"version", "target", "release_type", "allow_auto_update"})
+        self.assertNotIn("default", triggers["workflow_dispatch"]["inputs"]["version"])
+        jobs = workflow["jobs"]
+        preflight = jobs["preflight"]
+        upload = next(step for step in preflight["steps"]
+                      if step.get("uses", "").startswith("actions/upload-artifact@"))
+        self.assertEqual(upload["with"]["path"], "python/runtime-manifest.json")
+        self.assertEqual(upload["with"]["if-no-files-found"], "error")
+        plan = next(step for step in preflight["steps"] if step.get("id") == "plan")
+        self.assertEqual(plan["env"]["RELEASE_COMMIT_INPUT"], "${{ github.sha }}")
+        for platform in ("windows", "macos", "linux"):
+            with self.subTest(platform=platform):
+                job = jobs[platform]
+                self.assertEqual(job["needs"], "preflight")
+                self.assertIn("needs.preflight.outputs.target == 'all'", job["if"])
+                self.assertIn(f"needs.preflight.outputs.target == '{platform}'", job["if"])
+                self.assertEqual(job["with"]["core_manifest_artifact"], upload["with"]["name"])
+                child = yaml.safe_load((ROOT / ".github/workflows" / f"release-{platform}.yml").read_text(encoding="utf-8"))
+                child_job = (child["jobs"]["windows-rocm-runtime-assets"] if platform == "windows"
+                             else next(iter(child["jobs"].values())))
+                download = next(i for i, step in enumerate(child_job["steps"])
+                                if step.get("with", {}).get("name") == "${{ inputs.core_manifest_artifact }}")
+                build = next(i for i, step in enumerate(child_job["steps"])
+                             if any(marker in step.get("run", "") for marker in
+                                    ("prepare-python-runtime", "runtime-artifacts.py', 'snapshot'")))
+                self.assertLess(download, build)
+        for variant in ("cpu", "cuda", "rocm"):
+            verify = next(step for step in self.windows[f"windows-{variant}-prepare"]["steps"]
+                          if step.get("name", "").startswith("Verify prepared"))
+            self.assertIn(f"runtime-envs/{variant}/Scripts/python.exe", verify["run"])
+            self.assertIn("scripts/resolve-release-core.py python/runtime-manifest.json --verify", verify["run"])
+        publisher = jobs["github-release"]
+        self.assertIn("preflight", publisher["needs"])
+        self.assertIn("needs.preflight.outputs.publish == 'true'", publisher["if"])
+        self.assertIn("needs.preflight.result == 'success'", publisher["if"])
+        publish = next(step for step in publisher["steps"] if step.get("id") == "publish_release")
+        self.assertEqual(publish["with"]["target_commitish"], "${{ github.sha }}")
+        verify = next(step for step in publisher["steps"] if step.get("name") == "Verify release tag commit")
+        self.assertIn('--verify-tag "$RELEASE_TAG" "$GITHUB_SHA"', verify["run"])
+        self.assertLess(publisher["steps"].index(verify), publisher["steps"].index(publish))
+
+    def test_rocm_candidate_uses_a_separate_prerelease_entry(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/release-rocm-preview.yml").read_text(encoding="utf-8"))
+        job = workflow["jobs"]["release"]
+        self.assertEqual(job["uses"], "./.github/workflows/release.yml")
+        self.assertEqual(job["with"]["release_type"], "prerelease")
+        self.assertEqual(job["with"]["target"], "windows")
+        self.assertTrue(job["with"]["rocm_preview_candidate"])
+        self.assertNotIn("allow_auto_update", job["with"])
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is required for the release metadata check")
+    def test_release_policy_reaches_application_update_metadata_for_every_platform(self):
+        modules = {}
+        for name, filename in (("plan", "resolve-release-plan.py"), ("metadata", "generate-update-metadata.py")):
+            spec = importlib.util.spec_from_file_location(f"release_update_{name}", ROOT / "scripts" / filename)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            modules[name] = module
+        manifest = json.loads((ROOT / "python/runtime-manifest.json").read_text(encoding="utf-8"))
+        publisher = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))["jobs"]["github-release"]
+        prepare = next(step for step in publisher["steps"] if step.get("id") == "release_meta")["run"]
+        for version, mode, automatic in (("0.1.0", "stable", True), ("0.1.0", "stable", False),
+                                          ("0.1.0-rc.1", "prerelease", True)):
+            with self.subTest(mode=mode, automatic=automatic), tempfile.TemporaryDirectory() as temporary:
+                folder = Path(temporary)
+                plan = modules["plan"].release_plan(manifest, version, release_type=mode,
+                                                    allow_auto_update=automatic)
+                environment = {}
+                for name, template in publisher["env"].items():
+                    if not name.startswith("RELEASE_"):
+                        continue
+                    output = re.fullmatch(r"\$\{\{ needs\.preflight\.outputs\.(\w+) \}\}", template)
+                    self.assertIsNotNone(output, name)
+                    value = plan[output[1]]
+                    environment[name] = value if isinstance(value, str) else json.dumps(value)
+                env_file, output_file = folder / "environment.txt", folder / "outputs.txt"
+                result = subprocess.run([shutil.which("bash"), "-e", "-c", prepare],
+                                        env={**os.environ, **environment, "GITHUB_ENV": env_file.as_posix(),
+                                             "GITHUB_OUTPUT": output_file.as_posix()},
+                                        capture_output=True, text=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                environment.update(line.split("=", 1) for line in env_file.read_text(encoding="utf-8").splitlines())
+                for slug, suffix in (("windows-x64-update", "zip"), ("macos-arm64-update", "app.tar.gz"),
+                                     ("linux-x64", "AppImage")):
+                    asset = folder / f"Pymss-Studio-{version}-{slug}.{suffix}"
+                    asset.write_bytes(b"archive")
+                    asset.with_name(asset.name + ".sig").write_text("signature", encoding="utf-8")
+                    if slug.startswith("macos"):
+                        asset.with_name(asset.name + ".json").write_text(json.dumps({
+                            "version": version, "pymss_unpacked_size": 1,
+                            "pymss_runtime_contract": {"schemaVersion": 1},
+                        }), encoding="utf-8")
+                files = modules["metadata"].generate(folder, environment)
+                self.assertEqual(len(files), 3 if mode == "prerelease" else 6)
+                for name in files:
+                    metadata = json.loads((folder / name).read_text(encoding="utf-8"))
+                    self.assertEqual(metadata["version"], version)
+                    self.assertEqual(metadata["pymss_update_supported"], automatic)
+                    self.assertEqual(metadata["pymss_requires_manual_install"], not automatic)
+                    if mode == "prerelease":
+                        self.assertEqual(metadata["channel"], "prerelease")
 
     def test_every_package_downloads_the_same_tools_before_staging(self):
         producer = self.windows["windows-bundled-tools"]

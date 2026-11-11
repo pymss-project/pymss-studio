@@ -7,6 +7,10 @@ on:
         description: Release version
         required: true
         type: string
+      core_manifest_artifact:
+        description: Shared resolved runtime manifest
+        required: true
+        type: string
 
 jobs:
   macos-gpu-dmg:
@@ -24,6 +28,11 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "14.0.0"
     steps:
       - uses: actions/checkout@v4
+      - name: Download shared core snapshot
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.core_manifest_artifact }}
+          path: python
 
       - uses: ./.github/actions/setup-release-env
 
@@ -59,9 +68,6 @@ jobs:
           cargo.write_text(text, encoding="utf-8")
           PY
 
-      - name: Resolve latest stable release cores
-        run: python3 scripts/resolve-release-core.py python/runtime-manifest.json
-
       - name: Prepare bootstrap and MLX runtime environment
         working-directory: .
         env:
@@ -80,6 +86,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$PWD/python-runtime" python-runtime/bin/python3 -c "import importlib.util, sys, ssl, venv, xmlrpc.client, pip, pymss, pymss_core, torch; assert importlib.util.find_spec('mlx') is not None; assert torch.version.cuda is None; print(sys.prefix); print('bundled MLX runtime ok')"
           PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$PWD/python-runtime" python-runtime/bin/python3 -m pip install --help > /dev/null
           PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$PWD/python-runtime" python-runtime/bin/python3 scripts/resolve-release-core.py python/runtime-manifest.json --verify
+          PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$PWD/python-runtime" python-runtime/bin/python3 -m pip check
 
       - name: Install aria2 runtime libraries
         run: brew install --formula zlib expat sqlite c-ares

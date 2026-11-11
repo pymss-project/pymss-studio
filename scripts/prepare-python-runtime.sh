@@ -50,9 +50,9 @@ elif kind == "common":
         if name not in {"pymss", "pymss-core"}:
             print(requirement)
 elif kind == "pymss":
-    print(manifest["common"]["pymss"])
+    print(manifest.get("releaseCore", {}).get("requirements", {}).get("pymss", manifest["common"]["pymss"]))
 elif kind == "pymss-core":
-    print(manifest["common"]["pymss-core"])
+    print(manifest.get("releaseCore", {}).get("requirements", {}).get("pymss-core", manifest["common"]["pymss-core"]))
 elif kind == "extras":
     for requirement in backend.get("extras", []) or []:
         print(requirement)

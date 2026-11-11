@@ -1,0 +1,27 @@
+name: Release ROCm Preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Prerelease version (for example, 0.1.0-rocm-preview.1)"
+        required: true
+        type: string
+      rocm_profile:
+        description: "ROCm candidate profile; leave empty to use the manifest default"
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    uses: ./.github/workflows/release.yml
+    with:
+      version: ${{ inputs.version }}
+      target: windows
+      release_type: prerelease
+      rocm_profile: ${{ inputs.rocm_profile }}
+      rocm_preview_candidate: true
+    secrets: inherit

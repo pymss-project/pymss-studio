@@ -4,55 +4,45 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version"
+        description: "Release version (for example, 0.1.0)"
         required: true
-        default: "0.0.8"
+        type: string
       target:
         description: "Build target"
         required: true
-        default: "all"
+        default: all
         type: choice
-        options:
-          - all
-          - macos
-          - windows
-          - linux
-      publish:
-        description: "Publish a GitHub Release"
+        options: [all, windows, macos, linux]
+      release_type:
+        description: "Release mode"
         required: true
-        default: false
-        type: boolean
-      prerelease:
-        description: "Publish and mark the GitHub Release as a pre-release"
-        required: true
-        default: false
-        type: boolean
+        default: build-only
+        type: choice
+        options: [build-only, prerelease, stable]
       allow_auto_update:
-        description: "Allow this release to be installed through automatic updates"
+        description: "Allow installation through automatic updates"
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      version:
         required: true
+        type: string
+      target:
+        default: all
+        type: string
+      release_type:
+        default: build-only
+        type: string
+      allow_auto_update:
         default: false
         type: boolean
       rocm_profile:
-        description: "Windows ROCm runtime profile"
+        default: ""
         type: string
-        default: "win-rocm100-multiarch"
-      rocm_revision:
-        description: "Windows ROCm profile revision"
-        type: number
-        default: 1
-      rocm_targets:
-        description: "Space-separated ROCm GPU targets; use all for multiarch, empty for legacy"
-        type: string
-        default: "all"
-      rocm_channel:
-        description: "Windows ROCm distribution channel"
-        type: choice
-        options: [legacy, preview, stable]
-        default: preview
       rocm_preview_candidate:
-        description: "Create a prerelease-only runtime policy snapshot for the selected disabled candidate"
-        type: boolean
         default: false
+        type: boolean
   push:
     tags:
       - "v*"
@@ -61,43 +51,89 @@ permissions:
   contents: read
 
 jobs:
+  preflight:
+    name: Validate release and resolve shared core snapshot
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      target: ${{ steps.plan.outputs.target }}
+      publish: ${{ steps.plan.outputs.publish }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+      allow_auto_update: ${{ steps.plan.outputs.allow_auto_update }}
+      rocm_profile: ${{ steps.plan.outputs.rocm_profile }}
+      rocm_revision: ${{ steps.plan.outputs.rocm_revision }}
+      rocm_targets: ${{ steps.plan.outputs.rocm_targets }}
+      rocm_channel: ${{ steps.plan.outputs.rocm_channel }}
+      rocm_preview_candidate: ${{ steps.plan.outputs.rocm_preview_candidate }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate release inputs and derive runtime policy
+        id: plan
+        env:
+          RELEASE_VERSION_INPUT: ${{ inputs.version || github.ref_name }}
+          RELEASE_TARGET_INPUT: ${{ inputs.target || 'all' }}
+          RELEASE_TYPE_INPUT: ${{ inputs.release_type }}
+          RELEASE_AUTO_UPDATE_INPUT: ${{ inputs.allow_auto_update }}
+          RELEASE_ROCM_PROFILE_INPUT: ${{ inputs.rocm_profile }}
+          RELEASE_ROCM_PREVIEW_INPUT: ${{ inputs.rocm_preview_candidate }}
+          RELEASE_COMMIT_INPUT: ${{ github.sha }}
+        run: python scripts/resolve-release-plan.py
+      - name: Resolve compatible stable release cores
+        run: python scripts/resolve-release-core.py python/runtime-manifest.json
+      - name: Upload shared core snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-core-manifest
+          path: python/runtime-manifest.json
+          if-no-files-found: error
+
   windows:
-    if: github.event_name != 'workflow_dispatch' || github.event.inputs.target == 'all' || github.event.inputs.target == 'windows'
+    name: Windows packages
+    needs: preflight
+    if: needs.preflight.outputs.target == 'all' || needs.preflight.outputs.target == 'windows'
     uses: ./.github/workflows/release-windows.yml
     with:
-      version: ${{ github.event.inputs.version || github.ref_name }}
-      rocm_profile: ${{ inputs.rocm_profile || 'win-rocm100-multiarch' }}
-      rocm_profile_revision: ${{ fromJSON(github.event_name == 'workflow_dispatch' && toJSON(inputs.rocm_revision) || '1') }}
-      rocm_targets: ${{ fromJSON(github.event_name == 'workflow_dispatch' && toJSON(inputs.rocm_targets) || '"all"') }}
-      rocm_channel: ${{ inputs.rocm_channel || 'preview' }}
-      rocm_preview_candidate: ${{ github.event_name == 'workflow_dispatch' && inputs.rocm_preview_candidate == true }}
+      version: ${{ needs.preflight.outputs.version }}
+      core_manifest_artifact: release-core-manifest
+      rocm_profile: ${{ needs.preflight.outputs.rocm_profile }}
+      rocm_profile_revision: ${{ fromJSON(needs.preflight.outputs.rocm_revision) }}
+      rocm_targets: ${{ needs.preflight.outputs.rocm_targets }}
+      rocm_channel: ${{ needs.preflight.outputs.rocm_channel }}
+      rocm_preview_candidate: ${{ needs.preflight.outputs.rocm_preview_candidate == 'true' }}
     secrets: inherit
 
   macos:
-    if: github.event_name != 'workflow_dispatch' || github.event.inputs.target == 'all' || github.event.inputs.target == 'macos'
+    name: macOS packages
+    needs: preflight
+    if: needs.preflight.outputs.target == 'all' || needs.preflight.outputs.target == 'macos'
     uses: ./.github/workflows/release-macos.yml
     with:
-      version: ${{ github.event.inputs.version || github.ref_name }}
+      version: ${{ needs.preflight.outputs.version }}
+      core_manifest_artifact: release-core-manifest
     secrets: inherit
 
   linux:
-    if: github.event_name != 'workflow_dispatch' || github.event.inputs.target == 'all' || github.event.inputs.target == 'linux'
+    name: Linux AppImage
+    needs: preflight
+    if: needs.preflight.outputs.target == 'all' || needs.preflight.outputs.target == 'linux'
     uses: ./.github/workflows/release-linux.yml
     with:
-      version: ${{ github.event.inputs.version || github.ref_name }}
+      version: ${{ needs.preflight.outputs.version }}
+      core_manifest_artifact: release-core-manifest
     secrets: inherit
 
   github-release:
     name: Publish GitHub Release
     if: >-
-      always() &&
-      (
-        startsWith(github.ref, 'refs/tags/') ||
-        (github.event_name == 'workflow_dispatch' && (inputs.publish == true || inputs.prerelease == true))
-      ) &&
+      always() && needs.preflight.result == 'success' &&
+      needs.preflight.outputs.publish == 'true' &&
       !contains(needs.*.result, 'failure') &&
       !contains(needs.*.result, 'cancelled')
-    needs: [windows, macos, linux]
+    needs: [preflight, windows, macos, linux]
     # Release bodies and the shared updater channel must be published serially.
     concurrency:
       group: pymss-studio-release-publish
@@ -107,7 +143,11 @@ jobs:
     permissions:
       contents: write
     env:
-      RELEASE_VERSION_INPUT: ${{ github.event.inputs.version || github.ref_name }}
+      RELEASE_VERSION_INPUT: ${{ needs.preflight.outputs.version }}
+      RELEASE_PRERELEASE: ${{ needs.preflight.outputs.prerelease }}
+      RELEASE_AUTO_UPDATE_SUPPORTED: ${{ needs.preflight.outputs.allow_auto_update }}
+      RELEASE_MACOS_AUTO_UPDATE_SUPPORTED: ${{ needs.preflight.outputs.allow_auto_update }}
+      RELEASE_LINUX_AUTO_UPDATE_SUPPORTED: ${{ needs.preflight.outputs.allow_auto_update }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       MODELSCOPE_API_TOKEN: ${{ secrets.MODELSCOPE_API_TOKEN }}
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -126,31 +166,12 @@ jobs:
         id: release_meta
         shell: bash
         run: |
-          version="${RELEASE_VERSION_INPUT#v}"
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
-            echo "Invalid semantic version: $RELEASE_VERSION_INPUT" >&2
-            exit 1
-          fi
-          version="${version#v}"
-          release_tag="v${version}"
-          echo "RELEASE_TAG=${release_tag}" >> "$GITHUB_ENV"
+          version="$RELEASE_VERSION_INPUT"
+          echo "RELEASE_TAG=v${version}" >> "$GITHUB_ENV"
           echo "RELEASE_NAME=Pymss Studio v${version}" >> "$GITHUB_ENV"
           echo "RELEASE_VERSION=${version}" >> "$GITHUB_ENV"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          windows_result="${{ needs.windows.result }}"
-          macos_result="${{ needs.macos.result }}"
-          linux_result="${{ needs.linux.result }}"
-          if [[ "$windows_result" != "success" && "$macos_result" != "success" && "$linux_result" != "success" ]]; then
-            echo "RELEASE_PRERELEASE=true" >> "$GITHUB_ENV"
-          elif [[ "${version%%+*}" == *-* ]]; then
-            echo "RELEASE_PRERELEASE=true" >> "$GITHUB_ENV"
-          else
-            echo "RELEASE_PRERELEASE=${{ github.event_name == 'workflow_dispatch' && inputs.prerelease == true }}" >> "$GITHUB_ENV"
-          fi
-          requested_auto_update="${{ github.event_name == 'workflow_dispatch' && inputs.allow_auto_update == true }}"
-          echo "RELEASE_AUTO_UPDATE_SUPPORTED=$requested_auto_update" >> "$GITHUB_ENV"
-          echo "RELEASE_MACOS_AUTO_UPDATE_SUPPORTED=$requested_auto_update" >> "$GITHUB_ENV"
-          echo "RELEASE_LINUX_AUTO_UPDATE_SUPPORTED=$requested_auto_update" >> "$GITHUB_ENV"
+          requested_auto_update="$RELEASE_AUTO_UPDATE_SUPPORTED"
           echo "Automatic update requested: $requested_auto_update"
           update_message=""
           if [[ "$requested_auto_update" != "true" ]]; then
@@ -304,10 +325,13 @@ jobs:
           done
           echo "Staged $copied file(s) under $staging/"
           ls -la "$staging"
+      - name: Verify release tag commit
+        run: python3 scripts/resolve-release-plan.py --verify-tag "$RELEASE_TAG" "$GITHUB_SHA"
       - uses: softprops/action-gh-release@v2
         id: publish_release
         with:
           tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           name: ${{ env.RELEASE_NAME }}
           prerelease: ${{ env.RELEASE_PRERELEASE }}
           body_path: ${{ steps.release_notes.outputs.body_path }}

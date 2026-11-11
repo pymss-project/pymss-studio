@@ -217,7 +217,8 @@ def requirements_for(manifest: dict, plan: dict, *, host: bool = False) -> list[
         roots = [re.sub(r"\[device-[^\]]+\]", "", root) for root in roots]
     # Resolve common/kernel packages in the same transaction as Torch. Installing
     # them later from floating requirements would make Online and Offline differ.
-    return [*roots, *manifest["common"].values()]
+    common = {**manifest["common"], **manifest.get("releaseCore", {}).get("requirements", {})}
+    return [*roots, *common.values()]
 
 
 def distribution_manifest(manifest: dict, profile_id: str, revision: int, channel: str,

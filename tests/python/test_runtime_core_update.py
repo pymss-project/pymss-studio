@@ -198,6 +198,7 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
         state_overrides=None,
         expected_resolution_cores=None,
         expected_pip_environment=None,
+        pip_check_error=None,
     ):
         bundled_root, env, python = self.make_env(backend, manifest_version=manifest_version, bundled=bundled, platform=platform, bootstrap=bootstrap)
         if state_overrides:
@@ -221,6 +222,8 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
                 self.assertEqual(kwargs["env"].get(key), value)
             command_status = 0 if "--dry-run" in command else pip_status
             if "--dry-run" in command:
+                self.assertFalse(any(value.startswith("pymss-core") for value in command),
+                                 "pymss-core must be resolved as a pymss dependency")
                 for requirement in expected_resolution_cores or ():
                     self.assertIn(requirement, command)
                 self.assertNotIn("--target", command)
@@ -251,6 +254,7 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
              mock.patch.object(worker_bootstrap, "_probe_python_package_versions", side_effect=live_versions), \
              mock.patch.object(worker_bootstrap, "_probe_python_runtime", side_effect=lambda *_args, **_kwargs: probe_calls.pop(0) if probe_calls else (base if rollback_after else final)), \
              mock.patch.object(worker_bootstrap, "_verify_runtime_audio", side_effect=audio_error) as audio_probe, \
+             mock.patch.object(worker_bootstrap, "_verify_runtime_pip_check", side_effect=pip_check_error), \
              mock.patch.object(worker_bootstrap, "_runtime_pip_works", return_value=True), \
              mock.patch.object(worker_bootstrap.subprocess, "Popen", side_effect=popen), \
              mock.patch.object(sys, "platform", platform), \
@@ -330,7 +334,7 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
             installed_probe=old, state_overrides=old,
             overlay_probe=probe("cpu", pymss="2.3.4", core="0.1.14"),
             latest_versions={"pymss": None, "pymss-core": None},
-            expected_resolution_cores=("pymss[proxy]==2.3.4", "pymss-core==0.1.14"),
+            expected_resolution_cores=("pymss[proxy]==2.3.4",),
         )
         self.assertEqual(result, 0)
         self.assertIn("pymss[proxy]==2.3.4", commands[0])
@@ -344,7 +348,7 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
         result, commands, *_ = self.run_update(
             mode="sync", manifest_value=current_core_manifest(), installed_probe=installed,
             overlay_probe=installed, latest_versions={"pymss": None, "pymss-core": None},
-            expected_resolution_cores=("pymss[proxy]==3.0.0", "pymss-core==1.0.0"),
+            expected_resolution_cores=("pymss[proxy]==3.0.0",),
         )
         self.assertEqual(result, 0)
         self.assertIn("pymss[proxy]==3.0.0", commands[0])
@@ -459,6 +463,11 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
         self.assertNotIn("overlayPath", json.loads(self.active.read_text(encoding="utf-8")))
         self.assertTrue(env.is_dir())
         self.assertIn("audioread", events[-1]["payload"]["message"])
+
+    def test_dependency_check_failure_does_not_activate_overlay(self):
+        result, _commands, *_ = self.run_update(pip_check_error=RuntimeError("Runtime dependency verification failed"))
+        self.assertEqual(result, 1)
+        self.assertNotIn("overlayPath", json.loads(self.active.read_text(encoding="utf-8")))
 
     def test_newer_or_unknown_manifest_is_rejected_without_repair(self):
         for value in ("2026.10.1", "legacy", ""):

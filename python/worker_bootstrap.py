@@ -1325,14 +1325,12 @@ def _overlay_requirements(
     target_pymss_version: str,
     target_pymss_core_version: str | None,
 ) -> list[str]:
-    core_requirement = (
-        f"pymss-core=={target_pymss_core_version}" if target_pymss_core_version else
-        str(_runtime_requirement("pymss-core", manifest.get("common", {}).get("pymss-core")))
-    )
     requirements = [
         _pin_manifest_requirement(manifest.get("common", {}).get("pymss"), target_pymss_version),
-        core_requirement,
     ]
+    if target_pymss_core_version:
+        # A confirmed plan records dependency versions for reproducible apply.
+        requirements.append(f"pymss-core=={target_pymss_core_version}")
     for name, value in manifest.get("common", {}).items():
         if name in {"pymss", "pymss-core"}:
             continue
@@ -1621,10 +1619,10 @@ def cmd_runtime_install_plan(payload: dict[str, Any]) -> int:
     return 0
 
 
-def _verify_runtime_pip_check(python_path: Path) -> None:
+def _verify_runtime_pip_check(python_path: Path, overlay_path: Path | None = None) -> None:
     completed = subprocess.run([str(python_path), "-m", "pip", "check"], capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=60,
-                               env=_probe_environment(python_path=python_path))
+                               env=_probe_environment(overlay_path, python_path=python_path))
     if completed.returncode:
         raise RuntimeError("Runtime dependency verification failed: " + completed.stdout.strip()[:1000])
 
@@ -3205,9 +3203,8 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
         else:
             targets = {
                 "pymss": target_core_version("pymss", "pymssVersion"),
-                # Updates resolve the dependency from pymss metadata; repair and
-                # sync preserve their explicit baseline/recovery versions.
-                "pymss-core": target_core_version("pymss-core", "pymssCoreVersion") if repair_dependencies else None,
+                # pymss owns its dependency; never discover or choose a core independently.
+                "pymss-core": None,
             }
         target_pymss_version, target_pymss_core_version = targets["pymss"], targets["pymss-core"]
     except Exception as exc:
@@ -3299,6 +3296,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             if probed.get("torchVersion") != torch_version or probed.get("torchBackend") != base_probe.get("torchBackend") or probed.get("pymssGraphAvailable") is not True:
                 raise RuntimeError("The previous runtime is incompatible with the current application")
             _verify_runtime_audio(python_path, rollback_overlay, core_api=True)
+            _verify_runtime_pip_check(python_path, rollback_overlay)
             restored = {key: value for key, value in previous_runtime.items() if key not in {"previousRuntime", "activationId"}}
             restored["previousRuntime"] = {key: value for key, value in active.items() if key not in {"previousRuntime", "activationId"}}
             restored["previousRuntime"].update({
@@ -3415,12 +3413,17 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             selected = {canonicalize_name(item["metadata"]["name"]): item["metadata"]["version"] for item in report["install"]}
             targets = {name: selected.get(name) or base_versions.get(name) for name in targets}
             append_log("resolve", "Resolved core versions: " + ", ".join(f"{name}={version}" for name, version in targets.items()))
-            for index, name in enumerate(("pymss", "pymss-core")):
+            for name in ("pymss", "pymss-core"):
                 if not targets[name]:
                     raise RuntimeError(f"Unable to resolve a compatible version of {name}")
                 if name == "pymss" and channel == "stable" and Version(targets[name]).is_prerelease and targets[name] != package_versions.get(name):
                     raise RuntimeError("No stable pymss version is compatible with the current runtime")
-                requirements[index] = _pin_manifest_requirement(manifest["common"][name], targets[name])
+            dependency_pins = [_pin_manifest_requirement(manifest["common"][name], targets[name])
+                               for name in ("pymss", "pymss-core")]
+            requirements = [*dependency_pins, *[
+                value for value in requirements
+                if canonicalize_name(Requirement(value).name) not in {"pymss", "pymss-core"}
+            ]]
             if mode == "update" and package_versions.get("pymss") and Version(targets["pymss"]) <= Version(package_versions["pymss"]):
                 raise RuntimeError("No newer pymss version could be resolved from the selected package source. Check source availability and pip constraints before retrying.")
             _save_core_update_plan({
@@ -3464,6 +3467,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             )
         verify_accelerator_versions(frozen_accelerators, _probed_accelerator_versions(probed))
         _verify_runtime_audio(python_path, staging_site_packages, core_api=True)
+        _verify_runtime_pip_check(python_path, staging_site_packages)
         staging_generation.rename(final_generation)
         promoted_generation = final_generation
         overlay_path = final_generation / "site-packages"
