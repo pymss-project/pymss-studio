@@ -469,6 +469,7 @@ export const useModelStore = defineStore('model', () => {
   const downloadTaskIndex = ref<Record<string, string>>({})
   /** Models waiting for a free slot in a batch download, in start order. Not persisted. */
   const downloadQueue = ref<string[]>([])
+  const downloadsClosing = ref(false)
   const deleteTasks = ref<Record<string, DeleteTask>>({})
   const deleteTaskIndex = ref<Record<string, string>>({})
   const pendingModelDeletions = ref(new Map<string, number>())
@@ -1168,6 +1169,7 @@ export const useModelStore = defineStore('model', () => {
 
   async function downloadModel(name: string, force = false): Promise<boolean> {
     removeQueuedDownload(name)
+    if (downloadsClosing.value) return false
     const app = useAppStore()
     const settings = useSettingsStore()
     const existingTask = downloadTasks.value[name]
@@ -1199,12 +1201,14 @@ export const useModelStore = defineStore('model', () => {
       }
       const pendingTask = downloadTasks.value[name]
       if (!pendingTask || pendingTask.taskId !== taskId || pendingTask.status !== 'preparing') return false
+      if (downloadsClosing.value) { await cancelDownload(name); return false }
       await app.checkRuntimeInfo()
       if (!app.runtimeInfo?.ready) {
         throw new Error('请先完成并激活 Python 运行环境后再下载模型')
       }
       const currentTask = downloadTasks.value[name]
       if (!currentTask || currentTask.taskId !== taskId || currentTask.status !== 'preparing') return false
+      if (downloadsClosing.value) { await cancelDownload(name); return false }
       await invoke<{ taskId: string; started: boolean }>('start_model_download', {
         payload: {
           taskId,
@@ -1219,6 +1223,10 @@ export const useModelStore = defineStore('model', () => {
       const startedTask = downloadTasks.value[name]
       if (!startedTask || startedTask.taskId !== taskId) {
         await invoke<boolean>('cancel_task', { taskId }).catch(() => false)
+        return false
+      }
+      if (downloadsClosing.value && isActiveDownloadStatus(startedTask.status)) {
+        await cancelDownload(name)
         return false
       }
       if (startedTask.status === 'cancelled' || startedTask.status === 'paused') {
@@ -1291,6 +1299,7 @@ export const useModelStore = defineStore('model', () => {
   }
 
   function canQueueDownload(name: string) {
+    if (downloadsClosing.value) return false
     const model = models.value.find((item) => item.name === name)
     if (!model || !model.supported || model.downloaded || model.source === 'user') return false
     return !isModelDeletionPending(name) && !isActiveDownloadStatus(downloadTasks.value[name]?.status)
@@ -1298,6 +1307,7 @@ export const useModelStore = defineStore('model', () => {
 
   /** Starts queued downloads while slots are free. */
   function pumpDownloadQueue() {
+    if (downloadsClosing.value) return
     while (downloadQueue.value.length) {
       const activeCount = Object.values(downloadTasks.value).filter((task) => isActiveDownloadStatus(task.status)).length
       const { start } = takeQueuedDownloads(downloadQueue.value, activeCount, BATCH_DOWNLOAD_CONCURRENCY)
@@ -1710,6 +1720,13 @@ export const useModelStore = defineStore('model', () => {
     await loadModels()
     return result
   }
+
+  // Freeze before other close guards can release runtime waits or download slots.
+  registerWindowCloseGuard(() => {
+    if (!isTauriRuntime()) return
+    downloadsClosing.value = true
+    clearDownloadQueue()
+  }, 110, () => { downloadsClosing.value = false })
 
   // Model downloads/imports/deletions use background workers but are not part of
   // the separation task list. Stop any active worker before the main window closes.

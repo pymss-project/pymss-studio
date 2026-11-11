@@ -6,22 +6,29 @@ import { randomUUID } from 'node:crypto'
 import ts from 'typescript'
 import { nextTick, ref, watch } from 'vue'
 import { BATCH_DOWNLOAD_CONCURRENCY, enqueueDownloads, isActiveDownloadStatus, takeQueuedDownloads } from '../src/utils/downloadQueue.ts'
+import { registerWindowCloseGuard, runWindowCloseGuards } from '../src/utils/windowCloseGuards.ts'
 
 const source = ts.createSourceFile('model.ts', readFileSync(new URL('../src/stores/model.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true)
 const declaration = source.statements.find(statement => ts.isVariableStatement(statement)
   && statement.declarationList.declarations.some(item => item.name.getText(source) === 'useModelStore'))
 const body = declaration.declarationList.declarations[0].initializer.arguments[1].body
-const names = new Set(['downloadModel', 'cancelDownload', 'deleteModel', 'deleteStorageModels', 'isDeleteTaskTerminal', 'isModelDeletionPending', 'canQueueDownload',
+const names = new Set(['handleWorkerEvent', 'downloadModel', 'cancelDownload', 'deleteModel', 'deleteStorageModels', 'isDeleteTaskTerminal', 'isModelDeletionPending', 'canQueueDownload',
   'pumpDownloadQueue', 'enqueueBatchDownload', 'removeQueuedDownload', 'clearDownloadQueue'])
 const functions = body.statements.filter(statement => ts.isFunctionDeclaration(statement) && names.has(statement.name?.text))
 assert.equal(functions.length, names.size)
 const pendingDeletions = body.statements.find(statement => ts.isVariableStatement(statement)
   && statement.declarationList.declarations.some(item => item.name.getText(source) === 'pendingModelDeletions'))
 assert.ok(pendingDeletions)
+const downloadsClosing = body.statements.find(statement => ts.isVariableStatement(statement)
+  && statement.declarationList.declarations.some(item => item.name.getText(source) === 'downloadsClosing'))
+assert.ok(downloadsClosing)
 const queueWatch = body.statements.find(statement => ts.isExpressionStatement(statement)
   && statement.getText(source).startsWith('watch(downloadTasks,') && statement.getText(source).includes('pumpDownloadQueue'))
 assert.ok(queueWatch)
-const code = ts.transpileModule([pendingDeletions, ...functions, queueWatch].map(statement => statement.getText(source)).join('\n'), {
+const closeGuards = body.statements.filter(statement => ts.isExpressionStatement(statement) && ts.isCallExpression(statement.expression)
+  && statement.expression.expression.getText(source) === 'registerWindowCloseGuard')
+assert.ok(closeGuards.length)
+const code = ts.transpileModule([pendingDeletions, downloadsClosing, ...functions, queueWatch, ...closeGuards].map(statement => statement.getText(source)).join('\n'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText
 const flush = async () => { for (let i = 0; i < 6; i++) { await nextTick(); await new Promise(resolve => setImmediate(resolve)) } }
@@ -34,6 +41,9 @@ function environment(t) {
     downloadTasks: ref({}), downloadQueue: ref([]), deleteTasks: ref({}), deleteTaskIndex: ref({}),
     downloadStates: ref({}), downloadErrors: ref({}), downloadTaskIndex: ref({}),
     batchDeleteState: ref({ active: false, totalModels: 0, completedModels: 0, currentModel: '', failedModels: [] }),
+    residualCleanupState: ref({ active: false, taskId: '' }), customImportState: ref({ status: 'idle', taskId: '' }),
+    isTauriRuntime: () => true,
+    registerWindowCloseGuard(...args) { const stop = registerWindowCloseGuard(...args); stops.push(stop); return stop },
     useAppStore: () => ({ runtimeInfo: { ready: true }, async checkRuntimeInfo() {} }),
     useSettingsStore: () => ({ modelDir: 'C:/Models', downloadSource: 'modelscope', downloadMethod: 'requests' }),
     watch(...args) { const stop = watch(...args); stops.push(stop); return stop },
@@ -45,9 +55,18 @@ function environment(t) {
   }
   const store = vm.runInNewContext(`${code}\n({${[...names].join(',')}})`, state)
   t.after(() => stops.forEach(stop => stop()))
-  return { state, store, calls, finishDeletion: (name, error) => error
+  return { state, store, calls, close: runWindowCloseGuards, finishDeletion: (name, error) => error
     ? waiting.get(name).reject(error) : waiting.get(name).resolve({ resultModelInfo: null }),
     started: () => calls.filter(call => call.command === 'start_model_download').map(call => call.payload.model) }
+}
+
+function emitCancellations(h) {
+  const invoke = h.state.invoke
+  h.state.invoke = async (command, args) => {
+    const result = await invoke(command, args)
+    if (command === 'cancel_task') h.store.handleWorkerEvent({ type: 'task_cancelled', taskId: args.taskId, payload: {} })
+    return result
+  }
 }
 
 test('queued downloads use two slots and advance after completion', async t => {
@@ -287,4 +306,86 @@ test('an unavailable runtime stops the queue before asynchronous worker cleanup 
   await flush()
   assert.deepEqual(attempted, ['a', 'd'])
   assert.deepEqual(Array.from(h.state.downloadQueue.value), [])
+})
+
+test('window-close cancellation events cannot start replacements outside the cancellation snapshot', async t => {
+  const h = environment(t)
+  h.store.enqueueBatchDownload(['a', 'b', 'c', 'd'])
+  await flush()
+  emitCancellations(h)
+  await h.close()
+  await flush()
+  assert.deepEqual(h.started(), ['a', 'b'])
+  assert.deepEqual(Array.from(h.state.downloadQueue.value), [])
+  assert.equal(Object.values(h.state.downloadTasks.value).some(task => isActiveDownloadStatus(task.status)), false)
+})
+
+test('downloads freeze before runtime cleanup and reject new requests throughout closure', async t => {
+  const h = environment(t)
+  h.store.enqueueBatchDownload(['a', 'b', 'c'])
+  await flush()
+  emitCancellations(h)
+  let observed
+  const remove = registerWindowCloseGuard(async () => {
+    observed = { selectable: h.store.canQueueDownload('d'), added: h.store.enqueueBatchDownload(['d']),
+      started: await h.store.downloadModel('d') }
+  }, 80)
+  t.after(remove)
+  await h.close()
+  await flush()
+  assert.deepEqual(observed, { selectable: false, added: 0, started: false })
+  assert.deepEqual(h.started(), ['a', 'b'])
+  assert.equal(h.store.enqueueBatchDownload(['c']), 0)
+})
+
+test('cancelled closure restores download eligibility and future queue scheduling', async t => {
+  const h = environment(t)
+  h.store.enqueueBatchDownload(['a', 'b', 'c'])
+  await flush()
+  emitCancellations(h)
+  const remove = registerWindowCloseGuard(() => { throw new Error('Save blocked') }, -100)
+  t.after(remove)
+  await assert.rejects(h.close(), /Save blocked/)
+  assert.equal(h.store.canQueueDownload('d'), true)
+  assert.equal(h.store.enqueueBatchDownload(['d']), 1)
+  await flush()
+  assert.deepEqual(h.started(), ['a', 'b', 'd'])
+})
+
+for (const installing of [false, true]) {
+  test(`closing while a download waits for ${installing ? 'runtime installation' : 'runtime metadata'} cannot start its worker later`, async t => {
+    const h = environment(t)
+    let release
+    const gate = new Promise(resolve => { release = resolve })
+    h.state.useAppStore = () => ({ runtimeInfo: { ready: true }, runtimeInstallStatus: installing ? 'installing' : 'idle',
+      waitForRuntimeInstall: () => gate, checkRuntimeInfo: () => installing ? Promise.resolve() : gate })
+    const starting = h.store.downloadModel('a')
+    await flush()
+    await h.close()
+    release()
+    assert.equal(await starting, false)
+    await flush()
+    assert.deepEqual(h.started(), [])
+    assert.equal(isActiveDownloadStatus(h.state.downloadTasks.value.a.status), false)
+  })
+}
+
+test('a worker acknowledged after window cleanup is cancelled again instead of escaping closure', async t => {
+  const h = environment(t)
+  const invoke = h.state.invoke
+  let acknowledge, cancellations = 0
+  h.state.invoke = async (command, args) => {
+    const result = await invoke(command, args)
+    if (command === 'start_model_download') return new Promise(resolve => { acknowledge = () => resolve(result) })
+    if (command === 'cancel_task') return ++cancellations > 1
+    return result
+  }
+  const starting = h.store.downloadModel('a')
+  await flush()
+  await h.close()
+  assert.equal(cancellations, 1)
+  acknowledge()
+  assert.equal(await starting, false)
+  assert.equal(cancellations, 2)
+  assert.equal(h.state.downloadTasks.value.a.status, 'cancelled')
 })

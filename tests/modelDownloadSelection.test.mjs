@@ -31,8 +31,8 @@ const modelBody = modelDeclaration.declarationList.declarations[0].initializer.a
 const eligibilityFunctions = new Set(['isDeleteTaskTerminal', 'isModelDeletionPending', 'canQueueDownload'])
 const eligibilityStatements = modelBody.statements.filter(statement => ts.isFunctionDeclaration(statement)
   ? eligibilityFunctions.has(statement.name?.text)
-  : ts.isVariableStatement(statement) && statement.declarationList.declarations.some(item => item.name.getText(modelSource) === 'pendingModelDeletions'))
-assert.equal(eligibilityStatements.length, eligibilityFunctions.size + 1)
+  : ts.isVariableStatement(statement) && statement.declarationList.declarations.some(item => ['pendingModelDeletions', 'downloadsClosing'].includes(item.name.getText(modelSource))))
+assert.equal(eligibilityStatements.length, eligibilityFunctions.size + 2)
 const eligibilityCode = ts.transpileModule(eligibilityStatements.map(statement => statement.getText(modelSource)).join('\n'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText
@@ -52,11 +52,12 @@ function environment(t) {
     finishBatchDragSelection() { finishedDrags++ }, window: { getSelection: () => null },
     watch(...args) { const stop = watch(...args); stops.push(stop); return stop },
   }
-  const eligibility = vm.runInNewContext(`${eligibilityCode}\n({canQueueDownload, pendingModelDeletions})`, state)
+  const eligibility = vm.runInNewContext(`${eligibilityCode}\n({canQueueDownload, pendingModelDeletions, downloadsClosing})`, state)
   modelStore.canQueueDownload = eligibility.canQueueDownload
   const view = vm.runInNewContext(`${code}\n({${[...functions, ...variables].join(',')}})`, state)
   t.after(() => stops.forEach(stop => stop()))
-  return { state, view, models, opened, pendingDeletions: eligibility.pendingModelDeletions, finishedDrags: () => finishedDrags }
+  return { state, view, models, opened, pendingDeletions: eligibility.pendingModelDeletions,
+    downloadsClosing: eligibility.downloadsClosing, finishedDrags: () => finishedDrags }
 }
 
 test('failed and interrupted downloads can be selected again while active or ineligible models stay excluded', t => {
@@ -133,4 +134,21 @@ test('pending batch deletion targets become unavailable and clear only their own
   assert.equal(h.view.isDownloadSelectable(h.models[1]), true)
   h.view.setDownloadSelected(h.models[1], true)
   assert.deepEqual(Array.from(h.view.downloadSelection.value), ['paused', 'error'])
+})
+
+test('window closure disables download selection and cancellation restores eligibility', async t => {
+  const h = environment(t)
+  h.view.toggleDownloadSelectMode()
+  h.view.toggleDownloadSelectAll(true)
+  h.downloadsClosing.value = true
+  await nextTick()
+  assert.equal(h.view.downloadSelectableModels.value.length, 0)
+  assert.deepEqual(Array.from(h.view.downloadSelection.value), [])
+  h.view.setDownloadSelected(h.models[1], true)
+  assert.deepEqual(Array.from(h.view.downloadSelection.value), [])
+  h.downloadsClosing.value = false
+  await nextTick()
+  assert.equal(h.view.isDownloadSelectable(h.models[1]), true)
+  h.view.setDownloadSelected(h.models[1], true)
+  assert.deepEqual(Array.from(h.view.downloadSelection.value), ['error'])
 })
