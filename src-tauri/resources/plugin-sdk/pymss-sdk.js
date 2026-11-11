@@ -18,6 +18,7 @@
   var hostReady = false
   var hostSdkVersion = null
   var hostCapabilities = Object.freeze([])
+  var fileDropListeners = new Set()
 
   function post(message) { window.parent.postMessage(message, '*') }
 
@@ -28,6 +29,10 @@
 
     // Host pushes theme tokens; apply them to :root immediately.
     if (data.method === 'host.theme' && data.params) { applyTheme(data.params); return }
+    if (data.jsonrpc === '2.0' && data.method === 'host.filesDrop' && data.params) {
+      fileDropListeners.forEach(function (handler) { try { handler(data.params) } catch (e) { /* plugin cb */ } })
+      return
+    }
     if (data.method === 'host.ready') {
       hostSdkVersion = data.params.sdkVersion
       hostCapabilities = Object.freeze(data.params.capabilities.slice())
@@ -118,6 +123,11 @@
     pickAudio: function (options) { return call('files.pickAudio', options || {}) },
     pickFile: function (options) { return call('files.pickFile', options || {}) },
     pickDirectory: function () { return call('files.pickDirectory', {}) },
+    // Coordinates are CSS pixels within this view. Requires the files.drop permission.
+    onFileDrop: function (handler) {
+      fileDropListeners.add(handler)
+      return function () { fileDropListeners.delete(handler) }
+    },
     scanAudio: function (paths, recursive) {
       return call('files.scanAudio', { paths: paths || [], recursive: recursive !== false })
     },
