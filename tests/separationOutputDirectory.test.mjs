@@ -524,6 +524,29 @@ test('new inference tasks freeze resolved parameters; retry and a new run have d
   assert.equal(first.runConfig.inferenceParams.batch_size, 1)
 })
 
+test('shared ensemble parameters validate participating models without previous single-model metadata', async () => {
+  const values = storage()
+  const task = await newStore()
+  const model = useModelStore()
+  const first = model.models[0]
+  model.models = [first, { ...first, name: 'model-b' }]
+  model.selectedModel = 'missing'
+  model.selectedInfo = null
+  task.applySelectedModelDefaults(undefined)
+  task.ensembleEnabled = true
+  task.ensembleModels = ['model-a', 'model-b']
+  await task.applyParameterSettings('custom', { chunkMilliseconds: 8000, overlapBasisPoints: 2000 }, true)
+  assert.equal(task.parameterMode, 'custom')
+  assert.equal(task.customParameterIntent.chunkMilliseconds, 8000)
+  assert.equal(task.useTta, true)
+  assert.equal(model.selectedModel, 'missing')
+  assert.equal(JSON.parse(values.get('pymss-studio:separate-state')).customParameterIntent.overlapBasisPoints, 2000)
+
+  model.models[1] = { ...model.models[1], inferenceParamMeta: undefined }
+  await assert.rejects(task.applyParameterSettings('custom', { chunkMilliseconds: 14000, overlapBasisPoints: 8000 }), /metadataUnavailable/)
+  assert.equal(task.customParameterIntent.chunkMilliseconds, 8000)
+})
+
 test('legacy separation values are archived and cannot silently widen into model-library or workflow defaults', async () => {
   const values = storage({ 'separate-state': { version: 1, inferenceParamsByModel: { 'model-a': { chunk_size: 441000, overlap_size: 220500, normalize: true } } } })
   const task = await newStore()

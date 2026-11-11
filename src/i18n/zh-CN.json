@@ -2959,6 +2959,12 @@
       }
     },
     "rerunCurrent": "按当前设置新建任务",
-    "rerunCurrentHint": "保留原输入、模型和输出音轨，按当前设置创建新任务。"
+    "rerunCurrentHint": "保留原输入、模型和输出音轨，按当前设置创建新任务。",
+    "presets": {
+      "label": "推理参数预设",
+      "speed": "速度优先",
+      "balanced": "平衡",
+      "quality": "质量优先"
+    }
   }
 }

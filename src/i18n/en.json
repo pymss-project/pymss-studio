@@ -2959,6 +2959,12 @@
       }
     },
     "rerunCurrent": "New task with current settings",
-    "rerunCurrentHint": "Keep the original input, model and stems, and create a task using current settings."
+    "rerunCurrentHint": "Keep the original input, model and stems, and create a task using current settings.",
+    "presets": {
+      "label": "Inference presets",
+      "speed": "Speed first",
+      "balanced": "Balanced",
+      "quality": "Quality first"
+    }
   }
 }

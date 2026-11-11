@@ -976,8 +976,15 @@ export const useTaskStore = defineStore('task', () => {
 
   async function applyParameterSettings(mode: ParameterMode, intent: CustomParameterIntent, tta = useTta.value) {
     const candidate = JSON.parse(JSON.stringify(intent)) as CustomParameterIntent
-    const resolution = resolveParameters(selectedParameterMetadata.value, selectedModelOverrides.value, mode, candidate)
-    if (resolution.issues.length) throw new Error(i18n.global.t(`parameterEditor.error.${resolution.issues[0]!.code}`, { field: resolution.issues[0]!.key }))
+    const store = useModelStore()
+    const resolutions = ensembleEnabled.value ? ensembleModels.value.map(name => {
+      const entry = store.selectedInfo?.name === name ? store.selectedInfo : store.models.find(item => item.name === name)
+      return resolveParameters(entry?.inferenceParamMeta?.resolution, store.getModelInferenceOverrides(name), mode, candidate)
+    }) : [resolveParameters(selectedParameterMetadata.value, selectedModelOverrides.value, mode, candidate)]
+    if (!resolutions.length) throw new Error(i18n.global.t('parameterEditor.metadataUnavailable'))
+    for (const resolution of resolutions) {
+      if (resolution.issues.length) throw new Error(i18n.global.t(`parameterEditor.error.${resolution.issues[0]!.code}`, { field: resolution.issues[0]!.key }))
+    }
     const previousMode = parameterMode.value, previousIntent = customParameterIntent.value, previousTta = useTta.value
     parameterMode.value = mode
     customParameterIntent.value = normalizeCustomParameterIntent(candidate)

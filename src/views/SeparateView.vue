@@ -64,6 +64,7 @@ import WorkflowDescriptionDialog from '@/components/workflow/WorkflowDescription
 import WorkflowDescriptionEditor from '@/components/workflow/WorkflowDescriptionEditor.vue'
 import { legacyWorkflowDescription, resolveWorkflowDescription } from '@/workflows/metadata'
 import { resolveParameters, type CustomParameterIntent, type ParameterMode, type ResolvedInferenceSnapshot } from '@/features/inference/parameters'
+import { INFERENCE_PRESETS, matchingInferencePreset, supportsInferencePresets, type InferencePreset } from '@/features/inference/presets'
 
 const studioLog = createLogger('ui.views.SeparateView')
 
@@ -114,10 +115,19 @@ const applyingParameters = ref(false)
 const parameterMetadataError = ref('')
 const parameterMetadataLoading = ref(false)
 const audioDraft = ref({ wavBitDepth: settings.wavBitDepth, flacBitDepth: settings.flacBitDepth, mp3BitRate: settings.mp3BitRate, m4aBitRate: settings.m4aBitRate, m4aCodec: settings.m4aCodec })
-const parameterDraftResolution = computed(() => resolveParameters(currentModelInfo.value?.inferenceParamMeta?.resolution, model.getModelInferenceOverrides(currentModelInfo.value?.name || ''), parameterDraftMode.value, parameterDraftIntent.value))
+const parameterDraftResolution = computed(() => resolveParameters(parameterReferenceModel.value?.inferenceParamMeta?.resolution, model.getModelInferenceOverrides(parameterReferenceModel.value?.name || ''), parameterDraftMode.value, parameterDraftIntent.value))
+const showParameterPresets = computed(() => parameterDraftMode.value === 'custom'
+  && supportsInferencePresets(parameterReferenceModel.value?.inferenceParamMeta?.resolution))
+const parameterPresetsDisabled = computed(() => applyingParameters.value || parameterMetadataLoading.value || Boolean(parameterMetadataError.value))
+const selectedParameterPreset = computed(() => matchingInferencePreset(parameterDraftIntent.value))
+function applyParameterPreset(preset: InferencePreset) {
+  if (!showParameterPresets.value || parameterPresetsDisabled.value) return
+  parameterDraftIntent.value = { ...parameterDraftIntent.value,
+    chunkMilliseconds: preset.chunkMilliseconds, overlapBasisPoints: preset.overlapBasisPoints }
+}
 const canResetParameterDraft = computed(() => parameterDraftMode.value !== 'model' || Object.keys(parameterDraftIntent.value).length > 0)
-const pendingLegacy = computed(() => task.pendingLegacyParameters(currentModelInfo.value?.name || ''))
-const legacyPreview = computed(() => task.previewLegacyParameters(currentModelInfo.value?.name || ''))
+const pendingLegacy = computed(() => task.pendingLegacyParameters(parameterReferenceModel.value?.name || ''))
+const legacyPreview = computed(() => task.previewLegacyParameters(parameterReferenceModel.value?.name || ''))
 const legacyComparison = computed(() => {
   const preview = legacyPreview.value
   if (!preview) return []
@@ -175,7 +185,7 @@ async function applyParameters() {
 }
 
 async function resolveLegacy(choice: 'keep' | 'import') {
-  const name = currentModelInfo.value?.name
+  const name = parameterReferenceModel.value?.name
   if (!name) return
   applyingParameters.value = true
   try { await task.resolveLegacyParameters(name, choice) }
@@ -184,7 +194,7 @@ async function resolveLegacy(choice: 'keep' | 'import') {
 }
 
 async function editModelParameters() {
-  const name = currentModelInfo.value?.name
+  const name = parameterReferenceModel.value?.name
   if (!name) return
   const navigate = async () => {
     showSettingsDrawer.value = false
@@ -240,7 +250,7 @@ function handleSettingsAfterEnter() {
 const fieldGuideRef = ref<{ syncPosition: () => void } | null>(null)
 const guideTarget = ref<HTMLElement | null>(null)
 let guideOpenedSettings = false
-const helpTopics = computed(() => parameterHelpTopics(currentModelInfo.value?.modelType))
+const helpTopics = computed(() => parameterHelpTopics(parameterReferenceModel.value?.modelType))
 const guidedParameter = computed(() => beginnerGuide.parameterStep && (!beginnerGuide.demoActive || isTutorialFrame()) ? beginnerGuide.currentParameter : undefined)
 const guideRequiresAdvanced = computed(() => guidedParameter.value?.group === 'inference' && guidedParameter.value.id !== 'tta')
 watch(showSettingsDrawer, () => { parameterHelpPage.value = null })
@@ -468,6 +478,13 @@ const availableStemNames = computed(() => parseModelInstruments(currentModelInfo
 const ensembleModelEntries = computed(() => ensembleModels.value
   .map(name => listedDownloadedModels.value.find(item => item.name === name))
   .filter((item): item is (typeof listedDownloadedModels.value)[number] => Boolean(item)))
+const parameterReferenceModel = computed(() => {
+  if (!ensembleEnabled.value) return currentModelInfo.value
+  const entries = ensembleModelEntries.value
+  return entries.find(item => task.pendingLegacyParameters(item.name))
+    || entries.find(item => supportsInferencePresets(item.inferenceParamMeta?.resolution))
+    || entries.find(item => item.inferenceParamMeta?.resolution) || entries[0] || null
+})
 const ensembleStemOptionsByModel = computed(() => Object.fromEntries(
   ensembleModelEntries.value.map(item => [
     item.name,
@@ -2966,7 +2983,15 @@ async function retryCurrentTask() {
         <div class="settings-drawer__content">
           <div v-if="runMode === 'model'" class="settings-inference">
             <div class="parameter-section-heading">
-              <h3>{{ t('parameterEditor.inferenceGroup') }}</h3>
+              <div class="parameter-section-heading__title">
+                <h3>{{ t('parameterEditor.inferenceGroup') }}</h3>
+                <div v-if="showParameterPresets" class="parameter-presets" role="group" :aria-label="t('parameterEditor.presets.label')">
+                  <n-button v-for="preset in INFERENCE_PRESETS" :key="preset.id" size="tiny" secondary
+                    :type="selectedParameterPreset === preset.id ? 'primary' : 'default'"
+                    :aria-pressed="selectedParameterPreset === preset.id" :disabled="parameterPresetsDisabled"
+                    @click="applyParameterPreset(preset)">{{ t(preset.label) }}</n-button>
+                </div>
+              </div>
               <div class="parameter-section-heading__actions">
                 <n-radio-group class="parameter-source-switch" :value="parameterDraftMode" name="inference-parameter-source" size="small" :disabled="applyingParameters" :aria-label="t('parameterEditor.parameterSource')" @update:value="(value: 'model' | 'custom') => parameterDraftMode = value">
                   <n-radio-button value="model">{{ t('parameterEditor.followModel') }}</n-radio-button>
@@ -2977,7 +3002,7 @@ async function retryCurrentTask() {
             </div>
             <div class="parameter-context">
               <p class="advanced-hint">{{ t(parameterDraftMode === 'model' ? 'parameterEditor.followHint' : 'parameterEditor.modeHint') }}</p>
-              <n-button v-if="parameterDraftMode === 'model' && currentModelInfo" text type="primary" size="tiny" class="parameter-model-link" :disabled="applyingParameters" @click="editModelParameters">{{ t('parameterEditor.editModelSettings') }}<template #icon><n-icon :component="OpenOutline" /></template></n-button>
+              <n-button v-if="parameterDraftMode === 'model' && parameterReferenceModel" text type="primary" size="tiny" class="parameter-model-link" :disabled="applyingParameters" @click="editModelParameters">{{ t('parameterEditor.editModelSettings') }}<template #icon><n-icon :component="OpenOutline" /></template></n-button>
             </div>
             <n-alert v-if="pendingLegacy" type="warning" :bordered="false">
               {{ t('parameterEditor.migrationHint') }}
@@ -2995,8 +3020,8 @@ async function retryCurrentTask() {
             </n-alert>
             <n-alert v-if="parameterMetadataError" type="error" :bordered="false">{{ parameterMetadataError }}</n-alert>
             <InferenceParameterFields
-              :metadata="currentModelInfo?.inferenceParamMeta?.resolution"
-              :library="model.getModelInferenceOverrides(currentModelInfo?.name || '')"
+              :metadata="parameterReferenceModel?.inferenceParamMeta?.resolution"
+              :library="model.getModelInferenceOverrides(parameterReferenceModel?.name || '')"
               :mode="parameterDraftMode" v-model:intent="parameterDraftIntent"
               :loading="parameterMetadataLoading" :disabled="applyingParameters"
             />
@@ -5328,6 +5353,9 @@ async function retryCurrentTask() {
 .settings-inference, .settings-output { display: grid; gap: 10px; min-width: 0; }
 .parameter-section-heading, .settings-subhead { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 6px 12px; min-height: 28px; }
 .parameter-section-heading h3, .settings-subhead h3 { margin: 0; font-size: 14px; font-weight: 600; color: var(--on-surface-heading); }
+.parameter-section-heading__title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; min-width: 0; }
+.parameter-section-heading__title h3 { flex-shrink: 0; }
+.parameter-presets { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .parameter-section-heading__actions { display: flex; align-items: center; gap: 4px; }
 .parameter-source-switch { display: inline-flex; overflow: hidden; padding: 0; border: 1px solid var(--outline); border-radius: 9px; background: var(--surface-2); }
 .parameter-source-switch :deep(.n-radio-button) { height: 28px; line-height: 28px; padding: 0 13px; border: 0; border-radius: 0; background: transparent; box-shadow: none; font-size: 12px; color: var(--on-surface-muted); transition: color 160ms ease, background 200ms ease, box-shadow 200ms ease; }
