@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -15,6 +16,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 from worker_runtime_paths import discover_rocm_native_paths  # noqa: E402
+
+# Upstream HIP MIT text, kept offline for SPDX-only SDK headers:
+# https://github.com/ROCm/HIP/blob/7e6bd377cfef106b30a957b41d05f3c571ead5fe/LICENSE.md
+HIP_LICENSE = ROOT / "tools/rocm-detector/HIP-LICENSE.txt"
+
+
+def hip_runtime_notice(header: Path) -> str:
+    match = re.match(r"\s*/\*(.*?)\*/", header.read_text(encoding="utf-8-sig"), re.DOTALL)
+    notice = match.group(1).strip() if match else ""
+    attributed = "Copyright" in notice and "Advanced Micro Devices" in notice
+    if attributed and "Permission is hereby granted" in notice and "SOFTWARE" in notice:
+        return notice
+    if attributed and re.search(r"(?m)^\s*\*?\s*SPDX-License-Identifier:\s*MIT\s*$", notice):
+        return notice + "\n\n" + HIP_LICENSE.read_text(encoding="utf-8").strip()
+    raise ValueError("The HIP SDK copyright and permission notice could not be identified")
 
 
 def sha256(path: Path) -> str:
@@ -116,6 +132,7 @@ def build(environment: Path, output: Path, profile: str) -> dict:
     header = sdk / "include/hip/hip_runtime_api.h"
     if not header.is_file() or not header.resolve().is_relative_to(environment):
         raise ValueError("The matching HIP SDK headers were not found")
+    notice = hip_runtime_notice(header)
     output.mkdir(parents=True, exist_ok=False)
     destination = output / "bin"
     destination.mkdir()
@@ -160,10 +177,6 @@ def build(environment: Path, output: Path, profile: str) -> dict:
                 raise ValueError("Missing detector DLL dependency: " + name)
     licenses = output / "licenses"
     licenses.mkdir()
-    header_text = header.read_text(encoding="utf-8")
-    notice = header_text.split("*/", 1)[0].removeprefix("/*").strip()
-    if "Permission is hereby granted" not in notice or "SOFTWARE" not in notice:
-        raise ValueError("The HIP SDK copyright and permission notice could not be identified")
     (licenses / "HIP-runtime-notice.txt").write_text(notice + "\n", encoding="utf-8")
     for source in (sdk / "share/doc").rglob("*"):
         if source.is_file() and any(token in source.name.lower() for token in ("license", "copying", "notice")):
