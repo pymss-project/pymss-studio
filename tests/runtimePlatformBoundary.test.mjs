@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
 import ts from 'typescript'
-import { detectRuntimePlatform } from '../src/utils/runtime.ts'
+import { detectRuntimePlatform, runtimeInstallOptionsFromPlan } from '../src/utils/runtime.ts'
 import { runtimeErrorSummary, runtimeOperationError } from '../src/utils/runtimeErrors.ts'
 
 function componentFunction(file, name, scope) {
@@ -158,6 +158,42 @@ test('unsupported platforms skip core update prompts', () => {
   const scope = { app: { runtimeCoreUpdateSupported: false, updateRuntimeCore: async () => actions.push('update') }, runtimeCorePromptVisible: { value: false } }
   componentFunction('../src/App.vue', 'showRuntimeCorePrompt', scope)()
   assert.deepEqual(actions, [])
+})
+
+test('runtime version discovery is ready without a separate pymss-core release', () => {
+  for (const loading of [false, true]) {
+    const ready = componentComputed('../src/views/SettingsView.vue', 'runtimeCoreVersionCheckReady', {
+      app: { runtimeCoreVersionsLoading: loading },
+      latestPymssVersion: { value: '2.3.5' },
+      latestPymssCoreVersion: { value: null },
+    })
+    assert.equal(ready, !loading)
+  }
+  assert.equal(componentComputed('../src/views/SettingsView.vue', 'runtimeCoreVersionCheckReady', {
+    app: { runtimeCoreVersionsLoading: false },
+    latestPymssVersion: { value: null }, latestPymssCoreVersion: { value: '0.1.15' },
+  }), false)
+})
+
+test('startup update prompts announce pymss without promising an independent core upgrade', () => {
+  const prompt = componentComputed('../src/App.vue', 'runtimeCorePromptContent', {
+    runtimeManifestSyncRequired: { value: false },
+    activeRuntime: { value: { backend: 'cuda', pymssVersion: '2.3.4', pymssCoreVersion: '0.1.14' } },
+    app: { runtimeCoreVersions: { packages: {
+      pymss: { latestVersion: '2.3.5' }, 'pymss-core': { latestVersion: '0.1.15' },
+    } } },
+    runtimeBackendLabel: value => value,
+    t: (key, values) => ({ key, values }),
+  })
+  assert.equal(prompt.key, 'settings.runtimeCoreStartupPrompt')
+  assert.equal(prompt.values.pymss, '2.3.4')
+  assert.equal(prompt.values.latest, '2.3.5')
+  assert.equal('coreLatest' in prompt.values, false)
+  for (const locale of ['en', 'zh-CN']) {
+    const messages = JSON.parse(readFileSync(new URL(`../src/i18n/${locale}.json`, import.meta.url), 'utf8'))
+    assert.equal(messages.settings.runtimeCoreStartupPrompt.includes('{coreLatest}'), false)
+    assert.equal(messages.settings.runtimeCoreUpdateAvailable.includes('{core}'), false)
+  }
 })
 
 for (const backend of ['mlx', 'cpu']) {
@@ -328,3 +364,120 @@ test('non-Windows developer controls cannot open an editor or mutate runtime fil
     await componentFunction('../src/views/DebugView.vue', name, scope)({ editable: true, backupExists: true })
   }
 })
+
+for (const confirmed of [false, true]) {
+  test(`ROCm plan ${confirmed ? 'authorizes' : 'declines'} replacement of the saved previous version`, async () => {
+    const calls = []
+    const plan = { backend: 'rocm', action: 'upgrade', profileId: 'next', requestedTargets: ['gfx1100'], installationEnabled: true,
+      requiresPreviousReplacement: true, previousProfile: { id: 'old-profile', packages: { torch: '2.9.1' } },
+      expectedProfileId: 'old', expectedProfileRevision: 1, expectedBaseFingerprint: 'base', expectedTargetFingerprint: 'target' }
+    const scope = {
+      app: { installRuntime: async (...args) => calls.push(args) }, rocmPlan: { value: plan }, rocmPlanReady: { value: true },
+      runtimeBusy: { value: false }, runtimeMirror: { value: 'auto' }, currentLocale: { value: 'zh-CN' }, rocmDialogVisible: { value: true },
+      runtimeInstallPlanMatches: () => true, rocmInstallOptions: () => ({}), runtimeInstallOptionsFromPlan,
+      t: (key, values) => `${key}:${JSON.stringify(values || {})}`,
+      confirmRuntimeAction: async (_title, content) => { assert.match(content, /2\.9\.1/); return confirmed },
+      rocmActionError: { value: '' }, runtimeErrorSummary: value => String(value),
+    }
+    await componentFunction('../src/views/SettingsView.vue', 'confirmRocmInstall', scope)()
+    assert.equal(calls.length, confirmed ? 1 : 0)
+    if (confirmed) {
+      assert.equal(calls[0][3].replacePrevious, true)
+      assert.equal(calls[0][3].expectedTargetFingerprint, 'target')
+      assert.deepEqual(Array.from(calls[0][3].targets), ['gfx1100'])
+    }
+  })
+}
+
+test('Windows ROCm repair opens the device selector without installing or bypassing disabled profiles', async () => {
+  const actions = []
+  const scope = {
+    app: { runtimeManagementSupported: true, runtimeInfo: { platform: 'win32' }, installRuntime: () => assert.fail('must review a plan') },
+    runtimeBusy: { value: false }, openRocmInstaller: async repair => actions.push(repair),
+  }
+  await componentFunction('../src/views/SettingsView.vue', 'installBackend', scope)('rocm')
+  assert.deepEqual(actions, [true])
+})
+
+test('a disabled ROCm plan cannot be dispatched even after preview acknowledgement', async () => {
+  const scope = {
+    app: { installRuntime: () => assert.fail('disabled profile must remain disabled') },
+    rocmPlan: { value: { installationEnabled: false } }, rocmPlanReady: { value: false }, runtimeBusy: { value: false },
+  }
+  await componentFunction('../src/views/SettingsView.vue', 'confirmRocmInstall', scope)()
+})
+
+test('runtime recovery remains available after runtime-info recovery failure without claiming arbitrary query failures require recovery', () => {
+  for (const [code, expected] of [['RUNTIME_RECOVERY_FAILED', true], ['RUNTIME_BUSY', false]]) {
+    const result = componentComputed('../src/views/SettingsView.vue', 'runtimeRecoveryNeeded', {
+      app: { runtimeInfoFailure: { code } },
+    })
+    assert.equal(Boolean(result), expected)
+  }
+})
+
+test('rollback confirmation identifies current and previous runtime versions before dispatch', async () => {
+  const actions = []
+  const scope = {
+    app: { runtimeInfo: { previousRuntime: { torchVersion: '2.9.1' } }, runtimeInstallPlan: async () => ({}), rollbackRuntime: async () => actions.push('rollback') },
+    runtimeBusy: { value: false }, runtimeMaintenancePreparing: { value: false },
+    runtimeEnvironmentForBackend: () => ({ torchVersion: '2.12.0' }),
+    confirmRuntimeAction: async (_title, content) => { assert.match(content, /2\.9\.1/); assert.match(content, /2\.12\.0/); return true },
+    t: (key, values) => `${key}:${JSON.stringify(values || {})}`, runtimeErrorSummary,
+    message: { error: value => assert.fail(value) },
+  }
+  await componentFunction('../src/views/SettingsView.vue', 'restoreRuntimeEnvironment', scope)()
+  assert.deepEqual(actions, ['rollback'])
+  assert.equal(scope.runtimeMaintenancePreparing.value, false)
+})
+
+
+for (const includeFp16 of [false, true]) {
+  test(`Settings GPU diagnostic sends includeFp16=${includeFp16} and keeps the selected precision visible`, async () => {
+    const calls = []
+    const scope = {
+      app: { startRuntimeGpuProbe: async payload => calls.push(payload) },
+      runtimeBusy: { value: false }, runtimeGpuDialogVisible: { value: false }, runtimeGpuIncludeFp16: { value: false },
+      runtimeErrorSummary, t: key => key, message: { error: value => assert.fail(value) },
+    }
+    const probe = componentFunction('../src/views/SettingsView.vue', 'probeRuntimeGpu', scope)
+    if (includeFp16) await probe(true)
+    else await probe()
+    assert.equal(calls[0].includeFp16, includeFp16)
+    assert.equal(scope.runtimeGpuIncludeFp16.value, includeFp16)
+    assert.equal(scope.runtimeGpuDialogVisible.value, true)
+  })
+}
+
+
+for (const locale of ['zh-CN', 'en']) {
+  test(`${locale} names known GPU operators and preserves unknown operator identifiers`, () => {
+    const messages = JSON.parse(readFileSync(new URL(`../src/i18n/${locale}.json`, import.meta.url), 'utf8')).settings
+    const label = componentFunction('../src/views/SettingsView.vue', 'runtimeGpuCheckLabel', {
+      t: key => messages[key.replace('settings.', '')],
+    })
+    for (const id of ['allocation', 'stftIstft', 'conv', 'batchNorm', 'instanceNorm', 'sdpa', 'rnn']) {
+      assert.equal(typeof label(id), 'string')
+      assert.ok(label(id).length > 0)
+      assert.notEqual(label(id), id)
+    }
+    assert.equal(label('newOperator'), 'newOperator')
+    assert.match(label('conv'), locale === 'zh-CN' ? /基础/ : /Basic/)
+    assert.match(label('rnn'), locale === 'zh-CN' ? /基础路径/ : /basic path/)
+  })
+
+  test(`${locale} explains ROCm inference failures without promising CPU fallback`, () => {
+    const messages = JSON.parse(readFileSync(new URL(`../src/i18n/${locale}.json`, import.meta.url), 'utf8')).settings
+    const translate = key => messages[key.replace('settings.', '')]
+    for (const code of ['ROCM_CONTEXT_LOST', 'ROCM_OUT_OF_MEMORY', 'ROCM_TARGET_MISSING', 'ROCM_RUNTIME_INCOMPATIBLE', 'ROCM_NATIVE_CHECK_FAILED']) {
+      const summary = runtimeErrorSummary({ code, message: 'raw diagnostic' }, translate)
+      assert.equal(typeof summary, 'string')
+      assert.notEqual(summary, messages.runtimeCoreOperationFailed)
+      assert.doesNotMatch(summary, /CPU|fallback|raw diagnostic/i)
+    }
+    const context = runtimeErrorSummary({ code: 'ROCM_CONTEXT_LOST' }, translate)
+    assert.match(context, locale === 'zh-CN' ? /重新.*任务/ : /Start a new task/)
+    const memory = runtimeErrorSummary({ code: 'ROCM_OUT_OF_MEMORY' }, translate)
+    assert.match(memory, locale === 'zh-CN' ? /分段长度.*并发/ : /segment size.*concurrent/)
+  })
+}

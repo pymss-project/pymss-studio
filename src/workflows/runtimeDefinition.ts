@@ -4,6 +4,7 @@ import {
   isWorkflowSaveNodeType,
   normalizeGraphWorkflowDefinition,
 } from '@/workflows/formats'
+import { stripWorkflowMetadata } from '@/workflows/metadata'
 
 export type WorkflowDefinitionIssue =
   | 'steps-required'
@@ -166,7 +167,7 @@ export function prepareWorkflowDefinitionForRun(
   },
 ): Record<string, unknown> {
   const clone = normalizeGraphWorkflowDefinition(
-    JSON.parse(JSON.stringify(definition)) as Record<string, unknown>,
+    stripWorkflowMetadata(JSON.parse(JSON.stringify(definition)) as Record<string, unknown>),
   )
   const format = detectWorkflowFormat(clone)
   if (format === 'simple') {

@@ -2,11 +2,22 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$RuntimeDir,
     [switch]$KeepScripts,
-    [switch]$KeepVenv
+    [switch]$KeepVenv,
+    [ValidateSet("cpu", "cuda", "rocm", "mlx")]
+    [string]$Backend = "cpu"
 )
 
 $ErrorActionPreference = "Stop"
 $runtime = Resolve-Path $RuntimeDir
+
+function Test-RocmRuntimeResource {
+    param([string]$Path)
+    if ($Backend -ne "rocm") { return $false }
+    # SDK archives, HIPRTC headers, device kernels, entry points and their full
+    # metadata remain intact. Other packages keep the existing pruning policy.
+    return $Path -match '(?i)[\\/]site-packages[\\/](_?rocm([_.-]|$)|_?amd_torch(vision)?_device([_.-]|$))' -or
+        $Path -match '(?i)[\\/]site-packages[\\/]torch[\\/]include([\\/]|$)'
+}
 
 $removeDirs = @(
     "Doc",
@@ -22,7 +33,7 @@ $removeDirs = @(
 if (!$KeepVenv) {
     $removeDirs += @("Lib\ensurepip", "Lib\venv")
 }
-if (-not $KeepScripts) {
+if (-not $KeepScripts -and $Backend -ne "rocm") {
     $removeDirs += "Scripts"
 }
 foreach ($name in $removeDirs) {
@@ -33,11 +44,11 @@ foreach ($name in $removeDirs) {
 }
 
 Get-ChildItem -LiteralPath $runtime -Recurse -Force -Directory -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -in @("__pycache__", "test", "tests") } |
+    Where-Object { $_.Name -in @("__pycache__", "test", "tests") -and !(Test-RocmRuntimeResource $_.FullName) } |
     ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
 
 Get-ChildItem -LiteralPath $runtime -Recurse -Force -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Extension -in @(".pyc", ".pyo", ".a", ".la", ".h", ".hpp") } |
+    Where-Object { $_.Extension -in @(".pyc", ".pyo", ".a", ".la", ".h", ".hpp") -and !(Test-RocmRuntimeResource $_.FullName) } |
     ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
 
 # Windows wheel ships import libraries that are not needed at runtime.
@@ -65,7 +76,8 @@ if ($sitePackages -and (Test-Path -LiteralPath $sitePackages)) {
     Get-ChildItem -LiteralPath $sitePackages -Recurse -Force -Directory -ErrorAction SilentlyContinue |
         Where-Object {
             $_.Name -in @("__pycache__", "test", "tests", "testsuite", "examples", "example", "benchmarks", "docs", "doc") -and
-            $_.FullName -notmatch "[\\/]site-packages[\\/]torch[\\/]testing([\\/]|$)"
+            $_.FullName -notmatch "[\\/]site-packages[\\/]torch[\\/]testing([\\/]|$)" -and
+            !(Test-RocmRuntimeResource $_.FullName)
         } |
         Sort-Object FullName -Descending |
         ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
@@ -74,7 +86,7 @@ if ($sitePackages -and (Test-Path -LiteralPath $sitePackages)) {
     # and future pip updates. Remove only WHEEL bookkeeping; ROCm ships many distributions,
     # so retaining every wheel metadata file makes the LZMA2 installer enumerate more files.
     Get-ChildItem -LiteralPath $sitePackages -Recurse -Force -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match "(?i)\.dist-info$|\.egg-info$" } |
+        Where-Object { $_.Name -match "(?i)\.dist-info$|\.egg-info$" -and !(Test-RocmRuntimeResource $_.FullName) } |
         ForEach-Object {
             Get-ChildItem -LiteralPath $_.FullName -Force -File -ErrorAction SilentlyContinue |
                 Where-Object {

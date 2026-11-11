@@ -14,16 +14,29 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 from worker_audio import _apply_stereo_pan, _equal_power_fade, _read_audio, _resample_audio
+from worker_rocm import (
+    RocmCompatibilityError, RocmInferenceError, RocmWorkerAbort, assert_rocm_operation_succeeded,
+    begin_rocm_operation, model_native_checks, rocm_worker_poisoned,
+    run_rocm_initialization,
+)
 from worker_models import (
     _derive_overlap_size_from_num_overlap,
     auxiliary_paths_for,
     config_path_for,
     get_any_model_entry,
     is_user_model_entry,
+    load_parameter_resolution,
     model_path_for,
 )
 from worker_protocol import ProtocolLogHandler, _as_bool, _as_float, _as_int, current_log_task_id, emit, emit_error, task_logging
 from worker_inference_constraints import InferenceParameterError, validate_chunk_size
+from worker_inference_snapshot import (
+    SNAPSHOT_PARAMS_VERSION,
+    compute_inference_fingerprint,
+    parse_inference_params_version,
+    validate_snapshot_against_resolution,
+    validate_snapshot_payload,
+)
 from worker_paths import normalize_output_dir as _normalize_output_dir
 
 
@@ -237,7 +250,19 @@ def _studio_separator_type() -> type[Any]:
                     )
             from worker_rocm import configure_rocm_runtime
             configure_rocm_runtime(kwargs.get("device", "auto"), kwargs.get("device_ids"), kwargs.get("logger"))
-            super().__init__(*args, **kwargs)
+            initialize = super().__init__
+            run_rocm_initialization(lambda: initialize(*args, **kwargs), kwargs.get("device", "auto"))
+            params = kwargs.get("inference_params") or {}
+            model = getattr(self, "model", None)
+            config = getattr(self, "config", None)
+            inference = getattr(config, "inference", {})
+            training = getattr(config, "training", {})
+            amp = inference.get("use_amp") if hasattr(inference, "get") else None
+            if amp is None:
+                amp = training.get("use_amp", params.get("use_amp", True)) if hasattr(training, "get") else params.get("use_amp", True)
+            if isinstance(getattr(model, "use_amp", None), bool):
+                amp = model.use_amp
+            self._studio_rocm_checks = model_native_checks(model, use_amp=bool(amp), device=getattr(self, "device", kwargs.get("device", "auto")))
             self._studio_naming = _normalize_output_naming(output_naming)
             self._studio_output_model = output_model
             self._studio_output_lock = Lock()
@@ -273,9 +298,11 @@ def _studio_separator_type() -> type[Any]:
                     batch = (matches[0], len(batches))
             self._studio_progress_batch = batch
             try:
+                checks = getattr(self, "_studio_rocm_checks", ())
                 return run_rocm_inference(
                     lambda: separate(*args, **kwargs), getattr(self, "device", "auto"),
                     getattr(self, "device_ids", None), getattr(self, "logger", None),
+                    **({"required_checks": checks} if checks else {}),
                 )
             finally:
                 self._studio_progress_batch = previous_batch
@@ -456,6 +483,12 @@ def resolve_pymss_output_dir(output_dir: str, success_files: list[str], fallback
     return str(Path(output_dir) / file_name)
 
 def _emit_inference_error(exc: Exception, task_id: str) -> int:
+    if isinstance(exc, (RocmInferenceError, RocmCompatibilityError)):
+        detail = traceback.format_exc()
+        if getattr(exc, "original_traceback", None):
+            detail = f"{exc.original_traceback}\n{detail}"
+        return emit_error(exc.code, str(exc), detail, task_id=task_id,
+                          extra={"workerRestartRequired": rocm_worker_poisoned(), "outputPolicy": "preserve_completed"})
     if isinstance(exc, RuntimeCompatibilityError):
         return emit_error("RUNTIME_OUTDATED", str(exc), task_id=task_id)
     if isinstance(exc, InferenceParameterError):
@@ -479,7 +512,7 @@ def _emit_inference_error(exc: Exception, task_id: str) -> int:
     return emit_error("INFERENCE_FAILED", message, traceback.format_exc(), task_id=task_id)
 
 def _close_separator(separator: Any) -> None:
-    if separator is None:
+    if separator is None or rocm_worker_poisoned():
         return
     close = getattr(separator, "close", None)
     if callable(close):
@@ -604,17 +637,27 @@ def _prepare_separator(
     source = payload.get("source") or "modelscope"
     download_method = payload.get("downloadMethod") or "aria2c"
     endpoint = payload.get("endpoint") or None
+    # Version dispatch runs before device probing so an invalid snapshot fails without touching
+    # Torch. v4 carries a frozen resolvedInference snapshot and bypasses the legacy sanitize/enrich
+    # path (which treats 0 as "Default"); v1-3 keep their historical meaning.
+    params_version = parse_inference_params_version(payload.get("inferenceParamsVersion"))
+    snapshot: dict[str, Any] | None = None
+    if params_version == SNAPSHOT_PARAMS_VERSION:
+        snapshot = validate_snapshot_payload(payload)
+        use_tta = bool(snapshot["useTta"])
+        inference_params = dict(snapshot["parameters"])
+    else:
+        use_tta = bool(payload.get("useTta", False))
+        inference_params = normalize_inference_params(
+            payload.get("inferenceParams"),
+            payload.get("inferenceParamsVersion"),
+        )
     device, device_ids, resolved_device_label = _resolve_separator_device(
         payload.get("device"), payload.get("deviceIds")
     )
     output_format = payload.get("outputFormat") or "wav"
     selected_stems = _normalize_selected_stems(payload.get("selectedStems"))
-    use_tta = bool(payload.get("useTta", False))
     debug = bool(payload.get("debug", False))
-    inference_params = normalize_inference_params(
-        payload.get("inferenceParams"),
-        payload.get("inferenceParamsVersion"),
-    )
     audio_params = normalize_audio_params(payload.get("audioParams"))
 
     emit("task_log", {
@@ -629,6 +672,7 @@ def _prepare_separator(
     emit("task_stage", {"stage": "loading_runtime", "message": "Loading separation runtime"}, task_id=task_id)
     StudioMSSeparator = _studio_separator_type()
     emit("task_stage", {"stage": "loading_model", "message": "Loading model"}, task_id=task_id)
+    downloaded_now = False
     try:
         resolved = _resolve_studio_model(model_name, model_dir, require_supported=True, require_exists=True)
     except Exception as resolve_exc:
@@ -651,6 +695,7 @@ def _prepare_separator(
                 task_id=task_id,
             )
             resolved = _resolve_studio_model(model_name, model_dir, require_supported=True, require_exists=True)
+            downloaded_now = True
         except Exception as download_exc:
             raise ModelDownloadError(str(download_exc)) from download_exc
     if not isinstance(resolved, dict):
@@ -660,11 +705,20 @@ def _prepare_separator(
     if not resolved_model_type or not resolved_model_path:
         missing = [key for key in ('model_type', 'model_path') if not resolved.get(key)]
         raise RuntimeError(f"resolve_model result for {model_name!r} is missing required field(s): {', '.join(missing)}")
-    runtime_inference_params = _enrich_inference_params_for_model(
-        model_type=resolved_model_type,
-        config_path=resolved.get('config_path'),
-        inference_params=inference_params,
-    )
+    if snapshot is not None:
+        runtime_inference_params = _snapshot_runtime_params(
+            snapshot,
+            model_type=resolved_model_type,
+            config_path=resolved.get('config_path'),
+            model_path=resolved_model_path,
+            downloaded_now=downloaded_now,
+        )
+    else:
+        runtime_inference_params = _enrich_inference_params_for_model(
+            model_type=resolved_model_type,
+            config_path=resolved.get('config_path'),
+            inference_params=inference_params,
+        )
     target_options = {}
     if resolved.get('target_instrument_override') is not None:
         target_options['target_instrument_override'] = resolved['target_instrument_override']
@@ -687,6 +741,27 @@ def _prepare_separator(
         output_naming=payload.get("outputNaming"),
         output_model=str(model_name or ""),
     )
+
+
+def _snapshot_runtime_params(
+    snapshot: dict[str, Any],
+    *,
+    model_type: str | None,
+    config_path: str | None,
+    model_path: str | None,
+    downloaded_now: bool = False,
+) -> dict[str, Any]:
+    """Validate a v4 snapshot against the model as it exists now and return it unchanged.
+
+    No rounding, defaulting or model-library re-merge happens here: the frozen parameters are
+    passed to pymss verbatim, so an explicit overlap_size=0 really means zero overlap."""
+    resolution = load_parameter_resolution(model_type, config_path, model_path)
+    accepted: tuple[str, ...] = ()
+    if downloaded_now:
+        # Metadata for a model whose weights were absent could only hash "no weights"; the task
+        # itself just fetched them, so that pre-download fingerprint is still the submitted one.
+        accepted = (compute_inference_fingerprint(model_type, config_path, model_path, ignore_model_stat=True),)
+    return validate_snapshot_against_resolution(snapshot, resolution, accepted_fingerprints=accepted)
 
 
 def normalize_inference_params(payload_params: Any, version: Any = None) -> dict[str, Any]:
@@ -894,6 +969,7 @@ def cmd_infer_batch(payload: dict[str, Any]) -> int:
             emit("task_progress", progress, task_id=task_id)
 
     try:
+        begin_rocm_operation()
         Path(output_root).mkdir(parents=True, exist_ok=True)
         for item in batch_tasks:
             task_output = resolve_pymss_output_dir(output_root, [], item["input"], save_as_folder)
@@ -914,8 +990,22 @@ def cmd_infer_batch(payload: dict[str, Any]) -> int:
             task_id = item["taskId"]
             active_task_id = task_id
             with task_logging(task_id):
+                begin_rocm_operation()
                 emit("task_stage", {"stage": "separating", "message": "Separating"}, task_id=task_id)
-                success_files = separator.process_folder(item["input"], int(item.get("inputIndex") or 1))
+                try:
+                    success_files = separator.process_folder(item["input"], int(item.get("inputIndex") or 1))
+                    assert_rocm_operation_succeeded()
+                except Exception:
+                    # Continue only for a recorded HIP failure. Unrelated backend
+                    # exceptions keep their existing batch-level handling.
+                    try:
+                        assert_rocm_operation_succeeded()
+                    except Exception as item_exc:
+                        _emit_inference_error(item_exc, task_id)
+                        terminal_task_ids.add(task_id)
+                        failed = True
+                        continue
+                    raise
                 if Path(item["input"]).name not in {Path(name).name for name in success_files}:
                     emit_error("INFERENCE_FAILED", f"Batch separation did not produce outputs for {Path(item['input']).name}", task_id=task_id)
                     terminal_task_ids.add(task_id)
@@ -934,6 +1024,11 @@ def cmd_infer_batch(payload: dict[str, Any]) -> int:
                 terminal_task_ids.add(task_id)
         active_task_id = None
         return 1 if failed else 0
+    except RocmWorkerAbort as aborted:
+        for item in batch_tasks:
+            if item["taskId"] not in terminal_task_ids:
+                _emit_inference_error(aborted.error, item["taskId"])
+        return 1
     except Exception as exc:
         for item in batch_tasks:
             if item["taskId"] not in terminal_task_ids:
@@ -982,6 +1077,7 @@ def cmd_infer(payload: dict[str, Any]) -> int:
     separator = None
     cleanup = ExitStack()
     try:
+        begin_rocm_operation()
         emit("task_started", {"model": model_name, "input": input_path, "output": task_output}, task_id=task_id)
         emit("task_stage", {"stage": "validating_input", "message": "Validating input"}, task_id=task_id)
         Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -1000,6 +1096,7 @@ def cmd_infer(payload: dict[str, Any]) -> int:
         )
         emit("task_stage", {"stage": "separating", "message": "Separating"}, task_id=task_id)
         success_files = separator.process_folder(input_path, int(payload.get("inputIndex") or 1))
+        assert_rocm_operation_succeeded()
         if Path(input_path).name not in {Path(name).name for name in success_files}:
             return emit_error("INFERENCE_FAILED", f"Separation did not produce outputs for {Path(input_path).name}", task_id=task_id)
         emit("task_stage", {"stage": "writing_output", "message": "Collecting outputs"}, task_id=task_id)
@@ -1007,6 +1104,8 @@ def cmd_infer(payload: dict[str, Any]) -> int:
         outputs = separator.studio_outputs()
         emit("task_done", {"files": [output["path"] for output in outputs], "outputs": outputs, "outputDir": str(Path(task_output).resolve()), "outputRoot": output_dir, "outputFormat": output_format}, task_id=task_id)
         return 0
+    except RocmWorkerAbort as aborted:
+        return _emit_inference_error(aborted.error, task_id)
     except ModelNotFoundError as exc:
         return emit_error("MODEL_NOT_FOUND", str(exc), traceback.format_exc(), task_id=task_id)
     except ModelDownloadError as exc:

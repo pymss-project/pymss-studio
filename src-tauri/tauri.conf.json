@@ -47,6 +47,8 @@
       "../python/*.py",
       "../python/*.json",
       "../python/*.txt",
+      "../python/runtime-locks/*.json",
+      "../python/rocm-detectors/**/*",
       "../python/preinstalled_plugins/**/*"
     ],
     "icon": [

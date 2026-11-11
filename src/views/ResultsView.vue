@@ -16,6 +16,7 @@ import {
 import { useTaskStore, type SeparationJob, type SeparationTask } from '@/stores/task'
 import { useEditorStore, type OrphanedEditorProject } from '@/stores/editor'
 import { usePagedSelection } from '@/composables/usePagedSelection'
+import { segmentIntersectsRect, type SelectionPoint } from '@/utils/selection'
 import { resultType, RESULT_TYPE_KEYS, type ResultType } from '@/utils/resultType'
 import { isAudioOutput } from '@/utils/stemOutputs'
 import { NCheckbox, useDialog, useMessage } from 'naive-ui'
@@ -103,18 +104,18 @@ const {
 } = pagedSelection
 const pagedResults = computed(() => pagedSelection.pagedItems.value)
 
-const RESULT_DRAG_HOLD_MS = 260
+const resultList = ref<HTMLElement | null>(null)
 type ResultDragSelection = {
   pointerId: number
   startId: string
-  lastId: string
+  origin: SelectionPoint
+  previous: SelectionPoint
   targetSelected: boolean
   active: boolean
   visited: Set<string>
 }
 
 let resultDragSelection: ResultDragSelection | null = null
-let resultDragTimer: ReturnType<typeof setTimeout> | null = null
 let suppressNextResultClick = false
 
 watch([search, sortBy, typeFilter, pageSize], () => {
@@ -124,6 +125,7 @@ watch([search, sortBy, typeFilter, pageSize], () => {
 watch(selecting, (value) => {
   if (!value) finishResultDragSelection()
 })
+watch(() => JSON.stringify(pagedResults.value.map(item => item.id)), () => finishResultDragSelection())
 
 function getFileName(path: string) {
   return path.split(/[/\\]/).pop() || path
@@ -535,64 +537,68 @@ function handleClearResults() {
   })
 }
 
-function setResultSelected(id: string, selected: boolean) {
-  if (selectedResultSet.value.has(id) !== selected) toggleResultSelection(id)
-}
-
-function applyResultDragSelection(id: string) {
-  const state = resultDragSelection
-  if (!state?.active || state.visited.has(id)) return
-  state.visited.add(id)
-  setResultSelected(id, state.targetSelected)
-}
-
-function activateResultDragSelection() {
-  const state = resultDragSelection
-  if (!state || state.active) return
-  state.active = true
-  if (!selecting.value) selecting.value = true
-  document.documentElement.classList.add('results-drag-selecting')
-  applyResultDragSelection(state.startId)
-  applyResultDragSelection(state.lastId)
-}
-
 function handleResultIconPointerDown(event: PointerEvent, id: string) {
   if (event.pointerType !== 'mouse' || event.button !== 0) return
   event.preventDefault()
   finishResultDragSelection()
+  suppressNextResultClick = false
   window.getSelection()?.removeAllRanges()
+  const origin = { x: event.clientX, y: event.clientY }
   resultDragSelection = {
     pointerId: event.pointerId,
     startId: id,
-    lastId: id,
+    origin,
+    previous: origin,
     targetSelected: selecting.value ? !selectedResultSet.value.has(id) : true,
     active: false,
     visited: new Set(),
   }
-  resultDragTimer = setTimeout(activateResultDragSelection, RESULT_DRAG_HOLD_MS)
 }
 
-function handleResultIconPointerEnter(event: PointerEvent, id: string) {
-  if (!resultDragSelection) return
-  if ((event.buttons & 1) === 0) {
+function handleResultsPointerMove(event: PointerEvent) {
+  const state = resultDragSelection
+  if (!state || event.pointerId !== state.pointerId) return
+  if ((event.buttons & 1) === 0 || document.querySelector('[role="dialog"], .n-modal-mask')) {
     finishResultDragSelection()
     return
   }
-  resultDragSelection.lastId = id
-  applyResultDragSelection(id)
+  const point = { x: event.clientX, y: event.clientY }
+  if (!state.active && Math.hypot(point.x - state.origin.x, point.y - state.origin.y) < 5) return
+  state.active = true
+  selecting.value = true
+  event.preventDefault()
+  window.getSelection()?.removeAllRanges()
+  document.documentElement.classList.add('results-drag-selecting')
+
+  // Follow the whole path between events, including rows skipped by a fast mouse movement.
+  const next = new Set(selectedResultIds.value)
+  let changed = false
+  const apply = (id: string) => {
+    if (state.visited.has(id)) return
+    state.visited.add(id)
+    if (next.has(id) === state.targetSelected) return
+    if (state.targetSelected) next.add(id)
+    else next.delete(id)
+    changed = true
+  }
+  apply(state.startId)
+  const viewport = resultList.value?.closest('.app-content')?.getBoundingClientRect()
+  for (const element of resultList.value?.querySelectorAll<HTMLElement>('[data-result-id]') ?? []) {
+    const id = element.dataset.resultId!
+    if (state.visited.has(id)) continue
+    const bounds = element.getBoundingClientRect()
+    const rect = { left: Math.max(bounds.left, viewport?.left ?? 0), top: Math.max(bounds.top, viewport?.top ?? 0),
+      right: Math.min(bounds.right, viewport?.right ?? window.innerWidth), bottom: Math.min(bounds.bottom, viewport?.bottom ?? window.innerHeight) }
+    if (rect.right > rect.left && rect.bottom > rect.top && segmentIntersectsRect(state.previous, point, rect)) apply(id)
+  }
+  if (changed) selectedResultIds.value = [...next]
+  state.previous = point
 }
 
 function finishResultDragSelection(event?: PointerEvent) {
   const state = resultDragSelection
   if (!state || (event && event.pointerId !== state.pointerId)) return
-  if (resultDragTimer) {
-    clearTimeout(resultDragTimer)
-    resultDragTimer = null
-  }
-  if (state.active) {
-    suppressNextResultClick = true
-    window.setTimeout(() => { suppressNextResultClick = false }, 0)
-  }
+  if (state.active || event?.type !== 'pointerup') suppressNextResultClick = true
   resultDragSelection = null
   document.documentElement.classList.remove('results-drag-selecting')
 }
@@ -602,11 +608,12 @@ function hasSelectedResultText() {
   return Boolean(selection && !selection.isCollapsed && selection.toString())
 }
 
-function handleResultRowClick(id: string) {
-  if (suppressNextResultClick) {
-    suppressNextResultClick = false
-    return
-  }
+function resetResultClickSuppression() { suppressNextResultClick = false }
+
+function handleResultRowClick(event: MouseEvent, id: string) {
+  const suppressed = suppressNextResultClick && event.detail > 0
+  suppressNextResultClick = false
+  if (suppressed) return
   if (hasSelectedResultText()) return
   if (selecting.value) toggleResultSelection(id)
   else toggleExpanded(id)
@@ -620,7 +627,7 @@ function handleResultsKeydown(event: KeyboardEvent) {
   toggleSelecting()
 }
 
-function handleResultsWindowBlur() {
+function handleResultsWindowChange() {
   finishResultDragSelection()
 }
 
@@ -679,9 +686,11 @@ watch(() => task.focusedResultTaskId, (value) => {
 
 onMounted(() => {
   window.addEventListener('keydown', handleResultsKeydown)
+  window.addEventListener('pointermove', handleResultsPointerMove, { passive: false })
   window.addEventListener('pointerup', finishResultDragSelection)
   window.addEventListener('pointercancel', finishResultDragSelection)
-  window.addEventListener('blur', handleResultsWindowBlur)
+  window.addEventListener('blur', handleResultsWindowChange)
+  window.addEventListener('resize', handleResultsWindowChange)
   void refreshOrphanedEditorProjects()
   if (task.focusedResultTaskId) {
     scrollToFocusedResult(task.focusedResultTaskId)
@@ -691,9 +700,11 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleResultsKeydown)
+  window.removeEventListener('pointermove', handleResultsPointerMove)
   window.removeEventListener('pointerup', finishResultDragSelection)
   window.removeEventListener('pointercancel', finishResultDragSelection)
-  window.removeEventListener('blur', handleResultsWindowBlur)
+  window.removeEventListener('blur', handleResultsWindowChange)
+  window.removeEventListener('resize', handleResultsWindowChange)
   finishResultDragSelection()
 })
 
@@ -811,7 +822,7 @@ function formatDurationMs(value: number | undefined) {
       <span>{{ t('results.noMatchHint') }}</span>
     </div>
 
-    <div v-else class="results-list">
+    <div v-else ref="resultList" class="results-list" :class="{ 'results-list--selecting': selecting }" @pointerdown.capture="resetResultClickSuppression">
       <section
         v-for="item in pagedResults"
         :id="resultCardId(item)"
@@ -821,15 +832,15 @@ function formatDurationMs(value: number | undefined) {
       >
         <button
           class="result-row__main"
+          :data-result-id="item.id"
           :class="{ 'result-row__main--selecting': selecting }"
           :aria-pressed="selecting ? selectedResultSet.has(item.id) : undefined"
           type="button"
-          @click="handleResultRowClick(item.id)"
+          @click="handleResultRowClick($event, item.id)"
         >
           <span
             class="result-row__icon"
             @pointerdown="handleResultIconPointerDown($event, item.id)"
-            @pointerenter="handleResultIconPointerEnter($event, item.id)"
           >
             <span
               v-if="selecting"
@@ -1091,6 +1102,11 @@ function formatDurationMs(value: number | undefined) {
   background: var(--primary-strong);
 }
 
+.results-list--selecting .result-row,
+.results-list--selecting .result-row__selection-marker {
+  transition: none;
+}
+
 .result-row__body {
   min-width: 0;
   display: grid;
@@ -1121,7 +1137,7 @@ function formatDurationMs(value: number | undefined) {
 
 :global(html.results-drag-selecting),
 :global(html.results-drag-selecting *) {
-  cursor: crosshair !important;
+  cursor: pointer !important;
   user-select: none !important;
 }
 

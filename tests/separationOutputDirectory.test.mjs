@@ -73,7 +73,19 @@ async function newStore(platform = 'win32') {
   app.envInfo = { platform }
   stores.push(task, model, app)
   await Promise.all([task.initialize(), model.initialize()])
+  const resolution = {
+    version: 1, sampleRate: 44100, fingerprint: 'output-directory-model-v1',
+    defaults: { batch_size: 1, chunk_size: 573300, overlap_size: 28665, standardize: false, normalize: false },
+    capabilities: { batch_size: { kind: 'free', min: 1 }, chunk_size: { kind: 'free', min: 1025 }, overlap_size: { kind: 'free', min: 0 }, standardize: { kind: 'free' }, normalize: { kind: 'free' } },
+    overlap: { kind: 'samples' },
+  }
+  const entry = { name: 'model-a', modelType: 'bs_roformer', inferenceParamMeta: { resolution }, defaultInferenceParams: resolution.defaults }
+  model.models = [entry]
+  model.selectedInfo = entry
+  // Output-path tests supply metadata at the native boundary; no browser/worker is running here.
+  model.ensureModelMetadata = async () => entry
   model.selectedModel = 'model-a'
+  task.applySelectedModelDefaults(resolution.defaults, 'bs_roformer', undefined, model.getModelInferenceOverrides('model-a'))
   task.addInputFiles(['D:/Audio/song.wav'])
   return task
 }
@@ -458,6 +470,142 @@ for (const mode of ['model', 'workflow']) {
     })
   }
 }
+
+test('workflow submission uses the supplied input snapshot without changing the current selection', async () => {
+  storage()
+  const task = await newStore()
+  const inputFiles = ['D:/Audio/original.wav', 'D:/Audio/second.wav']
+  const submitted = await task.startWorkflowInference(workflow, { inputFiles })
+  inputFiles.push('D:/Audio/later.wav')
+  assert.deepEqual(submitted.tasks.map(item => item.input), ['D:/Audio/original.wav', 'D:/Audio/second.wav'])
+  assert.deepEqual(task.inputFiles, ['D:/Audio/song.wav'])
+})
+
+test('an explicitly empty workflow input snapshot never falls back to the current selection', async () => {
+  storage()
+  const task = await newStore()
+  await assert.rejects(task.startWorkflowInference(workflow, { inputFiles: [] }), /separate.startHintNoInput/)
+  assert.equal(task.tasks.length, 0)
+})
+
+test('clearing submitted inputs preserves unsubmitted paths and still supports clearing all', async () => {
+  storage()
+  const task = await newStore()
+  task.addInputFiles(['D:/Audio/next.wav'])
+  task.clearInputFiles([])
+  assert.deepEqual(task.inputFiles, ['D:/Audio/song.wav', 'D:/Audio/next.wav'])
+  task.clearInputFiles(['D:/Audio/song.wav'])
+  assert.deepEqual(task.inputFiles, ['D:/Audio/next.wav'])
+  task.clearInputFiles()
+  assert.deepEqual(task.inputFiles, [])
+})
+
+test('new inference tasks freeze resolved parameters; retry and a new run have distinct settings', async () => {
+  storage()
+  const task = await newStore()
+  const model = useModelStore()
+  task.selectedStems = ['vocals']
+  await task.applyParameterSettings('custom', { chunkMilliseconds: 10000, overlapBasisPoints: 5000 })
+  const first = (await task.startSeparation()).tasks[0]
+  assert.equal(first.runConfig.inferenceParamsVersion, 4)
+  assert.equal(first.runConfig.inferenceParams.chunk_size, 441000)
+  first.status = 'failed'
+  await model.setModelInferenceOverrides('model-a', { batch_size: 3 })
+  await task.applyParameterSettings('custom', { chunkMilliseconds: 7000, overlapBasisPoints: 7500 }, true)
+  const retry = await task.retryTask(first.id)
+  assert.deepEqual(retry.runConfig, JSON.parse(JSON.stringify(first.runConfig)))
+  assert.equal(retry.runConfig.useTta, false)
+  const fresh = await task.rerunTaskWithCurrentParameters(first.id)
+  assert.equal(fresh.runConfig.inferenceParams.chunk_size, 308700)
+  assert.equal(fresh.runConfig.inferenceParams.overlap_size, 231525)
+  assert.equal(fresh.runConfig.inferenceParams.batch_size, 3)
+  assert.equal(fresh.runConfig.useTta, true)
+  assert.deepEqual(fresh.runConfig.selectedStems, ['vocals'])
+  assert.equal(first.runConfig.inferenceParams.batch_size, 1)
+})
+
+test('shared ensemble parameters validate participating models without previous single-model metadata', async () => {
+  const values = storage()
+  const task = await newStore()
+  const model = useModelStore()
+  const first = model.models[0]
+  model.models = [first, { ...first, name: 'model-b' }]
+  model.selectedModel = 'missing'
+  model.selectedInfo = null
+  task.applySelectedModelDefaults(undefined)
+  task.ensembleEnabled = true
+  task.ensembleModels = ['model-a', 'model-b']
+  await task.applyParameterSettings('custom', { chunkMilliseconds: 8000, overlapBasisPoints: 2000 }, true)
+  assert.equal(task.parameterMode, 'custom')
+  assert.equal(task.customParameterIntent.chunkMilliseconds, 8000)
+  assert.equal(task.useTta, true)
+  assert.equal(model.selectedModel, 'missing')
+  assert.equal(JSON.parse(values.get('pymss-studio:separate-state')).customParameterIntent.overlapBasisPoints, 2000)
+
+  model.models[1] = { ...model.models[1], inferenceParamMeta: undefined }
+  await assert.rejects(task.applyParameterSettings('custom', { chunkMilliseconds: 14000, overlapBasisPoints: 8000 }), /metadataUnavailable/)
+  assert.equal(task.customParameterIntent.chunkMilliseconds, 8000)
+})
+
+test('legacy separation values are archived and cannot silently widen into model-library or workflow defaults', async () => {
+  const values = storage({ 'separate-state': { version: 1, inferenceParamsByModel: { 'model-a': { chunk_size: 441000, overlap_size: 220500, normalize: true } } } })
+  const task = await newStore()
+  const model = useModelStore()
+  assert.equal(task.parameterMode, 'model')
+  assert.deepEqual(task.customParameterIntent, {})
+  assert.equal(task.pendingLegacyParameters('model-a').chunk_size, 441000)
+  await assert.rejects(task.startSeparation(), /parameterEditor.migrationRequired/)
+  assert.equal(model.getModelInferenceOverrides('model-a'), undefined)
+  const ensureMetadata = model.ensureModelMetadata
+  model.ensureModelMetadata = async () => ({ ...model.models[0], inferenceParamMeta: { resolution: { ...model.models[0].inferenceParamMeta.resolution, fingerprint: 'changed-after-review' } } })
+  await assert.rejects(task.resolveLegacyParameters('model-a', 'import'), /parameterEditor.parametersChanged/)
+  assert.equal(model.getModelInferenceOverrides('model-a'), undefined)
+  model.ensureModelMetadata = ensureMetadata
+  await task.resolveLegacyParameters('model-a', 'keep')
+  const run = (await task.startSeparation()).tasks[0]
+  assert.equal(run.runConfig.inferenceParams.chunk_size, 573300)
+  const saved = JSON.parse(values.get('pymss-studio:separate-state'))
+  assert.equal(saved.legacyParameterBackup['model-a'].normalize, true)
+  assert.equal(saved.legacyParameterChoices['model-a'], 'keep')
+  assert.equal(model.getModelInferenceOverrides('model-a'), undefined)
+})
+
+test('batch model overrides persist together, reject stale previews, and roll back failed writes', async () => {
+  const values = storage()
+  await newStore()
+  const model = useModelStore()
+  model.models.push({ ...model.models[0], name: 'model-b' })
+  const revision = model.modelInferenceRevision
+  await model.replaceModelInferenceOverridesBatch([{ name: 'model-a', overrides: { batch_size: 3 } }, { name: 'model-b', overrides: { batch_size: 5 } }], revision)
+  assert.equal(JSON.parse(values.get('pymss-studio:model-state')).modelInferenceOverrides['model-b'].batch_size, 5)
+  await assert.rejects(model.replaceModelInferenceOverridesBatch([{ name: 'model-a', overrides: { batch_size: 8 } }], revision), /MODEL_PARAMETERS_CHANGED/)
+  const before = JSON.parse(JSON.stringify(model.modelInferenceOverrides))
+  const setItem = globalThis.localStorage.setItem
+  globalThis.localStorage.setItem = (key, value) => { if (key === 'pymss-studio:model-state') throw new Error('write failed'); setItem(key, value) }
+  await assert.rejects(model.replaceModelInferenceOverridesBatch([{ name: 'model-a', overrides: { batch_size: 8 } }, { name: 'model-b', overrides: { batch_size: 9 } }], model.modelInferenceRevision), /write failed/)
+  assert.deepEqual(JSON.parse(JSON.stringify(model.modelInferenceOverrides)), before)
+  globalThis.localStorage.setItem = setItem
+})
+
+test('batch reset removes explicit overrides while retaining each model default and unselected models', async () => {
+  const values = storage({ 'model-state': { modelInferenceOverrides: {
+    'model-a': { batch_size: 3 }, 'model-b': { batch_size: 2 }, 'model-c': { batch_size: 7 },
+  } } })
+  await newStore()
+  const model = useModelStore()
+  const defaults = { ...model.models[0].inferenceParamMeta.resolution.defaults, batch_size: 2, chunk_size: 882000 }
+  model.models.push({
+    ...model.models[0], name: 'model-b', defaultInferenceParams: defaults,
+    inferenceParamMeta: { resolution: { ...model.models[0].inferenceParamMeta.resolution, defaults } },
+  })
+  await model.replaceModelInferenceOverridesBatch([{ name: 'model-a' }, { name: 'model-b' }], model.modelInferenceRevision)
+  assert.equal(model.getModelInferenceOverrides('model-a'), undefined)
+  assert.equal(model.getModelInferenceOverrides('model-b'), undefined)
+  assert.equal(model.models[0].defaultInferenceParams.batch_size, 1)
+  assert.equal(model.models[1].defaultInferenceParams.batch_size, 2)
+  assert.equal(model.models[1].defaultInferenceParams.chunk_size, 882000)
+  assert.deepEqual(JSON.parse(values.get('pymss-studio:model-state')).modelInferenceOverrides, { 'model-c': { batch_size: 7 } })
+})
 
 for (const count of [0, 2]) {
   test(`separation rejects a graph with ${count} inputs before creating tasks`, async () => {

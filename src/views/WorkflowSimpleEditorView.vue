@@ -16,6 +16,7 @@ import WorkflowSimpleNodeEditor from '@/components/workflow/WorkflowSimpleNodeEd
 import WorkflowRevisionConflictModal from '@/components/workflow/WorkflowRevisionConflictModal.vue'
 import { useModelStore } from '@/stores/model'
 import { WorkflowRevisionConflictError, useWorkflowStore, type WorkflowEntry } from '@/stores/workflow'
+import { resolveWorkflowDescription } from '@/workflows/metadata'
 import {
   analyzeSimpleWorkflow,
   buildSimpleWorkflowDefinition,
@@ -205,7 +206,7 @@ function loadEntry(entry?: WorkflowEntry | null) {
     workbench.session.value.bindings.primaryInput = ''
   }
   name.value = entry?.name || t('workflows.newWorkflow')
-  description.value = entry?.description || ''
+  description.value = resolveWorkflowDescription(entry)
   loadError.value = ''
   if (entry) {
     const analysis = analyzeSimpleWorkflow(entry.definition)

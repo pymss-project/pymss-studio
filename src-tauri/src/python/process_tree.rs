@@ -52,6 +52,63 @@ pub(crate) fn terminate_worker(child: &mut Child) -> io::Result<ExitStatus> {
     child.wait()
 }
 
+// Runtime directory replacement requires proof that pip and every descendant stopped.
+// Windows assigns the suspended process to a job before executing any Python code.
+pub(super) struct RuntimeProcessTree {
+    #[cfg(windows)]
+    job: windows::QueryJob,
+    #[cfg(unix)]
+    group: i32,
+}
+
+impl RuntimeProcessTree {
+    pub(super) fn spawn(command: &mut Command) -> io::Result<(Child, Arc<Self>)> {
+        #[cfg(windows)]
+        let (child, job) = windows::QueryJob::spawn(command)?;
+        #[cfg(unix)]
+        configure_worker(command);
+        #[cfg(not(windows))]
+        let child = command.spawn()?;
+        let tree = Self {
+            #[cfg(windows)]
+            job,
+            #[cfg(unix)]
+            group: i32::try_from(child.id()).map_err(|_| io::Error::other("Invalid runtime process group"))?,
+        };
+        Ok((child, Arc::new(tree)))
+    }
+
+    pub(super) fn stop_and_confirm(&self) -> io::Result<()> {
+        #[cfg(windows)]
+        return self.job.terminate_and_wait(Duration::from_secs(10));
+        #[cfg(unix)]
+        {
+            if self.group <= 1 || self.group == unsafe { libc::getpgrp() } {
+                return Err(io::Error::other("Runtime worker does not own an isolated process group"));
+            }
+            let started = std::time::Instant::now();
+            loop {
+                if unsafe { libc::kill(-self.group, 0) } != 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() == Some(libc::ESRCH) { return Ok(()); }
+                    return Err(error);
+                }
+                if unsafe { libc::kill(-self.group, libc::SIGKILL) } != 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() == Some(libc::ESRCH) { return Ok(()); }
+                    return Err(error);
+                }
+                if started.elapsed() >= Duration::from_secs(10) {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "Runtime worker descendants did not exit"));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        Err(io::Error::other("Runtime process tree confirmation is unavailable"))
+    }
+}
+
 pub(super) struct QueryDeadline {
     child: Arc<Mutex<Child>>,
     stop: mpsc::Sender<()>,
@@ -108,6 +165,18 @@ impl QueryDeadline {
     pub(super) fn finish(mut self) -> bool {
         let _ = self.stop.send(());
         self.watchdog.take().unwrap().join().unwrap_or(false)
+    }
+
+    pub(super) fn finish_confirmed(mut self) -> io::Result<bool> {
+        let _ = self.stop.send(());
+        let timed_out = self.watchdog.take().unwrap().join().unwrap_or(false);
+        let mut child = self.child.lock().map_err(|_| io::Error::other("Worker process lock poisoned"))?;
+        terminate_worker(&mut child)?;
+        #[cfg(windows)]
+        self._job.terminate_and_wait(Duration::from_secs(10))?;
+        #[cfg(unix)]
+        RuntimeProcessTree { group: i32::try_from(child.id()).map_err(|_| io::Error::other("Invalid runtime process group"))? }.stop_and_confirm()?;
+        Ok(timed_out)
     }
 }
 
@@ -185,6 +254,14 @@ mod tests {
         terminate_worker(&mut child).unwrap();
         drop(child);
         assert!(!deadline.finish());
+    }
+
+    #[test]
+    fn confirmed_recovery_deadline_reaps_the_worker_before_returning() {
+        let deadline = QueryDeadline::spawn(&mut query_command(), Duration::from_secs(10)).unwrap();
+        let child = deadline.child();
+        assert!(!deadline.finish_confirmed().unwrap());
+        assert!(child.lock().unwrap().try_wait().unwrap().is_some());
     }
 
     #[test]

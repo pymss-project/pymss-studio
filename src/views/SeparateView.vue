@@ -33,7 +33,6 @@ import {
 } from '@vicons/ionicons5'
 import { useTaskStore, type ModelListSortMode, type OutputLayout, type SeparationJob, type SeparationTask, type StemOutput } from '@/stores/task'
 import { resolveJobStatus } from '@/features/tasks/lifecycle'
-import { inferenceChunkSizeIssue, resolveInferenceChunkStep, resolveInferenceSampleStep } from '@/features/inference/sampleStep'
 import { useWorkflowStore, type WorkflowEntry } from '@/stores/workflow'
 import { useWorkflowNodeStore } from '@/stores/workflowNodes'
 import { WORKFLOW_FORMAT_VERSION } from '@/workflows/formats'
@@ -42,7 +41,7 @@ import {
   resolveWorkflowRuntimeDefaults,
 } from '@/workflows/runtimeDefinition'
 import { useSettingsStore } from '@/stores/settings'
-import { useModelStore, type ModelDefaultInferenceParams, type ModelEntry } from '@/stores/model'
+import { useModelStore, type ModelEntry } from '@/stores/model'
 import { useAppStore } from '@/stores/app'
 import { buildModelCategoryOptionsFromModels, getModelCategoryLabel, hasModelCategoryOption, matchesModelCategory, type CategoryLikeModel } from '@/utils/modelCategory'
 import { compareModelDefaultOrder } from '@/utils/modelSort'
@@ -54,13 +53,18 @@ import { SEPARATE_MODEL_PAGE_SIZES } from '@/utils/pagination'
 import AppBrandMark from '@/components/AppBrandMark.vue'
 import ModelCategorySelect from '@/components/ModelCategorySelect.vue'
 import TaskLogConsole from '@/components/TaskLogConsole.vue'
-import AlignedInferenceInputNumber from '@/components/AlignedInferenceInputNumber.vue'
 import InferenceParameterLesson from '@/components/InferenceParameterLesson.vue'
 import { parameterHelpTopics } from '@/features/inference/parameterHelp'
 import ParameterFieldGuide from '@/components/ParameterFieldGuide.vue'
 import { isTutorialFrame } from '@/features/onboarding/demoContext'
 import { useBeginnerGuideStore } from '@/stores/beginnerGuide'
 import { visibleParameterGuides } from '@/features/onboarding/parameters'
+import InferenceParameterFields from '@/components/InferenceParameterFields.vue'
+import WorkflowDescriptionDialog from '@/components/workflow/WorkflowDescriptionDialog.vue'
+import WorkflowDescriptionEditor from '@/components/workflow/WorkflowDescriptionEditor.vue'
+import { legacyWorkflowDescription, resolveWorkflowDescription } from '@/workflows/metadata'
+import { resolveParameters, type CustomParameterIntent, type ParameterMode, type ResolvedInferenceSnapshot } from '@/features/inference/parameters'
+import { INFERENCE_PRESETS, matchingInferencePreset, supportsInferencePresets, type InferencePreset } from '@/features/inference/presets'
 
 const studioLog = createLogger('ui.views.SeparateView')
 
@@ -93,17 +97,6 @@ const {
   separateOutputNamingTemplate: outputNamingTemplate,
   separateCustomStemOrder: customStemOrder,
   useTta,
-  batch_size,
-  overlap_size,
-  num_overlap,
-  chunk_size,
-  standardize,
-  normalize,
-  window_size,
-  aggression,
-  enable_post_process,
-  post_process_threshold,
-  high_end_process,
   selectedStems,
   selectedStemsCleared: persistedOutputStemSelectionCleared,
   modelListViewMode,
@@ -115,13 +108,149 @@ const { workflows, selectedWorkflow, selectedWorkflowId } = storeToRefs(workflow
 
 const isDragging = ref(false)
 const showSettingsDrawer = ref(false)
+const parameterDraftMode = ref<ParameterMode>('model')
+const parameterDraftIntent = ref<CustomParameterIntent>({})
+const parameterDraftTta = ref(false)
+const applyingParameters = ref(false)
+const parameterMetadataError = ref('')
+const parameterMetadataLoading = ref(false)
+const audioDraft = ref({ wavBitDepth: settings.wavBitDepth, flacBitDepth: settings.flacBitDepth, mp3BitRate: settings.mp3BitRate, m4aBitRate: settings.m4aBitRate, m4aCodec: settings.m4aCodec })
+const parameterDraftResolution = computed(() => resolveParameters(parameterReferenceModel.value?.inferenceParamMeta?.resolution, model.getModelInferenceOverrides(parameterReferenceModel.value?.name || ''), parameterDraftMode.value, parameterDraftIntent.value))
+const showParameterPresets = computed(() => parameterDraftMode.value === 'custom'
+  && supportsInferencePresets(parameterReferenceModel.value?.inferenceParamMeta?.resolution))
+const parameterPresetsDisabled = computed(() => applyingParameters.value || parameterMetadataLoading.value || Boolean(parameterMetadataError.value))
+const selectedParameterPreset = computed(() => matchingInferencePreset(parameterDraftIntent.value))
+function applyParameterPreset(preset: InferencePreset) {
+  if (!showParameterPresets.value || parameterPresetsDisabled.value) return
+  parameterDraftIntent.value = { ...parameterDraftIntent.value,
+    chunkMilliseconds: preset.chunkMilliseconds, overlapBasisPoints: preset.overlapBasisPoints }
+}
+const canResetParameterDraft = computed(() => parameterDraftMode.value !== 'model' || Object.keys(parameterDraftIntent.value).length > 0)
+const pendingLegacy = computed(() => task.pendingLegacyParameters(parameterReferenceModel.value?.name || ''))
+const legacyPreview = computed(() => task.previewLegacyParameters(parameterReferenceModel.value?.name || ''))
+const legacyComparison = computed(() => {
+  const preview = legacyPreview.value
+  if (!preview) return []
+  const keys = new Set(Object.keys(preview.archived))
+  for (const key of Object.keys(preview.imported.parameters)) {
+    if (preview.current.parameters[key] !== preview.imported.parameters[key]) keys.add(key)
+  }
+  return [...keys].map(key => ({ key, old: preview.archived[key as keyof typeof preview.archived], current: preview.current.parameters[key], after: preview.imported.parameters[key] }))
+})
+function legacyValue(value: unknown) {
+  if (value === undefined) return '—'
+  if (typeof value === 'boolean') return t(value ? 'parameterEditor.modelLibrary.on' : 'parameterEditor.modelLibrary.off')
+  return String(value)
+}
+let parameterMetadataRun = 0
+watch(showSettingsDrawer, async show => {
+  const run = ++parameterMetadataRun
+  if (!show) return
+  parameterDraftMode.value = task.parameterMode
+  parameterDraftIntent.value = JSON.parse(JSON.stringify(task.customParameterIntent))
+  parameterDraftTta.value = task.useTta
+  audioDraft.value = { wavBitDepth: settings.wavBitDepth, flacBitDepth: settings.flacBitDepth, mp3BitRate: settings.mp3BitRate, m4aBitRate: settings.m4aBitRate, m4aCodec: settings.m4aCodec }
+  parameterMetadataError.value = ''
+  if (runMode.value !== 'model') return
+  parameterMetadataLoading.value = true
+  try {
+    const names = ensembleEnabled.value ? [...ensembleModels.value] : [selectedModelName.value]
+    for (let index = 0; index < names.length; index += 4) await Promise.all(names.slice(index, index + 4).filter(Boolean).map(name => model.ensureModelMetadata(name, true)))
+  } catch (error) { if (run === parameterMetadataRun) parameterMetadataError.value = error instanceof Error ? error.message : String(error) }
+  finally { if (run === parameterMetadataRun) parameterMetadataLoading.value = false }
+})
+
+function resetParameterDraft() {
+  parameterDraftMode.value = 'model'
+  parameterDraftIntent.value = {}
+}
+
+async function applyParameters() {
+  applyingParameters.value = true
+  try {
+    if (runMode.value === 'model') {
+      const names = ensembleEnabled.value ? ensembleModels.value : [selectedModelName.value]
+      for (const name of names) {
+        if (task.pendingLegacyParameters(name)) throw new Error(t('parameterEditor.migrationRequired'))
+        const entry = model.selectedInfo?.name === name ? model.selectedInfo : model.models.find(item => item.name === name)
+        const result = resolveParameters(entry?.inferenceParamMeta?.resolution, model.getModelInferenceOverrides(name), parameterDraftMode.value, parameterDraftIntent.value)
+        if (result.issues.length) throw new Error(`${name}: ${t(`parameterEditor.error.${result.issues[0]!.code}`, { field: result.issues[0]!.key })}`)
+      }
+      await task.applyParameterSettings(parameterDraftMode.value, parameterDraftIntent.value, parameterDraftTta.value)
+    }
+    Object.assign(settings, audioDraft.value)
+    showSettingsDrawer.value = false
+  } catch (error) { message.error(error instanceof Error ? error.message : String(error)) }
+  finally { applyingParameters.value = false }
+}
+
+async function resolveLegacy(choice: 'keep' | 'import') {
+  const name = parameterReferenceModel.value?.name
+  if (!name) return
+  applyingParameters.value = true
+  try { await task.resolveLegacyParameters(name, choice) }
+  catch (error) { message.error(error instanceof Error ? error.message : String(error)) }
+  finally { applyingParameters.value = false }
+}
+
+async function editModelParameters() {
+  const name = parameterReferenceModel.value?.name
+  if (!name) return
+  const navigate = async () => {
+    showSettingsDrawer.value = false
+    await router.push({ path: '/models', query: { parameters: name } })
+  }
+  const changed = parameterDraftMode.value !== task.parameterMode || parameterDraftTta.value !== task.useTta
+    || JSON.stringify(parameterDraftIntent.value) !== JSON.stringify(task.customParameterIntent)
+    || Object.entries(audioDraft.value).some(([key, value]) => value !== settings[key as keyof typeof audioDraft.value])
+  if (changed) {
+    dialog.warning({
+      title: t('parameterEditor.unsavedTitle'), content: t('parameterEditor.leaveDraftHint'),
+      positiveText: t('parameterEditor.discardAndEdit'), negativeText: t('common.cancel'),
+      onPositiveClick: navigate,
+    })
+    return
+  }
+  await navigate()
+}
 const parameterHelpPage = ref<number | null>(null)
 const expandedInferenceSections = ref<string[]>([])
 const settingsCardRef = ref<{ $el: HTMLElement } | null>(null)
+const settingsCanScroll = ref(false)
+let settingsScrollElement: HTMLElement | null = null
+let settingsResizeObserver: ResizeObserver | undefined
+function updateSettingsScroll() {
+  const element = settingsScrollElement
+  settingsCanScroll.value = !!element && element.scrollHeight - element.clientHeight - element.scrollTop > 2
+}
+function disconnectSettingsScroll() {
+  settingsScrollElement?.removeEventListener('scroll', updateSettingsScroll)
+  settingsResizeObserver?.disconnect()
+  settingsResizeObserver = undefined
+  settingsScrollElement = null
+  settingsCanScroll.value = false
+}
+watch(settingsCardRef, card => {
+  disconnectSettingsScroll()
+  const element = card?.$el.querySelector<HTMLElement>('.n-card__content, .n-card-content')
+  if (!element) return
+  settingsScrollElement = element
+  element.addEventListener('scroll', updateSettingsScroll, { passive: true })
+  settingsResizeObserver = new ResizeObserver(updateSettingsScroll)
+  settingsResizeObserver.observe(element)
+  const content = element.querySelector('.settings-drawer__content')
+  if (content) settingsResizeObserver.observe(content)
+  updateSettingsScroll()
+}, { flush: 'post' })
+onBeforeUnmount(disconnectSettingsScroll)
+function handleSettingsAfterEnter() {
+  settingsCardRef.value?.$el.querySelector<HTMLInputElement>('input[name="inference-parameter-source"]:checked')?.focus({ preventScroll: true })
+  void locateGuidedParameter()
+}
 const fieldGuideRef = ref<{ syncPosition: () => void } | null>(null)
 const guideTarget = ref<HTMLElement | null>(null)
 let guideOpenedSettings = false
-const helpTopics = computed(() => parameterHelpTopics(currentModelInfo.value?.modelType))
+const helpTopics = computed(() => parameterHelpTopics(parameterReferenceModel.value?.modelType))
 const guidedParameter = computed(() => beginnerGuide.parameterStep && (!beginnerGuide.demoActive || isTutorialFrame()) ? beginnerGuide.currentParameter : undefined)
 const guideRequiresAdvanced = computed(() => guidedParameter.value?.group === 'inference' && guidedParameter.value.id !== 'tta')
 watch(showSettingsDrawer, () => { parameterHelpPage.value = null })
@@ -147,9 +276,16 @@ const queueScope = ref<'session' | 'no-results'>('session')
 const removingRunRecords = ref(false)
 watch(showQueueModal, show => { if (!show) queueScope.value = 'session' })
 const workflowMetaEditor = ref<WorkflowEntry | null>(null)
+const workflowMetaCurrent = computed(() => workflows.value.find(item => item.id === workflowMetaEditor.value?.id))
 const workflowNameDraft = ref('')
-const workflowNoteDraft = ref('')
 const workflowMetaSaving = ref(false)
+const workflowDescriptionOpen = ref(false)
+const workflowDescriptionId = ref('')
+const workflowDescriptionEditor = ref<InstanceType<typeof WorkflowDescriptionEditor> | null>(null)
+const workflowMetaClosing = ref(false)
+let workflowDescriptionFocusRequested = false
+let pendingWorkflowDescriptionEdit = ''
+let pendingWorkflowNameSave: Promise<boolean> | null = null
 if (route.query.mode === 'workflow') runMode.value = 'workflow'
 const focusedSeparationJobId = ref<string | null>(null)
 const composingNewJob = ref(false)
@@ -260,40 +396,14 @@ const currentModelInfo = computed(() => {
   if (model.selectedInfo?.name === selectedModelName.value) return model.selectedInfo
   return selectedModelListItem.value
 })
-const currentInferenceSampleStep = computed(() => currentModelInfo.value?.inferenceParamMeta?.recommendedSampleStep)
-const overlapSizeStep = computed(() => resolveInferenceSampleStep(currentModelInfo.value?.inferenceParamMeta, 1))
-const chunkSizeStep = computed(() => resolveInferenceChunkStep(currentModelInfo.value?.inferenceParamMeta, 1024))
-const currentChunkConstraint = computed(() => currentModelInfo.value?.inferenceParamMeta?.chunkSizeConstraint)
-const currentChunkIssue = computed(() => inferenceChunkSizeIssue(chunk_size.value, currentModelInfo.value?.inferenceParamMeta))
-
-function updateOverlapSize(value: number | null) {
-  overlap_size.value = value
-}
-
-function updateChunkSize(value: number | null) {
-  chunk_size.value = value
-}
-
 const currentModelDefaults = computed(() => currentModelInfo.value?.defaultInferenceParams || {})
 const currentModelDefaultsResolved = computed(() => Boolean(currentModelInfo.value?.defaultInferenceParamsResolved))
 const currentModelType = computed(() => String(currentModelInfo.value?.modelType || '').trim().toLowerCase())
-const isVrModel = computed(() => currentModelType.value === 'vr')
-const isApolloModel = computed(() => currentModelType.value === 'apollo')
-const showStandardizeField = computed(() => Boolean(currentModelInfo.value) && !isVrModel.value)
-const showNormalizeField = computed(() => Boolean(currentModelInfo.value))
-const hasVisibleAdvancedFields = computed(() => (
-  Object.keys(currentModelDefaults.value).some(key => !['standardize', 'normalize'].includes(key))
-))
 const shouldPrefetchAdvancedParams = computed(() => (
   Boolean(currentModelInfo.value?.downloaded)
   && (!currentModelDefaultsResolved.value || !String(currentModelInfo.value?.configInstruments || '').trim())
 ))
 const advancedParamsLoading = computed(() => shouldPrefetchAdvancedParams.value && detailLoading.value)
-function hasInferenceField(key: string) {
-  if (key === 'standardize' || key === 'normalize') return false
-  if (key === 'num_overlap' && isApolloModel.value) return false
-  return Object.prototype.hasOwnProperty.call(currentModelDefaults.value, key)
-}
 
 watch(() => beginnerGuide.parameterStep, active => {
   if (beginnerGuide.demoActive && !isTutorialFrame()) return
@@ -337,84 +447,6 @@ function openParameterHelp() {
   parameterHelpPage.value = 0
 }
 
-function collectCurrentModelInferenceDefaults(): ModelDefaultInferenceParams {
-  const defaults = currentModelDefaults.value
-  const hasField = (key: keyof ModelDefaultInferenceParams) => Object.prototype.hasOwnProperty.call(defaults, key)
-  const next: ModelDefaultInferenceParams = {}
-
-  if (hasField('batch_size') && typeof batch_size.value === 'number' && Number.isFinite(batch_size.value)) {
-    next.batch_size = batch_size.value
-  }
-  if (hasField('overlap_size') && typeof overlap_size.value === 'number' && Number.isFinite(overlap_size.value)) {
-    next.overlap_size = overlap_size.value
-  }
-  if (hasField('num_overlap') && !isApolloModel.value && typeof num_overlap.value === 'number' && Number.isFinite(num_overlap.value)) {
-    next.num_overlap = num_overlap.value
-  }
-  if (hasField('chunk_size') && typeof chunk_size.value === 'number' && Number.isFinite(chunk_size.value)) {
-    next.chunk_size = chunk_size.value
-  }
-  if (hasField('window_size') && typeof window_size.value === 'number' && Number.isFinite(window_size.value)) {
-    next.window_size = window_size.value
-  }
-  if (hasField('aggression') && typeof aggression.value === 'number' && Number.isFinite(aggression.value)) {
-    next.aggression = aggression.value
-  }
-  if (hasField('enable_post_process')) next.enable_post_process = enable_post_process.value
-  if (hasField('post_process_threshold') && typeof post_process_threshold.value === 'number' && Number.isFinite(post_process_threshold.value)) {
-    next.post_process_threshold = post_process_threshold.value
-  }
-  if (hasField('high_end_process')) next.high_end_process = high_end_process.value
-  if (showStandardizeField.value) next.standardize = standardize.value
-  if (showNormalizeField.value) next.normalize = normalize.value
-
-  return next
-}
-
-function applyCurrentModelInferenceDefaults(info: ModelEntry) {
-  const latest = model.models.find(item => item.name === info.name) || info
-  task.applySelectedModelDefaults(
-    model.getModelBaseInferenceDefaults(info.name) || latest.defaultInferenceParams,
-    latest.modelType,
-    task.getSavedModelState(info.name),
-    model.getModelInferenceOverrides(info.name),
-    { force: true },
-  )
-}
-
-async function saveCurrentModelInferenceDefaults() {
-  const info = currentModelInfo.value
-  if (!info) return
-  task.normalizeInferenceInputsBeforeSubmit()
-  const overrides = collectCurrentModelInferenceDefaults()
-  if (!Object.keys(overrides).length) return
-  if (currentChunkIssue.value) {
-    message.warning(t('inference.invalidChunkSize', currentChunkIssue.value))
-    return
-  }
-  try {
-    await model.setModelInferenceOverrides(info.name, overrides)
-    applyCurrentModelInferenceDefaults(info)
-    message.success(t('models.inferenceDefaultsSaved'))
-  } catch (error) {
-    studioLog.error('Failed to persist model inference defaults', error)
-    message.error(t('models.inferenceDefaultsSaveFailed'))
-  }
-}
-
-async function resetCurrentModelInferenceDefaults() {
-  const info = currentModelInfo.value
-  if (!info) return
-  try {
-    await model.resetModelInferenceOverrides(info.name)
-    applyCurrentModelInferenceDefaults(info)
-    message.success(t('models.inferenceDefaultsReset'))
-  } catch (error) {
-    studioLog.error('Failed to restore model inference defaults', error)
-    message.error(t('models.inferenceDefaultsResetFailed'))
-  }
-}
-
 function parseModelInstruments(value?: unknown) {
   const seen = new Set<string>()
   const rawItems = Array.isArray(value)
@@ -446,6 +478,13 @@ const availableStemNames = computed(() => parseModelInstruments(currentModelInfo
 const ensembleModelEntries = computed(() => ensembleModels.value
   .map(name => listedDownloadedModels.value.find(item => item.name === name))
   .filter((item): item is (typeof listedDownloadedModels.value)[number] => Boolean(item)))
+const parameterReferenceModel = computed(() => {
+  if (!ensembleEnabled.value) return currentModelInfo.value
+  const entries = ensembleModelEntries.value
+  return entries.find(item => task.pendingLegacyParameters(item.name))
+    || entries.find(item => supportsInferencePresets(item.inferenceParamMeta?.resolution))
+    || entries.find(item => item.inferenceParamMeta?.resolution) || entries[0] || null
+})
 const ensembleStemOptionsByModel = computed(() => Object.fromEntries(
   ensembleModelEntries.value.map(item => [
     item.name,
@@ -579,7 +618,11 @@ const contextMenuOptions = computed<DropdownOption[]>(() => {
     return [{ key: 'edit-model-note', label: t('models.editNote') }]
   }
   if (contextMenuKind.value === 'workflow' && contextWorkflow.value) {
-    return [{ key: 'edit-workflow-meta', label: t('workflows.editMeta') }]
+    return [
+      { key: 'view-workflow-description', label: t('workflows.viewFullDescription') },
+      { key: 'edit-workflow-description', label: t('workflows.editDescription') },
+      { key: 'edit-workflow-meta', label: t('workflows.editMeta') },
+    ]
   }
   return []
 })
@@ -645,36 +688,62 @@ function saveModelNote() {
   message.success(t('models.noteSaved'))
 }
 
-function openWorkflowMetaEditor(item: WorkflowEntry) {
+async function openWorkflowMetaEditor(item: WorkflowEntry, focusDescription = false) {
+  if (showWorkflowMetaEditor.value && workflowMetaEditor.value?.id !== item.id) {
+    await closeWorkflowMetaEditor()
+    if (showWorkflowMetaEditor.value) return
+  }
+  const alreadyOpen = showWorkflowMetaEditor.value
   workflowMetaEditor.value = item
   workflowNameDraft.value = item.name
-  workflowNoteDraft.value = item.description
+  workflowDescriptionFocusRequested = focusDescription
   showWorkflowMetaEditor.value = true
+  if (alreadyOpen) await focusWorkflowDescription()
 }
 
-function closeWorkflowMetaEditor() {
-  showWorkflowMetaEditor.value = false
-  workflowMetaEditor.value = null
+async function closeWorkflowMetaEditor(keepDraft = false) {
+  if (workflowMetaClosing.value) return
+  workflowMetaClosing.value = true
+  try {
+    if (!keepDraft && workflowDescriptionEditor.value && !await workflowDescriptionEditor.value.flush()) return
+    if (!await saveWorkflowMetaName()) return
+    showWorkflowMetaEditor.value = false
+    workflowMetaEditor.value = null
+  } finally { workflowMetaClosing.value = false }
 }
 
 function handleWorkflowMetaEditorUpdate(value: boolean) {
-  showWorkflowMetaEditor.value = value
-  if (!value) workflowMetaEditor.value = null
+  if (!value) void closeWorkflowMetaEditor()
+}
+
+async function focusWorkflowDescription() {
+  if (!workflowDescriptionFocusRequested) return
+  await workflowDescriptionEditor.value?.focus()
+  workflowDescriptionFocusRequested = false
 }
 
 async function saveWorkflowMeta() {
-  const current = workflowMetaEditor.value
-  if (!current || workflowMetaSaving.value) return
+  const id = workflowMetaCurrent.value?.id
+  if (workflowDescriptionEditor.value && !await workflowDescriptionEditor.value.flush()) return false
+  if (workflowMetaCurrent.value?.id !== id) return true
+  return saveWorkflowMetaName()
+}
+
+function saveWorkflowMetaName(): Promise<boolean> {
+  if (pendingWorkflowNameSave) return pendingWorkflowNameSave
+  pendingWorkflowNameSave = persistWorkflowMetaName().finally(() => { pendingWorkflowNameSave = null })
+  return pendingWorkflowNameSave
+}
+
+async function persistWorkflowMetaName() {
+  const current = workflowMetaCurrent.value
+  if (!current) return true
   const trimmedName = workflowNameDraft.value.trim()
   if (!trimmedName) {
     message.error(t('workflows.nameRequired'))
-    return
+    return false
   }
-  const trimmedNote = workflowNoteDraft.value.trim()
-  if (trimmedName === current.name && trimmedNote === current.description) {
-    closeWorkflowMetaEditor()
-    return
-  }
+  if (trimmedName === current.name) return true
 
   const selectedIdBeforeSave = selectedWorkflowId.value
   workflowMetaSaving.value = true
@@ -682,7 +751,6 @@ async function saveWorkflowMeta() {
     await workflow.saveWorkflow({
       id: current.id,
       name: trimmedName,
-      description: trimmedNote,
       definition: current.definition,
       format: current.format,
       formatVersion: current.formatVersion,
@@ -692,10 +760,10 @@ async function saveWorkflowMeta() {
     if (selectedWorkflowId.value === current.id && selectedIdBeforeSave !== current.id) {
       workflow.selectWorkflow(selectedIdBeforeSave)
     }
-    closeWorkflowMetaEditor()
-    message.success(t('workflows.saved'))
+    return true
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error))
+    return false
   } finally {
     workflowMetaSaving.value = false
   }
@@ -712,6 +780,32 @@ function handleSeparateContextMenuSelect(key: string | number) {
   if (key === 'edit-workflow-meta' && 'id' in item) {
     openWorkflowMetaEditor(item as WorkflowEntry)
   }
+  if ((key === 'view-workflow-description' || key === 'edit-workflow-description') && 'id' in item) {
+    openWorkflowDescription(item as WorkflowEntry, key === 'edit-workflow-description')
+  }
+}
+
+function openWorkflowDescription(item: WorkflowEntry, editing = false) {
+  if (editing) {
+    if (workflowDescriptionOpen.value) {
+      pendingWorkflowDescriptionEdit = item.id
+      workflowDescriptionOpen.value = false
+    } else void openWorkflowMetaEditor(item, true)
+    return
+  }
+  workflowDescriptionId.value = item.id
+  workflowDescriptionOpen.value = true
+}
+
+function editWorkflowDescriptionFromReader() {
+  const current = workflows.value.find(item => item.id === workflowDescriptionId.value)
+  if (current) openWorkflowDescription(current, true)
+}
+
+function afterWorkflowDescriptionReaderLeave() {
+  const current = workflows.value.find(item => item.id === pendingWorkflowDescriptionEdit)
+  pendingWorkflowDescriptionEdit = ''
+  if (current) void openWorkflowMetaEditor(current, true)
 }
 
 function workflowValidationError() {
@@ -759,7 +853,7 @@ const filteredWorkflows = computed(() => {
   return [...workflows.value]
     .filter((item) => {
       if (!query) return true
-      return item.name.toLowerCase().includes(query) || item.description.toLowerCase().includes(query)
+    return item.name.toLowerCase().includes(query) || resolveWorkflowDescription(item).toLowerCase().includes(query) || legacyWorkflowDescription(item).toLowerCase().includes(query)
     })
     .sort((a, b) => b.updatedAt - a.updatedAt)
 })
@@ -881,6 +975,7 @@ const currentTask = computed(() => {
 })
 const completedActionOptions = computed<DropdownOption[]>(() => [
   { key: 'retry', label: t('separate.runAgain') },
+  ...(currentTask.value?.runConfig?.runMode !== 'workflow' ? [{ key: 'current-parameters', label: t('parameterEditor.rerunCurrent') }] : []),
   ...(currentTask.value?.logs.length ? [{ key: 'logs', label: t('tasks.logs') }] : []),
 ])
 const currentBatchTasks = computed(() => focusedBatchTasks.value.length ? focusedBatchTasks.value : currentTask.value ? [currentTask.value] : [])
@@ -1683,9 +1778,6 @@ watch(
       info.modelType,
       task.getSavedModelState(info.name),
       model.getModelInferenceOverrides(info.name),
-      {
-        force: modelChanged,
-      },
     )
     if (modelChanged) outputStemSelectionCleared.value = persistedOutputStemSelectionCleared.value
   },
@@ -1720,7 +1812,7 @@ const availableParameterGuides = computed(() => visibleParameterGuides({
   hasModel: Boolean(currentModelInfo.value),
   defaults: currentModelDefaults.value,
   format: effectiveFormat.value,
-  canSaveDefaults: Boolean(currentModelInfo.value && currentModelDefaultsResolved.value && !advancedParamsLoading.value),
+  canSaveDefaults: false,
 }))
 watch(availableParameterGuides, items => { if (!beginnerGuide.demoActive || isTutorialFrame()) beginnerGuide.registerParameters(items) }, { immediate: true })
 
@@ -1779,52 +1871,27 @@ async function pickTemporaryOutputDir() {
   if (folder) temporaryOutputDir.value = folder
 }
 
-function positiveInferenceNumber(value: number | null | undefined) {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
-}
-
-function nonNegativeInferenceNumber(value: number | null | undefined) {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
-}
-
-function buildEnsembleInferenceParams(modelType?: string | null) {
-  const normalizedModelType = String(modelType || '').trim().toLowerCase()
-  const vrModel = normalizedModelType === 'vr'
-  const apolloModel = normalizedModelType === 'apollo'
-  const params: Record<string, unknown> = {
-    standardize: standardize.value,
-    normalize: normalize.value,
-  }
-  const batchSizeValue = positiveInferenceNumber(batch_size.value)
-  if (batchSizeValue !== null) params.batch_size = batchSizeValue
-
-  if (vrModel) {
-    const windowSizeValue = positiveInferenceNumber(window_size.value)
-    const aggressionValue = nonNegativeInferenceNumber(aggression.value)
-    const postProcessThresholdValue = nonNegativeInferenceNumber(post_process_threshold.value)
-    if (windowSizeValue !== null) params.window_size = windowSizeValue
-    if (aggressionValue !== null) params.aggression = aggressionValue
-    params.enable_post_process = enable_post_process.value
-    if (postProcessThresholdValue !== null) params.post_process_threshold = postProcessThresholdValue
-    params.high_end_process = high_end_process.value
-    return params
-  }
-
-  const overlapSizeValue = positiveInferenceNumber(overlap_size.value)
-  const numOverlapValue = apolloModel ? null : positiveInferenceNumber(num_overlap.value)
-  const chunkSizeValue = positiveInferenceNumber(chunk_size.value)
-  if (overlapSizeValue !== null) params.overlap_size = overlapSizeValue
-  if (numOverlapValue !== null) params.num_overlap = numOverlapValue
-  if (chunkSizeValue !== null) params.chunk_size = chunkSizeValue
-  return params
-}
-
-function buildEnsembleWorkflow(): WorkflowEntry {
-  const outputStem = ensembleStem.value.trim()
+function captureEnsembleSubmission() {
   const runtimeDevice = settings.getRuntimeDeviceConfig(app.envInfo)
-  const device = runtimeDevice.device || 'auto'
-  const fmt = effectiveFormat.value || 'wav'
-  const models = ensembleModels.value
+  return {
+    inputFiles: [...inputFiles.value],
+    models: [...ensembleModels.value],
+    stems: { ...ensembleModelStems.value },
+    weights: { ...ensembleWeights.value },
+    outputStem: ensembleStem.value.trim(),
+    type: ensembleType.value,
+    device: runtimeDevice.device || 'auto',
+    deviceIds: String(runtimeDevice.deviceIds.join(',') || '0'),
+    downloadSource: settings.downloadSource,
+    format: effectiveFormat.value || 'wav',
+    outputDir: normalizedOutputDir.value,
+    outputLayout: effectiveOutputLayout.value,
+    outputNaming: { ...outputNamingConfig.value, stemOrder: [...outputNamingConfig.value.stemOrder] },
+  }
+}
+
+function buildEnsembleWorkflow(submission: ReturnType<typeof captureEnsembleSubmission>, snapshots: Record<string, ResolvedInferenceSnapshot>): WorkflowEntry {
+  const { models, outputStem, device, format: fmt } = submission
   const nodes: any[] = []
   const links: any[] = []
   let nodeId = 1
@@ -1844,10 +1911,9 @@ function buildEnsembleWorkflow(): WorkflowEntry {
   const separateIds: number[] = []
   const separateStemOutSlots: number[] = [] // the AUDIO slot for the chosen stem
   models.forEach((modelName, index) => {
-    const entry = ensembleModelEntries.value.find(item => item.name === modelName) || null
-    const stem = String(ensembleModelStems.value[modelName] || '').trim() || 'vocals'
+    const stem = String(submission.stems[modelName] || '').trim() || 'vocals'
     const paramsId = nextId()
-    nodes.push({ id: paramsId, type: 'pymss_mss_params', pos: [300, 100 + index * 160], size: [220, 120], flags: {}, order: nodes.length, mode: 0, properties: {}, widgets_values: [1, 'Default', 'Default', false, false, false], inputs: [], outputs: [{ name: 'mss_params', type: 'PYMSS_MSS_PARAMS', links: [] }] })
+    nodes.push({ id: paramsId, type: 'pymss_mss_params', pos: [300, 100 + index * 160], size: [220, 120], flags: {}, order: nodes.length, mode: 0, properties: {}, widgets_values: [snapshots[modelName]?.parameters.batch_size ?? 1, snapshots[modelName]?.parameters.overlap_size ?? 'Default', snapshots[modelName]?.parameters.chunk_size ?? 'Default', snapshots[modelName]?.parameters.standardize ?? false, snapshots[modelName]?.parameters.normalize ?? false, snapshots[modelName]?.useTta ?? false], inputs: [], outputs: [{ name: 'mss_params', type: 'PYMSS_MSS_PARAMS', links: [] }] })
     const sepId = nextId()
     // stem outputs: pairs of (stem Audio, stem String); find the Audio slot index
     const audioSlot = index * 2 // we connect load.audio(0) -> sep.audio(0), params(0) -> sep.params(1)
@@ -1855,7 +1921,7 @@ function buildEnsembleWorkflow(): WorkflowEntry {
       { name: `${stem} (Audio)`, type: 'AUDIO', links: [] },
       { name: `${stem} (String)`, type: 'STRING', links: [] },
     ]
-    nodes.push({ id: sepId, type: 'mss_separate', pos: [560, 100 + index * 160], size: [240, 100], flags: {}, order: nodes.length, mode: 0, properties: {}, widgets_values: [modelName, device, true, settings.downloadSource, String(runtimeDevice.deviceIds.join(',') || '0'), false], inputs: [{ name: 'audio', type: 'AUDIO', link: null }, { name: 'params', type: 'PYMSS_MSS_PARAMS', shape: 7, link: null }], outputs: sepOutputs })
+    nodes.push({ id: sepId, type: 'mss_separate', pos: [560, 100 + index * 160], size: [240, 100], flags: {}, order: nodes.length, mode: 0, properties: {}, widgets_values: [modelName, device, true, submission.downloadSource, submission.deviceIds, false], inputs: [{ name: 'audio', type: 'AUDIO', link: null }, { name: 'params', type: 'PYMSS_MSS_PARAMS', shape: 7, link: null }], outputs: sepOutputs })
     separateIds.push(sepId)
     separateStemOutSlots.push(index) // stem Audio is output slot 0 of each sep (only one stem)
     // wire load.audio -> sep.audio, params -> sep.params
@@ -1871,7 +1937,7 @@ function buildEnsembleWorkflow(): WorkflowEntry {
   const ensId = nextId()
   const ensInputs: any[] = []
   models.forEach((_, index) => ensInputs.push({ name: `audio_${index + 1}`, type: 'AUDIO', link: null }))
-  nodes.push({ id: ensId, type: 'pymss_audio_ensemble', pos: [900, 210], size: [220, 120], flags: {}, order: nodes.length, mode: 0, properties: {}, widgets_values: [models.length, ensembleType.value, ...models.map(m => { const w = Number(ensembleWeights.value[m]); return Number.isFinite(w) ? w : 1 })], inputs: ensInputs, outputs: [{ name: 'audio', type: 'AUDIO', links: [] }] })
+  nodes.push({ id: ensId, type: 'pymss_audio_ensemble', pos: [900, 210], size: [220, 120], flags: {}, order: nodes.length, mode: 0, properties: {}, widgets_values: [models.length, submission.type, ...models.map(m => { const w = Number(submission.weights[m]); return Number.isFinite(w) ? w : 1 })], inputs: ensInputs, outputs: [{ name: 'audio', type: 'AUDIO', links: [] }] })
   // wire each sep stem Audio -> ensemble input slot index
   models.forEach((_, index) => {
     const lid = link(separateIds[index], 0, ensId, index, 'AUDIO')
@@ -1908,6 +1974,18 @@ function buildEnsembleWorkflow(): WorkflowEntry {
   }
 }
 
+async function startEnsembleJob() {
+  const submission = captureEnsembleSubmission()
+  const snapshots = await task.prepareInferenceSnapshots(submission.models)
+  const result = await task.startWorkflowInference(buildEnsembleWorkflow(submission, snapshots), {
+    inputFiles: submission.inputFiles,
+    outputDir: submission.outputDir, outputLayout: submission.outputLayout,
+    outputNaming: submission.outputNaming, resolvedInferences: snapshots,
+  })
+  if (result) submission.models.forEach(name => model.recordModelUse(name))
+  return result
+}
+
 async function start() {
   if (submittingJob.value) return
   if (outputDirectoryError.value) {
@@ -1935,10 +2013,6 @@ async function start() {
     message.warning(t('separate.startHintModelMissing'))
     return
   }
-  if (runMode.value === 'model' && !ensembleEnabled.value && currentChunkIssue.value) {
-    message.warning(t('inference.invalidChunkSize', currentChunkIssue.value))
-    return
-  }
   if (runMode.value === 'model' && !ensembleEnabled.value && !hasOutputStemSelection.value) {
     message.warning(t('separate.startHintNoOutputStems'))
     return
@@ -1948,14 +2022,11 @@ async function start() {
     const result = runMode.value === 'workflow' && selectedWorkflow.value
       ? await task.startWorkflowInference(selectedWorkflow.value, { outputDir: normalizedOutputDir.value, outputLayout: effectiveOutputLayout.value })
       : ensembleEnabled.value
-        ? await task.startWorkflowInference(buildEnsembleWorkflow(), { outputDir: normalizedOutputDir.value, outputLayout: effectiveOutputLayout.value, outputNaming: outputNamingConfig.value })
+        ? await startEnsembleJob()
         : await task.startSeparation({ outputDir: normalizedOutputDir.value, outputLayout: effectiveOutputLayout.value, outputNaming: outputNamingConfig.value })
     focusedSeparationJobId.value = result?.jobId || newestRunningJob.value?.id || focusedSeparationJobId.value
     composingNewJob.value = false
-    if (runMode.value === 'model' && ensembleEnabled.value && result) {
-      ensembleModels.value.forEach((name) => model.recordModelUse(name))
-    }
-    if (settings.clearInputAfterSubmit) task.clearInputFiles()
+    if (settings.clearInputAfterSubmit && result) task.clearInputFiles(result.tasks.map(item => item.input))
     if (result && result.failed > 0) {
       message.warning(t('separate.batchPartial', { succeeded: result.succeeded, failed: result.failed }))
     } else {
@@ -2075,7 +2146,20 @@ function handleCompletedAction(key: string | number) {
     void retryCurrentTask()
   } else if (key === 'logs') {
     openCurrentLogs()
+  } else if (key === 'current-parameters') {
+    void rerunCurrentParameters()
   }
+}
+
+async function rerunCurrentParameters() {
+  const item = currentTask.value
+  if (!item) return
+  try {
+    const next = await task.rerunTaskWithCurrentParameters(item.id)
+    if (!next) return
+    focusedSeparationJobId.value = next.jobId || next.id
+    message.success(t('separate.batchStarted', { count: 1 }))
+  } catch (error) { message.error(error instanceof Error ? error.message : String(error)) }
 }
 
 function handleCancelCurrentTask() {
@@ -2490,7 +2574,8 @@ async function retryCurrentTask() {
               <template v-else-if="taskPanelState === 'failed'">
                 <n-button secondary size="large" @click="beginNextSeparation">
                   {{ t('separate.newSeparation') }}
-                </n-button>
+</n-button>
+                <n-button v-if="currentTask?.runConfig?.runMode !== 'workflow'" secondary size="large" :title="t('parameterEditor.rerunCurrentHint')" @click="rerunCurrentParameters">{{ t('parameterEditor.rerunCurrent') }}</n-button>
                 <n-button type="primary" size="large" class="stage-actions__primary" @click="retryCurrentTask">
                   <template #icon><n-icon :component="PlayOutline" /></template>
                   {{ t('common.retry') }}
@@ -2672,13 +2757,12 @@ async function retryCurrentTask() {
                     <template #prefix><n-icon :component="SearchOutline" /></template>
                   </n-input>
                 </div>
-                <div v-if="filteredWorkflows.length" class="target-list" role="listbox" :aria-label="t('separate.workflow')">
+                <div v-if="filteredWorkflows.length" class="target-list" role="list" :aria-label="t('separate.workflow')">
+                  <div v-for="item in filteredWorkflows" :key="item.id" class="workflow-target-item" role="listitem">
                   <button
-                    v-for="item in filteredWorkflows"
-                    :key="item.id"
                     type="button"
-                    role="option"
-                    :aria-selected="selectedWorkflowId === item.id"
+                    :aria-pressed="selectedWorkflowId === item.id"
+                    :aria-label="item.name"
                     :aria-disabled="Boolean(workflowIssue(item))"
                     :title="workflowIssue(item) || item.name"
                     class="target-row workflow-target"
@@ -2702,10 +2786,12 @@ async function retryCurrentTask() {
                       <span class="target-row__meta">
                         <span class="target-row__tag">{{ t('separate.workflow') }}</span>
                         <span v-if="workflowIssue(item)" class="target-row__issue">{{ workflowIssueSummary(item) }}</span>
-                        <span v-else class="target-row__desc" :title="item.description">{{ item.description || t('separate.workflowNoDescription') }}</span>
+                        <span v-else class="target-row__desc">{{ resolveWorkflowDescription(item) || t('separate.workflowNoDescription') }}</span>
                       </span>
                     </span>
                   </button>
+                  <n-button class="workflow-target-info" quaternary circle size="small" :aria-label="`${t('workflows.viewFullDescription')} · ${item.name}`" :title="t('workflows.viewFullDescription')" @click.stop="openWorkflowDescription(item)"><template #icon><n-icon :component="InformationCircleOutline" /></template></n-button>
+                  </div>
                 </div>
                 <div v-else class="stage-empty">
                   <div class="stage-empty__glyph"><n-icon :component="GitNetworkOutline" /></div>
@@ -2789,54 +2875,46 @@ async function retryCurrentTask() {
 
     <n-modal
       :show="showWorkflowMetaEditor"
+      :mask-closable="!workflowMetaClosing" :close-on-esc="!workflowMetaClosing"
       @update:show="handleWorkflowMetaEditorUpdate"
+      @after-enter="focusWorkflowDescription"
     >
       <n-card
         class="separate-workflow-meta-modal"
-        :title="t('workflows.editMeta')"
+        :title="t('workflows.settingsTitle')"
+        :aria-label="t('workflows.settingsTitle')"
         :bordered="false"
-        closable
+        :closable="!workflowMetaClosing"
         role="dialog"
         aria-modal="true"
-        @close="closeWorkflowMetaEditor"
+        @close="closeWorkflowMetaEditor()"
       >
         <div v-if="workflowMetaEditor" class="separate-workflow-meta-modal__body">
+          <p class="text-sm text-muted">{{ t('workflows.settingsAutosave') }}</p>
           <label class="separate-workflow-meta-modal__field">
             <span>{{ t('workflows.name') }}</span>
             <n-input
               v-model:value="workflowNameDraft"
-              :disabled="workflowMetaSaving"
+              :disabled="workflowMetaSaving || workflowMetaClosing"
               :placeholder="t('workflows.namePlaceholder')"
               maxlength="120"
               show-count
+              @blur="saveWorkflowMeta" @keydown.enter="(event: KeyboardEvent) => (event.target as HTMLElement)?.blur()"
             />
           </label>
-          <label class="separate-workflow-meta-modal__field">
-            <span>{{ t('workflows.note') }}</span>
-            <n-input
-              v-model:value="workflowNoteDraft"
-              type="textarea"
-              :disabled="workflowMetaSaving"
-              :autosize="{ minRows: 4, maxRows: 8 }"
-              clearable
-              :maxlength="240"
-              show-count
-              :placeholder="t('workflows.notePlaceholder')"
-            />
-          </label>
+          <WorkflowDescriptionEditor v-if="showWorkflowMetaEditor && workflowMetaCurrent" :key="workflowMetaCurrent.id" ref="workflowDescriptionEditor" :workflow-id="workflowMetaCurrent.id" :disabled="workflowMetaClosing" @keep-draft="closeWorkflowMetaEditor(true)" />
         </div>
         <template #footer>
           <div class="separate-workflow-meta-modal__footer">
-            <n-button secondary :disabled="workflowMetaSaving" @click="closeWorkflowMetaEditor">
-              {{ t('common.cancel') }}
-            </n-button>
-            <n-button type="primary" :loading="workflowMetaSaving" :disabled="!workflowMetaEditor" @click="saveWorkflowMeta">
-              {{ t('common.save') }}
+            <n-button secondary :disabled="workflowMetaClosing" @click="closeWorkflowMetaEditor()">
+              {{ t('common.close') }}
             </n-button>
           </div>
         </template>
       </n-card>
     </n-modal>
+
+    <WorkflowDescriptionDialog v-model:show="workflowDescriptionOpen" :workflow-id="workflowDescriptionId" @edit="editWorkflowDescriptionFromReader" @after-leave="afterWorkflowDescriptionReaderLeave" />
 
     <n-modal v-model:show="showEnsembleModal" :mask-closable="true">
       <n-card
@@ -2883,7 +2961,7 @@ async function retryCurrentTask() {
       </n-card>
     </n-modal>
 
-    <n-modal v-model:show="showSettingsDrawer" @after-enter="locateGuidedParameter">
+    <n-modal v-model:show="showSettingsDrawer" :auto-focus="runMode !== 'model'" @after-enter="handleSettingsAfterEnter">
       <InferenceParameterLesson
         v-if="parameterHelpPage !== null" :topic="helpTopics[parameterHelpPage]!" :topics="helpTopics" :progress="`${parameterHelpPage + 1} / ${helpTopics.length}`"
         :close-label="t('parameterHelp.backToParameters')" :next-label="parameterHelpPage === helpTopics.length - 1 ? t('parameterHelp.done') : undefined"
@@ -2903,146 +2981,94 @@ async function retryCurrentTask() {
         @close="showSettingsDrawer = false"
       >
         <div class="settings-drawer__content">
-          <div v-if="runMode === 'model'" class="settings-group settings-group--run">
-            <div class="settings-group__head">
-              <strong>{{ t('separate.runOptionsTitle') }}</strong>
-              <span>{{ t('separate.runOptionsHint') }}</span>
+          <div v-if="runMode === 'model'" class="settings-inference">
+            <div class="parameter-section-heading">
+              <div class="parameter-section-heading__title">
+                <h3>{{ t('parameterEditor.inferenceGroup') }}</h3>
+                <div v-if="showParameterPresets" class="parameter-presets" role="group" :aria-label="t('parameterEditor.presets.label')">
+                  <n-button v-for="preset in INFERENCE_PRESETS" :key="preset.id" size="tiny" secondary
+                    :type="selectedParameterPreset === preset.id ? 'primary' : 'default'"
+                    :aria-pressed="selectedParameterPreset === preset.id" :disabled="parameterPresetsDisabled"
+                    @click="applyParameterPreset(preset)">{{ t(preset.label) }}</n-button>
+                </div>
+              </div>
+              <div class="parameter-section-heading__actions">
+                <n-radio-group class="parameter-source-switch" :value="parameterDraftMode" name="inference-parameter-source" size="small" :disabled="applyingParameters" :aria-label="t('parameterEditor.parameterSource')" @update:value="(value: 'model' | 'custom') => parameterDraftMode = value">
+                  <n-radio-button value="model">{{ t('parameterEditor.followModel') }}</n-radio-button>
+                  <n-radio-button value="custom">{{ t('parameterEditor.source.custom') }}</n-radio-button>
+                </n-radio-group>
+                <n-button quaternary circle size="small" :aria-label="t('parameterHelp.label')" @click="openParameterHelp"><n-icon :component="InformationCircleOutline" /></n-button>
+              </div>
             </div>
-            <div class="check-list">
-              <n-checkbox v-model:checked="useTta" data-parameter-guide="tta" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'tta' }">{{ t('separate.tta') }}</n-checkbox>
+            <div class="parameter-context">
+              <p class="advanced-hint">{{ t(parameterDraftMode === 'model' ? 'parameterEditor.followHint' : 'parameterEditor.modeHint') }}</p>
+              <n-button v-if="parameterDraftMode === 'model' && parameterReferenceModel" text type="primary" size="tiny" class="parameter-model-link" :disabled="applyingParameters" @click="editModelParameters">{{ t('parameterEditor.editModelSettings') }}<template #icon><n-icon :component="OpenOutline" /></template></n-button>
             </div>
+            <n-alert v-if="pendingLegacy" type="warning" :bordered="false">
+              {{ t('parameterEditor.migrationHint') }}
+              <div v-if="legacyPreview" class="parameter-migration-values">
+                <n-table size="small" :bordered="false" :single-line="false">
+                  <thead><tr><th>{{ t('parameterEditor.batch.columnField') }}</th><th>{{ t('parameterEditor.migrationCurrent') }}</th><th>{{ t('parameterEditor.migrationPrevious') }}</th><th>{{ t('parameterEditor.migrationAfter') }}</th></tr></thead>
+                  <tbody><tr v-for="row in legacyComparison" :key="row.key"><td>{{ row.key }}</td><td>{{ legacyValue(row.current) }}</td><td>{{ legacyValue(row.old) }}</td><td>{{ legacyValue(row.after) }}</td></tr></tbody>
+                </n-table>
+                <p v-if="legacyPreview.imported.issues.length">{{ t('parameterEditor.modelLibrary.draftInvalid') }}</p>
+              </div>
+              <n-space>
+                <n-button size="small" :disabled="applyingParameters" @click="resolveLegacy('keep')">{{ t('parameterEditor.keepModelSettings') }}</n-button>
+                <n-button size="small" :disabled="applyingParameters || parameterMetadataLoading || !legacyPreview || legacyPreview.imported.issues.length > 0" @click="resolveLegacy('import')">{{ t('parameterEditor.importLegacy') }}</n-button>
+              </n-space>
+            </n-alert>
+            <n-alert v-if="parameterMetadataError" type="error" :bordered="false">{{ parameterMetadataError }}</n-alert>
+            <InferenceParameterFields
+              :metadata="parameterReferenceModel?.inferenceParamMeta?.resolution"
+              :library="model.getModelInferenceOverrides(parameterReferenceModel?.name || '')"
+              :mode="parameterDraftMode" v-model:intent="parameterDraftIntent"
+              :loading="parameterMetadataLoading" :disabled="applyingParameters"
+            />
           </div>
-
-          <div class="settings-group">
-            <div class="settings-group__head">
-              <strong>{{ t('separate.audioQualityTitle') }} · {{ formatLabel }}</strong>
-              <span>{{ t(runMode === 'workflow' && effectiveFormat !== 'm4a'
+          <section class="settings-output">
+            <div class="settings-subhead">
+              <h3>{{ runMode === 'model' ? t('parameterEditor.runtimeGroup') : `${t('separate.audioQualityTitle')} · ${formatLabel}` }}</h3>
+              <span v-if="runMode === 'workflow'">{{ t(effectiveFormat !== 'm4a'
                 ? 'separate.workflowAudioQualityHint' : 'separate.audioQualityEditable') }}</span>
             </div>
-            <n-grid v-if="runMode === 'model' || effectiveFormat === 'm4a'" :cols="2" :x-gap="12" :y-gap="12" responsive="screen">
-              <n-grid-item v-if="runMode === 'model' && effectiveFormat === 'wav'">
-                <div class="field-block" data-parameter-guide="wavBitDepth" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'wavBitDepth' }">
-                  <label>{{ t('audio.wavBitDepth') }}</label>
-                  <n-select v-model:value="settings.wavBitDepth" :options="wavBitDepthOptions" />
-                </div>
-              </n-grid-item>
-              <n-grid-item v-if="runMode === 'model' && effectiveFormat === 'flac'">
-                <div class="field-block" data-parameter-guide="flacBitDepth" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'flacBitDepth' }">
-                  <label>{{ t('audio.flacBitDepth') }}</label>
-                  <n-select v-model:value="settings.flacBitDepth" :options="flacBitDepthOptions" />
-                </div>
-              </n-grid-item>
-              <n-grid-item v-if="runMode === 'model' && effectiveFormat === 'mp3'">
-                <div class="field-block" data-parameter-guide="mp3BitRate" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'mp3BitRate' }">
-                  <label>{{ t('audio.mp3BitRate') }}</label>
-                  <n-select v-model:value="settings.mp3BitRate" :options="mp3BitRateOptions" />
-                </div>
-              </n-grid-item>
-              <n-grid-item v-if="effectiveFormat === 'm4a'">
-                <div class="field-block" data-parameter-guide="m4aBitRate" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'm4aBitRate' }">
-                  <label>{{ t('audio.m4aBitRate') }}</label>
-                  <n-select v-model:value="settings.m4aBitRate" :options="bitRateOptions" />
-                </div>
-              </n-grid-item>
-              <n-grid-item v-if="effectiveFormat === 'm4a'">
-                <div class="field-block" data-parameter-guide="m4aCodec" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'm4aCodec' }">
-                  <label>{{ t('audio.m4aCodec') }}</label>
-                  <n-select v-model:value="settings.m4aCodec" :options="m4aCodecOptions" />
-                </div>
-              </n-grid-item>
-              <n-grid-item v-if="runMode === 'model' && showNormalizeField">
-                <div class="field-block field-block--inline-check" data-parameter-guide="normalize" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'normalize' }">
-                  <n-checkbox v-model:checked="normalize">{{ t('inference.normalize') }}</n-checkbox>
-                </div>
-              </n-grid-item>
-            </n-grid>
-          </div>
-
-          <div v-if="runMode === 'model'" class="settings-group">
-            <n-collapse v-model:expanded-names="expandedInferenceSections">
-              <n-collapse-item :title="t('inference.advancedParams')" name="inference">
-                <template #header-extra><n-button v-if="!beginnerGuide.parameterStep" text size="small" :aria-label="t('parameterHelp.label')" @click.stop="openParameterHelp"><n-icon :component="InformationCircleOutline" size="18" /></n-button></template>
-                <p class="advanced-hint">{{ t('separate.advancedPanelHint') }}</p>
-                <div v-if="advancedParamsLoading" class="advanced-loading">
-                  <n-spin size="small" />
-                  <span>{{ t('separate.advancedPanelLoading') }}</span>
-                </div>
-                <n-grid v-if="runMode === 'model'" :cols="2" :x-gap="12" :y-gap="12" responsive="screen">
-                  <n-grid-item v-if="hasInferenceField('batch_size')">
-                    <div class="field-block" data-parameter-guide="batch_size" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'batch_size' }">
-                      <label>{{ t('inference.batchSize') }}</label>
-                      <n-input-number v-model:value="batch_size" :min="0" :max="32" style="width:100%" @blur="task.restoreInferenceNumberFallback('batch_size')" />
-                    </div>
-                  </n-grid-item>
-                  <n-grid-item v-if="hasInferenceField('overlap_size')">
-                    <div class="field-block" data-parameter-guide="overlap_size" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'overlap_size' }">
-                      <label>{{ t('inference.overlapSize') }}</label>
-                      <AlignedInferenceInputNumber :value="overlap_size" :step="overlapSizeStep" :alignment-step="currentInferenceSampleStep" @update:value="updateOverlapSize" @blur="task.restoreInferenceNumberFallback('overlap_size')" />
-                    </div>
-                  </n-grid-item>
-                  <n-grid-item v-if="hasInferenceField('num_overlap')">
-                    <div class="field-block" data-parameter-guide="num_overlap" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'num_overlap' }">
-                      <label>{{ t('inference.numOverlap') }}</label>
-                      <n-input-number v-model:value="num_overlap" :min="0" :max="128" style="width:100%" @blur="task.restoreInferenceNumberFallback('num_overlap')" />
-                    </div>
-                  </n-grid-item>
-                  <n-grid-item v-if="hasInferenceField('chunk_size')">
-                    <div class="field-block" data-parameter-guide="chunk_size" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'chunk_size' }">
-                      <label>{{ t('inference.chunkSize') }}</label>
-                      <AlignedInferenceInputNumber :value="chunk_size" :step="chunkSizeStep" :alignment-step="currentChunkConstraint?.step || currentInferenceSampleStep" :alignment-offset="currentChunkConstraint?.offset" :alignment-min="currentChunkConstraint?.min" @update:value="updateChunkSize" @blur="task.restoreInferenceNumberFallback('chunk_size')" />
-                      <n-text v-if="currentChunkIssue" type="warning">{{ t('inference.invalidChunkSize', currentChunkIssue) }}</n-text>
-                    </div>
-                  </n-grid-item>
-                  <n-grid-item v-if="hasInferenceField('window_size')">
-                    <div class="field-block" data-parameter-guide="window_size" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'window_size' }">
-                      <label>{{ t('inference.vrWindowSize') }}</label>
-                      <n-input-number v-model:value="window_size" :min="0" :max="4096" style="width:100%" @blur="task.restoreInferenceNumberFallback('window_size')" />
-                    </div>
-                  </n-grid-item>
-                  <n-grid-item v-if="hasInferenceField('aggression')">
-                    <div class="field-block" data-parameter-guide="aggression" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'aggression' }">
-                      <label>{{ t('inference.vrAggression') }}</label>
-                      <n-input-number v-model:value="aggression" :min="0" :max="100" style="width:100%" />
-                    </div>
-                  </n-grid-item>
-                  <n-grid-item v-if="hasInferenceField('post_process_threshold')">
-                    <div class="field-block" data-parameter-guide="post_process_threshold" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'post_process_threshold' }">
-                      <label>{{ t('inference.vrPostProcessThreshold') }}</label>
-                      <n-input-number v-model:value="post_process_threshold" :min="0" :max="1" :step="0.05" style="width:100%" />
-                    </div>
-                  </n-grid-item>
-                </n-grid>
-                <div class="check-list check-list--spaced">
-                  <n-checkbox v-if="showStandardizeField" v-model:checked="standardize" data-parameter-guide="standardize" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'standardize' }">{{ t('inference.standardize') }}</n-checkbox>
-                  <n-checkbox v-if="runMode === 'model' && hasInferenceField('enable_post_process')" v-model:checked="enable_post_process" data-parameter-guide="enable_post_process" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'enable_post_process' }">{{ t('inference.vrEnablePostProcess') }}</n-checkbox>
-                  <n-checkbox v-if="runMode === 'model' && hasInferenceField('high_end_process')" v-model:checked="high_end_process" data-parameter-guide="high_end_process" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'high_end_process' }">{{ t('inference.vrHighEndProcess') }}</n-checkbox>
-                </div>
-                <p v-if="runMode === 'model' && !advancedParamsLoading && !hasVisibleAdvancedFields" class="advanced-empty">
-                  {{ t('separate.advancedPanelEmpty') }}
-                </p>
-                <div
-                  v-if="runMode === 'model' && currentModelInfo && currentModelDefaultsResolved && !advancedParamsLoading"
-                  class="advanced-actions"
-                  data-parameter-guide="modelDefaults"
-                  :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'modelDefaults' }"
-                >
-                  <n-button size="small" secondary @click="resetCurrentModelInferenceDefaults">
-                    {{ t('separate.resetInferenceDefaults') }}
-                  </n-button>
-                  <n-button size="small" type="primary" @click="saveCurrentModelInferenceDefaults">
-                    {{ t('separate.saveInferenceDefaults') }}
-                  </n-button>
-                </div>
-              </n-collapse-item>
-            </n-collapse>
-          </div>
+            <div v-if="runMode === 'model' || effectiveFormat === 'm4a'" class="settings-list">
+              <div v-if="runMode === 'model'" class="settings-row" data-parameter-guide="tta" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'tta' }">
+                <label>{{ t('separate.tta') }}</label>
+                <n-switch v-model:value="parameterDraftTta" size="small" :aria-label="t('separate.tta')" :disabled="applyingParameters" />
+              </div>
+              <div v-if="runMode === 'model' && effectiveFormat === 'wav'" class="settings-row field-block" data-parameter-guide="wavBitDepth" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'wavBitDepth' }">
+                <label>{{ t('audio.wavBitDepth') }}</label>
+                <n-select v-model:value="audioDraft.wavBitDepth" size="small" :to="true" :options="wavBitDepthOptions" />
+              </div>
+              <div v-if="runMode === 'model' && effectiveFormat === 'flac'" class="settings-row field-block" data-parameter-guide="flacBitDepth" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'flacBitDepth' }">
+                <label>{{ t('audio.flacBitDepth') }}</label>
+                <n-select v-model:value="audioDraft.flacBitDepth" size="small" :to="true" :options="flacBitDepthOptions" />
+              </div>
+              <div v-if="runMode === 'model' && effectiveFormat === 'mp3'" class="settings-row field-block" data-parameter-guide="mp3BitRate" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'mp3BitRate' }">
+                <label>{{ t('audio.mp3BitRate') }}</label>
+                <n-select v-model:value="audioDraft.mp3BitRate" size="small" :to="true" :options="mp3BitRateOptions" />
+              </div>
+              <div v-if="effectiveFormat === 'm4a'" class="settings-row field-block" data-parameter-guide="m4aBitRate" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'm4aBitRate' }">
+                <label>{{ t('audio.m4aBitRate') }}</label>
+                <n-select v-model:value="audioDraft.m4aBitRate" size="small" :to="true" :options="bitRateOptions" />
+              </div>
+              <div v-if="effectiveFormat === 'm4a'" class="settings-row field-block" data-parameter-guide="m4aCodec" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'm4aCodec' }">
+                <label>{{ t('audio.m4aCodec') }}</label>
+                <n-select v-model:value="audioDraft.m4aCodec" size="small" :to="true" :options="m4aCodecOptions" />
+              </div>
+            </div>
+          </section>
         </div>
 
         <ParameterFieldGuide v-if="guidedParameter" ref="fieldGuideRef" :parameter="guidedParameter" :target="guideTarget" />
 
         <template #footer>
-          <div class="drawer-footer">
-            <n-button type="primary" @click="showSettingsDrawer = false">{{ t('common.close') }}</n-button>
+          <div v-if="settingsCanScroll" class="settings-scroll-hint" aria-hidden="true">{{ t('parameterEditor.scrollMore') }}<n-icon :component="ChevronDownOutline" /></div>
+          <div class="parameter-modal-footer">
+            <n-button v-if="runMode === 'model'" secondary :disabled="applyingParameters || !canResetParameterDraft" @click="resetParameterDraft">{{ t('parameterEditor.restoreDefaults') }}</n-button>
+            <n-button secondary :disabled="applyingParameters" @click="showSettingsDrawer = false">{{ t('common.cancel') }}</n-button>
+            <n-button type="primary" :loading="applyingParameters" :disabled="runMode === 'model' && (parameterMetadataLoading || !!parameterMetadataError || !!pendingLegacy || parameterDraftResolution.issues.length > 0)" @click="applyParameters">{{ t('parameterEditor.apply') }}</n-button>
           </div>
         </template>
       </n-card>
@@ -4264,7 +4290,8 @@ async function retryCurrentTask() {
   box-sizing: border-box;
 }
 .separate-note-modal__footer,
-.separate-workflow-meta-modal__footer {
+.separate-workflow-meta-modal__footer,
+.parameter-modal-footer {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
@@ -4469,6 +4496,9 @@ async function retryCurrentTask() {
   color: var(--on-surface-muted);
   line-height: 1.4;
 }
+.workflow-target-item { position: relative; min-width: 0; }
+.workflow-target-item .workflow-target { padding-right: 46px; }
+.workflow-target-info { position: absolute; top: 50%; right: 10px; transform: translateY(-50%); }
 
 .target-row__issue {
   min-width: 0;
@@ -5023,14 +5053,14 @@ async function retryCurrentTask() {
 
 .settings-drawer__content {
   display: grid;
-  gap: 12px;
+  gap: 24px;
   min-height: 0;
-  padding-top: 16px;
+  padding-top: 14px;
 }
 
 .settings-modal {
-  width: var(--modal-width-md);
-  max-height: var(--modal-max-height);
+  width: min(700px, calc(100vw - 48px));
+  max-height: min(calc(100dvh - 88px), 840px);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -5039,13 +5069,11 @@ async function retryCurrentTask() {
 
 .settings-modal :deep(.n-card-header) {
   flex: 0 0 auto;
-  padding: 14px 20px;
-  border-bottom: 1px solid color-mix(in srgb, var(--outline) 86%, transparent);
-  background: color-mix(in srgb, var(--surface-1) 96%, transparent);
+  padding: 16px 24px 0;
 }
 
 .settings-modal :deep(.n-card-header__main) {
-  font-size: 15px;
+  font-size: 17px;
   font-weight: 600;
 }
 
@@ -5054,13 +5082,14 @@ async function retryCurrentTask() {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  padding: 0 20px 16px;
+  padding: 0 24px 12px;
 }
 
 .settings-modal :deep(.n-card-footer),
 .settings-modal :deep(.n-card__footer) {
   flex: 0 0 auto;
-  padding: 12px 20px;
+  position: relative;
+  padding: 12px 24px;
   border-top: 1px solid color-mix(in srgb, var(--outline) 86%, transparent);
   background: color-mix(in srgb, var(--surface-1) 96%, transparent);
 }
@@ -5321,62 +5350,35 @@ async function retryCurrentTask() {
   gap: 12px;
 }
 
-.settings-group {
-  display: grid;
-  gap: 10px;
-  padding: 12px 14px;
-  border: 1px solid var(--outline);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--surface-2) 62%, transparent);
-}
-
-.settings-group--run {
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 16px;
-}
-
-.settings-group__head {
-  display: grid;
-  gap: 3px;
-}
-
-.settings-group__head strong {
-  font-size: 13px;
-}
-
-.settings-group__head span {
-  color: var(--on-surface-muted);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.settings-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 14px;
-  border: 1px solid var(--outline);
-  border-radius: 12px;
-  background: var(--surface-1);
-}
-
-.settings-row__copy {
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-}
-
-.settings-row__copy strong {
-  font-size: 13px;
-}
-
-.settings-row__copy span {
-  color: var(--on-surface-muted);
-  font-size: 12px;
-  line-height: 1.5;
-}
+.settings-inference, .settings-output { display: grid; gap: 10px; min-width: 0; }
+.parameter-section-heading, .settings-subhead { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 6px 12px; min-height: 28px; }
+.parameter-section-heading h3, .settings-subhead h3 { margin: 0; font-size: 14px; font-weight: 600; color: var(--on-surface-heading); }
+.parameter-section-heading__title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; min-width: 0; }
+.parameter-section-heading__title h3 { flex-shrink: 0; }
+.parameter-presets { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.parameter-section-heading__actions { display: flex; align-items: center; gap: 4px; }
+.parameter-source-switch { display: inline-flex; overflow: hidden; padding: 0; border: 1px solid var(--outline); border-radius: 9px; background: var(--surface-2); }
+.parameter-source-switch :deep(.n-radio-button) { height: 28px; line-height: 28px; padding: 0 13px; border: 0; border-radius: 0; background: transparent; box-shadow: none; font-size: 12px; color: var(--on-surface-muted); transition: color 160ms ease, background 200ms ease, box-shadow 200ms ease; }
+.parameter-source-switch :deep(.n-radio-group__splitor), .parameter-source-switch :deep(.n-radio-button__state-border) { display: none; }
+.parameter-source-switch :deep(.n-radio-button ~ .n-radio-button) { border-left: 1px solid var(--outline); }
+.parameter-source-switch :deep(.n-radio-button--checked) { color: var(--primary-strong); background: var(--primary-soft); }
+.parameter-source-switch :deep(.n-radio-button:not(.n-radio-button--checked):not(.n-radio-button--disabled):hover) { color: var(--on-surface); background: var(--surface-3); }
+.parameter-source-switch :deep(.n-radio-button:has(input:focus-visible)) { box-shadow: inset 0 -2px var(--primary); }
+.parameter-source-switch :deep(.n-radio-button--disabled) { opacity: .55; }
+.settings-subhead span { font-size: 11px; line-height: 1.4; color: var(--on-surface-muted); }
+/* The hint belongs to the heading above it, so it sits closer than the grid gap. */
+.parameter-context { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; margin-top: -6px; }
+.parameter-context .advanced-hint { margin: 0; font-size: 11px; font-weight: 400; line-height: 1.5; color: var(--on-surface-muted); }
+.settings-list { display: grid; min-width: 0; padding: 2px 16px; border-radius: 12px; background: color-mix(in srgb, var(--surface-2) 65%, var(--surface-1)); }
+.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; }
+.settings-row + .settings-row { border-top: 1px solid color-mix(in srgb, var(--outline) 80%, transparent); }
+.settings-row > label { font-size: 13px; font-weight: 500; color: var(--on-surface); white-space: nowrap; }
+.settings-row :deep(.n-select) { width: 150px; }
+.parameter-model-link { font-size: 11px; }
+.parameter-modal-footer { align-items: center; flex-wrap: wrap; }
+.settings-scroll-hint { position: absolute; inset: auto 0 100%; height: 27px; display: flex; align-items: end; justify-content: center; gap: 4px; padding-bottom: 3px; pointer-events: none; background: linear-gradient(transparent, var(--surface-1) 85%); color: var(--on-surface-muted); font-size: 10px; }
+.parameter-migration-values { overflow-x: auto; margin: 12px 0; }
+.parameter-migration-values th, .parameter-migration-values td { white-space: nowrap; }
 
 .output-preview {
   display: grid;
@@ -5529,10 +5531,9 @@ async function retryCurrentTask() {
   .progress-ring { width: 120px; height: 120px; }
   .progress-ring__center strong { font-size: 32px; }
   .settings-modal {
-    width: var(--modal-width-md);
-    max-height: var(--modal-max-height);
+    width: min(700px, calc(100vw - 32px));
+    max-height: min(calc(100dvh - 88px), 840px);
   }
-  .settings-drawer__content,
   .settings-modal :deep(.n-card-content),
   .settings-modal :deep(.n-card__content) {
     padding-left: 16px;

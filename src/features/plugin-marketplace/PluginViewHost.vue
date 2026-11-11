@@ -12,6 +12,8 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { getCurrentWebview, type DragDropEvent } from '@tauri-apps/api/webview'
+import { createLogger } from '@/utils/logger'
 import { open } from '@tauri-apps/plugin-dialog'
 import { open as openExternal } from '@tauri-apps/plugin-shell'
 import { pluginViewUrl } from './viewUrl'
@@ -38,6 +40,7 @@ const emit = defineEmits<{ 'busy-change': [busy: boolean] }>()
 const { t, locale } = useI18n()
 const settings = useSettingsStore()
 const app = useAppStore()
+const log = createLogger('ui.plugin-view')
 
 const frame = ref<HTMLIFrameElement | null>(null)
 const status = ref<'loading' | 'ready' | 'error'>('loading')
@@ -48,6 +51,34 @@ const overlayOpen = ref(false)
 const frameLoaded = ref(false)
 let pendingOverlayGeneration = 0
 let disposed = false
+let dropHovered = false
+
+function clearFileDropHover() {
+  if (!dropHovered) return
+  dropHovered = false
+  postToFrame({ jsonrpc: '2.0', method: 'host.filesDrop', params: { type: 'leave' } })
+}
+
+function onNativeFileDrop(payload: DragDropEvent) {
+  const element = frame.value
+  if (disposed || !element || !frameLoaded.value || status.value !== 'ready' || !allowed('files.drop') || payload.type === 'leave') {
+    clearFileDropHover()
+    return
+  }
+  const x = payload.position.x / window.devicePixelRatio
+  const y = payload.position.y / window.devicePixelRatio
+  // Hidden tools and drops over navigation or host dialogs must not reach a plugin.
+  if (!Number.isFinite(x) || !Number.isFinite(y) || document.elementFromPoint(x, y) !== element) {
+    clearFileDropHover()
+    return
+  }
+  const bounds = element.getBoundingClientRect()
+  dropHovered = payload.type !== 'drop'
+  postToFrame({ jsonrpc: '2.0', method: 'host.filesDrop', params: {
+    type: payload.type, position: { x: x - bounds.left, y: y - bounds.top },
+    ...('paths' in payload ? { paths: payload.paths } : {}),
+  } })
+}
 
 function onFrameLoad() {
   frameLoaded.value = true
@@ -472,6 +503,7 @@ function onWindowMessage(event: MessageEvent) {
 }
 
 let unlistenWorker: UnlistenFn | undefined
+let unlistenDrop: UnlistenFn | undefined
 let themeObserver: MutationObserver | undefined
 
 onMounted(async () => {
@@ -521,6 +553,15 @@ onMounted(async () => {
     )
     if (disposed) { unlisten(); return }
     unlistenWorker = unlisten
+    if (allowed('files.drop')) {
+      try {
+        const removeDrop = await getCurrentWebview().onDragDropEvent(event => onNativeFileDrop(event.payload))
+        if (disposed) { removeDrop(); return }
+        unlistenDrop = removeDrop
+      } catch (failure) {
+        log.warn('Failed to register plugin file drop events', failure)
+      }
+    }
     src.value = pluginViewUrl(
       props.pluginName, props.view.id, props.view.entryPath || props.view.entry, convertFileSrc,
     )
@@ -541,6 +582,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', syncOverlayLayout)
   window.removeEventListener('scroll', syncOverlayLayout, true)
   unlistenWorker?.()
+  unlistenDrop?.()
   themeObserver?.disconnect()
   for (const [requestId, handlers] of runRequests) {
     void cancelOwned(requestId, handlers).catch(() => undefined)

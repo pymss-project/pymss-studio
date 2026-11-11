@@ -41,6 +41,27 @@ class MdxChunkConstraintTests(unittest.TestCase):
         self.assertIsNone(chunk_size_constraint("mdx23c", {"audio": {"hop_length": 1024}}))
         validate_chunk_size("bs_roformer", self.config, 465920)
 
+    def test_snapshot_lattice_check_agrees_with_the_runtime_chunk_validator(self):
+        from worker_inference_snapshot import build_parameter_resolution, validate_snapshot_against_resolution
+
+        config = {**self.config, "audio": {**self.config["audio"], "chunk_size": 261120}, "inference": {"batch_size": 1}}
+        resolution = build_parameter_resolution("mdx23c", config, config_path=None, model_path=None)
+        self.assertEqual(resolution["capabilities"]["chunk_size"]["kind"], "lattice")
+        for chunk in [1, 31743, 31744, 64512, 64513, 261120, 457727, 457728, 465920, 490496]:
+            try:
+                validate_chunk_size("mdx23c", config, chunk)
+                runtime_ok = True
+            except InferenceParameterError:
+                runtime_ok = False
+            snapshot = {"fingerprint": resolution["fingerprint"], "parameters": {**resolution["defaults"], "chunk_size": chunk, "overlap_size": 0}}
+            try:
+                validate_snapshot_against_resolution(snapshot, resolution)
+                snapshot_ok = True
+            except InferenceParameterError:
+                snapshot_ok = False
+            with self.subTest(chunk=chunk):
+                self.assertEqual(snapshot_ok, runtime_ok)
+
     def test_studio_adapter_validates_effective_configuration_after_parent_update(self):
         class BaseSeparator:
             def update_inference_params(self, config, params):

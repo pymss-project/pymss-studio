@@ -1756,10 +1756,16 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   function toggleTrackFlag(trackId: string, flag: 'muted' | 'solo') {
-    const track = session.value?.tracks.find((item) => item.id === trackId)
-    if (!track) return
+    const tracks = session.value?.tracks
+    const track = tracks?.find((item) => item.id === trackId)
+    if (!tracks || !track) return
     pushHistory()
-    track[flag] = !track[flag]
+    if (flag === 'solo') {
+      const enabled = !track.solo
+      for (const item of tracks) item.solo = item.id === trackId && enabled
+    } else {
+      track.muted = !track.muted
+    }
     scheduleSave()
   }
 

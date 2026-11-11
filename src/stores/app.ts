@@ -4,7 +4,7 @@ import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { createRuntimeQueryQueue, createRuntimeReadCache } from '@/utils/runtimeQueries'
-import { activeRuntimeEnvironment, supportsRuntimeCoreUpdate, supportsRuntimeManagement } from '@/utils/runtime'
+import { activeRuntimeEnvironment, rocmStableDeviceIds, supportsRuntimeCoreUpdate, supportsRuntimeManagement } from '@/utils/runtime'
 import { runtimeOperationError, type RuntimeOperationError } from '@/utils/runtimeErrors'
 import { isTauriRuntime } from '@/utils/appStore'
 import { registerWindowCloseGuard } from '@/utils/windowCloseGuards'
@@ -40,6 +40,66 @@ export type EnvInfo = {
 }
 
 export type RuntimeBackend = 'cpu' | 'cuda' | 'rocm' | 'mlx'
+export type RuntimeGpuProbeCheck = {
+  id: string; status: 'passed' | 'failed' | 'unavailable' | 'timeout' | 'skipped'
+  message?: string; precision?: string; requiredForBasic?: boolean; errorCode?: string
+  exceptionType?: string; detail?: string
+}
+export type RuntimeGpuProbeMode = {
+  mode: 'miopen' | 'nativeHip' | string; status: string; basicAvailable: boolean; checks: RuntimeGpuProbeCheck[]
+  message?: string; errorCode?: string; failureStage?: string; exitCode?: number
+}
+export type RuntimeGpuDeviceCapability = {
+  index: number; name: string; rawArchitecture?: string; gfx?: string; stableId?: string; driverVersion?: string
+  basicAvailable: boolean; modes: RuntimeGpuProbeMode[]
+  failureStage?: string; exitCode?: number
+}
+export type RuntimeGpuProbeReport = {
+  probeVersion: string | number; profileId?: string; baseFingerprint?: string; targetFingerprint?: string
+  checkedAt: string; cacheReusable: boolean; status: 'completed' | 'partial' | 'unavailable' | 'cancelled'
+  message?: string; errorCode?: string
+  fromCache?: boolean; matchesCurrentRuntime?: boolean
+  deviceCapabilities: RuntimeGpuDeviceCapability[]
+}
+export type RuntimeInstallAction = 'install' | 'addTargets' | 'upgrade' | 'prepareSeed'
+export type RuntimeInstallOptions = {
+  profileId?: string; targets?: string[]; selectedDeviceIds?: string[]; action?: RuntimeInstallAction; acceptPreview?: boolean
+  expectedProfileId?: string; expectedProfileRevision?: string | number
+  expectedBaseFingerprint?: string; expectedTargetFingerprint?: string; replacePrevious?: boolean
+}
+export type RuntimeHardwareDevice = {
+  id: string; vendor: string; name: string; hardwareId?: string; driverVersion?: string
+  gfx?: string | null; architectureSource: 'native' | 'runtime' | 'manual' | 'unknown'
+  architectureConfidence: 'confirmed' | 'hint' | 'unknown'; memoryBytes?: number | null; isDiscrete?: boolean | null
+}
+export type RuntimeHardwareProfile = {
+  id: string; revision: string | number; releaseState: 'legacy' | 'disabled' | 'preview' | 'stable' | 'revoked'
+  installationEnabled: boolean; validationStatus?: string; availableTargets: string[]; validatedTargets: string[]; torchVersion?: string
+}
+export type RuntimeHardwareInventory = {
+  schemaVersion: number; platform: string; devices: RuntimeHardwareDevice[]; profiles: RuntimeHardwareProfile[]
+  defaultProfileId?: string | null
+  errors: Array<{ code?: string; message?: string } | string>; detectorStatus?: string
+}
+export type RuntimeInstallPlan = RuntimeInstallOptions & {
+  backend: RuntimeBackend; profileRevision?: string | number; releaseState?: string
+  installationEnabled: boolean; requiresPreviewAcceptance?: boolean
+  validationStatus?: string; packages?: Record<string, string>; requiresPreviousReplacement?: boolean
+  requestedTargets?: string[]; resolvedTargets?: string[]; installedTargets?: string[]; missingTargets?: string[]
+  seedPreparationRequired?: boolean; downloadBytes?: number | null
+  environmentRollbackAvailable?: boolean; previousProfile?: { id?: string; packages?: Record<string, string> } | null
+}
+export type RuntimeActivationValidation = {
+  status: 'passed' | 'failed' | 'notRun'; reason?: string; message?: string; exitCode?: number
+  devices?: Array<{ index: number; name?: string; gfx?: string; status: 'passed' | 'failed' | 'targetMissing'; message?: string }>
+}
+export type RuntimeProfileState = {
+  profileId?: string; profileRevision?: string | number; installedTargets?: string[]; baseFingerprint?: string; targetFingerprint?: string
+  selectedDeviceIds?: string[]
+  gpuProbeReport?: RuntimeGpuProbeReport | null
+  activationValidation?: RuntimeActivationValidation | null
+  seedPreparationRequired?: boolean
+}
 export type RuntimeCoreMode = 'update' | 'sync' | 'repair' | 'rollback'
 export type RuntimeCorePlan = {
   id: string
@@ -53,7 +113,15 @@ export type RuntimeCorePlan = {
   dependencyCount: number
 }
 type RuntimeDebugCommand = 'debug_runtime_override_active' | 'debug_runtime_write_file' | 'debug_runtime_restore_file'
-export type RuntimeInfo = {
+export type RuntimeInfo = RuntimeProfileState & {
+  environmentRollbackAvailable?: boolean
+  seedProfileId?: string | null
+  seedInstalledTargets?: string[]
+  seedPreparationReason?: string | null
+  runtimeMaintenancePending?: boolean
+  recoveryRequired?: boolean
+  recoveryError?: { code?: string; message?: string } | null
+  previousRuntime?: { profileId?: string; torchVersion?: string; installedAt?: string } | null
   rollbackAvailable?: boolean
   manifestVersion?: string
   pythonVersion?: string
@@ -64,7 +132,7 @@ export type RuntimeInfo = {
   activeRuntimeFile?: string
   backend?: RuntimeBackend | null
   installedBackend?: RuntimeBackend | string | null
-  installState?: {
+  installState?: RuntimeProfileState & {
     backend?: RuntimeBackend | string
     manifestVersion?: string
     installedAt?: string
@@ -98,7 +166,7 @@ export type RuntimeInfo = {
   ready?: boolean
 }
 
-export type InstalledRuntime = {
+export type InstalledRuntime = RuntimeProfileState & {
   backend?: RuntimeBackend | string
   source?: 'managed' | 'bundled' | string
   health?: 'ready' | 'degraded' | 'broken' | 'unknown' | string
@@ -149,6 +217,13 @@ export type DiagnosticItem = {
 
 export type WorkerEventConnectionStatus = 'idle' | 'connecting' | 'connected' | 'error'
 
+function readSelectedRocmDeviceIds(): string[] {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem('pymss-studio.rocm-device-ids') || '[]')
+    return Array.isArray(value) ? rocmStableDeviceIds(value.filter((id): id is string => typeof id === 'string')).slice(0, 16) : []
+  } catch { return [] }
+}
+
 export const useAppStore = defineStore('app', () => {
   const settings = useSettingsStore()
   const envInfo = ref<EnvInfo | null>(null)
@@ -161,13 +236,31 @@ export const useAppStore = defineStore('app', () => {
   const workerEventConnectionError = ref('')
   const lastError = ref<string | null>(null)
   const runtimeInfo = ref<RuntimeInfo | null>(null)
+  const runtimeHardwareInventory = ref<RuntimeHardwareInventory | null>(null)
+  const runtimeHardwareInventoryLoading = ref(false)
+  const runtimeHardwareInventoryError = ref<RuntimeOperationError | null>(null)
+  const selectedRocmDeviceIds = ref<string[]>(readSelectedRocmDeviceIds())
+  watch(selectedRocmDeviceIds, (ids) => {
+    try { localStorage.setItem('pymss-studio.rocm-device-ids', JSON.stringify(rocmStableDeviceIds(ids))) } catch { /* Storage is optional. */ }
+  }, { deep: true })
   const runtimeInfoLoading = ref(false)
   const runtimeInfoError = ref('')
+  const runtimeInfoFailure = ref<RuntimeOperationError | null>(null)
   const runtimeInstallTaskId = ref<string | null>(null)
   const runtimeInstallStatus = ref<'idle' | 'installing' | 'success' | 'error' | 'cancelled'>('idle')
   const runtimeInstallBackend = ref<string | null>(null)
   const runtimeInstallMessage = ref('')
+  const runtimeInstallActivationValidation = ref<RuntimeActivationValidation | null>(null)
   const runtimeInstallLogs = ref<LogEntry[]>([])
+  const runtimeGpuProbeTaskId = ref<string | null>(null)
+  const runtimeGpuProbeStatus = ref<'idle' | 'running' | 'success' | 'error' | 'cancelled'>('idle')
+  const runtimeGpuProbeStage = ref('')
+  const runtimeGpuProbeError = ref<RuntimeOperationError | null>(null)
+  const runtimeGpuProbeReport = ref<RuntimeGpuProbeReport | null>(null)
+  const runtimeMaintenanceTaskId = ref<string | null>(null)
+  const runtimeMaintenanceStatus = ref<'idle' | 'running' | 'success' | 'error' | 'cancelled'>('idle')
+  const runtimeMaintenanceMode = ref<'rollback' | 'recover'>('recover')
+  const runtimeMaintenanceError = ref<RuntimeOperationError | null>(null)
   const runtimeCoreVersions = ref<RuntimeCoreVersions | null>(null)
   const runtimeCoreVersionsLoading = ref(false)
   const runtimeCoreUpdateTaskId = ref<string | null>(null)
@@ -179,6 +272,7 @@ export const useAppStore = defineStore('app', () => {
   const corePlanWaiters = new Map<string, { resolve: (plan: RuntimeCorePlan) => void; reject: (error: Error) => void }>()
   let preparedRuntimeCorePlanId: string | null = null
   const runtimeEnvSizes = ref<Record<string, number>>({})
+  const runtimeRollbackBytes = ref<number | null>(null)
   const runtimeEnvSizesLoading = ref(false)
   const runtimeEnvSizesError = ref('')
   // Backends whose venv exists but never finished installing — leftover disk usage the user
@@ -467,14 +561,18 @@ export const useAppStore = defineStore('app', () => {
     return runRuntimeQuery(async () => {
       if (!isTauriRuntime()) {
         runtimeEnvSizes.value = {}
+        runtimeRollbackBytes.value = null
         runtimeIncompleteBackends.value = []
         return runtimeEnvSizes.value
       }
       const result = await invoke<{
         sizes?: Record<string, number>
         incompleteBackends?: string[]
+        environmentRollbackBytes?: number | null
       }>('runtime_env_sizes')
       runtimeEnvSizes.value = result?.sizes || {}
+      const rollbackBytes = result?.environmentRollbackBytes
+      runtimeRollbackBytes.value = typeof rollbackBytes === 'number' && Number.isFinite(rollbackBytes) && rollbackBytes >= 0 ? rollbackBytes : null
       runtimeIncompleteBackends.value = result?.incompleteBackends || []
       return runtimeEnvSizes.value
     })
@@ -517,6 +615,7 @@ export const useAppStore = defineStore('app', () => {
     runtimeInfoWaiting += 1
     runtimeInfoLoading.value = true
     runtimeInfoError.value = ''
+    runtimeInfoFailure.value = null
     try {
       return await runRuntimeQuery(async () => {
         if (!isTauriRuntime()) {
@@ -532,6 +631,7 @@ export const useAppStore = defineStore('app', () => {
       })
     } catch (error) {
       runtimeInfoError.value = error instanceof Error ? error.message : String(error)
+      runtimeInfoFailure.value = runtimeOperationError(error)
       throw error
     } finally {
       runtimeInfoWaiting -= 1
@@ -598,7 +698,7 @@ export const useAppStore = defineStore('app', () => {
     if (!runtimeManagementSupported.value) throw new Error('Runtime management is only available on Windows and Linux.')
   }
 
-  async function installRuntime(backend: RuntimeBackend, mirror = 'auto', locale = '') {
+  async function installRuntime(backend: RuntimeBackend, mirror = 'auto', locale = '', target: RuntimeInstallOptions = {}) {
     requireRuntimeManagement()
     const taskId = `runtime_install_${crypto.randomUUID()}`
     runtimeInstallTaskId.value = taskId
@@ -606,14 +706,103 @@ export const useAppStore = defineStore('app', () => {
     runtimeInstallBackend.value = backend
     runtimeInstallMessage.value = ''
     runtimeInstallLogs.value = []
+    runtimeInstallActivationValidation.value = null
     try {
-      await startRuntimeBackground('start_runtime_install', taskId, { taskId, backend, mirror, locale }, 'runtime_install_finished')
+      await startRuntimeBackground('start_runtime_install', taskId, { taskId, backend, mirror, locale, ...target,
+        ...(target.selectedDeviceIds ? { selectedDeviceIds: rocmStableDeviceIds(target.selectedDeviceIds) } : {}),
+      }, 'runtime_install_finished')
     } catch (error) {
       runtimeInstallStatus.value = 'error'
       runtimeInstallMessage.value = error instanceof Error ? error.message : String(error)
       throw error
     }
     return taskId
+  }
+
+  async function runtimeInstallPlan(backend: RuntimeBackend, target: RuntimeInstallOptions = {}) {
+    return runRuntimeQuery(() => invoke<RuntimeInstallPlan>('runtime_install_plan', { payload: { backend, ...target,
+      ...(target.selectedDeviceIds ? { selectedDeviceIds: rocmStableDeviceIds(target.selectedDeviceIds) } : {}),
+    } }))
+  }
+
+  async function loadRuntimeHardwareInventory() {
+    runtimeHardwareInventoryLoading.value = true
+    runtimeHardwareInventoryError.value = null
+    try {
+      const result = await runRuntimeQuery(() => invoke<RuntimeHardwareInventory>('runtime_hardware_inventory'))
+      runtimeHardwareInventory.value = result
+      return result
+    } catch (error) {
+      runtimeHardwareInventoryError.value = runtimeOperationError(error)
+      throw error
+    } finally { runtimeHardwareInventoryLoading.value = false }
+  }
+
+  async function startRuntimeGpuProbe(target: { deviceIds?: number[]; modes?: Array<'miopen' | 'nativeHip'>; includeFp16?: boolean } = {}) {
+    const taskId = `runtime_gpu_probe_${crypto.randomUUID()}`
+    runtimeGpuProbeTaskId.value = taskId
+    runtimeGpuProbeStatus.value = 'running'
+    runtimeGpuProbeStage.value = ''
+    runtimeGpuProbeError.value = null
+    runtimeGpuProbeReport.value = null
+    try {
+      await startRuntimeBackground('start_runtime_gpu_probe', taskId, { taskId, ...target }, 'runtime_gpu_probe_finished')
+    } catch (error) {
+      if (runtimeGpuProbeTaskId.value === taskId) {
+        runtimeGpuProbeStatus.value = 'error'
+        runtimeGpuProbeError.value = runtimeOperationError(error)
+        runtimeGpuProbeTaskId.value = null
+      }
+      throw error
+    }
+    return taskId
+  }
+
+  async function cancelRuntimeGpuProbe() {
+    if (!runtimeGpuProbeTaskId.value) return false
+    return cancelRuntimeBackground('cancel_runtime_gpu_probe', runtimeGpuProbeTaskId.value)
+  }
+
+  async function rollbackRuntime() {
+    requireRuntimeManagement()
+    const taskId = `runtime_rollback_${crypto.randomUUID()}`
+    runtimeMaintenanceTaskId.value = taskId
+    runtimeMaintenanceMode.value = 'rollback'
+    runtimeMaintenanceStatus.value = 'running'
+    runtimeMaintenanceError.value = null
+    try {
+      await startRuntimeBackground('start_runtime_rollback', taskId, { taskId, backend: 'rocm' }, 'runtime_rollback_finished')
+    } catch (error) {
+      if (runtimeMaintenanceTaskId.value === taskId) {
+        runtimeMaintenanceStatus.value = 'error'
+        runtimeMaintenanceError.value = runtimeOperationError(error)
+        runtimeMaintenanceTaskId.value = null
+      }
+      throw error
+    }
+    return taskId
+  }
+
+  async function cancelRuntimeMaintenance() {
+    if (!runtimeMaintenanceTaskId.value || runtimeMaintenanceMode.value !== 'rollback') return false
+    return cancelRuntimeBackground('cancel_runtime_install', runtimeMaintenanceTaskId.value)
+  }
+
+  async function recoverRuntime() {
+    requireRuntimeManagement()
+    runtimeMaintenanceMode.value = 'recover'
+    runtimeMaintenanceStatus.value = 'running'
+    runtimeMaintenanceError.value = null
+    try {
+      await mutateRuntime(() => invoke('recover_runtime', { payload: {} }))
+      runtimeMaintenanceStatus.value = 'success'
+      runtimeGpuProbeReport.value = null
+      await Promise.allSettled([checkRuntimeInfo(), checkEnv(), loadRuntimeEnvSizes()])
+    } catch (error) {
+      runtimeMaintenanceStatus.value = 'error'
+      runtimeMaintenanceError.value = runtimeOperationError(error)
+      throw error
+    }
   }
 
   async function updateRuntimeCore(
@@ -691,16 +880,18 @@ export const useAppStore = defineStore('app', () => {
 
   async function activateRuntime(
     backend: RuntimeBackend,
-    target: { pythonPath?: string } = {},
+    target: { pythonPath?: string; selectedDeviceIds?: string[] } = {},
     options: { refreshCoreVersions?: boolean; onlyIfNoActive?: boolean } = {},
   ) {
     requireRuntimeManagement()
     const payload = {
       backend,
       ...target,
+      ...(target.selectedDeviceIds ? { selectedDeviceIds: rocmStableDeviceIds(target.selectedDeviceIds) } : {}),
       ...(options.onlyIfNoActive ? { onlyIfNoActive: true } : {}),
     }
     await mutateRuntime(() => invoke('activate_runtime', { payload }))
+    runtimeGpuProbeReport.value = null
     const checks: Promise<unknown>[] = [checkRuntimeInfo(), checkEnv()]
     if (options.refreshCoreVersions !== false) checks.push(loadRuntimeCoreVersions())
     await Promise.all(checks)
@@ -747,6 +938,11 @@ export const useAppStore = defineStore('app', () => {
   // to avoid leaving pip/download processes behind.
   registerWindowCloseGuard(async () => {
     if (!isTauriRuntime()) return
+    if (runtimeMaintenanceStatus.value === 'running') {
+      if (runtimeMaintenanceMode.value === 'recover') throw new Error('Runtime recovery is in progress. Wait for the operation to finish.')
+      await cancelRuntimeMaintenance()
+    }
+    if (runtimeGpuProbeStatus.value === 'running') await cancelRuntimeGpuProbe()
     if (runtimeInstallStatus.value === 'installing') await cancelRuntimeInstall()
     if (runtimeCoreUpdateStatus.value === 'updating' || runtimeCoreUpdateStatus.value === 'preparing') {
       if (runtimeCoreUpdateStage.value === 'activate') throw new Error('The runtime is being activated. Wait for the operation to finish.')
@@ -783,6 +979,45 @@ export const useAppStore = defineStore('app', () => {
       // Release before terminal handlers enqueue their post-write refreshes.
       operation.complete()
     }
+    if (runtimeGpuProbeTaskId.value && taskId === runtimeGpuProbeTaskId.value) {
+      if (event.type === 'runtime_gpu_probe_finished') {
+        const report = (event.payload?.report || event.payload) as RuntimeGpuProbeReport
+        runtimeGpuProbeReport.value = report.status === 'cancelled' ? null : report
+        runtimeGpuProbeStatus.value = report.status === 'cancelled' ? 'cancelled' : 'success'
+        runtimeGpuProbeTaskId.value = null
+        runtimeGpuProbeStage.value = ''
+      } else if (event.type === 'runtime_gpu_probe_stage') {
+        runtimeGpuProbeStage.value = event.payload?.message || event.payload?.stage || event.payload?.phase || ''
+      } else if (event.type === 'error') {
+        runtimeGpuProbeStatus.value = 'error'
+        runtimeGpuProbeError.value = runtimeOperationError(event.payload)
+        runtimeGpuProbeTaskId.value = null
+      } else if (event.type === 'task_cancelled') {
+        runtimeGpuProbeStatus.value = 'cancelled'
+        runtimeGpuProbeTaskId.value = null
+        runtimeGpuProbeStage.value = ''
+      }
+      return
+    }
+    if (runtimeMaintenanceTaskId.value && taskId === runtimeMaintenanceTaskId.value) {
+      if (event.type === 'runtime_rollback_finished') {
+        runtimeMaintenanceStatus.value = 'success'
+        runtimeMaintenanceTaskId.value = null
+        runtimeGpuProbeReport.value = null
+        void Promise.allSettled([checkRuntimeInfo(), checkEnv(), loadRuntimeEnvSizes()])
+        void import('@/stores/model').then(({ useModelStore }) => useModelStore().loadModels()).catch(() => {})
+      } else if (event.type === 'error') {
+        runtimeMaintenanceStatus.value = 'error'
+        runtimeMaintenanceError.value = runtimeOperationError(event.payload)
+        runtimeMaintenanceTaskId.value = null
+        void checkRuntimeInfo().catch(() => {})
+      } else if (event.type === 'task_cancelled') {
+        runtimeMaintenanceStatus.value = 'cancelled'
+        runtimeMaintenanceTaskId.value = null
+        void checkRuntimeInfo().catch(() => {})
+      }
+      return
+    }
     if (runtimeCoreUpdateTaskId.value && taskId === runtimeCoreUpdateTaskId.value) {
       const waiter = corePlanWaiters.get(taskId)
       if (event?.type === 'runtime_core_update_plan') {
@@ -795,6 +1030,7 @@ export const useAppStore = defineStore('app', () => {
         waiter?.resolve(event.payload as RuntimeCorePlan)
       } else if (event?.type === 'runtime_core_update_finished') {
         invalidateRuntimeReads()
+        runtimeGpuProbeReport.value = null
         runtimeCoreVersions.value = null
         runtimeCoreUpdateStatus.value = 'success'
         runtimeCoreUpdateMessage.value = ''
@@ -853,9 +1089,11 @@ export const useAppStore = defineStore('app', () => {
     }
     if (!runtimeInstallTaskId.value || taskId !== runtimeInstallTaskId.value) return
     if (event?.type === 'runtime_install_finished') {
+      runtimeGpuProbeReport.value = null
       runtimeInstallStatus.value = 'success'
+      runtimeInstallActivationValidation.value = event.payload?.activationValidation || null
       runtimeInstallMessage.value = ''
-      if (event.payload?.state || event.payload?.logPath) {
+      if (event.payload?.activated !== false && (event.payload?.state || event.payload?.logPath)) {
         runtimeInfo.value = {
           ...(runtimeInfo.value || {}),
           installedBackend: event.payload?.state?.backend,
@@ -904,17 +1142,22 @@ export const useAppStore = defineStore('app', () => {
     setWorkerEventConnection,
     checkEnv,
     checkEnvInBackground,
-    runtimeInfo,
+    runtimeInfo, runtimeHardwareInventory, runtimeHardwareInventoryLoading, runtimeHardwareInventoryError, selectedRocmDeviceIds, loadRuntimeHardwareInventory,
     runtimeManagementSupported,
     runtimeDebugSupported,
     runtimeCoreUpdateSupported,
     runtimeInfoLoading,
     runtimeInfoError,
+    runtimeInfoFailure,
     runtimeInstallTaskId,
     runtimeInstallStatus,
     runtimeInstallBackend,
-    runtimeInstallMessage,
+    runtimeInstallMessage, runtimeInstallActivationValidation,
     runtimeInstallLogs,
+    runtimeGpuProbeTaskId, runtimeGpuProbeStatus, runtimeGpuProbeStage, runtimeGpuProbeError, runtimeGpuProbeReport,
+    startRuntimeGpuProbe, cancelRuntimeGpuProbe, runtimeInstallPlan,
+    runtimeMaintenanceTaskId, runtimeMaintenanceStatus, runtimeMaintenanceMode, runtimeMaintenanceError,
+    rollbackRuntime, recoverRuntime, cancelRuntimeMaintenance,
     runtimeCoreVersions,
     runtimeCoreVersionsLoading,
     runtimeCoreUpdateTaskId,
@@ -926,6 +1169,7 @@ export const useAppStore = defineStore('app', () => {
     prepareRuntimeCoreUpdate,
     discardRuntimeCorePlan,
     runtimeEnvSizes,
+    runtimeRollbackBytes,
     runtimeEnvSizesLoading,
     runtimeEnvSizesError,
     runtimeIncompleteBackends,

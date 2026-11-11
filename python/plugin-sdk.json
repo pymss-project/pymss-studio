@@ -10,6 +10,7 @@
     "files.pickDirectory",
     "files.pickModel",
     "files.scanAudio",
+    "files.drop",
     "files.reveal",
     "clipboard.writeText",
     "shell.openExternal",

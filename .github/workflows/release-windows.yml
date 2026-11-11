@@ -7,11 +7,132 @@ on:
         description: Release version
         required: true
         type: string
+      rocm_profile:
+        description: Versioned ROCm recipe identifier
+        type: string
+        default: win-rocm100-multiarch
+      rocm_profile_revision:
+        description: Expected ROCm recipe revision
+        type: number
+        default: 1
+      rocm_targets:
+        description: Explicit space-separated GPU targets; legacy uses an empty set
+        type: string
+        default: all
+      rocm_channel:
+        description: Recipe release state (legacy, preview or stable)
+        type: string
+        default: preview
+      rocm_preview_candidate:
+        description: Publish the versioned ROCm candidate in an explicit prerelease recipe snapshot
+        type: boolean
+        default: false
 
 jobs:
+  windows-rocm-runtime-assets:
+    name: Resolve shared ROCm binary lock and HIP detector
+    runs-on: windows-latest
+    env:
+      PYMSS_VERSION_INPUT: ${{ inputs.version }}
+      PYMSS_ROCM_PROFILE: ${{ inputs.rocm_profile }}
+      PYMSS_ROCM_REVISION: ${{ inputs.rocm_profile_revision }}
+      PYMSS_ROCM_TARGETS: ${{ inputs.rocm_targets }}
+      PYMSS_ROCM_CHANNEL: ${{ inputs.rocm_channel }}
+      PYMSS_ROCM_PREVIEW_CANDIDATE: ${{ inputs.rocm_preview_candidate }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-release-env
+      - name: Restore verified source download cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/runtime-artifact-sources
+          key: windows-rocm-${{ inputs.rocm_profile }}-${{ inputs.rocm_profile_revision }}-${{ inputs.rocm_targets }}-${{ inputs.rocm_channel }}-${{ hashFiles('python/runtime-manifest.json', 'python/worker_runtime_artifacts.py', 'scripts/runtime-artifacts.py') }}
+      - name: Resolve complete binary closure
+        shell: pwsh
+        run: |
+          $version = $env:PYMSS_VERSION_INPUT.TrimStart('v')
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z][0-9A-Za-z.-]*)?$') { throw 'Invalid release version' }
+          $targets = @($env:PYMSS_ROCM_TARGETS -split '\s+' | Where-Object { $_ })
+          $snapshotArgs = @('scripts/runtime-artifacts.py', 'snapshot', '--profile', $env:PYMSS_ROCM_PROFILE,
+            '--profile-revision', $env:PYMSS_ROCM_REVISION, '--channel', $env:PYMSS_ROCM_CHANNEL,
+            '--version', $version, '--output', 'release/rocm-distribution-manifest.json')
+          if ($env:PYMSS_ROCM_PREVIEW_CANDIDATE -eq 'true') { $snapshotArgs += '--enable-preview-candidate' }
+          & python @snapshotArgs
+          if ($LASTEXITCODE -ne 0) { throw 'ROCm distribution recipe snapshot failed' }
+          $arguments = @('scripts/runtime-artifacts.py', 'resolve', '--profile', $env:PYMSS_ROCM_PROFILE,
+            '--profile-revision', $env:PYMSS_ROCM_REVISION, '--channel', $env:PYMSS_ROCM_CHANNEL,
+            '--manifest', 'release/rocm-distribution-manifest.json',
+            '--base-url', "https://github.com/${{ github.repository }}/releases/download/v$version",
+            '--output', 'release/rocm-runtime-assets')
+          if ($targets.Count) { $arguments += @('--targets') + $targets }
+          & python @arguments
+          if ($LASTEXITCODE -ne 0) { throw 'ROCm binary lock resolution failed' }
+          $manifest = Get-Content -Raw 'release/rocm-distribution-manifest.json' | ConvertFrom-Json
+          $defaultProfile = $manifest.backends.rocm.platformOverrides.win32.defaultProfile
+          if ($defaultProfile -ne $env:PYMSS_ROCM_PROFILE) {
+            $defaultRecipe = $manifest.backends.rocm.platformOverrides.win32.profiles.$defaultProfile
+            $defaultArguments = @('scripts/runtime-artifacts.py', 'resolve', '--profile', $defaultProfile,
+              '--profile-revision', $defaultRecipe.revision, '--channel', $defaultRecipe.releaseState,
+              '--manifest', 'release/rocm-distribution-manifest.json',
+              '--base-url', "https://github.com/${{ github.repository }}/releases/download/v$version",
+              '--output', 'release/rocm-runtime-assets')
+            if ($defaultRecipe.installMode -eq 'multiarch') { $defaultArguments += @('--targets', 'all') }
+            & python @defaultArguments
+            if ($LASTEXITCODE -ne 0) { throw 'Default Online ROCm binary lock resolution failed' }
+          }
+          New-Item -ItemType Directory -Force 'python/runtime-locks' | Out-Null
+          Get-ChildItem 'release/rocm-runtime-assets/*.json' | Where-Object { $_.Name -ne 'build-manifest.json' } | Copy-Item -Destination 'python/runtime-locks/'
+          Copy-Item 'release/rocm-distribution-manifest.json' 'python/runtime-manifest.json' -Force
+      - name: Build pinned no-Torch HIP inventory helper
+        shell: pwsh
+        run: |
+          $catalog = Get-Content -Raw 'python/runtime-locks/catalog.json' | ConvertFrom-Json
+          foreach ($profile in $catalog.profiles) {
+            $id = $profile.profileId
+            $environment = Join-Path (Resolve-Path '.').Path ".cache/rocm-detector-sdk-$id"
+            python -m venv $environment
+            if ($LASTEXITCODE -ne 0) { throw 'HIP detector build environment creation failed' }
+            $python = Join-Path $environment 'Scripts/python.exe'
+            python scripts/runtime-artifacts.py detector --lock "python/runtime-locks/$id.json" --python $python --wheelhouse release/rocm-runtime-assets/wheels
+            if ($LASTEXITCODE -ne 0) { throw 'Locked HIP detector SDK installation failed' }
+            python scripts/build-rocm-detector.py --environment $environment --profile $id --output "python/rocm-detectors/$id"
+            if ($LASTEXITCODE -ne 0) { throw 'Pinned HIP detector build failed' }
+          }
+      - name: Upload shared lock and detector resources
+        uses: actions/upload-artifact@v4
+        with:
+          name: rocm-runtime-resources
+          path: |
+            python/runtime-manifest.json
+            python/runtime-locks
+            python/rocm-detectors
+          if-no-files-found: error
+      - name: Upload verified binary wheelhouse for preparation
+        uses: actions/upload-artifact@v4
+        with:
+          name: rocm-runtime-wheelhouse
+          path: release/rocm-runtime-assets
+          compression-level: 0
+          if-no-files-found: error
+      - name: Assemble Online release assets
+        shell: pwsh
+        run: |
+          $version = $env:PYMSS_VERSION_INPUT.TrimStart('v')
+          New-Item -ItemType Directory -Force 'release/rocm-runtime-public' | Out-Null
+          Copy-Item 'release/rocm-runtime-assets/wheels/*.whl' 'release/rocm-runtime-public/'
+          Copy-Item 'release/rocm-runtime-assets/*.json' 'release/rocm-runtime-public/'
+          "artifact_name=Pymss-Studio-$version-windows-x64-rocm-runtime-assets" >> $env:GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.artifact_name }}
+          path: release/rocm-runtime-public
+          compression-level: 0
+          if-no-files-found: error
+
   windows-cuda-prepare:
     name: Windows x64 CUDA prepare
     runs-on: windows-latest
+    needs: windows-rocm-runtime-assets
     outputs:
       version: ${{ steps.meta.outputs.version }}
       stage_name: ${{ steps.meta.outputs.stage_name }}
@@ -22,6 +143,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-release-env
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rocm-runtime-resources
+          path: python
 
       - name: Resolve package metadata
         id: meta
@@ -215,6 +341,7 @@ jobs:
   windows-cpu-prepare:
     name: Windows x64 CPU prepare
     runs-on: windows-latest
+    needs: windows-rocm-runtime-assets
     outputs:
       version: ${{ steps.meta.outputs.version }}
       stage_name: ${{ steps.meta.outputs.stage_name }}
@@ -225,6 +352,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-release-env
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rocm-runtime-resources
+          path: python
 
       - name: Resolve package metadata
         id: meta
@@ -409,6 +541,7 @@ jobs:
   windows-online-prepare:
     name: Windows x64 online runtime prepare
     runs-on: windows-latest
+    needs: windows-rocm-runtime-assets
     outputs:
       version: ${{ steps.meta.outputs.version }}
       stage_name: ${{ steps.meta.outputs.stage_name }}
@@ -428,6 +561,10 @@ jobs:
           echo "version=$version" >> $env:GITHUB_OUTPUT
           echo "stage_name=$stageName" >> $env:GITHUB_OUTPUT
           echo "stage_artifact=$stageName-stage" >> $env:GITHUB_OUTPUT
+      - uses: actions/download-artifact@v4
+        with:
+          name: rocm-runtime-resources
+          path: python
       - name: Prepare minimal Python runtime
         shell: pwsh
         run: ./scripts/prepare-python-runtime.ps1 -Variant default -Minimal
@@ -572,6 +709,7 @@ jobs:
   windows-rocm-prepare:
     name: Windows x64 ROCm prepare
     runs-on: windows-latest
+    needs: windows-rocm-runtime-assets
     outputs:
       version: ${{ steps.meta.outputs.version }}
       stage_name: ${{ steps.meta.outputs.stage_name }}
@@ -581,6 +719,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-release-env
+      - uses: actions/download-artifact@v4
+        with:
+          name: rocm-runtime-resources
+          path: python
+      - uses: actions/download-artifact@v4
+        with:
+          name: rocm-runtime-wheelhouse
+          path: release/rocm-runtime-assets
       - name: Resolve package metadata
         id: meta
         shell: pwsh
@@ -593,7 +739,13 @@ jobs:
           echo "stage_artifact=$stageName-stage" >> $env:GITHUB_OUTPUT
       - name: Prepare bootstrap runtime + ROCm environment seed
         shell: pwsh
-        run: ./scripts/prepare-python-runtime.ps1 -Variant rocm -InitialBackend rocm
+        env:
+          PYMSS_ROCM_PROFILE: ${{ inputs.rocm_profile }}
+          PYMSS_ROCM_TARGETS: ${{ inputs.rocm_targets }}
+          PYMSS_ROCM_CHANNEL: ${{ inputs.rocm_channel }}
+        run: |
+          $targets = @($env:PYMSS_ROCM_TARGETS -split '\s+' | Where-Object { $_ })
+          ./scripts/prepare-python-runtime.ps1 -Variant rocm -InitialBackend rocm -RocmProfile $env:PYMSS_ROCM_PROFILE -RocmTargets $targets -RocmChannel $env:PYMSS_ROCM_CHANNEL -RuntimeArtifactLock "python/runtime-locks/$env:PYMSS_ROCM_PROFILE.json" -RuntimeArtifactWheelhouse 'release/rocm-runtime-assets/wheels'
       - name: Sync build version metadata
         shell: pwsh
         env:
@@ -649,14 +801,14 @@ jobs:
           ./scripts/stage-plugin-sdk.ps1 -StagePath $stage
           ./scripts/prepare-python-runtime.ps1 -RewriteRuntimeEnvConfigs -RuntimeEnvsDir "$stage/python-runtime/runtime-envs" -RuntimeDir "$stage/python-runtime"
           if (Test-Path "$stage\python-runtime\runtime-envs\rocm\Scripts\offload-arch.exe") { throw "Staged ROCm offload-arch launcher still embeds the build Python path" }
-          $rocmSdkPackage = Get-ChildItem "$stage\python-runtime\runtime-envs\rocm\Lib\site-packages" -Directory -Filter "_rocm_sdk_core*" |
-            Select-Object -First 1
-          if (-not $rocmSdkPackage) { throw "Staged ROCm SDK core package is missing" }
-          $rocmNativeTools = Join-Path $rocmSdkPackage.FullName "lib\llvm\bin"
-          $rocmRuntimeBin = Join-Path $rocmSdkPackage.FullName "bin"
-          if (!(Test-Path (Join-Path $rocmNativeTools "offload-arch.exe"))) { throw "Staged ROCm native offload-arch tool is missing" }
-          if (!(Test-Path $rocmRuntimeBin)) { throw "Staged ROCm runtime DLL directory is missing" }
-          $env:PATH = "$rocmNativeTools;$rocmRuntimeBin;$env:PATH"
+          $environment = (Resolve-Path "$stage/python-runtime/runtime-envs/rocm").Path
+          $python = Join-Path $environment 'Scripts/python.exe'
+          $nativeJson = & $python -I -B "$stage/python/worker_runtime_paths.py" $environment --python $python
+          if ($LASTEXITCODE -ne 0) { throw 'Staged ROCm SDK metadata query failed' }
+          $native = $nativeJson | ConvertFrom-Json
+          if (!$native.nativeLibraryDirs.Count -or !$native.nativeToolDirs.Count) { throw 'Staged ROCm SDK native paths are missing' }
+          $nativePaths = @($native.nativeToolDirs + $native.nativeLibraryDirs | ForEach-Object { Join-Path $environment $_ })
+          $env:PATH = ($nativePaths + $env:PATH) -join ';'
           @"
           Pymss Studio ${{ steps.meta.outputs.version }} Windows x64 ROCm
           This package includes a base Python runtime and a ROCm environment.

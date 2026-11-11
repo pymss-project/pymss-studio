@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { isTauriRuntime, loadAppStore, saveAppStore } from '@/utils/appStore'
+import { createWorkflowMetadata, legacyWorkflowDescription, mergeWorkflowDescription, normalizeWorkflowMetadata, resolveWorkflowDescription, stripWorkflowMetadata, WORKFLOW_NOTES_MAX_LENGTH, type WorkflowMetadata } from '@/workflows/metadata'
 import { isWorkflowEditorSnapshot, workflowEditorFor, WorkflowEditorInUseError, type WorkflowEditorSnapshot, type WorkflowEditorRecord } from '@/utils/workflowEditorState'
 import {
   detectWorkflowFormat,
@@ -19,6 +20,7 @@ export type WorkflowEntry = {
   name: string
   description: string
   definition: Record<string, unknown>
+  metadata?: WorkflowMetadata
   format: WorkflowFormat
   formatVersion: number
   createdAt: number
@@ -38,11 +40,21 @@ export class WorkflowRevisionConflictError extends Error {
   }
 }
 
+export class WorkflowGuidConflictError extends Error {
+  readonly code = 'WORKFLOW_METADATA_GUID_CONFLICT'
+
+  constructor(readonly actualGuid: string) {
+    super('Workflow GUID changed during export')
+    this.name = 'WorkflowGuidConflictError'
+  }
+}
+
 export type SaveWorkflowInput = {
   id?: string
   name: string
   description?: string
   definition: Record<string, unknown>
+  metadata?: WorkflowMetadata
   format?: WorkflowFormat
   formatVersion?: number
   expectedUpdatedAt?: number
@@ -62,9 +74,11 @@ type LoadedWorkflowState = {
 }
 
 type WorkflowStoreMutation = {
-  action: 'upsert' | 'delete' | 'select' | 'dismiss_recovery'
+  action: 'upsert' | 'metadata' | 'notes' | 'delete' | 'select' | 'dismiss_recovery'
   entry?: WorkflowEntry
+  metadata?: WorkflowMetadata
   workflowId?: string
+  requireMatchingGuid?: boolean
   expectedUpdatedAt?: number
   legacyIndex?: number
   legacyEntry?: Partial<WorkflowEntry>
@@ -91,7 +105,7 @@ function normalizeDefinition(value: unknown): Record<string, unknown> {
   // YAML dict (simple creator). Keep format compatibility migrations at this
   // storage boundary so every consumer sees the current schema.
   const definition = value && typeof value === 'object' && !Array.isArray(value)
-    ? JSON.parse(JSON.stringify(value)) as Record<string, unknown>
+    ? stripWorkflowMetadata(JSON.parse(JSON.stringify(value)) as Record<string, unknown>)
     : {}
   return detectWorkflowFormat(definition) === 'simple'
     ? normalizeSimpleWorkflowDefinition(definition)
@@ -110,6 +124,7 @@ function normalizeWorkflow(input: Partial<WorkflowEntry>): WorkflowEntry | null 
     name,
     description: String(input.description || '').trim(),
     definition,
+    metadata: normalizeWorkflowMetadata(input.metadata ?? input.definition?._metadata),
     format: detectedFormat === 'unknown' ? (input.format || 'unknown') : detectedFormat,
     formatVersion: Number.isFinite(Number(input.formatVersion))
       ? Number(input.formatVersion)
@@ -178,7 +193,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       } catch (error) {
         lastMutationError.value = {
           message: error instanceof Error ? error.message : String(error),
-          code: error instanceof WorkflowRevisionConflictError || error instanceof WorkflowEditorInUseError ? error.code : 'WORKFLOW_MUTATION_FAILED',
+          code: error instanceof WorkflowRevisionConflictError || error instanceof WorkflowEditorInUseError || error instanceof WorkflowGuidConflictError ? error.code : 'WORKFLOW_MUTATION_FAILED',
           at: new Date().toISOString(),
         }
         throw error
@@ -248,6 +263,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
         return response
       } catch (error) {
         if (String(error).includes('WORKFLOW_EDITOR_IN_USE')) throw new WorkflowEditorInUseError()
+        const match = /WORKFLOW_METADATA_GUID_CONFLICT:([0-9a-f-]{36})/i.exec(String(error))
+        const actual = match ? normalizeWorkflowMetadata({ guid: match[1] }) : undefined
+        if (actual) throw new WorkflowGuidConflictError(actual.guid)
         throw error
       }
     }
@@ -281,6 +299,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
       }
       const entry = {
         ...mutation.entry,
+        // Publication details can change while an editor holds an older graph snapshot.
+        metadata: existing?.metadata ?? mutation.entry.metadata,
+        description: existing?.description ?? mutation.entry.description,
         createdAt: existing?.createdAt || mutation.entry.createdAt,
         updatedAt: Math.max(mutation.entry.updatedAt, actualUpdatedAt + 1),
       }
@@ -288,6 +309,27 @@ export const useWorkflowStore = defineStore('workflow', () => {
       else next.workflows.push(entry)
       next.workflows.sort((a, b) => b.updatedAt - a.updatedAt)
       next.selectedWorkflowId = entry.id
+    } else if (mutation.action === 'metadata' || mutation.action === 'notes') {
+      const index = findMutationWorkflowIndex(next.workflows, mutation)
+      if (index < 0) throw new Error('Workflow no longer exists')
+      const metadata = normalizeWorkflowMetadata(mutation.metadata)
+      if (!metadata) throw new Error('Invalid workflow metadata')
+      if (mutation.action === 'notes' && (metadata.notes?.length ?? 0) > WORKFLOW_NOTES_MAX_LENGTH) throw new Error('Invalid workflow metadata')
+      const existing = next.workflows[index]
+      if (mutation.requireMatchingGuid && existing.metadata && existing.metadata.guid !== metadata.guid) {
+        throw new WorkflowGuidConflictError(existing.metadata.guid)
+      }
+      if (mutation.action === 'metadata' && mutation.requireMatchingGuid) {
+        for (const key of ['notes', 'legacyDescription'] as const) {
+          if (existing.metadata?.[key] !== undefined) metadata[key] = existing.metadata[key]
+          else delete metadata[key]
+        }
+      }
+      existing.metadata = mutation.action === 'notes'
+        ? mergeWorkflowDescription(existing, metadata)
+        : { ...metadata, guid: existing.metadata?.guid ?? metadata.guid }
+      if (mutation.action === 'notes') existing.description = existing.metadata.notes!
+      existing.id = mutation.workflowId!
     } else if (mutation.action === 'delete') {
       const index = findMutationWorkflowIndex(next.workflows, mutation)
       const actualUpdatedAt = index >= 0 ? next.workflows[index].updatedAt : 0
@@ -425,11 +467,13 @@ export const useWorkflowStore = defineStore('workflow', () => {
       const now = Math.max(Date.now(), (existing?.updatedAt || 0) + 1)
       const definition = normalizeDefinition(input.definition)
       const detectedFormat = detectWorkflowFormat(definition)
+      const metadata = createWorkflowMetadata(existing?.metadata ?? input.metadata ?? input.definition._metadata)
       const entry: WorkflowEntry = {
         id: existing?.id || input.id || createId(),
         name: input.name.trim(),
-        description: String(input.description || '').trim(),
+        description: existing?.description ?? (String(input.description || '').trim() || metadata.notes || ''),
         definition,
+        metadata,
         format: detectedFormat === 'unknown'
           ? (input.format || existing?.format || 'unknown')
           : detectedFormat,
@@ -488,6 +532,72 @@ export const useWorkflowStore = defineStore('workflow', () => {
     })
   }
 
+  async function updateWorkflowMetadata(id: string, metadata: WorkflowMetadata, action: 'metadata' | 'notes' = 'metadata') {
+    const selectionGenerationAtRequest = selectionMutationGeneration
+    const legacyReference = legacyWorkflowReferences.get(id)
+    return queueMutation(async () => {
+      const response = await mutateStoredState({
+        action, workflowId: id, metadata,
+        legacyIndex: legacyReference?.index, legacyEntry: legacyReference?.entry,
+      })
+      applyStoredState(normalizeMutationState(response.state, selectionGenerationAtRequest))
+      const saved = workflows.value.find(item => item.id === id)
+      if (!saved) throw new Error('Saved workflow is missing from persistent state')
+      return saved
+    })
+  }
+
+  async function updateWorkflowNotes(id: string, notes: string) {
+    const current = workflows.value.find(item => item.id === id)
+    if (!current) throw new Error('Workflow no longer exists')
+    return updateWorkflowMetadata(id, { ...createWorkflowMetadata(current.metadata), notes }, 'notes')
+  }
+
+  async function exportWorkflow(
+    id: string,
+    metadata: WorkflowMetadata,
+    saveFile: (entry: WorkflowEntry, metadata: WorkflowMetadata) => Promise<boolean>,
+  ) {
+    const selectionGenerationAtRequest = selectionMutationGeneration
+    const legacyReference = legacyWorkflowReferences.get(id)
+    return queueMutation(async () => {
+      // Read a fresh export snapshot without publishing state or changing legacy IDs.
+      const stored = await loadAppStore<StoredWorkflowState>('workflow-state')
+      const entries = stored?.workflows || []
+      let source = entries.find(item => item.id === id)
+      if (!source && legacyReference) {
+        const matches = (item: Partial<WorkflowEntry> | undefined) => Boolean(item)
+          && !String(item?.id || '').trim()
+          && JSON.stringify(item) === JSON.stringify(legacyReference.entry)
+        source = matches(entries[legacyReference.index])
+          ? entries[legacyReference.index]
+          : entries.find(matches)
+      }
+      const entry = source ? normalizeWorkflow({ ...source, id }) : null
+      if (!entry) throw new Error('Workflow no longer exists')
+      const prepared = normalizeWorkflowMetadata(metadata)
+      if (!prepared) throw new Error('Invalid workflow metadata')
+      prepared.guid = entry.metadata?.guid ?? prepared.guid
+      const description = resolveWorkflowDescription(entry)
+      if (description || entry.metadata?.notes !== undefined) prepared.notes = description
+      else delete prepared.notes
+      const legacy = legacyWorkflowDescription(entry)
+      if (legacy) prepared.legacyDescription = legacy
+      else delete prepared.legacyDescription
+      if (!await saveFile(entry, prepared)) return null
+
+      const response = await mutateStoredState({
+        action: 'metadata', workflowId: id, metadata: prepared,
+        requireMatchingGuid: true,
+        legacyIndex: legacyReference?.index, legacyEntry: legacyReference?.entry,
+      })
+      applyStoredState(normalizeMutationState(response.state, selectionGenerationAtRequest))
+      const saved = workflows.value.find(item => item.id === id)
+      if (!saved) throw new Error('Saved workflow is missing from persistent state')
+      return saved
+    })
+  }
+
   async function duplicateWorkflow(id: string) {
     const source = workflows.value.find(item => item.id === id)
     if (!source) return null
@@ -495,6 +605,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       name: `${source.name} Copy`,
       description: source.description,
       definition: JSON.parse(JSON.stringify(source.definition)) as Record<string, unknown>,
+      metadata: createWorkflowMetadata(source.metadata, true),
       format: source.format,
       formatVersion: source.formatVersion,
     })
@@ -564,6 +675,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
     reload,
     handleEditorClosed,
     saveWorkflow,
+    updateWorkflowMetadata,
+    updateWorkflowNotes,
+    exportWorkflow,
     deleteWorkflow,
     duplicateWorkflow,
     selectWorkflow,

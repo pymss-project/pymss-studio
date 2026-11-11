@@ -18,7 +18,17 @@ const i18nDir = path.join(srcDir, 'i18n')
  *   advanced-editor node metadata    — litegraph/nodeLocalization.ts
  */
 const DYNAMIC_KEY_PREFIXES = [
+  'parameterEditor.source.',
+  'parameterEditor.capability.',
+  'parameterEditor.error.',
   'settings.themeAccent',
+  // Runtime views translate protocol action, release, stage, operator and result IDs.
+  'settings.runtimeRocmAction_',
+  'settings.runtimeReleaseState_',
+  'settings.runtimeGpuStatus_',
+  'settings.runtimeGpuStage_',
+  'settings.runtimeGpuOperator_',
+  'settings.runtimeGpuCheck_',
   'nav.',
   'workflows.advancedEditor.categories.',
   'workflows.advancedEditor.nodes.',

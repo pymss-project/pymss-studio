@@ -35,6 +35,10 @@ class PluginMarketplaceTests(unittest.TestCase):
         })
         self.environment.start()
         self.addCleanup(self.environment.stop)
+        # These fixtures select legacy runtimes through the temporary pointer;
+        # the developer interpreter's own ABI cache is outside the fixture.
+        import worker_optional_packages
+        self.enterContext(mock.patch.object(worker_optional_packages, "_runtime_state_for_executable", return_value={}))
         (self.work / "active.json").write_text('{"backend":"cpu"}')
         self.root = plugins._root()
         self.plugin_manifest = self.work / "plugin-manifest.json"

@@ -14,9 +14,9 @@ export type ParameterGuide = {
 export const PARAMETER_GUIDES: readonly ParameterGuide[] = [
   { id: 'tta', group: 'inference', title: 'separate.tta', description: 'beginnerGuide.ttaFieldDescription', diagram: 'tta' },
   { id: 'batch_size', group: 'inference', title: 'inference.batchSize', description: 'parameterHelp.batchDetail', diagram: 'batch' },
-  { id: 'overlap_size', group: 'inference', title: 'inference.overlapSize', description: 'beginnerGuide.overlapFieldDescription', diagram: 'overlap' },
+  { id: 'overlap_size', group: 'inference', title: 'parameterEditor.overlapPercent', description: 'beginnerGuide.overlapFieldDescription', diagram: 'overlap' },
   { id: 'num_overlap', group: 'inference', title: 'inference.numOverlap', description: 'beginnerGuide.overlapCountFieldDescription', diagram: 'overlap' },
-  { id: 'chunk_size', group: 'inference', title: 'inference.chunkSize', description: 'beginnerGuide.chunkFieldDescription', diagram: 'chunk' },
+  { id: 'chunk_size', group: 'inference', title: 'parameterEditor.chunkSeconds', description: 'beginnerGuide.chunkFieldDescription', diagram: 'chunk' },
   { id: 'window_size', group: 'inference', title: 'inference.vrWindowSize', description: 'beginnerGuide.windowFieldDescription', diagram: 'vrWindow' },
   { id: 'aggression', group: 'inference', title: 'inference.vrAggression', description: 'beginnerGuide.aggressionFieldDescription', diagram: 'vrAggression' },
   { id: 'post_process_threshold', group: 'inference', title: 'inference.vrPostProcessThreshold', description: 'beginnerGuide.postThresholdFieldDescription' },
@@ -47,7 +47,7 @@ export function visibleParameterGuides(context: {
     if (item.id === 'normalize') return context.hasModel
     if (item.id === 'standardize') return context.hasModel && type !== 'vr'
     if (item.id === 'modelDefaults') return context.canSaveDefaults
-    if (item.id === 'num_overlap' && type === 'apollo') return false
+    if (item.id === 'num_overlap') return false
     return Object.hasOwn(context.defaults, item.id)
   }).map(item => item.id === 'tta' && type === 'vr' ? { ...item, diagram: 'vrTta' as const } : item)
 }

@@ -12,6 +12,14 @@ export function createDemoModels(): ModelEntry[] {
     classificationConfidence: '', classificationBasis: '', sizeBytes: (index + 1) * 104857600, sha256: '', downloaded: false,
     missingPaths: [], modelPath: '', configPath: null, auxiliaryPaths: [], source: 'catalog',
     defaultInferenceParams: { ...DEMO_INFERENCE_DEFAULTS }, defaultInferenceParamsResolved: true, defaultInferenceParamsSource: 'config',
+    inferenceParamMeta: { resolution: {
+      version: 1, sampleRate: 44100, sampleRateSource: 'tutorial', fingerprint: `tutorial-${index}`,
+      defaults: { ...DEMO_INFERENCE_DEFAULTS }, overlap: { kind: 'samples' },
+      capabilities: {
+        batch_size: { kind: 'free', min: 1, step: 1 }, chunk_size: { kind: 'free', min: 1025, step: 1 },
+        overlap_size: { kind: 'free', min: 0, step: 1 }, standardize: { kind: 'free' }, normalize: { kind: 'free' },
+      },
+    } },
   }))
 }
 

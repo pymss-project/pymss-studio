@@ -585,11 +585,15 @@ class UserModelSerializationTests(unittest.TestCase):
         with mock.patch.object(worker_models, "_load_yaml_config", wraps=worker_models._load_yaml_config) as load:
             payload = worker_models.model_to_dict(FakeUserModelEntry("my_model", self.weights, self.config))
 
-        self.assertEqual(payload["inferenceParamMeta"], {
+        meta = dict(payload["inferenceParamMeta"])
+        resolution = meta.pop("resolution")
+        self.assertEqual(meta, {
             "recommendedSampleStep": 512,
             "source": "model.stft_hop_length",
         })
         load.assert_called_once_with(self.config)
+        self.assertEqual(resolution["version"], 1)
+        self.assertTrue(resolution["fingerprint"].startswith("r1:"))
 
     def test_legacy_catalog_entries_without_config_stem_fields_serialize(self):
         entry = LegacyCatalogEntry("old_model.pth", "old_model.pth")

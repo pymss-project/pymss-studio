@@ -6,7 +6,7 @@ use crate::model_dir_migration::{
 };
 use crate::python::worker::{
     bundled_bin_dirs, cleanup_editor_export_temp_files, editor_export_task_token, run_worker_once,
-    run_worker_with_payload, spawn_worker_background, terminate_worker,
+    run_worker_with_payload, spawn_worker_background,
 };
 use crate::session_log::{self, DebugLogContent, DebugLogInfo, DebugLogReport};
 use crate::state::{AppState, ProxySettings};
@@ -670,11 +670,6 @@ pub async fn start_runtime_install(
     payload: Value,
 ) -> AppResult<Value> {
     require_runtime_management()?;
-    if let Ok(tasks) = state.tasks.lock() {
-        if tasks.keys().any(|id| id.starts_with("runtime_install_")) {
-            return Err(AppError::Worker("runtime installation is already running".into()));
-        }
-    }
     let backend = payload
         .get("backend")
         .and_then(Value::as_str)
@@ -692,6 +687,73 @@ pub async fn start_runtime_install(
     }
     spawn_worker_background(app, state, "install_runtime", task_id.clone(), payload)?;
     Ok(serde_json::json!({ "taskId": task_id, "started": true }))
+}
+
+#[tauri::command]
+pub async fn runtime_hardware_inventory(app: AppHandle) -> AppResult<Value> {
+    run_worker_with_payload(&app, "runtime_hardware_inventory", None)
+}
+
+#[tauri::command]
+pub async fn runtime_install_plan(app: AppHandle, payload: Value) -> AppResult<Value> {
+    require_runtime_management()?;
+    run_worker_with_payload(&app, "runtime_install_plan", Some(payload))
+}
+
+#[tauri::command]
+pub async fn recover_runtime(app: AppHandle, payload: Value) -> AppResult<Value> {
+    require_runtime_management()?;
+    run_worker_with_payload(&app, "recover_runtime", Some(payload))
+}
+
+#[tauri::command]
+pub async fn start_runtime_rollback(
+    app: AppHandle, state: State<'_, AppState>, mut payload: Value,
+) -> AppResult<Value> {
+    require_runtime_management()?;
+    let task_id = payload.get("taskId").and_then(Value::as_str).map(str::to_string)
+        .unwrap_or_else(|| format!("runtime_rollback_{}", chrono_like_timestamp()));
+    let object = payload.as_object_mut().ok_or_else(|| AppError::Worker("Invalid runtime rollback request".into()))?;
+    object.insert("taskId".into(), task_id.clone().into());
+    object.entry("backend").or_insert_with(|| Value::String("rocm".into()));
+    spawn_worker_background(app, state, "rollback_runtime", task_id.clone(), payload)?;
+    Ok(serde_json::json!({"taskId": task_id, "started": true}))
+}
+
+fn prepare_runtime_gpu_probe_payload(mut payload: Value) -> AppResult<(String, Value)> {
+    let object = payload.as_object_mut()
+        .ok_or_else(|| AppError::Worker("Invalid GPU diagnostics request".into()))?;
+    let task_id = match object.get("taskId") {
+        None => format!("runtime_gpu_probe_{}", chrono_like_timestamp()),
+        Some(Value::String(value)) if !value.is_empty() && value.len() <= 128
+            && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')) => value.clone(),
+        _ => return Err(AppError::Worker("Invalid GPU diagnostics task identifier".into())),
+    };
+    object.insert("taskId".into(), task_id.clone().into());
+    Ok((task_id, payload))
+}
+
+#[tauri::command]
+pub async fn start_runtime_gpu_probe(
+    app: AppHandle, state: State<'_, AppState>, payload: Value,
+) -> AppResult<Value> {
+    require_runtime_management()?;
+    let (task_id, payload) = prepare_runtime_gpu_probe_payload(payload)?;
+    spawn_worker_background(app, state, "runtime_gpu_probe", task_id.clone(), payload)?;
+    Ok(serde_json::json!({"taskId": task_id, "started": true}))
+}
+
+#[tauri::command]
+pub async fn runtime_gpu_probe_report(app: AppHandle) -> AppResult<Value> {
+    require_runtime_management()?;
+    run_worker_with_payload(&app, "runtime_gpu_probe_report", None)
+}
+
+#[tauri::command]
+pub async fn cancel_runtime_gpu_probe(
+    app: AppHandle, state: State<'_, AppState>, task_id: String,
+) -> AppResult<bool> {
+    cancel_task(app, state, task_id).await
 }
 
 #[tauri::command]
@@ -2511,18 +2573,31 @@ pub async fn start_operation_task(
     Ok(serde_json::json!({ "taskId": task_id, "started": true }))
 }
 
+async fn await_runtime_cancel_completion(
+    completion: Option<std::sync::Arc<crate::python::worker::RuntimeMaintenanceCompletion>>,
+) -> AppResult<()> {
+    if let Some(completion) = completion {
+        tauri::async_runtime::spawn_blocking(move || crate::python::worker::wait_runtime_maintenance_completion(completion))
+            .await.map_err(|error| AppError::Worker(format!("Runtime cancellation completion failed: {error}")))??;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn cancel_task(
     app: AppHandle,
     state: State<'_, AppState>,
     task_id: String,
 ) -> AppResult<bool> {
+    let deferred_cancellation = crate::python::worker::defers_task_cancellation(&task_id);
+    let runtime_completion = crate::python::worker::runtime_maintenance_completion(&task_id);
     if state
         .terminal_tasks
         .lock()
         .map(|terminal| terminal.contains(&task_id))
         .unwrap_or(false)
     {
+        await_runtime_cancel_completion(runtime_completion).await?;
         return Ok(false);
     }
     let child = state
@@ -2551,13 +2626,17 @@ pub async fn cancel_task(
         if let Ok(mut cancelled) = state.cancelled_tasks.lock() {
             cancelled.extend(cancelled_task_ids.iter().cloned());
         }
-        if let Ok(mut child) = child.lock() {
-            let _ = terminate_worker(&mut child);
+        if let Some(completion) = runtime_completion {
+            let cancel_id = task_id.clone();
+            tauri::async_runtime::spawn_blocking(move || crate::python::worker::cancel_runtime_maintenance_worker(&cancel_id, child, completion))
+                .await.map_err(|error| AppError::Worker(format!("Runtime cancellation completion failed: {error}")))??;
+        } else {
+            let mut child = child.lock().map_err(|_| AppError::Worker("worker process lock poisoned".into()))?;
+            crate::python::worker::terminate_background_worker(&task_id, &mut child)?;
         }
         for cancelled_task_id in cancelled_task_ids {
-            // Plugin cancellation is emitted by the worker supervisor after releasing
-            // the exclusive runtime lease, so the UI can immediately refresh safely.
-            if cancelled_task_id.starts_with("plugin_manage_") {
+            // Maintenance cancellation follows worker exit and recovery.
+            if deferred_cancellation {
                 continue;
             }
             session_log::append(&app, "INFO", "task.cancelled", vec![("taskId", cancelled_task_id.clone()), ("message", "Task cancelled".into())]);
@@ -2572,6 +2651,7 @@ pub async fn cancel_task(
         }
         Ok(true)
     } else {
+        await_runtime_cancel_completion(runtime_completion).await?;
         Ok(false)
     }
 }
@@ -3508,6 +3588,24 @@ mod tests {
     use super::*;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn gpu_probe_request_preserves_options_and_rejects_unsafe_task_identifiers() {
+        let (task_id, payload) = prepare_runtime_gpu_probe_payload(serde_json::json!({
+            "taskId": "runtime-probe_1", "deviceIds": [0, 1], "modes": ["miopen", "nativeHip"], "includeFp16": false,
+        })).unwrap();
+        assert_eq!(task_id, "runtime-probe_1");
+        assert_eq!(payload["deviceIds"], serde_json::json!([0, 1]));
+        assert_eq!(payload["modes"], serde_json::json!(["miopen", "nativeHip"]));
+        assert_eq!(payload["includeFp16"], false);
+        assert!(prepare_runtime_gpu_probe_payload(serde_json::json!({})).unwrap().0.starts_with("runtime_gpu_probe_"));
+        for payload in [serde_json::Value::Null, serde_json::json!([]), serde_json::json!({"taskId": 1})] {
+            assert!(prepare_runtime_gpu_probe_payload(payload).is_err());
+        }
+        for task_id in ["", "../probe", "C:\\probe", "probe/name", "probe\nname", &"a".repeat(129)] {
+            assert!(prepare_runtime_gpu_probe_payload(serde_json::json!({"taskId": task_id})).is_err(), "{task_id:?}");
+        }
+    }
 
     #[test]
     fn runtime_management_accepts_windows_and_linux_only() {

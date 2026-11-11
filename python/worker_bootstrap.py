@@ -23,9 +23,29 @@ from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import Version
 
 from worker_runtime_lock import RuntimeLockBusy, runtime_lock
+from worker_runtime_transactions import RocmTransaction, RuntimeRecoveryError, RuntimeSpaceError
 from worker_platform import machine
+from worker_runtime_profiles import (
+    BASE_ACCELERATOR_PACKAGES,
+    BASE_ACCELERATOR_PREFIXES,
+    FINGERPRINT_SCHEMA_VERSION,
+    assert_profile_installable,
+    accelerator_constraints,
+    accelerator_source_records,
+    accelerator_versions,
+    assert_no_accelerator_overlay,
+    backend_spec,
+    is_base_accelerator_package,
+    resolve_profile_for_runtime,
+    runtime_fingerprints,
+    runtime_state_from_artifact_plan,
+    runtime_install_plan,
+    verify_accelerator_versions,
+    verify_profile_accelerator_sources,
+)
 
 MANIFEST_PATH = Path(__file__).with_name("runtime-manifest.json")
+RUNTIME_PROBE_MARKER = "__PYMSS_RUNTIME_PROBE__"
 
 
 def _default_runtime_envs_dir() -> Path:
@@ -104,7 +124,7 @@ def _supported_backend(backend: str, manifest: dict[str, Any] | None = None) -> 
         return None
     manifest = manifest or _manifest()
     spec = manifest.get("backends", {}).get(normalized)
-    return (normalized, spec) if isinstance(spec, dict) else None
+    return (normalized, backend_spec(manifest, normalized)) if isinstance(spec, dict) else None
 
 
 def _emit(event_type: str, payload: dict[str, Any], task_id: str | None = None) -> None:
@@ -128,6 +148,10 @@ def _serialized_runtime_command(command: Callable[..., int], *, query: bool = Fa
                 task_id=payload.get("taskId"),
                 recoverable=True,
             )
+        except RuntimeRecoveryError as exc:
+            from worker_protocol import emit_error
+            return emit_error("RUNTIME_RECOVERY_FAILED", str(exc), task_id=payload.get("taskId"), recoverable=True,
+                              extra={"recoveryRequired": True, "recoveryError": str(exc)})
         except OSError as exc:
             if exc.errno not in {errno.EACCES, errno.EPERM, errno.EROFS}:
                 raise
@@ -159,6 +183,8 @@ def _resolve_runtime_state_from(file: Path) -> dict[str, Any] | None:
         if not isinstance(python_path, str):
             return None
         p = Path(python_path)
+        if _reserved_runtime_path(p):
+            return None
         if not p.is_absolute():
             resolved = file.parent / p
             if resolved.is_file():
@@ -359,6 +385,7 @@ def _recover_core_update_transactions() -> None:
 
 
 def _recover_runtime_transactions() -> None:
+    RocmTransaction(RUNTIME_ENVS_DIR, ACTIVE_RUNTIME_FILE).recover()
     _recover_overlay_activation()
     _recover_reinstall_backups()
     _recover_core_update_transactions()
@@ -649,6 +676,30 @@ def _probe_environment(overlay_path: Path | None = None, *, python_path: Path | 
         env["PYTHONPATH"] = str(overlay_path)
     else:
         env.pop("PYTHONPATH", None)
+    roots = [RUNTIME_ENVS_DIR, *([BUNDLED_RUNTIME_ENVS_DIR] if BUNDLED_RUNTIME_ENVS_DIR else [])]
+    retained = []
+    for value in env.get("PATH", "").split(os.pathsep):
+        path = Path(value)
+        contaminated = False
+        for root in roots:
+            try:
+                parts = path.resolve().relative_to(root.resolve()).parts
+            except (ValueError, OSError):
+                continue
+            if any(part.lower() == "rocm" or part.lower().startswith((".rocm-", "_rocm_sdk")) for part in parts):
+                contaminated = True
+                break
+        if not contaminated:
+            retained.append(value)
+    if python_path:
+        target_root = _runtime_env_dir_for_python(python_path)
+        if target_root.name.lower() == "rocm" and python_path.is_file():
+            from worker_runtime_paths import discover_rocm_native_paths, resolve_rocm_native_paths
+            state = _read_json_object(target_root / "pymss-runtime-state.json") or {}
+            native = state if any(name in state for name in ("nativeToolDirs", "nativeLibraryDirs")) else discover_rocm_native_paths(target_root, python_path)
+            directories = resolve_rocm_native_paths(target_root, native)
+            retained = [*directories["nativeToolDirs"], *directories["nativeLibraryDirs"], *retained]
+    env["PATH"] = os.pathsep.join(dict.fromkeys(retained))
     return env
 
 
@@ -686,6 +737,11 @@ import importlib.util, json, platform
 from importlib import metadata
 packages = json.loads(%PACKAGES%)
 mapping = json.loads(%MAPPING%)
+accelerator_names = json.loads(%ACCELERATOR_NAMES%)
+accelerator_prefixes = tuple(json.loads(%ACCELERATOR_PREFIXES%))
+def is_accelerator(name):
+    name = __import__('re').sub(r'[-_.]+', '-', name).lower()
+    return name in accelerator_names or name.startswith(accelerator_prefixes)
 result = {'pythonVersion': platform.python_version(), 'torchVersion': None, 'torchBackend': 'missing', 'acceleratorAvailable': False, 'packages': {}, 'packageVersions': {}, 'pymssVersion': None, 'pymssCoreVersion': None, 'pymssGraphAvailable': False}
 for name in packages:
     result['packages'][name] = importlib.util.find_spec(mapping.get(name, name)) is not None
@@ -699,6 +755,10 @@ try:
     result['pymssGraphAvailable'] = importlib.util.find_spec('pymss.graph') is not None
 except Exception:
     result['pymssGraphAvailable'] = False
+result['acceleratorPackages'] = {
+    dist.metadata['Name']: dist.version for dist in metadata.distributions()
+    if dist.metadata.get('Name') and is_accelerator(dist.metadata['Name'])
+}
 if importlib.util.find_spec('torch') is not None:
     try:
         import torch
@@ -707,9 +767,12 @@ if importlib.util.find_spec('torch') is not None:
         result['acceleratorAvailable'] = bool(torch.cuda.is_available())
     except Exception as exc:
         result['torchBackend'] = f'error:{exc}'
-print(json.dumps(result, ensure_ascii=False))
+print(chr(10) + %RESULT_MARKER% + json.dumps(result, ensure_ascii=False), flush=True)
 """.replace("%PACKAGES%", repr(json.dumps(package_names))) \
-   .replace("%MAPPING%", repr(json.dumps(PACKAGE_IMPORT_NAMES)))
+   .replace("%MAPPING%", repr(json.dumps(PACKAGE_IMPORT_NAMES))) \
+   .replace("%ACCELERATOR_NAMES%", repr(json.dumps(BASE_ACCELERATOR_PACKAGES))) \
+   .replace("%ACCELERATOR_PREFIXES%", repr(json.dumps(BASE_ACCELERATOR_PREFIXES))) \
+   .replace("%RESULT_MARKER%", repr(RUNTIME_PROBE_MARKER))
     output = subprocess.check_output(
         [str(python_path), "-c", script],
         text=True,
@@ -719,7 +782,13 @@ print(json.dumps(result, ensure_ascii=False))
         env=_probe_environment(overlay_path, python_path=python_path),
         timeout=60,
     )
-    result = json.loads(output)
+    # SDK initialization can print warnings even when Torch imports correctly.
+    # Only our framed response is authoritative; retain clean JSON compatibility.
+    responses = [line[len(RUNTIME_PROBE_MARKER):] for line in output.splitlines()
+                 if line.startswith(RUNTIME_PROBE_MARKER)]
+    if len(responses) > 1:
+        raise ValueError("Python runtime probe returned multiple responses")
+    result = json.loads(responses[0] if responses else output)
     if (
         not isinstance(result, dict)
         or not isinstance(result.get("pythonVersion"), str)
@@ -734,6 +803,11 @@ print(json.dumps(result, ensure_ascii=False))
             or not isinstance(result["packageVersions"][name], (str, type(None)))
             for name in package_names
         )
+        or ("acceleratorPackages" in result and (
+            not isinstance(result["acceleratorPackages"], dict)
+            or any(not isinstance(name, str) or not isinstance(version, str)
+                   for name, version in result["acceleratorPackages"].items())
+        ))
     ):
         raise ValueError("Python runtime probe returned an incomplete response")
     return result
@@ -988,6 +1062,8 @@ def _envs_with_live_active(
         })
         if "pymssGraphAvailable" in active_probe:
             entry["pymssGraphAvailable"] = bool(active_probe["pymssGraphAvailable"])
+        if "activationValidation" in active_probe:
+            entry["activationValidation"] = active_probe["activationValidation"]
         break
     return environments
 
@@ -1035,13 +1111,18 @@ def _is_user_runtime_env(env_dir: Path) -> bool:
     # spellings so a short-path command path still belongs to the configured runtime root
     # and is not rejected as an outside interpreter.  The original spelling is retained as
     # the first candidate so genuinely long paths keep their extended-path support.
-    return _path_is_within(env_dir, RUNTIME_ENVS_DIR)
+    return _path_is_within(env_dir, RUNTIME_ENVS_DIR) and not _reserved_runtime_path(env_dir)
 
 
 def _is_bundled_runtime_env(env_dir: Path) -> bool:
     if not BUNDLED_RUNTIME_ENVS_DIR:
         return False
-    return _path_is_within(env_dir, BUNDLED_RUNTIME_ENVS_DIR)
+    return _path_is_within(env_dir, BUNDLED_RUNTIME_ENVS_DIR) and not _reserved_runtime_path(env_dir)
+
+
+def _reserved_runtime_path(path: Path) -> bool:
+    parts = Path(_normal_runtime_path(path)).resolve().parts
+    return any(part.lower().startswith((".rocm-", ".rocm.")) for part in parts)
 
 
 def _bundled_bootstrap_python() -> Path | None:
@@ -1154,6 +1235,7 @@ def _core_update_identity(state: dict[str, Any], versions: dict[str, Any], manif
         "python": os.path.normcase(_normal_runtime_path(Path(str(state.get("pythonPath") or "")))),
         "overlay": os.path.normcase(_normal_runtime_path(Path(str(state.get("overlayPath") or "")))),
         "versions": versions, "manifest": manifest,
+        "baseFingerprint": state.get("baseFingerprint"),
     }
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
@@ -1212,9 +1294,12 @@ def _overlay_path_from_state(state: dict[str, Any] | None) -> Path | None:
 
 
 def _registered_runtime_overlay(backend: str, python_path: Path) -> dict[str, Any] | None:
+    base_state = _read_json_object(_runtime_env_dir_for_python(python_path) / "pymss-runtime-state.json") or {}
     for path in (_runtime_overlay_selection_path(backend), _runtime_overlay_selection_path(backend, python_path)):
         state = _read_json_object(path)
         if not state or not _same_path(state.get("pythonPath"), python_path):
+            continue
+        if state.get("baseFingerprint") != base_state.get("baseFingerprint"):
             continue
         overlay = _overlay_path_from_state(state)
         # A matching record without an overlay is an explicit restoration of
@@ -1238,11 +1323,15 @@ def _overlay_requirements(
     backend: str,
     base_versions: dict[str, str | None],
     target_pymss_version: str,
-    target_pymss_core_version: str,
+    target_pymss_core_version: str | None,
 ) -> list[str]:
+    core_requirement = (
+        f"pymss-core=={target_pymss_core_version}" if target_pymss_core_version else
+        str(_runtime_requirement("pymss-core", manifest.get("common", {}).get("pymss-core")))
+    )
     requirements = [
         _pin_manifest_requirement(manifest.get("common", {}).get("pymss"), target_pymss_version),
-        f"pymss-core=={target_pymss_core_version}",
+        core_requirement,
     ]
     for name, value in manifest.get("common", {}).items():
         if name in {"pymss", "pymss-core"}:
@@ -1262,22 +1351,289 @@ def _overlay_requirements(
 
 
 def _is_base_accelerator_package(name: str) -> bool:
-    name = canonicalize_name(name)
-    return name in {"torch", "torchaudio", "torchvision", "triton", "mlx"} or name.startswith(("nvidia-", "rocm-", "mlx-"))
+    return is_base_accelerator_package(name)
 
 
-def _resolved_overlay_requirements(requirements: list[str], report: dict[str, Any]) -> list[str]:
+def _resolved_overlay_requirements(
+    requirements: list[str], report: dict[str, Any], frozen: dict[str, str] | None = None,
+) -> list[str]:
     if report.get("version") != "1" or not isinstance(report.get("install"), list):
         raise RuntimeError("The package resolver returned an unsupported installation report")
     resolved = {canonicalize_name(Requirement(value).name): value for value in requirements}
     for item in report["install"]:
         metadata = item["metadata"]
         name = canonicalize_name(metadata["name"])
-        if _is_base_accelerator_package(name):
+        if is_base_accelerator_package(name, frozen or ()):
             raise RuntimeError(f"The core update requires changing the base accelerator package {name}; the current runtime was preserved")
         version = str(Version(metadata["version"]))
         resolved[name] = _pin_manifest_requirement(resolved.get(name, name), version)
     return list(resolved.values())
+
+
+def _probed_accelerator_versions(probed: dict[str, Any], additional: list[str] | tuple[str, ...] = ()) -> dict[str, str]:
+    versions = {**(probed.get("packageVersions") or {}), **(probed.get("acceleratorPackages") or {})}
+    if probed.get("torchVersion"):
+        versions["torch"] = probed["torchVersion"]
+    return accelerator_versions(versions, additional)
+
+
+def _runtime_selected_device_ids(payload: dict[str, Any], state: dict[str, Any] | None = None,
+                                 python_path: Path | None = None) -> list[str]:
+    if "selectedDeviceIds" in payload:
+        selection = payload["selectedDeviceIds"]
+    else:
+        # A read-only bundled cache cannot record a later device choice. Its
+        # matching active pointer owns that choice, just as in runtime_info.
+        active = _read_runtime_state() if python_path else None
+        if active and _same_path(active.get("pythonPath"), python_path) and "selectedDeviceIds" in active:
+            state = active
+        selection = (state or {}).get("selectedDeviceIds") or []
+    if (not isinstance(selection, list) or len(selection) > 8
+            or any(not isinstance(value, str) or len(value) > 160
+                   or not re.fullmatch(r"(hip-pci:[0-9a-f:.]+|pnp:[0-9a-f]{24})", value) for value in selection)):
+        raise ValueError("Runtime hardware selection must contain confirmed persistent device identities")
+    return sorted(set(selection))
+
+
+def _legacy_rocm_upgrade_state(manifest: dict[str, Any], cached: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Bind a pre-profile legacy installation to live facts without rewriting it.
+
+    This is a version-based legacy identity, not a verified binary-lock snapshot.
+    The transaction retains the original cache bytes for rollback.
+    """
+    python = _env_python_path("rocm")
+    if not python.is_file() or cached.get("profileSnapshot"):
+        raise ValueError("The existing runtime identity is incomplete; repair its original profile before upgrading")
+    live = _probe_python_runtime(python, _backend_extra_names(manifest, "rocm"))
+    profile = resolve_profile_for_runtime(manifest, "rocm", str(live.get("torchVersion") or ""),
+                                          profile_id=cached.get("profileId"))
+    if not profile or profile.get("installMode") != "legacy" or live.get("torchBackend") != "rocm":
+        raise ValueError("The existing runtime is not a recognized legacy ROCm installation")
+    if (cached.get("torchVersion") and Version(str(cached["torchVersion"])) != Version(str(live["torchVersion"]))
+            or cached.get("profileRevision") not in (None, profile["revision"])):
+        raise ValueError("The installed ROCm build changed. Refresh its state before upgrading")
+    if ".".join(str(live.get("pythonVersion") or "").split(".")[:2]) != profile["python"]:
+        raise ValueError("The existing ROCm Python ABI does not match its legacy profile")
+    frozen = _probed_accelerator_versions(live)
+    expected = accelerator_versions(profile["packages"], profile["packages"])
+    verify_accelerator_versions(expected, {name: frozen.get(name) for name in expected})
+    state = {**cached, "profileId": profile["id"], "profileRevision": profile["revision"],
+             "torchVersion": live["torchVersion"], "resolvedAcceleratorPackages": frozen,
+             "acceleratorPackages": frozen, "installedTargets": [],
+             "fingerprintSchemaVersion": FINGERPRINT_SCHEMA_VERSION,
+             **runtime_fingerprints(profile, str(live["pythonVersion"]), frozen)}
+    return state, live
+
+
+def _runtime_operation_plan(payload: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+    backend = str(payload.get("backend") or "cpu").strip().lower()
+    action = payload.get("action", "install")
+    if action not in {"install", "addTargets", "upgrade", "prepareSeed"} or (action != "install" and backend != "rocm"):
+        raise ValueError("Unsupported runtime installation action")
+    selection = _runtime_selected_device_ids(payload)
+    cached = _read_json_object(_env_state_path(backend)) or {}
+    legacy_source = None
+    if backend == "rocm" and sys.platform == "win32" and action == "upgrade" and (
+            cached.get("fingerprintSchemaVersion") != FINGERPRINT_SCHEMA_VERSION
+            or not all(cached.get(key) for key in ("profileId", "profileRevision", "baseFingerprint", "targetFingerprint"))):
+        cached, legacy_probe = _legacy_rocm_upgrade_state(manifest, cached)
+        legacy_source = (cached, legacy_probe)
+    profile_id = payload.get("profileId")
+    seed = None
+    if action == "prepareSeed":
+        from worker_runtime_seed import seed_plan
+        seed = seed_plan(RUNTIME_ENVS_DIR, BUNDLED_RUNTIME_ENVS_DIR, _bootstrap_python_path(), manifest)
+        if not seed.get("available"):
+            raise ValueError("No bundled ROCm environment is available for preparation")
+        if profile_id is not None and profile_id != seed["profileId"]:
+            raise ValueError("The bundled ROCm seed belongs to another profile")
+        profile_id = seed["profileId"]
+    if action == "addTargets" and profile_id is None:
+        profile_id = cached.get("profileId")
+    plan = runtime_install_plan(
+        manifest, backend, profile_id, seed["targets"] if seed else payload.get("targets"),
+        machine_name=machine(), python_version=platform.python_version(),
+    )
+    requested = plan["requestedTargets"]
+    if action == "addTargets":
+        if plan["installMode"] != "multiarch":
+            raise ValueError("This runtime profile does not support incremental device kernels")
+        if not cached.get("profileId") or cached["profileId"] != plan["profileId"] or cached.get("profileRevision") != plan["profileRevision"]:
+            raise ValueError("Adding device targets requires the same installed runtime profile and revision")
+        if cached.get("fingerprintSchemaVersion") != FINGERPRINT_SCHEMA_VERSION:
+            raise ValueError("The installed runtime must be upgraded before adding device targets")
+        old_targets = cached.get("installedTargets")
+        if not isinstance(old_targets, list) or any(not isinstance(item, str) for item in old_targets):
+            raise ValueError("The installed runtime has no trustworthy device coverage")
+        resolved = sorted(set(old_targets) | set(plan["resolvedTargets"]))
+        plan = runtime_install_plan(manifest, backend, profile_id, resolved,
+                                    machine_name=machine(), python_version=platform.python_version())
+        plan["requestedTargets"] = requested
+    installed = cached.get("installedTargets") if isinstance(cached.get("installedTargets"), list) else []
+    plan.update({"action": action, "installedTargets": installed,
+                 "selectedDeviceIds": selection,
+                 "missingTargets": sorted(set(plan["resolvedTargets"]) - set(installed)),
+                 "expectedProfileId": cached.get("profileId"),
+                 "expectedProfileRevision": cached.get("profileRevision"),
+                 "expectedBaseFingerprint": cached.get("baseFingerprint"),
+                  "expectedTargetFingerprint": cached.get("targetFingerprint")})
+    if legacy_source:
+        plan["_legacySourceState"], plan["_legacySourceProbe"] = legacy_source
+    if seed:
+        plan.update({"seed": seed, "seedPreparationRequired": seed.get("preparationRequired", False),
+                     "downloadBytes": 0, "spaceRequiredBytes": seed["spaceRequiredBytes"],
+                     "resolutionStatus": "bundledSeed"})
+        return plan
+    if backend == "rocm" and plan["profileId"]:
+        from worker_runtime_artifacts import artifact_lock_path, load_artifact_lock, resolve_artifact_plan
+        lock_path = artifact_lock_path(plan["profileId"])
+        if lock_path:
+            lock = load_artifact_lock(lock_path)
+            if plan["releaseState"] not in {"disabled", "revoked"} and lock["channel"] != plan["releaseState"]:
+                raise ValueError("The runtime binary lock belongs to a different release channel")
+            locked = resolve_artifact_plan(lock, plan["profileId"], plan["resolvedTargets"],
+                                          profile_revision=plan["profileRevision"],
+                                          python_abi="cp" + str(plan["python"]).replace(".", ""), platform_tag="win_amd64")
+            plan.update({**locked, "resolutionStatus": "locked"})
+            expected = accelerator_versions(plan["packages"], plan["packages"])
+            verify_accelerator_versions(expected, {name: locked["resolvedAcceleratorPackages"].get(name) for name in expected})
+        elif plan["installationEnabled"] and plan["installMode"] == "multiarch":
+            plan["resolutionStatus"] = "lockMissing"
+    return plan
+
+
+def _verify_runtime_operation_identity(payload: dict[str, Any], plan: dict[str, Any]) -> None:
+    if plan["action"] in {"install", "prepareSeed"}:
+        return
+    for key in ("expectedProfileId", "expectedProfileRevision", "expectedBaseFingerprint", "expectedTargetFingerprint"):
+        if not plan.get(key) or payload.get(key) != plan[key]:
+            raise ValueError("The installed runtime changed. Prepare and confirm a new installation plan")
+
+
+def _recorded_runtime_profile(state: dict[str, Any]) -> dict[str, Any] | None:
+    snapshot = state.get("profileSnapshot")
+    if isinstance(snapshot, dict) and snapshot.get("id") == state.get("profileId") and snapshot.get("revision") == state.get("profileRevision"):
+        return snapshot
+    if state.get("profileId"):
+        # Old state did not save a recipe. Preserve known facts rather than
+        # describing its rollback slot using a newer manifest revision.
+        return {"id": state["profileId"], "revision": state.get("profileRevision"),
+                "packages": state.get("resolvedAcceleratorPackages") or state.get("acceleratorPackages") or {},
+                "snapshotStatus": "recordedPackagesOnly"}
+    return None
+
+
+def _probe_python_distribution_sources(python_path: Path, names: list[str]) -> dict[str, Any]:
+    """Read installed wheel provenance without importing Torch or applying overlays."""
+    script = r"""
+import json, sys
+from importlib import metadata
+from urllib.parse import urlsplit, urlunsplit
+result = {}
+for name in json.loads(sys.argv[1]):
+ try:
+  dist = metadata.distribution(name)
+  direct = json.loads(dist.read_text('direct_url.json') or '{}')
+  archive = direct.get('archive_info') or {}
+  digest = (archive.get('hashes') or {}).get('sha256')
+  if not digest and str(archive.get('hash', '')).startswith('sha256='):
+   digest = archive['hash'].split('=', 1)[1]
+  parsed = urlsplit(str(direct.get('url') or ''))
+  result[name] = {'version': dist.version, 'sha256': digest,
+                  'url': urlunsplit((parsed.scheme, parsed.hostname or '', parsed.path, '', ''))}
+ except (metadata.PackageNotFoundError, ValueError, TypeError):
+  result[name] = {}
+print(json.dumps(result))
+"""
+    try:
+        completed = subprocess.run([str(python_path), "-c", script, json.dumps(names)], capture_output=True,
+                                   text=True, encoding="utf-8", errors="replace", timeout=30,
+                                   env=_probe_environment(python_path=python_path))
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError("The installed runtime source identities could not be read") from error
+    if completed.returncode or len(completed.stdout) > 1024 * 1024:
+        raise ValueError("The installed runtime source identities could not be verified")
+    result = json.loads(completed.stdout)
+    if (not isinstance(result, dict) or set(result) != set(names)
+            or any(not isinstance(value, dict) for value in result.values())):
+        raise ValueError("The installed runtime returned invalid distribution source identities")
+    return result
+
+
+def _verify_recorded_runtime_snapshot(state: dict[str, Any], live: dict[str, Any], python_path: Path,
+                                      *, verify_all_artifacts: bool = False) -> dict[str, Any]:
+    """Authorize an old recipe using its live packages and installed wheel provenance."""
+    snapshot = state.get("profileSnapshot")
+    if (not isinstance(snapshot, dict) or snapshot.get("id") != state.get("profileId")
+            or snapshot.get("revision") != state.get("profileRevision")
+            or sys.platform not in snapshot.get("platforms", []) or not snapshot.get("packages")
+            or state.get("fingerprintSchemaVersion") != FINGERPRINT_SCHEMA_VERSION):
+        raise ValueError("The previous runtime has no complete, verifiable profile snapshot")
+    if snapshot.get("python") and ".".join(str(live.get("pythonVersion") or "").split(".")[:2]) != snapshot["python"]:
+        raise ValueError("The previous runtime Python ABI does not match its recorded recipe")
+    recorded = state.get("resolvedAcceleratorPackages") or state.get("acceleratorPackages")
+    if not isinstance(recorded, dict) or not recorded:
+        raise ValueError("The previous runtime has no frozen accelerator package identity")
+    devices = state.get("devicePackageNames") or []
+    artifacts = state.get("acceleratorPackageArtifacts") or {}
+    source_names = sorted(set(recorded) | (set(artifacts) if verify_all_artifacts else set()))
+    sources = _probe_python_distribution_sources(python_path, source_names)
+    live = {**live, "packageVersions": {**(live.get("packageVersions") or {}),
+                                      **{name: source.get("version") for name, source in sources.items() if isinstance(source, dict)}}}
+    actual = _probed_accelerator_versions(live, devices)
+    verify_accelerator_versions(recorded, actual)
+    expected = accelerator_versions(snapshot["packages"], snapshot["packages"])
+    verify_accelerator_versions(expected, {name: actual.get(name) for name in expected})
+    fingerprints = runtime_fingerprints(snapshot, str(live["pythonVersion"]), actual,
+        state.get("installedTargets") or [], device_packages=devices,
+        package_artifacts=state.get("acceleratorPackageArtifacts"), host_lock_id=state.get("hostLockId"))
+    if any(state.get(key) != value for key, value in fingerprints.items()):
+        raise ValueError("The previous runtime recipe and package fingerprints do not match")
+    old_sources = state.get("acceleratorPackageSources") or {}
+    for name in source_names:
+        identity = artifacts.get(name) or {}
+        version = recorded.get(name) or identity.get("version")
+        source = old_sources.get(name) or {}
+        expected_hash = identity.get("sha256") or (source.get("hashes") or {}).get("sha256")
+        actual_source = sources.get(name) or {}
+        if (not isinstance(expected_hash, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", expected_hash)
+                or actual_source.get("sha256") != expected_hash
+                or Version(str(actual_source.get("version"))) != Version(str(version))
+                or (not identity and source.get("url") and actual_source.get("url") != source["url"])):
+            raise ValueError("The installed runtime source identity changed: " + name)
+    return snapshot
+
+
+def cmd_runtime_install_plan(payload: dict[str, Any]) -> int:
+    """Return a read-only plan; no downloads, repair, or environment writes."""
+    from worker_protocol import emit_error
+    try:
+        plan = _runtime_operation_plan(payload, _manifest())
+        plan.pop("_legacySourceState", None)
+        plan.pop("_legacySourceProbe", None)
+        if plan["backend"] == "rocm":
+            previous = RocmTransaction(RUNTIME_ENVS_DIR, ACTIVE_RUNTIME_FILE).previous_manifest()
+            plan.update({"environmentRollbackAvailable": previous is not None, "requiresPreviousReplacement": previous is not None,
+                         "previousProfile": previous.get("profile") if previous else None})
+    except (ValueError, TypeError, KeyError, RuntimeError) as error:
+        return emit_error("RUNTIME_PROFILE_INVALID", str(error), task_id=payload.get("taskId"))
+    _emit("runtime_install_plan", plan, payload.get("taskId"))
+    return 0
+
+
+def _verify_runtime_pip_check(python_path: Path) -> None:
+    completed = subprocess.run([str(python_path), "-m", "pip", "check"], capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=60,
+                               env=_probe_environment(python_path=python_path))
+    if completed.returncode:
+        raise RuntimeError("Runtime dependency verification failed: " + completed.stdout.strip()[:1000])
+
+
+def _verify_rocm_activation(python_path: Path, targets: list[str], device_ids: Any = None,
+                            *, selected_device_ids: Any = None) -> dict[str, Any]:
+    from worker_runtime_activation import verify_activation
+    return verify_activation(python_path, targets, device_ids, selected_device_ids=selected_device_ids,
+                             environment=_probe_environment(python_path=python_path))
 
 
 def _cleanup_runtime_overlays(backend: str, keep: set[Path]) -> None:
@@ -1286,6 +1642,19 @@ def _cleanup_runtime_overlays(backend: str, keep: set[Path]) -> None:
         return
     try:
         kept = {path.resolve() for path in keep}
+        if backend == "rocm":
+            previous = RocmTransaction(RUNTIME_ENVS_DIR, ACTIVE_RUNTIME_FILE).previous_manifest()
+            if previous:
+                import base64
+                records = [previous.get("state") or {}]
+                for raw in [previous["snapshot"].get("active"), *previous["snapshot"].get("selections", {}).values()]:
+                    if raw:
+                        records.append(json.loads(base64.b64decode(raw)))
+                for record in records:
+                    for selection in (record, record.get("previousRuntime") or {}):
+                        overlay = _overlay_path_from_state(selection)
+                        if overlay:
+                            kept.add(overlay.parent)
         current = _read_json_object(_runtime_overlay_selection_path(backend)) or {}
         for path in root.glob("active-overlay*.json"):
             selected = _read_json_object(path) or {}
@@ -1302,13 +1671,112 @@ def _cleanup_runtime_overlays(backend: str, keep: set[Path]) -> None:
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
-    except OSError:
+    except (OSError, ValueError, KeyError, RuntimeRecoveryError):
         return
     for candidate in candidates:
         resolved = candidate.resolve()
         if resolved in kept:
             continue
         shutil.rmtree(candidate, ignore_errors=True)
+
+
+def _runtime_activation_requested(payload: dict[str, Any], backend: str) -> bool:
+    active = _read_runtime_state()
+    if "activate" in payload:
+        if not isinstance(payload["activate"], bool):
+            raise ValueError("Runtime activation must be a boolean")
+        if not payload["activate"] and active and _same_path(active.get("pythonPath"), _env_python_path(backend)):
+            raise ValueError("Switch to another runtime before preparing a replacement without activation")
+        return payload["activate"]
+    return not active or active.get("backend") == backend
+
+
+@_serialized_runtime_command
+def cmd_recover_runtime(payload: dict[str, Any]) -> int:
+    _recover_runtime_transactions()
+    previous = RocmTransaction(RUNTIME_ENVS_DIR, ACTIVE_RUNTIME_FILE).previous_manifest()
+    _emit("runtime_recovered", {"recovered": True, "rollbackAvailable": previous is not None}, payload.get("taskId"))
+    return 0
+
+
+@_serialized_runtime_command
+def cmd_rollback_runtime(payload: dict[str, Any]) -> int:
+    from worker_protocol import emit_error
+    task_id = str(payload.get("taskId") or f"runtime_rollback_{int(time.time() * 1000)}")
+    if str(payload.get("backend") or "rocm").strip().lower() != "rocm":
+        return emit_error("RUNTIME_BACKEND_UNSUPPORTED", "Environment rollback is only available for ROCm", task_id=task_id)
+    transaction = RocmTransaction(RUNTIME_ENVS_DIR, ACTIVE_RUNTIME_FILE)
+    try:
+        _recover_runtime_transactions()
+        activate = _runtime_activation_requested(payload, "rocm")
+        previous = transaction.previous_manifest()
+        if not previous:
+            raise ValueError("No previous ROCm environment is available")
+        _emit("runtime_rollback_started", {"backend": "rocm", "activate": activate}, task_id)
+        current_state = _read_json_object(_env_state_path("rocm")) or {}
+        current_profile = _recorded_runtime_profile(current_state)
+        record = transaction.begin("rollback", activate=activate, profile=current_profile)
+        # Only the canonical interpreter can run. Windows venv executables are
+        # never launched from the previous/temporary slots.
+        python = _env_python_path("rocm")
+        if not python.is_file():
+            raise RuntimeError("The previous ROCm interpreter is missing")
+        # A previous slot may still name the managed root from before a move.
+        # Repair its saved generation binding only after it is canonical again.
+        _repair_runtime_venv_config(_env_dir("rocm"))
+        state = _read_json_object(_env_state_path("rocm")) or {}
+        registered = _registered_runtime_overlay("rocm", python) or {}
+        import base64
+        try:
+            saved_active = json.loads(base64.b64decode(previous["snapshot"].get("active") or "", validate=True))
+        except (ValueError, UnicodeError):
+            saved_active = {}
+        if isinstance(saved_active, dict) and isinstance(saved_active.get("pythonPath"), str):
+            saved_python = Path(saved_active["pythonPath"])
+            if not saved_python.is_absolute():
+                saved_active["pythonPath"] = str(ACTIVE_RUNTIME_FILE.parent / saved_python)
+        if not isinstance(saved_active, dict) or not _same_path(saved_active.get("pythonPath"), python):
+            saved_active = {}
+        if state.get("baseFingerprint") and saved_active.get("baseFingerprint") and state["baseFingerprint"] != saved_active["baseFingerprint"]:
+            raise RuntimeError("The previous runtime pointer and base identity do not match")
+        # A core overlay can be committed even when the per-environment cache
+        # could not be refreshed. The saved pointer/selection owns that choice.
+        state = {**state, **registered, **saved_active}
+        overlay = _overlay_path_from_state(state)
+        if state.get("overlayPath") and overlay is None:
+            raise RuntimeError("The previous runtime's core overlay is missing or invalid")
+        probed = _probe_python_runtime(python, _backend_extra_names(_manifest(), "rocm"), overlay)
+        old_profile = _verify_recorded_runtime_snapshot(state, probed, python) if state.get("profileSnapshot") else None
+        valid, failures = _manifest_versions_are_satisfied({**state, **probed}, _manifest(), "rocm", profile_snapshot=old_profile)
+        if not _runtime_probe_is_ready("rocm", probed, _manifest()) or not valid:
+            raise RuntimeError("The previous ROCm runtime failed validation: " + "; ".join(failures))
+        if state.get("resolvedAcceleratorPackages"):
+            verify_accelerator_versions(state["resolvedAcceleratorPackages"], _probed_accelerator_versions(probed))
+        _verify_runtime_audio(python, overlay, core_api=True)
+        selected_devices = _runtime_selected_device_ids(payload, state)
+        activation_validation = _verify_rocm_activation(python, state.get("installedTargets", []), payload.get("deviceIds"),
+            **({"selected_device_ids": selected_devices} if selected_devices else {})) if activate else {"status": "notRun"}
+        if activate and activation_validation.get("status") != "passed":
+            raise RuntimeError("The previous ROCm runtime did not pass basic GPU execution validation")
+        state.update({key: probed[key] for key in (
+            "pythonVersion", "torchVersion", "torchBackend", "packages", "packageVersions", "pymssVersion",
+            "pymssCoreVersion", "pymssGraphAvailable", "acceleratorPackages",
+        ) if key in probed})
+        state.update({"environmentTransactionId": record["id"], "acceleratorAvailable": bool(probed.get("acceleratorAvailable")),
+                      "selectedDeviceIds": selected_devices,
+                      "activationValidation": activation_validation})
+        _atomic_write_json(_env_state_path("rocm"), state)
+        active = {**state, "backend": "rocm", "pythonPath": str(python), "activatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        transaction.commit(active if activate else None)
+        _emit("runtime_rollback_finished", {"backend": "rocm", "state": active, "activated": activate,
+                                           "rollbackAvailable": transaction.previous_manifest() is not None}, task_id)
+        return 0
+    except Exception as error:
+        try:
+            transaction.abort()
+        except Exception as recovery_error:
+            return emit_error("RUNTIME_RECOVERY_FAILED", f"{error}; recovery failed: {recovery_error}", task_id=task_id, recoverable=True)
+        return emit_error("RUNTIME_ROLLBACK_FAILED", str(error), task_id=task_id, recoverable=True)
 
 
 def _target_runtime_from_payload(payload: dict[str, Any], backend: str) -> tuple[dict[str, Any] | None, Path, Path, Path] | None:
@@ -1466,6 +1934,7 @@ def _manifest_versions_are_satisfied(
     probed: dict[str, Any],
     manifest: dict[str, Any],
     backend: str,
+    *, profile_snapshot: dict[str, Any] | None = None,
 ) -> tuple[bool, list[str]]:
     """Validate installed distribution versions against the shipped manifest.
 
@@ -1482,6 +1951,28 @@ def _manifest_versions_are_satisfied(
         if name:
             requirements[name] = extra
     torch_requirement = manifest.get("backends", {}).get(backend, {}).get("torch", {}).get("requirement")
+    profile = None
+    try:
+        if profile_snapshot is not None:
+            # Only a caller that verified the saved recipe against live packages
+            # and installed wheel identities may supply this rollback override.
+            profile = profile_snapshot
+            if Version(str(probed.get("torchVersion"))) != Version(profile["packages"]["torch"]):
+                return False, ["The restored Torch build does not match its recorded recipe"]
+        else:
+            profile = resolve_profile_for_runtime(
+                manifest, backend, str(probed.get("torchVersion") or ""), profile_id=probed.get("profileId"),
+            )
+    except ValueError as error:
+        return False, [str(error)]
+    if profile:
+        if probed.get("profileRevision", profile["revision"]) != profile["revision"]:
+            return False, ["The installed runtime profile revision is not recognized by this Studio version"]
+        torch_requirement = f"torch=={profile['packages']['torch']}"
+        # Old cached state lacks the SDK inventory; a live probe validates the full set.
+        if "acceleratorPackages" in probed:
+            versions = {**versions, **accelerator_versions(probed["acceleratorPackages"])}
+            requirements.update({name: f"{name}=={version}" for name, version in profile["packages"].items()})
     if torch_requirement:
         requirements["torch"] = torch_requirement
         versions = {**versions, "torch": probed.get("torchVersion")}
@@ -1554,6 +2045,7 @@ def _runtime_info_payload(payload: dict[str, Any], *, repair: bool = True) -> di
     accelerator_available = False
     live_probe_error: dict[str, str] | None = None
     active_probe: dict[str, Any] | None = None
+    activation_validation: dict[str, Any] = {"status": "notRun"}
     active_python = _runtime_command_path(Path(str(install_state.get("pythonPath")))) if install_state and install_state.get("pythonPath") else None
     active_overlay = _overlay_path_from_state(install_state)
     if active_python and active_python.is_file():
@@ -1602,6 +2094,21 @@ def _runtime_info_payload(payload: dict[str, Any], *, repair: bool = True) -> di
         accelerator_available = False
         pymss_graph_available = None
         active_probe = None
+    gpu_check_python = active_python if active_python and active_python.is_file() else (
+        Path(sys.executable) if not install_state and active_probe is not None else None
+    )
+    if live_probe_error is None and torch_backend == "rocm" and gpu_check_python:
+        try:
+            selected = (install_state or {}).get("selectedDeviceIds")
+            activation_validation = _verify_rocm_activation(gpu_check_python, (install_state or {}).get("installedTargets") or [], None,
+                **({"selected_device_ids": selected} if selected else {}))
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            activation_validation = {"status": "failed", "reason": "processFailed", "devices": []}
+        if activation_validation.get("status") != "passed":
+            accelerator_available = False
+        if active_probe is not None:
+            active_probe = {**active_probe, "acceleratorAvailable": accelerator_available,
+                            "activationValidation": activation_validation}
     if not pymss_version and package_versions:
         pymss_version = package_versions.get("pymss")
     if not pymss_core_version and package_versions:
@@ -1621,6 +2128,16 @@ def _runtime_info_payload(payload: dict[str, Any], *, repair: bool = True) -> di
                     "acceleratorAvailable": False, "pymssGraphAvailable": None,
                     "packages": {name: False for name in (entry.get("packages") or {})},
                 })
+    rollback = RocmTransaction(RUNTIME_ENVS_DIR, ACTIVE_RUNTIME_FILE).previous_manifest()
+    previous = (rollback or {}).get("state") or {}
+    maintenance_pending = (RUNTIME_ENVS_DIR / ".rocm-transaction.json").exists()
+    seed = {"available": False}
+    if BUNDLED_RUNTIME_ENVS_DIR and not _same_path(BUNDLED_RUNTIME_ENVS_DIR, RUNTIME_ENVS_DIR):
+        try:
+            from worker_runtime_seed import seed_plan
+            seed = seed_plan(RUNTIME_ENVS_DIR, BUNDLED_RUNTIME_ENVS_DIR, _bootstrap_python_path(), manifest, include_sizes=False)
+        except (OSError, ValueError, RuntimeError) as error:
+            seed = {"available": False, "reason": str(error)}
     return {
         "manifestVersion": manifest["manifestVersion"],
         "pythonVersion": platform.python_version(),
@@ -1628,11 +2145,19 @@ def _runtime_info_payload(payload: dict[str, Any], *, repair: bool = True) -> di
         "machine": machine(),
         "bootstrapPython": str(_bootstrap_python_path()),
         "runtimeEnvsDir": str(RUNTIME_ENVS_DIR),
+        "bundledRuntimeEnvsDir": str(BUNDLED_RUNTIME_ENVS_DIR) if BUNDLED_RUNTIME_ENVS_DIR else None,
+        "seedPreparationRequired": bool(seed.get("available") and seed.get("preparationRequired")),
+        "seedProfileId": seed.get("profileId"), "seedInstalledTargets": seed.get("targets", []),
+        "seedPreparationReason": seed.get("reason"),
         "activeRuntimeFile": str(ACTIVE_RUNTIME_FILE),
         "backend": backend,
         "installedBackend": install_state.get("backend") if install_state else None,
         "installState": install_state,
         "rollbackAvailable": _core_rollback_available(install_state, manifest),
+        "environmentRollbackAvailable": rollback is not None,
+        "previousRuntime": {"profileId": previous.get("profileId") or ((rollback or {}).get("profile") or {}).get("id"),
+                            "torchVersion": previous.get("torchVersion"), "installedAt": previous.get("installedAt")} if rollback else None,
+        "runtimeMaintenancePending": maintenance_pending, "recoveryRequired": maintenance_pending, "recoveryError": None,
         "statePath": str(ACTIVE_RUNTIME_FILE),
         "logPath": str(install_state.get("logPath")) if install_state and install_state.get("logPath") else None,
         "installedEnvironments": environments,
@@ -1640,6 +2165,7 @@ def _runtime_info_payload(payload: dict[str, Any], *, repair: bool = True) -> di
         "torchVersion": torch_version,
         "torchBackend": torch_backend,
         "acceleratorAvailable": accelerator_available,
+        "activationValidation": activation_validation,
         "packages": packages,
         "packageVersions": package_versions,
         "pymssVersion": pymss_version,
@@ -1648,7 +2174,7 @@ def _runtime_info_payload(payload: dict[str, Any], *, repair: bool = True) -> di
         "liveProbeError": live_probe_error,
         # mlx is an optional extra: it must not drag readiness down when it was probed
         # speculatively (no backend requested). An explicit mlx backend still requires it below.
-        "ready": live_probe_error is None and all(v for k, v in packages.items() if k != "mlx" or backend == "mlx") and torch_backend != "missing" and not torch_backend.startswith("error:") and (
+        "ready": live_probe_error is None and all(v for k, v in packages.items() if k != "mlx" or backend == "mlx") and torch_backend != "missing" and not torch_backend.startswith("error:") and (torch_backend != "rocm" or activation_validation.get("status") == "passed") and (
             not backend or backend == "cpu" and torch_backend == "cpu"
             or backend == "cuda" and torch_backend == "cuda" and accelerator_available
             or backend == "rocm" and torch_backend == "rocm" and accelerator_available
@@ -1669,16 +2195,18 @@ def cmd_runtime_core_versions(payload: dict[str, Any]) -> int:
     channel = "prerelease" if payload.get("channel") == "prerelease" else "stable"
     current = payload.get("versions") or {}
     packages: dict[str, dict[str, Any]] = {}
-    for name in ("pymss", "pymss-core"):
-        try:
-            latest = _latest_pypi_version(name, channel)
-            installed = current.get(name)
-            packages[name] = {
-                "latestVersion": latest, "currentVersion": installed,
-                "updateAvailable": bool(latest and installed and Version(latest) > Version(installed)),
-            }
-        except Exception as exc:
-            packages[name] = {"latestVersion": None, "error": str(exc)}
+    # pymss owns its core dependency. A standalone core release is not an
+    # application update and may intentionally be ahead of pymss's pinned core.
+    name = "pymss"
+    try:
+        latest = _latest_pypi_version(name, channel)
+        installed = current.get(name)
+        packages[name] = {
+            "latestVersion": latest, "currentVersion": installed,
+            "updateAvailable": bool(latest and installed and Version(latest) > Version(installed)),
+        }
+    except Exception as exc:
+        packages[name] = {"latestVersion": None, "error": str(exc)}
     _emit("runtime_core_versions", {"channel": channel, "packages": packages})
     return 0
 
@@ -1705,11 +2233,14 @@ def cmd_runtime_env_sizes(payload: dict[str, Any], *, repair: bool = True) -> in
             sizes[backend] = _dir_size_bytes(env_dir)
         except Exception:
             continue
-    _emit("runtime_env_sizes", {
+    result = {
         "sizes": sizes,
         "totalBytes": sum(sizes.values()),
         "incompleteBackends": incomplete,
-    })
+    }
+    if RocmTransaction(RUNTIME_ENVS_DIR, ACTIVE_RUNTIME_FILE).previous_manifest():
+        result["environmentRollbackBytes"] = _dir_size_bytes(RUNTIME_ENVS_DIR / ".rocm-previous")
+    _emit("runtime_env_sizes", result)
     return 0
 
 
@@ -1760,6 +2291,11 @@ def cmd_activate_runtime(payload: dict[str, Any]) -> int:
     # active pointer between them, so honour the guard for both bundled and managed runtimes.
     if preserve_existing_pointer():
         return 0
+    try:
+        selected_devices = _runtime_selected_device_ids(payload, state, python_path) if backend == "rocm" else []
+    except ValueError as error:
+        from worker_protocol import emit_error
+        return emit_error("RUNTIME_PROFILE_INVALID", str(error), task_id=payload.get("taskId"), recoverable=True)
     registered_overlay = _registered_runtime_overlay(backend, python_path)
     overlay_path = _overlay_path_from_state(state) or _overlay_path_from_state(registered_overlay)
     if _is_bundled_runtime_env(env_dir) or _is_bundled_bootstrap_python(python_path):
@@ -1780,6 +2316,15 @@ def cmd_activate_runtime(payload: dict[str, Any]) -> int:
                 f"acceleratorAvailable={probed.get('acceleratorAvailable')}",
                 recoverable=True,
             )
+        activation_validation = None
+        if backend == "rocm":
+            activation_validation = _verify_rocm_activation(python_path, (state or {}).get("installedTargets", []), payload.get("deviceIds"),
+                **({"selected_device_ids": selected_devices} if selected_devices else {}))
+            if activation_validation.get("status") != "passed":
+                from worker_protocol import emit_error
+                return emit_error("RUNTIME_GPU_VALIDATION_FAILED", "The ROCm runtime did not pass basic GPU execution validation.",
+                                  task_id=payload.get("taskId"), recoverable=True,
+                                  extra={"activationValidation": activation_validation})
         active = {
             **(state or {}),
             **(registered_overlay or {}),
@@ -1788,6 +2333,9 @@ def cmd_activate_runtime(payload: dict[str, Any]) -> int:
             "source": "bundled",
             "activatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
+        if activation_validation:
+            active["selectedDeviceIds"] = selected_devices
+            active["activationValidation"] = activation_validation
         _write_runtime_state(active)
         _emit("runtime_activated", active)
         return 0
@@ -1804,6 +2352,15 @@ def cmd_activate_runtime(payload: dict[str, Any]) -> int:
             f"Runtime {backend} failed validation: {exc}",
             recoverable=True,
         )
+    activation_validation = None
+    if backend == "rocm":
+        activation_validation = _verify_rocm_activation(python_path, (state or {}).get("installedTargets", []), payload.get("deviceIds"),
+                **({"selected_device_ids": selected_devices} if selected_devices else {}))
+        if activation_validation.get("status") != "passed":
+            from worker_protocol import emit_error
+            return emit_error("RUNTIME_GPU_VALIDATION_FAILED", "The ROCm runtime did not pass basic GPU execution validation.",
+                              task_id=payload.get("taskId"), recoverable=True,
+                              extra={"activationValidation": activation_validation})
     if not _runtime_probe_is_ready(backend, probed, manifest):
         from worker_protocol import emit_error
         return emit_error(
@@ -1829,6 +2386,9 @@ def cmd_activate_runtime(payload: dict[str, Any]) -> int:
             "pymssCoreVersion": probed.get("pymssCoreVersion") or state.get("pymssCoreVersion"),
             "pymssGraphAvailable": bool(probed.get("pymssGraphAvailable")),
         }
+    if activation_validation:
+        state["selectedDeviceIds"] = selected_devices
+        state["activationValidation"] = activation_validation
     if env_state_path:
         try:
             _atomic_write_json(env_state_path, state)
@@ -1843,6 +2403,8 @@ def cmd_activate_runtime(payload: dict[str, Any]) -> int:
         "logPath": str(env_dir / "pymss-runtime-install.log"),
         "activatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    if activation_validation:
+        active["activationValidation"] = activation_validation
     # Close the remaining race window while the live probe was running. Per-environment cache
     # refreshes above are harmless, but an active pointer created meanwhile belongs to the user.
     if preserve_existing_pointer():
@@ -1994,7 +2556,8 @@ def _ensure_runtime_pip(
 
 def _repair_runtime_venv_config(env_dir: Path) -> bool:
     cfg = env_dir / "pyvenv.cfg"
-    bootstrap = _bootstrap_python_path()
+    from worker_runtime_seed import bound_bootstrap_python
+    bootstrap = bound_bootstrap_python(env_dir, RUNTIME_ENVS_DIR, _bootstrap_python_path())
     if not cfg.is_file() or not bootstrap.is_file():
         return False
     content = "\n".join([
@@ -2042,17 +2605,12 @@ def _make_posix_venv_relocatable(env_dir: Path) -> bool:
 
 @_serialized_runtime_command
 def cmd_install_runtime(payload: dict[str, Any]) -> int:
-    """Build and activate an environment for `backend`.
-
-    Cancellation is not handled here: the desktop shell kills this process and its whole tree
-    (see cancel_task in app_cmd.rs), which takes pip down with it. The interrupted venv is left
-    on disk on purpose — _incomplete_env_backends() reports it so the space can be reclaimed."""
+    """Install a runtime; ROCm swaps are journaled for cancellation/crash recovery."""
     task_id = str(payload.get("taskId") or f"runtime_install_{int(time.time() * 1000)}")
     backend = str(payload.get("backend") or "cpu").strip().lower()
     mirror = str(payload.get("mirror") or "auto").strip().lower()
     locale = str(payload.get("locale") or "").strip().lower()
     manifest = _manifest()
-    _recover_runtime_transactions()
     supported = _supported_backend(backend, manifest)
     if not supported:
         from worker_protocol import emit_error
@@ -2061,18 +2619,107 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
     if sys.platform not in spec.get("platforms", []):
         from worker_protocol import emit_error
         return emit_error("RUNTIME_PLATFORM_UNSUPPORTED", f"Backend {backend} is not supported on {sys.platform}", task_id=task_id)
+    try:
+        install_plan = _runtime_operation_plan(payload, manifest)
+        assert_profile_installable(install_plan, accept_preview=payload.get("acceptPreview") is True)
+        if install_plan["installMode"] == "multiarch" and install_plan.get("resolutionStatus") not in {"locked", "bundledSeed"}:
+            raise ValueError("The runtime binary artifact lock is unavailable; this profile cannot be installed")
+        _recover_runtime_transactions()
+        install_plan = _runtime_operation_plan(payload, manifest)
+        _verify_runtime_operation_identity(payload, install_plan)
+        action = install_plan["action"]
+        activate = _runtime_activation_requested(payload, backend) if backend == "rocm" or "activate" in payload else True
+        if backend == "rocm":
+            RocmTransaction(RUNTIME_ENVS_DIR, ACTIVE_RUNTIME_FILE).checked(_env_dir(backend))
+        cached = install_plan.pop("_legacySourceState", None) or _read_json_object(_env_state_path(backend)) or {}
+        same_profile = (not cached.get("profileId") or (cached["profileId"] == install_plan["profileId"]
+                        and cached.get("profileRevision", install_plan["profileRevision"]) == install_plan["profileRevision"]))
+        if not same_profile and action != "upgrade":
+            raise ValueError("Changing runtime profiles requires a confirmed recoverable runtime upgrade")
+        upgrade_live_probe = install_plan.pop("_legacySourceProbe", None)
+        if backend == "rocm" and spec.get("profiles"):
+            installed_torch = cached.get("torchVersion")
+            if _env_python_path(backend).is_file():
+                # State is a cache, not proof of the installed build. Missing state
+                # must not authorize replacing an unknown/newer ROCm interpreter.
+                installed_torch = _probe_python_package_versions(_env_python_path(backend), ["torch"]).get("torch")
+                if not installed_torch:
+                    raise ValueError("Unable to identify the existing ROCm build; its environment was preserved")
+            if installed_torch:
+                if action == "upgrade" and cached.get("profileSnapshot"):
+                    upgrade_live_probe = _probe_python_runtime(_env_python_path(backend), _backend_extra_names(manifest, backend))
+                    existing = _verify_recorded_runtime_snapshot(cached, upgrade_live_probe, _env_python_path(backend))
+                else:
+                    existing = resolve_profile_for_runtime(manifest, backend, installed_torch, profile_id=cached.get("profileId"))
+                if not existing or (existing["id"] != install_plan["profileId"] and action != "upgrade"):
+                    raise ValueError("The existing ROCm build cannot be replaced by this installation profile")
+                if cached.get("torchVersion") and installed_torch != cached["torchVersion"]:
+                    raise ValueError("The installed ROCm build changed. Refresh its state before replacing it")
+        if action == "upgrade":
+            recorded = cached.get("resolvedAcceleratorPackages") or cached.get("acceleratorPackages")
+            if not recorded:
+                raise ValueError("The existing runtime has no frozen accelerator identity; repair it before upgrading")
+            current_probe = upgrade_live_probe or _probe_python_runtime(_env_python_path(backend), _backend_extra_names(manifest, backend))
+            if cached.get("acceleratorPackageArtifacts"):
+                current_versions = _probe_python_package_versions(_env_python_path(backend), list(cached["acceleratorPackageArtifacts"]))
+                if current_versions != {name: item["version"] for name, item in cached["acceleratorPackageArtifacts"].items()}:
+                    raise ValueError("The existing runtime distributions changed. Prepare a new upgrade plan")
+                current_probe["packageVersions"] = {**(current_probe.get("packageVersions") or {}), **current_versions}
+            verify_accelerator_versions(recorded, _probed_accelerator_versions(current_probe, cached.get("devicePackageNames", [])))
+        if action == "addTargets":
+            if not install_plan.get("hostLockId") or cached.get("hostLockId") != install_plan["hostLockId"]:
+                raise ValueError("The runtime host artifacts changed; use a recoverable upgrade instead")
+            if cached.get("basePackageArtifacts") != install_plan.get("basePackageArtifacts"):
+                raise ValueError("The runtime host artifact identities do not match the target addition")
+            old_artifacts = cached.get("acceleratorPackageArtifacts") or {}
+            if not old_artifacts or any(install_plan["acceleratorPackageArtifacts"].get(name) != value
+                                        for name, value in old_artifacts.items()):
+                raise ValueError("The installed device artifact identities changed; use a recoverable upgrade")
+            current_probe = _probe_python_runtime(_env_python_path(backend), _backend_extra_names(manifest, backend))
+            _verify_recorded_runtime_snapshot(cached, current_probe, _env_python_path(backend), verify_all_artifacts=True)
+            if not install_plan["missingTargets"]:
+                _emit("runtime_install_finished", {"backend": backend, "state": cached, "activated": False,
+                                                   "action": action, "unchanged": True}, task_id)
+                return 0
+    except (ValueError, TypeError, KeyError, RuntimeError) as error:
+        from worker_protocol import emit_error
+        return emit_error("RUNTIME_PROFILE_INVALID", str(error), task_id=task_id, recoverable=True)
     index_url = None
     mirror, index_url = _resolve_pypi_mirror(mirror, locale)
     env_dir = _env_dir(backend)
+    transaction: RocmTransaction | None = None
+    space_report = None
+    if backend == "rocm":
+        transaction = RocmTransaction(RUNTIME_ENVS_DIR, ACTIVE_RUNTIME_FILE)
+        try:
+            RUNTIME_ENVS_DIR.mkdir(parents=True, exist_ok=True)
+            previous = transaction.previous_manifest()
+            if previous and payload.get("replacePrevious") is not True:
+                raise ValueError("The existing rollback version must be explicitly selected for replacement")
+            space_report = transaction.preflight(
+                _dir_size_bytes(env_dir) if env_dir.is_dir() else 0,
+                _dir_size_bytes(transaction.previous) if previous else 0,
+            )
+        except (OSError, ValueError, RuntimeSpaceError) as error:
+            from worker_protocol import emit_error
+            return emit_error("RUNTIME_INSUFFICIENT_SPACE" if isinstance(error, RuntimeSpaceError) else "RUNTIME_INSTALL_FAILED",
+                              str(error), task_id=task_id, recoverable=True)
     try:
         had_existing_environment = env_dir.is_dir() and any(env_dir.iterdir())
     except OSError:
         had_existing_environment = env_dir.exists()
-    env_dir.mkdir(parents=True, exist_ok=True)
+    if transaction is None:
+        env_dir.mkdir(parents=True, exist_ok=True)
     env_python = _env_python_path(backend)
     install_log_path = _env_log_path(backend)
     reinstall_backup: Path | None = None
-    if had_existing_environment:
+    frozen_accelerators: dict[str, str] = {}
+    accelerator_sources: dict[str, Any] = dict(cached.get("acceleratorPackageSources") or {}) if action == "addTargets" else {}
+    locked_requirements_path = RUNTIME_ENVS_DIR / f".{backend}.locked-{uuid.uuid4().hex}.txt"
+    seed_state: dict[str, Any] | None = None
+    bootstrap_binding: dict[str, Any] | None = None
+    constraints_path = RUNTIME_ENVS_DIR / f".{backend}.accelerator-{uuid.uuid4().hex}.txt"
+    if had_existing_environment and transaction is None:
         reinstall_backup = RUNTIME_ENVS_DIR / f".{backend}.reinstalling"
         if reinstall_backup.exists():
             shutil.rmtree(reinstall_backup)
@@ -2087,16 +2734,20 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
 
     def run_pip(args: list[str], stage: str, package_index: str | None = None) -> None:
         command = [str(env_python), "-m", "pip", "install", "--no-cache-dir"]
+        report_path = env_dir / f"pymss-install-{stage}.json"
+        command.extend(["--report", str(report_path)])
         if stage == "pymss":
             command.append("--upgrade")
         if stage in {"common", "pymss"}:
             command.extend(["--only-binary=:all:", "--prefer-binary"])
+        if frozen_accelerators and stage in {"common", "pymss", "extras"}:
+            command.extend(["--constraint", str(constraints_path)])
         if package_index or (index_url and stage != "torch"):
             command.extend(["--index-url", package_index or index_url])
         command.extend(args)
         append_log(stage, "pip install " + " ".join(args))
         _emit("runtime_install_stage", {"stage": stage, "command": "pip install " + " ".join(args)}, task_id)
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", env=_probe_environment())
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", env=_probe_environment(python_path=env_python))
         assert process.stdout is not None
         try:
             for line in process.stdout:
@@ -2111,8 +2762,38 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
                 process.kill()
             process.wait()
             raise
+        finally:
+            close_stdout = getattr(process.stdout, "close", None)
+            if close_stdout:
+                close_stdout()
         if process.wait() != 0:
             raise RuntimeError(f"pip failed during {stage} with exit code {process.returncode}")
+        if report_path.is_file():
+            report = _read_json_object(report_path)
+            sources = accelerator_source_records(report or {})
+            if stage == "locked":
+                allowed = {item["name"]: item for item in artifacts}
+                for item in report["install"]:
+                    package = item.get("metadata") or {}
+                    name = canonicalize_name(str(package.get("name") or ""))
+                    expected = allowed.get(name)
+                    source = item.get("download_info") or {}
+                    hashes = (source.get("archive_info") or {}).get("hashes") or {}
+                    if (not expected or str(package.get("version")) != expected["version"]
+                            or hashes.get("sha256") != expected["sha256"]):
+                        raise RuntimeError("The installed distribution does not match its locked artifact: " + name)
+            from urllib.parse import urlsplit, urlunsplit
+            for item in report["install"]:
+                download = item.get("download_info") or {}
+                if download.get("url"):
+                    source = urlsplit(download["url"])
+                    download["url"] = urlunsplit((source.scheme, source.hostname or "", source.path, "", ""))
+            _atomic_write_json(report_path, report)
+            if sources and stage in {"common", "pymss"}:
+                raise RuntimeError(f"The {stage} dependencies attempted to replace a base accelerator package: {', '.join(sources)}")
+            accelerator_sources.update(sources)
+        elif backend == "rocm" and install_plan["profileId"]:
+            raise RuntimeError("The ROCm package installer did not produce a source verification report")
 
     def run_pip_with_pypi_fallback(args: list[str], stage: str) -> None:
         try:
@@ -2125,6 +2806,21 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
             run_pip(args, stage, "https://pypi.org/simple")
 
     try:
+        if transaction:
+            previous_state = _read_json_object(_env_state_path(backend)) or {}
+            source_profile = _recorded_runtime_profile(previous_state)
+            transaction.begin("install", activate=activate, profile=source_profile, replace_previous=payload.get("replacePrevious") is True)
+            if action == "addTargets":
+                transaction.copy_current_candidate()
+            else:
+                env_dir.mkdir(parents=True, exist_ok=True)
+            if action == "prepareSeed":
+                from worker_runtime_seed import copy_seed
+                seed_state = copy_seed(BUNDLED_RUNTIME_ENVS_DIR / "rocm", env_dir, _bootstrap_python_path(),
+                                       RUNTIME_ENVS_DIR, install_plan["seed"]["baseGeneration"],
+                                       progress=lambda copied, total: _emit("runtime_install_stage", {
+                                           "stage": "copy-seed", "copiedBytes": copied, "totalBytes": total}, task_id))
+                bootstrap_binding = seed_state.get("bootstrapBinding")
         install_log_path.write_text(
             f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] install backend={backend} mirror={mirror} manifest={manifest['manifestVersion']}\n",
             encoding="utf-8",
@@ -2139,6 +2835,8 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
             # starts so fresh installs and repaired installs follow the same path rules.
             _repair_runtime_venv_config(env_dir)
         elif not _runtime_python_works(env_python):
+            if action == "addTargets":
+                raise RuntimeError("The existing runtime interpreter is unusable; its original environment was preserved")
             rebuild_message = "existing environment interpreter is unusable; rebuilding"
             _emit("runtime_install_log", {"stage": "venv", "message": rebuild_message}, task_id)
             import shutil
@@ -2147,6 +2845,8 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
             _create_runtime_venv(env_dir)
             _repair_runtime_venv_config(env_dir)
         elif not _runtime_pip_works(env_python):
+            if action == "addTargets":
+                raise RuntimeError("The existing runtime package installer is unusable; repair it before adding targets")
             # A cancelled or older portable install can leave a runnable venv without pip. The
             # venv's ensurepip module may have been pruned already, so recreate it from the
             # bootstrap runtime instead of failing the first package install.
@@ -2162,28 +2862,92 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
             _repair_runtime_venv_config(env_dir)
         if rebuild_message:
             append_log("bootstrap", rebuild_message)
+        if backend == "rocm" and action == "addTargets":
+            bootstrap_binding = cached.get("bootstrapBinding")
+        if backend == "rocm" and action not in {"prepareSeed", "addTargets"} and BUNDLED_RUNTIME_ENVS_DIR and not _same_path(BUNDLED_RUNTIME_ENVS_DIR, RUNTIME_ENVS_DIR):
+            from worker_runtime_seed import bind_environment, ensure_managed_bootstrap
+            bootstrap_binding = ensure_managed_bootstrap(_bootstrap_python_path(), RUNTIME_ENVS_DIR, manifest.get("baseGeneration", 1))
+            bind_environment(env_dir, RUNTIME_ENVS_DIR, bootstrap_binding)
         _make_posix_venv_relocatable(env_dir)
-        _emit("runtime_install_started", {"backend": backend, "manifestVersion": manifest["manifestVersion"], "logPath": str(install_log_path)}, task_id)
-        _ensure_runtime_pip(env_python, task_id, append_log)
-        torch = spec.get("torch", {})
-        if torch.get("rocmRequirements"):
-            run_pip(list(torch["rocmRequirements"]), "rocm-sdk", None)
-        torch_args = list(torch.get("requirements", [])) if torch.get("requirements") else [torch["requirement"]]
-        run_pip((["--no-deps"] if torch.get("noDeps") else []) + torch_args, "torch", torch.get("indexUrl"))
-        common = [value for name, value in manifest["common"].items() if name not in {"pymss", "pymss-core"}]
-        pymss_requirement = manifest["common"]["pymss"]
-        pymss_core_requirement = manifest["common"]["pymss-core"]
-        run_pip_with_pypi_fallback(common, "common")
-        # Install the declared pymss extras with dependency resolution enabled.  The previous
-        # --no-deps path silently skipped PySocks required by pymss[proxy], so a fresh runtime
-        # passed the basic import probe but failed when a SOCKS proxy was used.
-        run_pip_with_pypi_fallback([pymss_requirement, pymss_core_requirement], "pymss")
-        if spec.get("extras"):
-            run_pip_with_pypi_fallback(list(spec["extras"]), "extras")
+        _emit("runtime_install_started", {"backend": backend, "manifestVersion": manifest["manifestVersion"], "logPath": str(install_log_path),
+                                          "activate": activate, "space": space_report}, task_id)
+        if action != "prepareSeed":
+            _ensure_runtime_pip(env_python, task_id, append_log)
+        if action == "prepareSeed":
+            base_probe = _probe_python_runtime(env_python, _backend_extra_names(manifest, backend))
+            frozen_accelerators = _probed_accelerator_versions(base_probe, seed_state.get("devicePackageNames", []))
+            verify_accelerator_versions(seed_state.get("resolvedAcceleratorPackages") or seed_state.get("acceleratorPackages") or {}, frozen_accelerators)
+            accelerator_sources = seed_state.get("acceleratorPackageSources") or {}
+            _verify_runtime_pip_check(env_python)
+        elif install_plan.get("resolutionStatus") == "locked":
+            from worker_runtime_artifacts import build_locked_requirements
+            artifacts = install_plan["artifacts"]
+            if action == "addTargets":
+                before = _probe_python_runtime(env_python, _backend_extra_names(manifest, backend))
+                previous_versions = _probe_python_package_versions(env_python, list(cached["acceleratorPackageArtifacts"]))
+                previous_expected = {name: item["version"] for name, item in cached["acceleratorPackageArtifacts"].items()}
+                if previous_versions != previous_expected:
+                    raise RuntimeError("The installed runtime distributions changed before adding device targets")
+                before["packageVersions"] = {**(before.get("packageVersions") or {}), **previous_versions}
+                verify_accelerator_versions(cached.get("resolvedAcceleratorPackages") or {},
+                                            _probed_accelerator_versions(before, cached.get("devicePackageNames", [])))
+                installed_names = set((cached.get("acceleratorPackageArtifacts") or {}))
+                artifacts = [item for item in artifacts if item["role"] == "device" and item["name"] not in installed_names]
+            if artifacts:
+                locked_requirements_path.write_text(build_locked_requirements(install_plan, artifacts=artifacts), encoding="utf-8")
+                run_pip(["--require-hashes", "--no-deps", "--only-binary=:all:", "-r", str(locked_requirements_path)], "locked")
+            base_probe = _probe_python_runtime(env_python, _backend_extra_names(manifest, backend))
+            versions = _probe_python_package_versions(env_python, [item["name"] for item in install_plan["artifacts"]])
+            frozen_accelerators = _probed_accelerator_versions(
+                {**base_probe, "packageVersions": {**(base_probe.get("packageVersions") or {}), **versions}},
+                install_plan["devicePackageNames"])
+            expected_accelerators = accelerator_versions(install_plan["resolvedAcceleratorPackages"], install_plan["devicePackageNames"])
+            verify_accelerator_versions(expected_accelerators, frozen_accelerators)
+            from worker_runtime_artifacts import verify_installed_coverage
+            verify_installed_coverage(install_plan, versions)
+            if action == "addTargets":
+                devices = set(install_plan["devicePackageNames"])
+                verify_accelerator_versions(
+                    {name: version for name, version in (cached.get("resolvedAcceleratorPackages") or {}).items() if name not in devices},
+                    {name: version for name, version in frozen_accelerators.items() if name not in devices})
+            _verify_runtime_pip_check(env_python)
+        else:
+            torch = install_plan["torch"]
+            if torch.get("rocmRequirements"):
+                run_pip(list(torch["rocmRequirements"]), "rocm-sdk", None)
+            torch_args = list(torch.get("requirements", [])) if torch.get("requirements") else [torch["requirement"]]
+            run_pip((["--no-deps"] if torch.get("noDeps") else []) + torch_args, "torch", torch.get("indexUrl"))
+            base_probe = _probe_python_runtime(env_python, _backend_extra_names(manifest, backend))
+            frozen_accelerators = _probed_accelerator_versions(base_probe)
+            if not frozen_accelerators.get("torch"):
+                raise RuntimeError("Unable to freeze the installed accelerator packages")
+            constraints_path.write_text(accelerator_constraints(frozen_accelerators), encoding="utf-8")
+            if spec.get("extras"):
+                # Backend packages such as MLX belong to the base. Install them before
+                # common/core dependencies, retaining the already captured Torch build.
+                run_pip_with_pypi_fallback(list(spec["extras"]), "extras")
+                extras_probe = _probe_python_runtime(env_python, _backend_extra_names(manifest, backend))
+                with_extras = _probed_accelerator_versions(extras_probe)
+                verify_accelerator_versions(frozen_accelerators, {
+                    name: with_extras.get(name) for name in frozen_accelerators
+                })
+                frozen_accelerators = with_extras
+                constraints_path.write_text(accelerator_constraints(frozen_accelerators), encoding="utf-8")
+            common = [value for name, value in manifest["common"].items() if name not in {"pymss", "pymss-core"}]
+            pymss_requirement = manifest["common"]["pymss"]
+            pymss_core_requirement = manifest["common"]["pymss-core"]
+            run_pip_with_pypi_fallback(common, "common")
+            # Install the declared pymss extras with dependency resolution enabled.  The previous
+            # --no-deps path silently skipped PySocks required by pymss[proxy], so a fresh runtime
+            # passed the basic import probe but failed when a SOCKS proxy was used.
+            run_pip_with_pypi_fallback([pymss_requirement, pymss_core_requirement], "pymss")
         # Probe the interpreter that was just built, not _runtime_info_payload(): that one reads
         # the *active* runtime, which at this point is still the previously activated environment
         # — recording its torch build here is what made a CPU env report cu128.
         probed = _probe_python_runtime(env_python, _backend_extra_names(manifest, backend))
+        if install_plan.get("resolutionStatus") == "locked":
+            probed["packageVersions"] = {**(probed.get("packageVersions") or {}), **versions}
+        verify_accelerator_versions(frozen_accelerators, _probed_accelerator_versions(probed, install_plan.get("devicePackageNames", [])))
         if not _runtime_probe_is_ready(backend, probed, manifest):
             missing = [
                 name for name in [*manifest.get("common", {}), *_backend_extra_names(manifest, backend)]
@@ -2200,7 +2964,10 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
                 "Runtime manifest verification failed: " + "; ".join(manifest_failures)
             )
         _verify_runtime_audio(env_python)
+        if backend == "rocm" and install_plan["profileId"] and install_plan.get("resolutionStatus") not in {"locked", "bundledSeed"}:
+            verify_profile_accelerator_sources(install_plan, accelerator_sources)
         state = {
+            **(seed_state or {}),
             "backend": backend,
             "manifestVersion": manifest["manifestVersion"],
             "stateVersion": ENV_STATE_VERSION,
@@ -2214,7 +2981,32 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
             "pymssVersion": probed.get("pymssVersion"),
             "pymssCoreVersion": probed.get("pymssCoreVersion"),
             "pymssGraphAvailable": bool(probed.get("pymssGraphAvailable")),
+            "resolvedAcceleratorPackages": frozen_accelerators,
+            "acceleratorPackages": frozen_accelerators,
+            "acceleratorPackageSources": accelerator_sources,
         }
+        profile = resolve_profile_for_runtime(manifest, backend, str(probed.get("torchVersion") or ""), profile_id=install_plan["profileId"])
+        if profile and action != "prepareSeed":
+            state.update(runtime_state_from_artifact_plan(install_plan, str(state["pythonVersion"]), frozen_accelerators))
+            if action == "addTargets" and state["baseFingerprint"] != cached["baseFingerprint"]:
+                raise RuntimeError("Adding device kernels changed the base runtime identity")
+        state["dependencyReady"] = True
+        state["selectedDeviceIds"] = install_plan["selectedDeviceIds"]
+        if bootstrap_binding:
+            state["bootstrapBinding"] = bootstrap_binding
+        state["activationValidation"] = {"status": "notRun"}
+        if backend == "rocm" and activate:
+            _emit("runtime_install_stage", {"stage": "gpu-check", "message": "Checking basic ROCm device execution"}, task_id)
+            state["activationValidation"] = _verify_rocm_activation(env_python, state.get("installedTargets", []), payload.get("deviceIds"),
+                **({"selected_device_ids": payload["selectedDeviceIds"]} if payload.get("selectedDeviceIds") else {}))
+        if backend == "rocm":
+            from worker_runtime_paths import discover_rocm_native_paths
+            state.update(discover_rocm_native_paths(env_dir, env_python))
+        if transaction:
+            state["environmentTransactionId"] = transaction.record["id"]
+            # A target addition retains the host ABI and its registered core overlay.
+            if action != "addTargets":
+                transaction.restore_selections({"selections": {}})
         _atomic_write_json(_env_state_path(backend), state)
         active = {
             **state,
@@ -2222,23 +3014,62 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
             "logPath": str(install_log_path),
             "activatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        _write_runtime_state(active)
+        if transaction:
+            if activate and state["activationValidation"]["status"] != "passed":
+                prepared = {key: value for key, value in active.items() if key != "activatedAt"}
+                retained = False
+                if not transaction.record["hadCurrent"]:
+                    retained = transaction.commit_prepared()
+                if not retained:
+                    transaction.abort()
+                _emit("runtime_install_finished", {"backend": backend, "state": prepared if retained else cached or None,
+                      "preparedState": {**prepared, "retained": retained}, "activated": False,
+                      "activationValidation": state["activationValidation"], "action": action,
+                      "logPath": str(install_log_path), "environmentRollbackAvailable": bool(transaction.previous_manifest())}, task_id)
+                return 0
+            if action == "addTargets" and activate:
+                old_active = _read_runtime_state() or {}
+                if old_active.get("baseFingerprint") == state.get("baseFingerprint"):
+                    active = {**old_active, **active}
+                    if old_active.get("overlayPath"):
+                        overlay = _overlay_path_from_state(old_active)
+                        if overlay is None:
+                            raise RuntimeError("The current core overlay is no longer available")
+                        overlay_probe = _probe_python_runtime(env_python, _backend_extra_names(manifest, backend), overlay)
+                        verify_accelerator_versions(frozen_accelerators, _probed_accelerator_versions(overlay_probe, install_plan.get("devicePackageNames", [])))
+                        _verify_runtime_audio(env_python, overlay, core_api=True)
+                        active.update({key: overlay_probe[key] for key in ("packages", "packageVersions", "pymssVersion", "pymssCoreVersion", "pymssGraphAvailable") if key in overlay_probe})
+            transaction.commit(active if activate else None)
+        elif activate:
+            _write_runtime_state(active)
         if reinstall_backup and reinstall_backup.exists():
             import shutil
             try:
                 shutil.rmtree(reinstall_backup)
             except OSError as backup_error:
                 append_log("warning", f"failed to remove reinstall backup: {backup_error}")
-        _emit("runtime_install_finished", {"backend": backend, "state": active, "logPath": str(install_log_path)}, task_id)
+        _emit("runtime_install_finished", {"backend": backend, "state": active, "logPath": str(install_log_path),
+                                           "activated": activate, "action": action, "activationValidation": state["activationValidation"],
+                                           "environmentRollbackAvailable": bool(transaction and transaction.previous_manifest())}, task_id)
         return 0
     except Exception as exc:
         from worker_protocol import emit_error
+        if transaction:
+            try:
+                transaction.abort()
+            except Exception as recovery_error:
+                return emit_error("RUNTIME_RECOVERY_FAILED", f"{exc}; recovery failed: {recovery_error}", task_id=task_id,
+                                  recoverable=True, extra={"backend": backend})
         if reinstall_backup and reinstall_backup.exists():
             import shutil
             if env_dir.exists():
                 shutil.rmtree(env_dir, ignore_errors=True)
             reinstall_backup.rename(env_dir)
-        append_log("error", str(exc))
+        if install_log_path.parent.is_dir():
+            try:
+                append_log("error", str(exc))
+            except OSError:
+                pass  # The original install error remains the protocol result.
         return emit_error(
             "RUNTIME_PERMISSION_DENIED" if isinstance(exc, PermissionError) else "RUNTIME_INSTALL_FAILED",
             str(exc),
@@ -2247,6 +3078,12 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
             recoverable=True,
             extra={"backend": backend, "logPath": str(install_log_path)},
         )
+    finally:
+        try:
+            constraints_path.unlink(missing_ok=True)
+            locked_requirements_path.unlink(missing_ok=True)
+        except OSError:
+            _emit("runtime_install_log", {"stage": "warning", "message": "The temporary accelerator constraint file could not be removed"}, task_id)
 
 
 @_serialized_runtime_command
@@ -2368,7 +3205,9 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
         else:
             targets = {
                 "pymss": target_core_version("pymss", "pymssVersion"),
-                "pymss-core": target_core_version("pymss-core", "pymssCoreVersion"),
+                # Updates resolve the dependency from pymss metadata; repair and
+                # sync preserve their explicit baseline/recovery versions.
+                "pymss-core": target_core_version("pymss-core", "pymssCoreVersion") if repair_dependencies else None,
             }
         target_pymss_version, target_pymss_core_version = targets["pymss"], targets["pymss-core"]
     except Exception as exc:
@@ -2419,12 +3258,24 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
         if key in base_probe
     }
     runtime_facts["torchVersion"] = torch_version
+    frozen_accelerators = _probed_accelerator_versions({**base_probe, "torchVersion": torch_version})
+    try:
+        recorded_accelerators = state.get("resolvedAcceleratorPackages")
+        if recorded_accelerators:
+            verify_accelerator_versions(recorded_accelerators, frozen_accelerators)
+    except (ValueError, RuntimeError) as error:
+        from worker_protocol import emit_error
+        return emit_error("RUNTIME_CORE_UPDATE_FAILED", str(error), task_id=task_id, recoverable=True)
+    runtime_facts["resolvedAcceleratorPackages"] = frozen_accelerators
+    runtime_facts["acceleratorPackages"] = frozen_accelerators
     staging_generation: Path | None = None
     promoted_generation: Path | None = None
     overlay_committed = False
     try:
         if plan and (plan.get("torchVersion") != torch_version or plan.get("baseVersions") != base_probe.get("packageVersions")):
             raise ValueError("The base runtime changed. Prepare and confirm a new update plan.")
+        if plan and plan.get("baseAcceleratorPackages", frozen_accelerators) != frozen_accelerators:
+            raise ValueError("The base accelerator packages changed. Prepare and confirm a new update plan.")
         if mode == "rollback":
             rollback_overlay = _overlay_path_from_state(previous_runtime)
             if previous_runtime.get("overlayPath") and rollback_overlay is None:
@@ -2439,6 +3290,9 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
                 }, task_id)
                 return 0
             probed = _probe_python_runtime(python_path, _backend_extra_names(manifest, backend), rollback_overlay)
+            if rollback_overlay:
+                assert_no_accelerator_overlay(rollback_overlay, frozen_accelerators)
+            verify_accelerator_versions(frozen_accelerators, _probed_accelerator_versions(probed))
             manifest_ok, failures = _manifest_versions_are_satisfied(probed, manifest, backend)
             if not manifest_ok or any(probed.get("packageVersions", {}).get(name) != version for name, version in targets.items()):
                 raise RuntimeError("The previous runtime failed compatibility verification: " + "; ".join(failures))
@@ -2475,13 +3329,12 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             target_pymss_core_version,
         )
         if prepare_only and mode == "update":
-            for index, name in enumerate(("pymss", "pymss-core")):
-                requirement = _runtime_requirement(name, manifest["common"][name])
-                requirement.specifier &= SpecifierSet(f"<={targets[name]}")
-                installed = package_versions.get(name)
-                if installed:
-                    requirement.specifier &= SpecifierSet(f">={installed}")
-                requirements[index] = str(requirement)
+            requirement = _runtime_requirement("pymss", manifest["common"]["pymss"])
+            requirement.specifier &= SpecifierSet(f"<={targets['pymss']}")
+            installed = package_versions.get("pymss")
+            if installed:
+                requirement.specifier &= SpecifierSet(f">={installed}")
+            requirements[0] = str(requirement)
         # Cancellation can terminate this bootstrap process before its finally block runs.
         # Runtime operations are serialized, so any staging directory left from an earlier
         # process is safe to reclaim before starting the next generation.
@@ -2551,32 +3404,30 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
         # packages). Install only the resulting delta into the new overlay afterwards.
         if prepare_only:
             constraints = staging_generation / "base-constraints.txt"
-            constraints.write_text(f"torch=={torch_version}\n", encoding="utf-8")
+            constraints.write_text(accelerator_constraints(frozen_accelerators), encoding="utf-8")
             report_path = staging_generation / "resolve-report.json"
             run_pip([
                 *pip_command, "--dry-run", "--report", str(report_path),
                 "--constraint", str(constraints), *requirements,
             ], "resolve")
             report = json.loads(report_path.read_text(encoding="utf-8"))
-            requirements = _resolved_overlay_requirements(requirements, report)
+            requirements = _resolved_overlay_requirements(requirements, report, frozen_accelerators)
             selected = {canonicalize_name(item["metadata"]["name"]): item["metadata"]["version"] for item in report["install"]}
             targets = {name: selected.get(name) or base_versions.get(name) for name in targets}
             append_log("resolve", "Resolved core versions: " + ", ".join(f"{name}={version}" for name, version in targets.items()))
             for index, name in enumerate(("pymss", "pymss-core")):
                 if not targets[name]:
                     raise RuntimeError(f"Unable to resolve a compatible version of {name}")
-                if channel == "stable" and Version(targets[name]).is_prerelease and targets[name] != package_versions.get(name):
-                    raise RuntimeError("No stable core version is compatible with the current runtime")
+                if name == "pymss" and channel == "stable" and Version(targets[name]).is_prerelease and targets[name] != package_versions.get(name):
+                    raise RuntimeError("No stable pymss version is compatible with the current runtime")
                 requirements[index] = _pin_manifest_requirement(manifest["common"][name], targets[name])
-            if mode == "update" and not any(
-                not package_versions.get(name) or Version(version) > Version(package_versions[name])
-                for name, version in targets.items()
-            ):
-                raise RuntimeError("No newer core could be resolved from the selected package source. Check source availability and pip constraints before retrying.")
+            if mode == "update" and package_versions.get("pymss") and Version(targets["pymss"]) <= Version(package_versions["pymss"]):
+                raise RuntimeError("No newer pymss version could be resolved from the selected package source. Check source availability and pip constraints before retrying.")
             _save_core_update_plan({
                 "backend": backend, "pythonPath": str(python_path), "mode": mode,
                 "channel": channel, "mirror": mirror, "identity": identity,
                 "torchVersion": torch_version, "baseVersions": base_probe.get("packageVersions"),
+                "baseAcceleratorPackages": frozen_accelerators,
                 "currentVersions": {name: package_versions.get(name) for name in targets},
                 "targetVersions": targets, "dependencyCount": max(0, len(requirements) - 2),
                 "requirements": requirements,
@@ -2584,6 +3435,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             return 0
         requirements = plan["requirements"]
         run_pip([*pip_command, "--target", str(staging_site_packages), "--no-deps", *requirements], stage)
+        assert_no_accelerator_overlay(staging_site_packages, frozen_accelerators)
         _emit("runtime_core_update_stage", {"stage": "verify", "message": "Verifying runtime packages"}, task_id)
         probed = _probe_python_runtime(
             python_path,
@@ -2610,6 +3462,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             raise RuntimeError(
                 f"Torch version changed to {probed.get('torchVersion') or 'unknown'} during update; expected {torch_version}"
             )
+        verify_accelerator_versions(frozen_accelerators, _probed_accelerator_versions(probed))
         _verify_runtime_audio(python_path, staging_site_packages, core_api=True)
         staging_generation.rename(final_generation)
         promoted_generation = final_generation

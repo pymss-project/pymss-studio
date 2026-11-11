@@ -182,8 +182,34 @@ test('runtime environment lookup does not guess when the active path is stale', 
   assert.equal(runtimeEnvironmentForBackend(info, 'cuda'), undefined)
 })
 
-test('runtime core update is available when pymss-core alone is behind', () => {
-  assert.equal(runtimeCoreUpdateAvailable({ manifestVersion: '2026.09.1', pymssVersion: '2.0.19', pymssCoreVersion: '0.1.4' }, { packages: { 'pymss-core': { currentVersion: '0.1.4', updateAvailable: true } } }, '2026.09.1'), true)
+test('independent pymss-core releases do not offer a pymss update', () => {
+  const env = { manifestVersion: '2026.10.2', pymssVersion: '2.3.4', pymssCoreVersion: '0.1.14' }
+  const core = { currentVersion: '0.1.14', latestVersion: '0.1.15', updateAvailable: true }
+  assert.equal(runtimeCoreUpdateAvailable(env, { packages: { 'pymss-core': core } }, '2026.10.2'), false)
+  assert.equal(runtimeCoreUpdateAvailable(env, { packages: {
+    pymss: { currentVersion: '2.3.4', latestVersion: '2.3.4', updateAvailable: false },
+    'pymss-core': core,
+  } }, '2026.10.2'), false)
+})
+
+test('a pymss update does not require an independent pymss-core update', () => {
+  const env = { manifestVersion: '2026.10.2', pymssVersion: '2.3.4', pymssCoreVersion: '0.1.14' }
+  const pymss = { currentVersion: '2.3.4', latestVersion: '2.3.5', updateAvailable: true }
+  assert.equal(runtimeCoreUpdateAvailable(env, { packages: { pymss } }, '2026.10.2'), true)
+  assert.equal(runtimeCoreUpdateAvailable(env, { packages: {
+    pymss,
+    'pymss-core': { currentVersion: '0.1.14', latestVersion: '0.1.14', updateAvailable: false },
+  } }, '2026.10.2'), true)
+})
+
+test('pymss update availability requires a comparison for the installed pymss version', () => {
+  const env = { manifestVersion: '2026.10.2', pymssVersion: '2.3.4', pymssCoreVersion: '0.1.14' }
+  for (const currentVersion of [undefined, '', '2.3.3']) {
+    assert.equal(runtimeCoreUpdateAvailable(env, { packages: {
+      pymss: { currentVersion, latestVersion: '2.3.5', updateAvailable: true },
+      'pymss-core': { currentVersion: '0.1.14', updateAvailable: true },
+    } }, '2026.10.2'), false)
+  }
 })
 
 test('core update availability uses PEP 440 comparison and ignores stale comparisons after a completed update', () => {

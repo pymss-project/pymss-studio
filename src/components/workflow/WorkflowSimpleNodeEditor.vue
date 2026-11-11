@@ -1482,7 +1482,7 @@ onBeforeUnmount(() => {
                 type="button"
                 class="simple-icon-button simple-inference-settings"
                 :class="{ 'simple-inference-settings--custom': Boolean(step.inferenceParams) }"
-                :title="`${t('workflows.stepInferenceParams')} · ${t(step.inferenceParams ? 'workflows.inferenceWorkflowCustom' : 'workflows.inferenceFollowGlobal')}`"
+                :title="`${t('workflows.stepInferenceParams')} · ${t(step.inferenceParams ? 'workflows.inferenceWorkflowCustom' : 'workflows.inferenceInheritParams')}`"
                 @pointerdown.stop
                 @click.stop="openInferenceEditor(step)"
               >

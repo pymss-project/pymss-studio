@@ -177,6 +177,27 @@ impl QueryJob {
             true
         }
     }
+
+    pub(super) fn terminate_and_wait(&self, timeout: std::time::Duration) -> io::Result<()> {
+        let started = std::time::Instant::now();
+        loop {
+            let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+            let queried = unsafe { QueryInformationJobObject(
+                self.0.as_raw_handle(), JobObjectBasicAccountingInformation,
+                &mut info as *mut _ as *mut std::ffi::c_void,
+                std::mem::size_of_val(&info) as u32, std::ptr::null_mut(),
+            ) };
+            if queried == 0 { return Err(io::Error::last_os_error()); }
+            if info.ActiveProcesses == 0 { return Ok(()); }
+            if unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if started.elapsed() >= timeout {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "Runtime worker descendants did not exit"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 }
 
 fn startup_thread(pid: u32) -> io::Result<OwnedHandle> {
@@ -273,8 +294,54 @@ mod tests {
     #[ignore = "child process fixture"]
     fn startup_fixture() {
         let marker = std::env::var_os("PYMSS_QUERY_STARTUP_MARKER").unwrap();
-        std::fs::write(marker, b"started").unwrap();
+        let marker = PathBuf::from(marker);
+        let depth = std::env::var("PYMSS_RUNTIME_TREE_DEPTH").ok().and_then(|value| value.parse::<u32>().ok());
+        let mut descendants = None;
+        if let Some(depth) = depth {
+            if depth < 2 {
+                let test_module = module_path!().split_once("::").unwrap().1;
+                let mut command = Command::new(std::env::current_exe().unwrap());
+                command.args(["--exact", &format!("{test_module}::startup_fixture"), "--ignored"])
+                    .env("PYMSS_QUERY_STARTUP_MARKER", &marker)
+                    .env("PYMSS_RUNTIME_TREE_DEPTH", (depth + 1).to_string())
+                    .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+                // A nested child job exercises execution under a Tauri parent job too.
+                descendants = Some(QueryJob::spawn(&mut command).unwrap());
+            }
+            std::fs::write(marker.with_extension(depth.to_string()), std::process::id().to_string()).unwrap();
+        } else {
+            std::fs::write(marker, b"started").unwrap();
+        }
         std::thread::sleep(Duration::from_secs(60));
+        drop(descendants);
+    }
+
+    #[test]
+    fn runtime_job_confirms_all_nested_descendants_stopped() {
+        use windows_sys::Win32::System::Threading::PROCESS_SYNCHRONIZE;
+        let marker = Marker::new();
+        let mut command = marker.command();
+        command.env("PYMSS_RUNTIME_TREE_DEPTH", "0");
+        let (mut child, job) = QueryJob::spawn(&mut command).unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while !(0..=2).all(|depth| marker.0.with_extension(depth.to_string()).is_file()) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut handles = Vec::new();
+        for depth in 0..=2 {
+            let pid = std::fs::read_to_string(marker.0.with_extension(depth.to_string())).unwrap().parse().unwrap();
+            let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, pid) };
+            assert!(!handle.is_null());
+            handles.push(unsafe { OwnedHandle::from_raw_handle(handle) });
+        }
+        job.terminate_and_wait(Duration::from_secs(10)).unwrap();
+        child.wait().unwrap();
+        for handle in handles {
+            assert_eq!(unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) }, WAIT_OBJECT_0);
+        }
+        // Confirmation is idempotent after the job has drained.
+        job.terminate_and_wait(Duration::ZERO).unwrap();
+        for depth in 0..=2 { std::fs::remove_file(marker.0.with_extension(depth.to_string())).unwrap(); }
     }
 
     #[test]

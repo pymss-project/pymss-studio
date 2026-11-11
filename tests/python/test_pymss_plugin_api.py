@@ -58,6 +58,10 @@ class PymssPluginApiTests(unittest.TestCase):
         macos = (ROOT / ".github/workflows/release-macos.yml").read_text(encoding="utf-8")
         self.assertIn('runtime_python "$(dirname "$0")/verify-pymss-plugin-api.py"', shell)
         for interpreter in ("$envPython", "$runtimePython"):
-            self.assertIn(f"Invoke-NativeChecked -FilePath {interpreter} -Arguments @('-B', "
-                          '(Join-Path $PSScriptRoot "verify-pymss-plugin-api.py"))', windows)
+            calls = [line for line in windows.splitlines()
+                     if f"Invoke-NativeChecked -FilePath {interpreter} -Arguments @(" in line
+                     and '(Join-Path $PSScriptRoot "verify-pymss-plugin-api.py")' in line]
+            self.assertEqual(len(calls), 1)
+            self.assertIn("'-I'", calls[0])
+            self.assertIn("'-B'", calls[0])
         self.assertIn('"$PY" -B scripts/verify-pymss-plugin-api.py', macos)

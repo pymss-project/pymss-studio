@@ -70,11 +70,33 @@ class CorePlanTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertIn("pymss-core==0.1.7", commands[0])
 
+    def test_pymss_update_resolves_its_core_without_querying_core_releases(self):
+        final = probe("cpu", pymss="2.2.0", core="0.1.7")
+        status, commands, *_ = self.case.run_update(
+            latest_versions={"pymss": "2.2.0"}, overlay_probe=final,
+            expected_resolution_cores=("pymss-core>=0.1.6",),
+        )
+        self.assertEqual(status, 0)
+        self.assertIn("pymss[proxy]==2.2.0", commands[0])
+        self.assertIn("pymss-core==0.1.7", commands[0])
+
+    def test_core_only_resolution_cannot_be_confirmed_as_a_pymss_update(self):
+        compatible = manifest()
+        compatible["common"]["pymss"] = "pymss[proxy]>=2.1.3"
+        status, commands, *_rest, events = self.case.run_update(
+            manifest_value=compatible,
+            latest_versions={"pymss": "2.1.3", "pymss-core": "0.1.7"},
+            overlay_probe=probe("cpu", pymss="2.1.3", core="0.1.7"),
+        )
+        self.assertNotEqual(status, 0)
+        self.assertEqual(commands, [])
+        self.assertIn("No newer pymss", events[-1]["payload"]["message"])
+
     def test_uninstallable_newer_release_cannot_turn_into_a_successful_no_op_update(self):
         status, commands, *_rest, events = self.case.run_update(overlay_probe=probe("cpu", pymss="2.1.3"))
         self.assertNotEqual(status, 0)
         self.assertEqual(commands, [])
-        self.assertIn("No newer core could be resolved", events[-1]["payload"]["message"])
+        self.assertIn("No newer pymss version could be resolved", events[-1]["payload"]["message"])
 
     def test_expired_plan_or_changed_active_environment_is_rejected_before_installation(self):
         def expire(plan, _active):

@@ -140,6 +140,7 @@ impl EditorRegistry {
                 .get("workflowId")
                 .and_then(Value::as_str)
                 .unwrap_or(""),
+            // Publication metadata never changes the graph or its revision.
             _ => "",
         };
         self.check_write_owner(caller_label, workflow_id)?;
@@ -229,6 +230,22 @@ mod tests {
             .reserve("simple-new", "", WorkflowEditorKind::Simple)
             .unwrap();
         assert_eq!(registry.snapshot().editors[0].workflow_id, "workflow-a");
+    }
+
+    #[test]
+    fn publication_metadata_can_change_while_another_window_owns_the_graph() {
+        let mut registry = EditorRegistry::default();
+        registry.reserve("simple-a", "a", WorkflowEditorKind::Simple).unwrap();
+        let before = registry.snapshot();
+        for action in ["metadata", "notes"] {
+            let (_, changed) = registry.mutate("main", &json!({ "action": action, "workflowId": "a" }),
+                || Ok(json!({ "state": {} }))).unwrap();
+            assert!(changed.is_none());
+        }
+        assert_eq!(registry.snapshot().revision, before.revision);
+        assert_eq!(registry.snapshot().editors[0].label, "simple-a");
+        assert!(registry.mutate("main", &json!({ "action": "upsert", "entry": { "id": "a" } }),
+            || panic!("graph ownership must be enforced")).is_err());
     }
 
     #[test]

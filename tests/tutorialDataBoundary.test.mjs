@@ -104,6 +104,17 @@ test('window commands stay inside the tutorial and workflow writes use its priva
   const entry = { ...original.workflows[0], name: 'Updated in tutorial' }
   await runtime.invoke('mutate_workflow_store', { payload: { action: 'upsert', entry } })
   assert.equal((await runtime.invoke('load_app_store', { name: 'workflow-state' })).workflows[0].name, entry.name)
+  const metadata = { guid: '0d971bdd-6b5b-4245-8dd0-aad662b657c9', author: 'Author', version: '1.0.0' }
+  const published = await runtime.invoke('mutate_workflow_store', { payload: { action: 'metadata', workflowId: entry.id, metadata } })
+  assert.deepEqual(published.state.workflows[0].metadata, metadata)
+  assert.deepEqual(published.state.workflows[0].definition, entry.definition)
+  await assert.rejects(runtime.invoke('mutate_workflow_store', { payload: {
+    action: 'metadata', workflowId: entry.id, requireMatchingGuid: true,
+    metadata: { ...metadata, guid: '33333333-3333-4333-8333-333333333333' },
+  } }), /WORKFLOW_METADATA_GUID_CONFLICT/)
+  assert.deepEqual((await runtime.invoke('load_app_store', { name: 'workflow-state' })).workflows[0].metadata, metadata)
+  const saved = await runtime.invoke('mutate_workflow_store', { payload: { action: 'upsert', entry } })
+  assert.deepEqual(saved.state.workflows[0].metadata, metadata)
 })
 
 test('the native boundary forwards ordinary calls unchanged and never falls back in a tutorial', async t => {

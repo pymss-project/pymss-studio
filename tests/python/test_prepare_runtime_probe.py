@@ -1,3 +1,4 @@
+import base64
 import contextlib
 import importlib.util
 from importlib import metadata
@@ -17,6 +18,28 @@ from unittest.mock import patch
 
 
 class PrepareRuntimeProbeTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("robocopy"), "Windows robocopy is required")
+    def test_windows_bootstrap_copy_does_not_inherit_host_runtime_state(self):
+        script = (Path(__file__).resolve().parents[2] / "scripts/prepare-python-runtime.ps1").read_text(encoding="utf-8")
+        commands = re.findall(r"^\s*robocopy \$pythonHome \$runtime (.*?) \| Out-Host", script, re.M)
+        self.assertTrue(commands)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source"
+            source.mkdir()
+            (source / "keep.py").write_text("value = 1\n", encoding="utf-8")
+            states = ("pymss-runtime-state.json", "pymss-runtime-artifact-lock.json", "pymss-accelerator-state.json")
+            for name in states:
+                (source / name).write_text('{"backend":"cuda"}', encoding="utf-8")
+            for index, arguments in enumerate(commands):
+                destination = Path(directory) / str(index)
+                result = subprocess.run([shutil.which("robocopy"), str(source), str(destination),
+                    *arguments.split(), "/NFL", "/NDL", "/NJH", "/NJS"], capture_output=True)
+                self.assertLess(result.returncode, 8, result.stderr)
+                self.assertTrue((destination / "keep.py").is_file())
+                for name in states:
+                    self.assertFalse((destination / name).exists(), name)
+                    self.assertEqual((source / name).read_text(encoding="utf-8"), '{"backend":"cuda"}')
+
     def test_macos_bundled_state_records_torch_and_rejects_an_absent_installation(self):
         script = (Path(__file__).resolve().parents[2] / "scripts/prepare-python-runtime.sh").read_text(encoding="utf-8")
         recorder = re.search(r'runtime_python - "\$RUNTIME_ENVS_DIR" .*? <<\'PY\'\n(.*?)\nPY', script, re.S)
@@ -74,19 +97,19 @@ $result | ConvertTo-Json -Compress
         )
         match = re.search(
             r"\$probeScript = @'\r?\n(.*?)\r?\n'@"
-            r"\.Replace\('%NAMES%', \$manifestPackageJson\)"
-            r"\.Replace\('%MAPPING%', \$manifestMappingJson\)",
+            r"\.Replace\('%NAMES%', \$manifestPackageData\)"
+            r"\.Replace\('%MAPPING%', \$manifestMappingData\)",
             script,
             re.S,
         )
         self.assertIsNotNone(match, "exercise the production PowerShell heredoc and replacement chain")
         template = match.group(1)
-        self.assertIn("names = %NAMES%", template)
-        self.assertIn("mapping = %MAPPING%", template)
+        self.assertIn("names = json.loads(base64.b64decode('%NAMES%'))", template)
+        self.assertIn("mapping = json.loads(base64.b64decode('%MAPPING%'))", template)
         self.assertNotIn("json.loads(%NAMES%)", template)
         self.assertNotIn("json.loads(%MAPPING%)", template)
-        rendered = template.replace("%NAMES%", '["av", "pymss-core"]').replace(
-            "%MAPPING%", '{"pymss-core":"pymss_core"}',
+        rendered = template.replace("%NAMES%", base64.b64encode(b'["av", "pymss-core"]').decode()).replace(
+            "%MAPPING%", base64.b64encode(b'{"pymss-core":"pymss_core"}').decode(),
         )
         fake_torch = types.SimpleNamespace(
             __version__="test",

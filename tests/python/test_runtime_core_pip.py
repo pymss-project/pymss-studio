@@ -24,6 +24,9 @@ class OfflineCoreUpdateTests(unittest.TestCase):
     def test_real_resolver_installs_the_confirmed_pair_and_dependency_then_restores_the_base(self):
         self.run_offline_update(bundled=False)
 
+    def test_locked_core_is_resolved_without_checking_standalone_core_releases(self):
+        self.run_offline_update(bundled=False, core_requirement="pymss-core==0.1.7")
+
     def test_read_only_bundled_runtime_updates_and_rolls_back_through_user_overlays(self):
         self.run_offline_update(bundled=True)
 
@@ -46,7 +49,8 @@ class OfflineCoreUpdateTests(unittest.TestCase):
     def test_pruned_bundled_runtime_preserves_torch_dependencies_for_offline_updates(self):
         self.run_offline_update(bundled=True, pruned=True)
 
-    def run_offline_update(self, *, bundled, pruned=False, replace_bundle=False, temporary_parent=None, apple_silicon=False):
+    def run_offline_update(self, *, bundled, pruned=False, replace_bundle=False, temporary_parent=None, apple_silicon=False,
+                           core_requirement="pymss-core>=0.1.7,<0.2"):
         root = Path(self.enterContext(tempfile.TemporaryDirectory(dir=temporary_parent)))
         backend = "mlx" if apple_silicon else "cpu"
         envs = root / "runtime-envs"
@@ -93,7 +97,7 @@ class OfflineCoreUpdateTests(unittest.TestCase):
             wheel("setuptools", "78.1.0")
         wheel("pymss", "2.1.4", ["pymss-core==0.1.6", "torch>=2"])
         wheel("pymss-core", "0.1.6", ["torch>=2"])
-        wheel("pymss", "2.2.0", ["pymss-core>=0.1.7,<0.2", "new-audio-dependency>=1", "torch>=2"])
+        wheel("pymss", "2.2.0", [core_requirement, "new-audio-dependency>=1", "torch>=2"])
         wheel("pymss-core", "0.1.7", ["torch>=2"])
         wheel("pymss-core", "0.2.0", ["torch>=2"])
         wheel("new-audio-dependency", "1.0")
@@ -247,13 +251,14 @@ class OfflineCoreUpdateTests(unittest.TestCase):
              mock.patch.object(worker, "ACTIVE_RUNTIME_FILE", active), \
              mock.patch.object(worker, "BUNDLED_RUNTIME_ENVS_DIR", bundled_envs if bundled else None), \
              mock.patch.object(worker, "_manifest", return_value=manifest), \
-             mock.patch.object(worker, "_latest_pypi_version", side_effect=lambda name, channel="stable": {"pymss": "2.2.0", "pymss-core": "0.2.0"}[name]) as latest, \
+             mock.patch.object(worker, "_latest_pypi_version", side_effect=lambda name, channel="stable": {"pymss": "2.2.0"}[name]) as latest, \
              mock.patch.object(worker, "_verify_runtime_audio"), \
              mock.patch.object(optional_packages, "_is_apple_silicon", return_value=apple_silicon), \
              mock.patch.object(worker.subprocess, "Popen", side_effect=offline_popen), \
              contextlib.redirect_stdout(io.StringIO()) as output:
             payload = {"backend": backend, "pythonPath": str(python), "mirror": "pypi", "mode": "update", "taskId": "offline-pip"}
             self.assertEqual(worker.cmd_update_runtime_core({**payload, "prepareOnly": True}), 0, output.getvalue())
+            latest.assert_called_once_with("pymss", "stable")
             plan = next(json.loads(line)["payload"] for line in output.getvalue().splitlines() if json.loads(line)["type"] == "runtime_core_update_plan")
             self.assertEqual(plan["targetVersions"], {"pymss": "2.2.0", "pymss-core": "0.1.7"})
             self.assertEqual(json.loads(active.read_text(encoding="utf-8"))["pymssVersion"], "2.1.4")

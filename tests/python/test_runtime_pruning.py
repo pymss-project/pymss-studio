@@ -126,6 +126,61 @@ class RuntimePruningTests(unittest.TestCase):
         self.assertFalse((site_packages / "cachepkg" / "__pycache__").exists())
         self.assertFalse((site_packages / "cachepkg" / "tests").exists())
 
+    def _check_rocm_resources(self, *, windows: bool) -> None:
+        runtime, site = self._write_sample_runtime(windows=windows)
+        protected = [
+            "_rocm_sdk_core_7_2_1/include/hip/hip_runtime.h",
+            "_rocm_sdk_core_7_2_1/lib/llvm/lib/clang/20/include/stddef.h",
+            "_rocm_sdk_core_7_2_1/lib/llvm/bin/offload-arch.exe",
+            "_rocm_sdk_core_7_2_1/bin/hiprtc-builtins.bc",
+            "_rocm_sdk_devel_7_2_1/docs/runtime-data.json",
+            "rocm_sdk/tests/base_test.py",
+            "rocm_sdk_device_gfx1031/lib/library.kpack",
+            "amd_torch_device_gfx1031/kernels/attention.hsaco",
+            "rocm_sdk_core-7.2.1.dist-info/WHEEL",
+            "rocm_sdk_core-7.2.1.dist-info/METADATA",
+            "rocm_sdk_core-7.2.1.dist-info/entry_points.txt",
+            "amd_torch_device_gfx1031-2.13.0.dist-info/WHEEL",
+            "torch/include/ATen/native/hip/Loops.cuh",
+            "torch/include/ATen/native/hip/Kernel.h",
+        ]
+        for name in protected:
+            path = site / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"runtime resource")
+        unrelated = site / "cachepkg/include/unneeded.h"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.touch()
+        launcher = runtime / ("Scripts/rocm-sdk.exe" if windows else "bin/rocm-sdk")
+        launcher.parent.mkdir(parents=True)
+        launcher.write_bytes(b"SDK entry point")
+        script_dir = Path(__file__).resolve().parents[2] / "scripts"
+        if windows:
+            shell = shutil.which("pwsh") or shutil.which("powershell")
+            if shell is None:
+                self.skipTest("PowerShell is required")
+            command = [shell, "-NoProfile", "-File", str(script_dir / "prune-python-runtime.ps1"),
+                       "-RuntimeDir", str(runtime), "-Backend", "rocm"]
+        else:
+            shell = shutil.which("bash")
+            if shell is None:
+                self.skipTest("Bash is required")
+            command = [shell, str(script_dir / "prune-python-runtime.sh"), str(runtime), "--backend=rocm"]
+        result = subprocess.run(command, capture_output=True, text=True, env={**os.environ, "OS": "Windows_NT"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in protected:
+            self.assertEqual((site / name).read_bytes(), b"runtime resource", name)
+        self.assertFalse(unrelated.exists())
+        self.assertFalse((site / "cachepkg/tests").exists())
+        self.assertEqual(launcher.read_bytes(), b"SDK entry point")
+        self._check_packaging_dependencies(site)
+
+    def test_windows_rocm_prune_retains_hiprtc_kernels_sdk_metadata_and_tools(self):
+        self._check_rocm_resources(windows=True)
+
+    def test_posix_rocm_prune_retains_hiprtc_kernels_sdk_metadata_and_tools(self):
+        self._check_rocm_resources(windows=False)
+
     def _check_posix_xmlrpc_survives_pruning(self, *, keep_venv: bool) -> None:
         bash = shutil.which("bash")
         if bash is None:

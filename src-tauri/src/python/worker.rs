@@ -10,13 +10,20 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[path = "audio_output.rs"]
 mod audio_output;
+
+#[path = "runtime_native_paths.rs"]
+mod runtime_native_paths;
+
+#[path = "runtime_completion.rs"]
+mod runtime_completion;
+pub(crate) use runtime_completion::RuntimeMaintenanceCompletion;
 
 #[path = "process_tree.rs"]
 mod process_tree;
@@ -31,7 +38,7 @@ pub(crate) fn recover_audio_output_temps(app: &AppHandle) {
 }
 
 fn requires_background_result(command: &str) -> bool {
-    matches!(command, "export_editor_mix" | "manage_plugin" | "run_operation")
+    matches!(command, "export_editor_mix" | "manage_plugin" | "run_operation" | "install_runtime" | "rollback_runtime" | "runtime_gpu_probe")
 }
 
 fn take_cancelled_tasks(cancelled: &Mutex<HashSet<String>>, registered: &[String]) -> Vec<String> {
@@ -85,12 +92,107 @@ const HOST_PYTHON_ENV_VARS: &[&str] = &[
 
 static PAYLOAD_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+struct BackgroundTask {
+    command: String,
+    runtime_tree: Option<Arc<process_tree::RuntimeProcessTree>>,
+    completion: Option<Arc<RuntimeMaintenanceCompletion>>,
+}
+static BACKGROUND_TASKS: OnceLock<Mutex<HashMap<String, Arc<BackgroundTask>>>> = OnceLock::new();
+
+fn deferred_terminal_command(command: &str) -> bool {
+    matches!(command, "update_runtime_core" | "manage_plugin" | "install_runtime" | "rollback_runtime" | "runtime_gpu_probe")
+}
+
+fn transactional_runtime_command(command: &str) -> bool {
+    matches!(command, "install_runtime" | "rollback_runtime")
+}
+
+fn supervised_runtime_command(command: &str) -> bool {
+    transactional_runtime_command(command) || command == "runtime_gpu_probe"
+}
+
+fn mark_terminal_before_exit(command: &str) -> bool {
+    // A probe can report before its native processes finish. Keep cancellation available.
+    command != "runtime_gpu_probe"
+}
+
+pub(crate) fn defers_task_cancellation(task_id: &str) -> bool {
+    BACKGROUND_TASKS.get().and_then(|tasks| tasks.lock().ok())
+        .and_then(|tasks| tasks.get(task_id).cloned())
+        .is_some_and(|task| deferred_terminal_command(&task.command))
+}
+
+pub(crate) fn runtime_maintenance_completion(task_id: &str) -> Option<Arc<RuntimeMaintenanceCompletion>> {
+    BACKGROUND_TASKS.get().and_then(|tasks| tasks.lock().ok())
+        .and_then(|tasks| tasks.get(task_id).cloned()).and_then(|task| task.completion.clone())
+}
+
+pub(crate) fn wait_runtime_maintenance_completion(completion: Arc<RuntimeMaintenanceCompletion>) -> AppResult<()> {
+    let result = completion.wait(Duration::from_secs(150), || {
+        if let Ok(mut access) = RUNTIME_ACCESS.lock() {
+            access.recovery_required = true;
+            access.maintenance_cancel_timed_out = true;
+        }
+    });
+    if result.is_err() {
+        if let Ok(mut access) = RUNTIME_ACCESS.lock() {
+            access.recovery_required = true;
+            access.maintenance_cancel_timed_out |= result.as_ref().err()
+                .is_some_and(|message| message.starts_with("RUNTIME_CANCEL_TIMEOUT:"));
+        }
+    }
+    result.map_err(AppError::Worker)
+}
+
+pub(crate) fn cancel_runtime_maintenance_worker(
+    task_id: &str, child: crate::state::SharedChild, completion: Arc<RuntimeMaintenanceCompletion>,
+) -> AppResult<()> {
+    let stopped = (|| {
+        let mut child = child.lock().map_err(|_| AppError::Worker("worker process lock poisoned".into()))?;
+        terminate_background_worker(task_id, &mut child)
+    })();
+    if let Err(error) = stopped {
+        // cancel_task already records cancellation intent. Preserve a failed termination
+        // so a later natural exit cannot turn the failed RPC into a successful ACK.
+        let _ = completion.complete(Err(error.to_string()));
+        return Err(error);
+    }
+    // The supervisor needs this same child mutex for wait before it can recover.
+    wait_runtime_maintenance_completion(completion)
+}
+
+fn wait_runtime_worker(child: &crate::state::SharedChild) -> Option<std::process::ExitStatus> {
+    loop {
+        let status = { child.lock().ok()?.try_wait().ok()? };
+        match status {
+            Some(status) => return Some(status),
+            None => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
+pub(crate) fn terminate_background_worker(task_id: &str, child: &mut Child) -> AppResult<()> {
+    let task = BACKGROUND_TASKS.get().and_then(|tasks| tasks.lock().ok())
+        .and_then(|tasks| tasks.get(task_id).cloned());
+    terminate_worker(child)?;
+    if let Some(tree) = task.and_then(|task| task.runtime_tree.clone()) {
+        tree.stop_and_confirm().map_err(|error| AppError::Worker(format!(
+            "RUNTIME_PROCESS_EXIT_UNCONFIRMED: Runtime descendants could not be stopped: {error}"
+        )))?;
+    }
+    Ok(())
+}
+
 // Core packages are updated in the active environment. Hold a shared lease for every worker
 // using that interpreter, and an exclusive lease for pip, including the process-start window.
+// GPU probes are also exclusive: model inference would compete for memory and skew diagnostics.
 static RUNTIME_ACCESS: Mutex<RuntimeAccess> = Mutex::new(RuntimeAccess {
     users: 0,
     updating: false,
     installing_plugins: 0,
+    recovery_required: false,
+    process_exit_unconfirmed: false,
+    maintenance_cancel_timed_out: false,
 });
 // Application replacement also excludes bootstrap workers, which can otherwise keep
 // importing modules from the old bundle while its directory is being replaced.
@@ -98,6 +200,9 @@ static APPLICATION_ACCESS: Mutex<RuntimeAccess> = Mutex::new(RuntimeAccess {
     users: 0,
     updating: false,
     installing_plugins: 0,
+    recovery_required: false,
+    process_exit_unconfirmed: false,
+    maintenance_cancel_timed_out: false,
 });
 
 pub(crate) fn acquire_application_update() -> AppResult<impl Drop> {
@@ -127,6 +232,9 @@ struct RuntimeAccess {
     users: usize,
     updating: bool,
     installing_plugins: usize,
+    recovery_required: bool,
+    process_exit_unconfirmed: bool,
+    maintenance_cancel_timed_out: bool,
 }
 
 struct RuntimeAccessGuard<'a> {
@@ -159,6 +267,10 @@ fn requires_bootstrap_python(command: &str) -> bool {
             | "runtime_env_sizes"
             | "runtime_core_versions"
             | "install_runtime"
+            | "runtime_install_plan"
+            | "runtime_hardware_inventory"
+            | "rollback_runtime"
+            | "recover_runtime"
             | "activate_runtime"
             | "delete_runtime"
             | "update_runtime_core"
@@ -190,13 +302,22 @@ fn acquire_runtime_access<'a>(
     command: &str,
 ) -> AppResult<Option<RuntimeAccessGuard<'a>>> {
     let installing_plugins = command == "install_plugin";
-    let updating = matches!(command, "update_runtime_core" | "manage_plugin" | "activate_runtime" | "delete_runtime" | "install_runtime");
-    if !updating && requires_bootstrap_python(command) {
+    let updating = matches!(command, "update_runtime_core" | "manage_plugin" | "activate_runtime" | "delete_runtime" | "install_runtime" | "rollback_runtime" | "recover_runtime" | "runtime_gpu_probe");
+    if !updating && matches!(command, "health" | "network_diagnostics" | "plugin_source_info") {
         return Ok(None);
     }
     let mut state = access
         .lock()
         .map_err(|_| AppError::Worker("runtime access lock poisoned".into()))?;
+    if state.maintenance_cancel_timed_out {
+        return Err(AppError::Worker(runtime_completion::CANCEL_COMPLETION_TIMEOUT.into()));
+    }
+    if state.process_exit_unconfirmed {
+        return Err(AppError::Worker("RUNTIME_PROCESS_EXIT_UNCONFIRMED: Runtime processes may still be running. Restart the application after closing runtime processes.".into()));
+    }
+    if state.recovery_required && !matches!(command, "install_runtime" | "rollback_runtime" | "recover_runtime") {
+        return Err(AppError::Worker("RUNTIME_RECOVERY_REQUIRED: Runtime recovery failed. Recover the runtime before starting another operation.".into()));
+    }
     if state.updating || ((updating || installing_plugins) && state.users > 0)
         || (!installing_plugins && state.installing_plugins > 0) {
         return Err(AppError::Worker(
@@ -223,10 +344,17 @@ fn worker_scratch(command: &str) -> std::io::Result<Option<tempfile::TempDir>> {
 
 fn query_timeout(command: &str) -> Option<std::time::Duration> {
     let seconds = match command {
-        "env_info" | "runtime_info" | "plugin_marketplace" | "list_nodes" | "describe_operation" => {
+        "env_info" | "plugin_marketplace" | "list_nodes" | "describe_operation" => {
             90
         }
+        // ROCm overview checks include a bounded import probe and a separate
+        // supervised GPU kernel check; allow both to return structured failures.
+        "runtime_info" => 180,
         "runtime_env_sizes" => 180,
+        "runtime_install_plan" => 90,
+        "runtime_hardware_inventory" => 90,
+        "runtime_gpu_probe_report" => 15,
+        "recover_runtime" => 120,
         _ => return None,
     };
     Some(std::time::Duration::from_secs(seconds))
@@ -238,6 +366,23 @@ fn runtime_access_command<'a>(command: &'a str, payload: &Value) -> &'a str {
     } else {
         command
     }
+}
+
+fn has_pending_runtime_transaction(app: &AppHandle) -> AppResult<bool> {
+    let mut roots = vec![storage::runtime_envs_dir(app)?];
+    roots.extend(bundled_runtime_envs_dir(app)?);
+    Ok(roots.iter().any(|root| root.join(".rocm-transaction.json").exists()))
+}
+
+fn recovery_query(command: &str) -> bool {
+    matches!(command, "runtime_info" | "runtime_core_versions" | "runtime_env_sizes" | "runtime_install_plan")
+}
+
+fn acquire_worker_runtime_access(app: &AppHandle, command: &str, payload: &Value) -> AppResult<Option<RuntimeAccessGuard<'static>>> {
+    let access_command = if recovery_query(command) && has_pending_runtime_transaction(app)? {
+        "recover_runtime"
+    } else { runtime_access_command(command, payload) };
+    acquire_runtime_access(&RUNTIME_ACCESS, access_command)
 }
 
 #[derive(Debug, Deserialize)]
@@ -623,56 +768,6 @@ fn bundled_bin_candidates(resource: Option<&Path>, exe_dir: &Path) -> Vec<PathBu
     dirs
 }
 
-#[cfg(windows)]
-fn rocm_native_tool_dir(runtime_envs_dir: &Path) -> Option<PathBuf> {
-    let site_packages = runtime_envs_dir
-        .join("rocm")
-        .join("Lib")
-        .join("site-packages");
-    let entries = std::fs::read_dir(site_packages).ok()?;
-    entries
-        .flatten()
-        .map(|entry| entry.path())
-        .find_map(|package_dir| {
-            let name = package_dir.file_name()?.to_str()?;
-            let tool_dir = package_dir.join("lib").join("llvm").join("bin");
-            (name.starts_with("_rocm_sdk_core") && tool_dir.join("offload-arch.exe").is_file())
-                .then_some(tool_dir)
-        })
-}
-
-#[cfg(windows)]
-fn rocm_native_tool_dirs(app: &AppHandle) -> AppResult<Vec<PathBuf>> {
-    let mut runtime_envs_dirs = vec![storage::runtime_envs_dir(app)?];
-    runtime_envs_dirs.extend(bundled_runtime_envs_dir(app)?);
-    Ok(rocm_native_tool_dirs_from(runtime_envs_dirs))
-}
-
-#[cfg(windows)]
-fn rocm_native_tool_dirs_from(runtime_envs_dirs: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut result = Vec::new();
-    for runtime_envs in runtime_envs_dirs {
-        let Some(tool_dir) = rocm_native_tool_dir(&runtime_envs) else {
-            continue;
-        };
-        let sdk_bin = tool_dir
-            .parent()
-            .and_then(|path| path.parent())
-            .and_then(|path| path.parent())
-            .map(|path| path.join("bin"));
-        result.push(tool_dir);
-        if let Some(sdk_bin) = sdk_bin.filter(|dir| dir.is_dir()) {
-            result.push(sdk_bin);
-        }
-    }
-    result
-}
-
-#[cfg(not(windows))]
-fn rocm_native_tool_dirs(_app: &AppHandle) -> AppResult<Vec<PathBuf>> {
-    Ok(Vec::new())
-}
-
 #[cfg(target_os = "macos")]
 fn bundled_openssl_env(app: &AppHandle) -> AppResult<Option<(PathBuf, PathBuf)>> {
     for bin_dir in bundled_bin_dirs(app)? {
@@ -717,7 +812,10 @@ fn isolate_python_environment(cmd: &mut Command, cache_root: &Path) {
     for key in HOST_PYTHON_ENV_VARS {
         cmd.env_remove(key);
     }
-    cmd.env("PYTHONNOUSERSITE", "1")
+    // An interpreter flag also works for isolated/embedded Python, which can
+    // ignore PYTHONFAULTHANDLER inherited through the environment.
+    cmd.args(["-X", "faulthandler"])
+        .env("PYTHONNOUSERSITE", "1")
         .env("NUMBA_CACHE_DIR", cache_root.join("numba-cache"))
         .env("PIP_CACHE_DIR", cache_root.join("pip-cache"));
 }
@@ -769,7 +867,8 @@ fn build_worker_command(
     operation_id: &str,
 ) -> AppResult<Command> {
     let worker = worker_path(app)?;
-    let bootstrap_python = bootstrap_python_path(app)?;
+    let bootstrap_python = runtime_native_paths::command_executable(Path::new(&bootstrap_python_path(app)?))
+        .to_string_lossy().into_owned();
     let settings = storage::read_app_store(app, "app-settings")?;
     let developer_mode = settings.get("developerMode").and_then(Value::as_bool) == Some(true);
     // Runtime management must never run inside the environment it is managing: the bootstrap
@@ -786,6 +885,14 @@ fn build_worker_command(
         .transpose()?
         .flatten();
     let python = select_worker_python(command, &bootstrap_python, active_runtime_python)?;
+    let mut managed_roots = vec![storage::runtime_envs_dir(app)?];
+    managed_roots.extend(bundled_runtime_envs_dir(app)?);
+    runtime_native_paths::reject_reserved_interpreter(Path::new(&python), &managed_roots)?;
+    runtime_native_paths::reject_reserved_interpreter(Path::new(&bootstrap_python), &managed_roots)?;
+    runtime_native_paths::reject_managed_bootstrap(Path::new(&bootstrap_python), &managed_roots)?;
+    if !requires_bootstrap_python(command) {
+        runtime_native_paths::reject_pending_environment(Path::new(&python), &managed_roots)?;
+    }
     let python_for_log = python.clone();
     let worker_for_log = worker.clone();
     let mut cmd = Command::new(&python);
@@ -848,9 +955,12 @@ fn build_worker_command(
         );
     }
     apply_proxy_env(app, &mut cmd);
-    let mut tool_dirs = rocm_native_tool_dirs(app)?;
+    let mut tool_dirs = if cfg!(windows) {
+        runtime_native_paths::native_directories(Path::new(&python))?
+    } else { Vec::new() };
     tool_dirs.extend(bundled_bin_dirs(app)?);
-    if let Some(path) = prepend_path(std::env::var("PATH").ok(), tool_dirs) {
+    let inherited_path = runtime_native_paths::clean_managed_rocm_path(std::env::var("PATH").ok(), &managed_roots);
+    if let Some(path) = prepend_path(inherited_path, tool_dirs) {
         cmd.env("PATH", path);
     }
     #[cfg(target_os = "macos")]
@@ -1009,20 +1119,42 @@ fn emit_batch_stderr(app: &AppHandle, task_ids: &[String], line: String) {
     }
 }
 
-fn native_worker_failure(code: Option<i32>) -> Option<String> {
-    let status = code? as u32;
-    let reason = match status {
-        0xC0000005 => "Windows access violation",
-        0xC000001D => "Windows illegal instruction",
-        0xC0000409 => "Windows fail-fast termination",
-        0xC0000374 => "Windows heap corruption",
-        _ => return None,
+fn native_fault_status(line: &str) -> Option<i32> {
+    let reason = line.trim().strip_prefix("Windows fatal exception: ")?;
+    let status = match reason {
+        "access violation" => 0xC0000005_u32,
+        "illegal instruction" => 0xC000001D_u32,
+        _ => {
+            let hex = reason.strip_prefix("code 0x")?;
+            if hex.len() != 8 { return None; }
+            u32::from_str_radix(hex, 16).ok()?
+        }
     };
-    Some(format!("{reason} (0x{status:08X})"))
+    Some(status as i32)
+}
+
+fn native_worker_failure(code: Option<i32>, fault: Option<i32>) -> Option<String> {
+    // Windows faulthandler can report the native status but exit through the CRT
+    // with code 3. Retain that status independently of the bounded stderr tail.
+    // Handled first-chance faults can also print a header before an unrelated
+    // Python failure, so ordinary exit codes must keep their existing meaning.
+    let fault = if code == Some(3) { fault } else { None };
+    for code in [code, fault].into_iter().flatten() {
+        let status = code as u32;
+        let reason = match status {
+            0xC0000005 => "Windows access violation",
+            0xC000001D => "Windows illegal instruction",
+            0xC0000409 => "Windows fail-fast termination",
+            0xC0000374 => "Windows heap corruption",
+            _ => continue,
+        };
+        return Some(format!("{reason} (0x{status:08X})"));
+    }
+    None
 }
 
 fn worker_stage(envelope: &WorkerEnvelope, fallback_task_id: &str) -> Option<(String, String)> {
-    if envelope.event_type != "task_stage" { return None; }
+    if !matches!(envelope.event_type.as_str(), "task_stage" | "runtime_gpu_probe_stage") { return None; }
     let stage = envelope.payload.get("stage")?.as_str()?;
     if stage.is_empty() || stage.len() > 64 || !stage.bytes().all(|value| value.is_ascii_lowercase() || value.is_ascii_digit() || value == b'_') {
         return None;
@@ -1366,6 +1498,8 @@ fn is_background_terminal_event(command: &str, event_type: &str) -> bool {
             event_type,
             "error" | "runtime_install_finished" | "task_cancelled"
         ),
+        "rollback_runtime" => matches!(event_type, "error" | "runtime_rollback_finished" | "task_cancelled"),
+        "runtime_gpu_probe" => matches!(event_type, "error" | "runtime_gpu_probe_finished" | "task_cancelled"),
         "update_runtime_core" => matches!(
             event_type,
             "error"
@@ -1517,7 +1651,39 @@ fn run_worker_with_payload_inner(
     operation_id: &str,
 ) -> AppResult<Value> {
     let _application_access = acquire_application_operation()?;
-    let _runtime_access = acquire_runtime_access(&RUNTIME_ACCESS, runtime_access_command(command, payload.as_ref().unwrap_or(&Value::Null)))?;
+    let _runtime_access = acquire_worker_runtime_access(app, command, payload.as_ref().unwrap_or(&Value::Null))?;
+    let exclusive_query = recovery_query(command) && _runtime_access.as_ref().is_some_and(|lease| lease.updating);
+    let mut result = execute_worker_with_payload(app, command, payload, operation_id, command != "recover_runtime" && !exclusive_query);
+    if command == "recover_runtime" {
+        if result.as_ref().is_ok_and(|payload| payload.get("recovered").and_then(Value::as_bool) != Some(true)) {
+            result = Err(AppError::Worker("RUNTIME_RECOVERY_FAILED: Runtime recovery did not confirm completion".into()));
+        }
+        if let Err(error) = &result {
+            if let Ok(mut access) = RUNTIME_ACCESS.lock() {
+                access.recovery_required = true;
+                access.process_exit_unconfirmed |= error.to_string().contains("RUNTIME_PROCESS_EXIT_UNCONFIRMED");
+            }
+        }
+    }
+    if result.is_ok() && _runtime_access.as_ref().is_some_and(|lease| lease.updating)
+        && (command == "recover_runtime" || recovery_query(command)) && !has_pending_runtime_transaction(app)?
+    {
+        if let Ok(mut access) = RUNTIME_ACCESS.lock() { access.recovery_required = false; }
+    }
+    drop(_runtime_access);
+    drop(_application_access);
+    if command == "recover_runtime" {
+        if let Ok(payload) = &result {
+            let _ = app.emit("pymss://worker-event", serde_json::json!({"type": "runtime_recovered", "payload": payload}));
+        }
+    }
+    result
+}
+
+// The caller owns both application and runtime leases, including recovery after a killed worker.
+fn execute_worker_with_payload(
+    app: &AppHandle, command: &str, payload: Option<Value>, operation_id: &str, emit_events: bool,
+) -> AppResult<Value> {
     let scratch = worker_scratch(command)?;
     let payload_file = match payload {
         Some(value) => Some(make_payload_file(command, None, value)?),
@@ -1569,11 +1735,16 @@ fn run_worker_with_payload_inner(
     let stderr_command = command.to_string();
     let stderr_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let stderr_lines_for_thread = Arc::clone(&stderr_lines);
+    let stderr_fault = Arc::new(AtomicI32::new(0));
+    let stderr_fault_for_thread = Arc::clone(&stderr_fault);
     let stderr_handle = stderr.map(|stderr| {
         std::thread::spawn(move || {
             read_lossy_lines(stderr, |line| {
                 if forward_python_terminal_log(&stderr_app, &line) {
                     return;
+                }
+                if let Some(status) = native_fault_status(&line) {
+                    stderr_fault_for_thread.store(status, Ordering::Release);
                 }
                 if let Ok(mut lines) = stderr_lines_for_thread.lock() {
                     lines.push(line.clone());
@@ -1600,7 +1771,7 @@ fn run_worker_with_payload_inner(
                 log_worker_event_with_scope(app, command, &mut envelope, Some(operation_id), None);
                 // Environment probes return through IPC or a correlated background event.
                 // An untagged broadcast would bypass the caller's request ordering.
-                if command != "env_info" || is_log {
+                if emit_events && (command != "env_info" || is_log) {
                     let _ = app.emit("pymss://worker-event", &envelope);
                 }
                 if envelope.event_type == "error" {
@@ -1644,7 +1815,13 @@ fn run_worker_with_payload_inner(
             .map_err(|_| AppError::Worker("worker process lock poisoned".into()))?
             .wait()?
     };
-    let timed_out = deadline.map(|deadline| deadline.finish()).unwrap_or(false);
+    let timeout_completion = match deadline {
+        Some(deadline) if command == "recover_runtime" => deadline.finish_confirmed().map_err(|error| AppError::Worker(format!(
+            "RUNTIME_PROCESS_EXIT_UNCONFIRMED: Recovery worker descendants could not be stopped: {error}"
+        ))),
+        Some(deadline) => Ok(deadline.finish()),
+        None => Ok(false),
+    };
     session_log::append(
         app,
         if status.success() {
@@ -1666,6 +1843,7 @@ fn run_worker_with_payload_inner(
     if let Some(path) = payload_file.as_ref() {
         let _ = std::fs::remove_file(path);
     }
+    let timed_out = timeout_completion?;
     if timed_out {
         return Err(AppError::Worker(format!(
             "WORKER_QUERY_TIMEOUT: {command} exceeded its {} second time limit. Check runtime diagnostics and retry.",
@@ -1676,7 +1854,8 @@ fn run_worker_with_payload_inner(
         return Err(err);
     }
     if !status.success() {
-        if let Some(message) = native_worker_failure(status.code()) {
+        let fault = stderr_fault.load(Ordering::Acquire);
+        if let Some(message) = native_worker_failure(status.code(), (fault != 0).then_some(fault)) {
             return Err(AppError::Worker(format!(
                 "WORKER_NATIVE_CRASH: {message}. Export diagnostics and check system application error events for the faulting module."
             )));
@@ -1717,7 +1896,7 @@ fn spawn_worker_background_inner(
     operation_id: String,
 ) -> AppResult<()> {
     let mut application_access = Some(acquire_application_operation()?);
-    let mut runtime_access = acquire_runtime_access(&RUNTIME_ACCESS, runtime_access_command(command, &payload))?;
+    let mut runtime_access = acquire_worker_runtime_access(&app, command, &payload)?;
     let mut registered_task_ids = vec![task_id.clone()];
     if let Some(tasks) = payload.get("tasks").and_then(Value::as_array) {
         for item in tasks {
@@ -1745,6 +1924,8 @@ fn spawn_worker_background_inner(
     }
 
     let command_name = command.to_string();
+    let needs_transaction_recovery = command == "rollback_runtime"
+        || (command == "install_runtime" && payload.get("backend").and_then(Value::as_str).is_some_and(|backend| backend.trim().eq_ignore_ascii_case("rocm")));
     let scratch = worker_scratch(command)?;
     let mut audio_scope = if command == "run_operation" {
         let directory = operation_output_directory(&payload, &default_output_dir(&app)?)?;
@@ -1785,8 +1966,28 @@ fn spawn_worker_background_inner(
             ("taskId", task_id.clone()),
         ],
     );
-    let mut child: Child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
-        Ok(child) => child,
+    // Reserve both registries before spawning so no registration error can release the
+    // maintenance lease while an untracked worker is already changing the environment.
+    let mut task_registry = state.tasks.lock().map_err(|_| {
+        let _ = std::fs::remove_file(&payload_file);
+        AppError::Worker("task registry lock poisoned".into())
+    })?;
+    let mut background_registry = BACKGROUND_TASKS.get_or_init(|| Mutex::new(HashMap::new())).lock().map_err(|_| {
+        let _ = std::fs::remove_file(&payload_file);
+        AppError::Worker("background command registry lock poisoned".into())
+    })?;
+    if let Some(id) = registered_task_ids.iter().find(|id| task_registry.contains_key(*id)) {
+        let _ = std::fs::remove_file(&payload_file);
+        return Err(AppError::Worker(format!("task already exists: {id}")));
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let launched = if supervised_runtime_command(command) {
+        process_tree::RuntimeProcessTree::spawn(&mut cmd).map(|(child, tree)| (child, Some(tree)))
+    } else {
+        cmd.spawn().map(|child| (child, None))
+    };
+    let (mut child, runtime_tree) = match launched {
+        Ok(process) => process,
         Err(error) => {
             let _ = std::fs::remove_file(&payload_file);
             return Err(error.into());
@@ -1806,26 +2007,35 @@ fn spawn_worker_background_inner(
     let stderr = child.stderr.take();
     let stderr_app = app.clone();
     let stderr_task_ids = registered_task_ids.clone();
+    let stderr_fault = Arc::new(AtomicI32::new(0));
+    let stderr_fault_for_thread = Arc::clone(&stderr_fault);
+    let (stderr_done, stderr_drained) = std::sync::mpsc::channel();
     let stderr_handle = stderr.map(|stderr| {
         std::thread::spawn(move || {
             read_lossy_lines(stderr, |line| {
                 if forward_python_terminal_log(&stderr_app, &line) {
                     return;
                 }
+                if let Some(status) = native_fault_status(&line) {
+                    stderr_fault_for_thread.store(status, Ordering::Release);
+                }
                 emit_batch_stderr(&stderr_app, &stderr_task_ids, line);
             });
+            let _ = stderr_done.send(());
         })
     });
     let shared_child = Arc::new(Mutex::new(child));
-    {
-        let mut tasks = state
-            .tasks
-            .lock()
-            .map_err(|_| AppError::Worker("task registry lock poisoned".into()))?;
-        for registered_task_id in &registered_task_ids {
-            tasks.insert(registered_task_id.clone(), shared_child.clone());
-        }
+    let maintenance_completion = supervised_runtime_command(command)
+        .then(|| Arc::new(RuntimeMaintenanceCompletion::default()));
+    let task = Arc::new(BackgroundTask {
+        command: command_name.clone(), runtime_tree: runtime_tree.clone(), completion: maintenance_completion.clone(),
+    });
+    for id in &registered_task_ids {
+        background_registry.insert(id.clone(), task.clone());
+        task_registry.insert(id.clone(), shared_child.clone());
     }
+    drop(background_registry);
+    drop(task_registry);
     std::thread::spawn(move || {
         let mut terminal_task_ids: HashSet<String> = HashSet::new();
         let mut core_terminal_events = Vec::new();
@@ -1845,17 +2055,17 @@ fn spawn_worker_background_inner(
                         if let Some(envelope_task_id) = envelope.task_id.as_deref() {
                             if registered_task_ids.iter().any(|id| id == envelope_task_id) {
                                 terminal_task_ids.insert(envelope_task_id.to_string());
-                                mark_task_terminal(&app, envelope_task_id);
+                                if mark_terminal_before_exit(&command_name) { mark_task_terminal(&app, envelope_task_id); }
                             }
                         } else if envelope.event_type == "error" {
                             if let Some(request_id) = envelope.request_id.as_deref().filter(|id| {
                                 registered_task_ids.iter().any(|task_id| task_id == id)
                             }) {
                                 terminal_task_ids.insert(request_id.to_string());
-                                mark_task_terminal(&app, request_id);
+                                if mark_terminal_before_exit(&command_name) { mark_task_terminal(&app, request_id); }
                             } else {
                                 let message = worker_error_message(&envelope);
-                                if matches!(command_name.as_str(), "update_runtime_core" | "manage_plugin") {
+                                if deferred_terminal_command(&command_name) {
                                     core_terminal_error =
                                         Some((message, envelope.payload.get("logRecord").cloned()));
                                 } else {
@@ -1868,15 +2078,15 @@ fn spawn_worker_background_inner(
                                 }
                                 terminal_task_ids.extend(registered_task_ids.iter().cloned());
                                 for registered_task_id in &registered_task_ids {
-                                    mark_task_terminal(&app, registered_task_id);
+                                    if mark_terminal_before_exit(&command_name) { mark_task_terminal(&app, registered_task_id); }
                                 }
                             }
                         } else {
                             terminal_task_ids.insert(task_id.clone());
-                            mark_task_terminal(&app, &task_id);
+                            if mark_terminal_before_exit(&command_name) { mark_task_terminal(&app, &task_id); }
                         }
                     }
-                    if matches!(command_name.as_str(), "update_runtime_core" | "manage_plugin")
+                    if deferred_terminal_command(&command_name)
                         && is_background_terminal_event(&command_name, envelope.event_type.as_str())
                     {
                         core_terminal_events.push(envelope);
@@ -1898,18 +2108,25 @@ fn spawn_worker_background_inner(
                             &line,
                         );
                         let record = serde_json::to_value(record).ok();
-                        broadcast_existing_task_error(
-                            &app,
-                            &registered_task_ids,
-                            format!("Invalid worker event: {err}"),
-                            record.as_ref(),
-                        );
+                        if command_name == "runtime_gpu_probe" {
+                            core_terminal_error = Some((format!("Invalid worker event: {err}"), record));
+                        } else {
+                            broadcast_existing_task_error(
+                                &app,
+                                &registered_task_ids,
+                                format!("Invalid worker event: {err}"),
+                                record.as_ref(),
+                            );
+                        }
                         terminal_task_ids.extend(registered_task_ids.iter().cloned());
                     }
                 }
             }
         });
-        let exit_status = if let Ok(mut child) = shared_child.lock() {
+        let exit_status = if supervised_runtime_command(&command_name) {
+            // EOF can precede process exit. Keep the child mutex available to cancellation.
+            wait_runtime_worker(&shared_child)
+        } else if let Ok(mut child) = shared_child.lock() {
             child.wait().ok()
         } else {
             None
@@ -1924,15 +2141,56 @@ fn spawn_worker_background_inner(
         // The parent owns scratch so forced worker cancellation also removes
         // temporary AUDIO files, even when Python cannot execute its finally.
         drop(scratch);
-        drop(runtime_access.take());
-        drop(application_access.take());
-        // Finish Python cleanup before the terminal event starts the UI's environment refresh.
-        if let Some((message, record)) = core_terminal_error {
-            broadcast_existing_task_error(&app, &registered_task_ids, message, record.as_ref());
+        let mut recovery_error = None;
+        let mut recovery_payload = None;
+        if supervised_runtime_command(&command_name) {
+            for id in &registered_task_ids { mark_task_terminal(&app, id); }
+            let stopped = if exit_status.is_none() {
+                Err(AppError::Worker("RUNTIME_PROCESS_EXIT_UNCONFIRMED: Runtime worker exit could not be confirmed".into()))
+            } else {
+                runtime_tree.as_ref().ok_or_else(|| AppError::Worker("Runtime process tree was not registered".into()))
+                    .and_then(|tree| tree.stop_and_confirm().map_err(AppError::from))
+            };
+            let process_exit_unconfirmed = stopped.is_err();
+            let recovered = stopped.and_then(|_| {
+                if !needs_transaction_recovery { return Ok(None); }
+                execute_worker_with_payload(
+                    &app, "recover_runtime", Some(serde_json::json!({"taskId": task_id})), &operation_id, false,
+                ).and_then(|payload| {
+                    if payload.get("recovered").and_then(Value::as_bool) == Some(true) { Ok(Some(payload)) }
+                    else { Err(AppError::Worker("Runtime recovery did not confirm a usable environment".into())) }
+                })
+            });
+            match recovered {
+                Ok(payload) => { recovery_payload = payload; }
+                Err(error) => {
+                    recovery_error = Some(if transactional_runtime_command(&command_name) {
+                        format!("RUNTIME_RECOVERY_FAILED: {error}")
+                    } else {
+                        format!("RUNTIME_PROCESS_EXIT_UNCONFIRMED: GPU probe processes could not be stopped: {error}")
+                    });
+                    core_terminal_events.clear();
+                    core_terminal_error = None;
+                    terminal_task_ids.extend(registered_task_ids.iter().cloned());
+                }
+            }
+            if let Ok(mut access) = RUNTIME_ACCESS.lock() {
+                access.recovery_required = recovery_error.is_some();
+                access.process_exit_unconfirmed = process_exit_unconfirmed
+                    || recovery_error.as_ref().is_some_and(|error| error.contains("RUNTIME_PROCESS_EXIT_UNCONFIRMED"));
+            }
         }
-        for mut envelope in core_terminal_events {
-            log_worker_event_with_scope(&app, &command_name, &mut envelope, Some(&operation_id), Some(&task_id));
-            let _ = app.emit("pymss://worker-event", &envelope);
+        if let Some(completion) = &maintenance_completion {
+            let outcome = recovery_error.clone().map_or(Ok(()), Err);
+            if let Err(message) = completion.complete_after_release(runtime_access.take(), application_access.take(), outcome) {
+                recovery_error = Some(message);
+                core_terminal_events.clear();
+                core_terminal_error = None;
+                terminal_task_ids.extend(registered_task_ids.iter().cloned());
+            }
+        } else {
+            drop(runtime_access.take());
+            drop(application_access.take());
         }
         // Retain the consumed IDs for notification: draining them once for logging
         // and again for emission loses the plugin supervisor's cancellation ACK.
@@ -1942,6 +2200,38 @@ fn spawn_worker_background_inner(
         let was_cancelled = !cancelled_task_ids.is_empty();
         for id in &cancelled_task_ids {
             terminal_task_ids.insert(id.clone());
+        }
+        if let Some(message) = &recovery_error {
+            broadcast_existing_task_error(&app, &registered_task_ids, message.clone(), None);
+        } else if let Some(payload) = recovery_payload {
+            let _ = app.emit("pymss://worker-event", serde_json::json!({
+                "type": "runtime_recovered", "taskId": task_id, "payload": payload,
+            }));
+        }
+        // Finish Python cleanup before the terminal event starts the UI's environment refresh.
+        if was_cancelled {
+            core_terminal_error = None;
+            core_terminal_events.clear();
+        }
+        // A report is only final after the worker has exited successfully. Native crashes
+        // after report serialization must still be surfaced as process failures.
+        if command_name == "runtime_gpu_probe" && !exit_status.as_ref().is_some_and(|status| status.success())
+            && !was_cancelled && recovery_error.is_none()
+        {
+            core_terminal_events.retain(|envelope| envelope.event_type == "error");
+            if core_terminal_error.is_none() && core_terminal_events.is_empty() {
+                for id in &registered_task_ids { terminal_task_ids.remove(id); }
+            }
+        }
+        if command_name == "runtime_gpu_probe" && core_terminal_error.is_some() {
+            core_terminal_events.clear();
+        }
+        if let Some((message, record)) = core_terminal_error {
+            broadcast_existing_task_error(&app, &registered_task_ids, message, record.as_ref());
+        }
+        for mut envelope in core_terminal_events {
+            log_worker_event_with_scope(&app, &command_name, &mut envelope, Some(&operation_id), Some(&task_id));
+            let _ = app.emit("pymss://worker-event", &envelope);
         }
         session_log::append(
             &app,
@@ -1971,12 +2261,17 @@ fn spawn_worker_background_inner(
         ));
         for registered_task_id in cancelled_task_ids {
             terminal_task_ids.insert(registered_task_id.clone());
-            if command_name == "manage_plugin" {
+            if deferred_terminal_command(&command_name) && recovery_error.is_none() {
                 let _ = app.emit("pymss://worker-event", serde_json::json!({
                     "type": "task_cancelled", "taskId": registered_task_id,
                     "payload": { "message": "Cancelled" }
                 }));
             }
+        }
+        // A descendant can retain stderr after the Worker exits. Bound this
+        // drain so its inherited pipe cannot hide the task's failure event.
+        if exit_status.as_ref().is_some_and(|status| !status.success()) {
+            let _ = stderr_drained.recv_timeout(Duration::from_secs(1));
         }
         let missing_terminal_task_ids = registered_task_ids
             .iter()
@@ -1986,7 +2281,8 @@ fn spawn_worker_background_inner(
         if !missing_terminal_task_ids.is_empty() {
             match exit_status {
                 Some(status) if !status.success() => {
-                    if let Some(message) = native_worker_failure(status.code()) {
+                    let fault = stderr_fault.load(Ordering::Acquire);
+                    if let Some(message) = native_worker_failure(status.code(), (fault != 0).then_some(fault)) {
                         let mut details = serde_json::json!({ "exitStatus": status.to_string(), "exitCode": status.code() });
                         if let Some((stage_task_id, stage)) = &last_stage {
                             details["lastStage"] = stage.clone().into();
@@ -2021,6 +2317,11 @@ fn spawn_worker_background_inner(
             let _ = handle.join();
         }
         let _ = std::fs::remove_file(payload_file);
+        if let Some(registry) = BACKGROUND_TASKS.get() {
+            if let Ok(mut registry) = registry.lock() {
+                for id in &registered_task_ids { registry.remove(id); }
+            }
+        }
         let cleanup_state = app.state::<AppState>();
         if let Ok(mut tasks) = cleanup_state.tasks.lock() {
             for registered_task_id in &registered_task_ids {
@@ -2052,14 +2353,31 @@ mod tests {
 
     #[test]
     fn native_worker_exit_codes_preserve_status_without_guessing_the_driver() {
-        let message = super::native_worker_failure(Some(0xC0000005_u32 as i32)).unwrap();
+        let message = super::native_worker_failure(Some(0xC0000005_u32 as i32), None).unwrap();
         assert!(message.contains("0xC0000005"));
         assert!(message.contains("access violation"));
         assert!(!message.contains("AMD") && !message.contains("ROCm"));
         for code in [None, Some(0), Some(1), Some(-9)] {
-            assert!(super::native_worker_failure(code).is_none());
+            assert!(super::native_worker_failure(code, None).is_none());
         }
-        assert!(super::native_worker_failure(Some(0xC000001D_u32 as i32)).unwrap().contains("illegal instruction"));
+        assert!(super::native_worker_failure(Some(0xC000001D_u32 as i32), None).unwrap().contains("illegal instruction"));
+        let fault = Some(0xC000001D_u32 as i32);
+        assert!(super::native_worker_failure(Some(3), fault).unwrap().contains("0xC000001D"));
+        for code in [None, Some(0), Some(1), Some(-9)] {
+            assert!(super::native_worker_failure(code, fault).is_none());
+        }
+    }
+
+    #[test]
+    fn native_fault_headers_accept_only_faulthandler_status_lines() {
+        for line in ["Windows fatal exception: code 0xc000001d", "Windows fatal exception: illegal instruction"] {
+            assert_eq!(super::native_fault_status(line), Some(0xC000001D_u32 as i32));
+        }
+        assert_eq!(super::native_fault_status("Windows fatal exception: access violation"), Some(0xC0000005_u32 as i32));
+        for line in ["illegal instruction", "Warning: Windows fatal exception: illegal instruction",
+                     "Windows fatal exception: code 0xc000001d extra", "Windows fatal exception: code 0x123"] {
+            assert!(super::native_fault_status(line).is_none(), "{line}");
+        }
     }
 
     #[test]
@@ -2072,6 +2390,60 @@ mod tests {
             assert!(super::worker_stage(&envelope(stage), "fallback").is_none());
         }
         assert!(super::worker_stage(&envelope(&"x".repeat(65)), "fallback").is_none());
+        let probe_stage = serde_json::from_value(json!({
+            "type": "runtime_gpu_probe_stage", "taskId": "probe-1", "payload": { "stage": "stft" }
+        })).unwrap();
+        assert_eq!(super::worker_stage(&probe_stage, "fallback"), Some(("probe-1".into(), "stft".into())));
+    }
+
+    #[test]
+    fn hardware_inventory_uses_bootstrap_without_an_installed_torch_runtime() {
+        assert!(super::requires_bootstrap_python("runtime_hardware_inventory"));
+        assert_eq!(super::select_worker_python("runtime_hardware_inventory", "bootstrap", None).unwrap(), "bootstrap");
+        assert_eq!(super::query_timeout("runtime_hardware_inventory"), Some(std::time::Duration::from_secs(90)));
+        assert!(!super::transactional_runtime_command("runtime_hardware_inventory"));
+    }
+
+    #[test]
+    fn gpu_probe_uses_active_runtime_with_supervised_completion_without_directory_transactions() {
+        for command in ["runtime_gpu_probe", "runtime_gpu_probe_report"] {
+            assert!(!super::requires_bootstrap_python(command));
+            assert_eq!(super::select_worker_python(command, "bootstrap", Some("active-rocm".into())).unwrap(), "active-rocm");
+            assert!(super::select_worker_python(command, "bootstrap", None).is_err());
+            assert!(!super::recovery_query(command));
+            assert!(!super::transactional_runtime_command(command));
+        }
+        assert!(super::supervised_runtime_command("runtime_gpu_probe"));
+        assert!(super::deferred_terminal_command("runtime_gpu_probe"));
+        assert!(super::requires_background_result("runtime_gpu_probe"));
+        assert!(!super::mark_terminal_before_exit("runtime_gpu_probe"));
+        for event in ["runtime_gpu_probe_finished", "error", "task_cancelled"] {
+            assert!(super::is_background_terminal_event("runtime_gpu_probe", event));
+        }
+        for event in ["runtime_gpu_probe_started", "runtime_gpu_probe_stage"] {
+            assert!(!super::is_background_terminal_event("runtime_gpu_probe", event));
+        }
+        assert!(!super::supervised_runtime_command("runtime_gpu_probe_report"));
+        assert_eq!(super::query_timeout("runtime_gpu_probe_report"), Some(std::time::Duration::from_secs(15)));
+    }
+
+    #[test]
+    fn gpu_probe_excludes_inference_and_environment_changes_until_its_lease_is_released() {
+        let access = std::sync::Mutex::new(super::RuntimeAccess::default());
+        let inference = super::acquire_runtime_access(&access, "infer").unwrap();
+        assert!(super::acquire_runtime_access(&access, "runtime_gpu_probe").is_err());
+        drop(inference);
+        let probe = super::acquire_runtime_access(&access, "runtime_gpu_probe").unwrap();
+        for command in ["infer", "runtime_gpu_probe", "runtime_gpu_probe_report", "activate_runtime", "delete_runtime",
+                        "install_runtime", "rollback_runtime", "recover_runtime", "update_runtime_core", "manage_plugin"] {
+            assert!(super::acquire_runtime_access(&access, command).is_err(), "probe must exclude {command}");
+        }
+        drop(probe);
+        assert!(super::acquire_runtime_access(&access, "infer").is_ok());
+        access.lock().unwrap().recovery_required = true;
+        for command in ["runtime_gpu_probe", "runtime_gpu_probe_report"] {
+            assert!(super::acquire_runtime_access(&access, command).err().unwrap().to_string().contains("RUNTIME_RECOVERY_REQUIRED"));
+        }
     }
 
     #[test]
@@ -2169,17 +2541,146 @@ mod tests {
             assert!(result.is_err(), "{command} must wait for the core update");
             assert!(result.err().unwrap().to_string().contains("RUNTIME_BUSY"));
         }
-        for command in [
-            "health",
-            "runtime_info",
-            "runtime_core_versions",
-            "runtime_env_sizes",
-        ] {
-            assert!(super::acquire_runtime_access(&access, command)
-                .unwrap()
-                .is_none());
+        for command in ["runtime_info", "runtime_core_versions", "runtime_env_sizes", "runtime_install_plan"] {
+            assert!(super::acquire_runtime_access(&access, command).is_err(), "{command}");
         }
+        assert!(super::acquire_runtime_access(&access, "health").unwrap().is_none());
         drop(update);
+        assert!(super::acquire_runtime_access(&access, "infer").is_ok());
+    }
+
+    #[test]
+    fn runtime_install_and_rollback_exclude_all_environment_users_and_each_other() {
+        let access = std::sync::Mutex::new(super::RuntimeAccess::default());
+        for maintenance in ["install_runtime", "rollback_runtime", "recover_runtime"] {
+            let lease = super::acquire_runtime_access(&access, maintenance).unwrap();
+            for command in ["infer", "env_info", "runtime_info", "runtime_core_versions", "runtime_env_sizes",
+                            "runtime_install_plan", "manage_plugin", "install_plugin", "manage_optional_package",
+                            "diagnose_rocm", "install_runtime", "rollback_runtime", "recover_runtime"] {
+                assert!(super::acquire_runtime_access(&access, command).is_err(), "{maintenance} must exclude {command}");
+            }
+            drop(lease);
+        }
+        let query = super::acquire_runtime_access(&access, "runtime_info").unwrap();
+        assert!(super::acquire_runtime_access(&access, "install_runtime").is_err());
+        drop(query);
+        access.lock().unwrap().recovery_required = true;
+        assert!(super::acquire_runtime_access(&access, "infer").err().unwrap().to_string().contains("RUNTIME_RECOVERY_REQUIRED"));
+        assert!(super::acquire_runtime_access(&access, "update_runtime_core").is_err());
+        assert!(super::acquire_runtime_access(&access, "recover_runtime").is_ok());
+        access.lock().unwrap().process_exit_unconfirmed = true;
+        assert!(super::acquire_runtime_access(&access, "recover_runtime").is_err());
+        assert!(super::acquire_runtime_access(&access, "install_runtime").is_err());
+    }
+
+    #[test]
+    #[ignore = "child process fixture"]
+    fn runtime_cancel_process_fixture() {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn runtime_cancel_rpc_wait_releases_child_mutex_and_observes_both_leases_released() {
+        use std::sync::{mpsc, Arc, Mutex};
+        use std::time::{Duration, Instant};
+        for command in ["install_runtime", "runtime_gpu_probe"] {
+            let access = Mutex::new(super::RuntimeAccess::default());
+            let application = Mutex::new(super::RuntimeAccess::default());
+            let runtime_lease = super::acquire_runtime_access(&access, command).unwrap();
+            let application_lease = super::acquire_runtime_access(&application, "application_operation").unwrap();
+            let completion = Arc::new(super::RuntimeMaintenanceCompletion::default());
+            let test_module = module_path!().split_once("::").unwrap().1;
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &format!("{test_module}::runtime_cancel_process_fixture"), "--ignored"])
+                .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+                .spawn().unwrap();
+            let child = Arc::new(Mutex::new(child));
+            let (finished, receive_finished) = mpsc::channel();
+            std::thread::scope(|scope| {
+                let child_for_waiter = child.clone();
+                let completion_for_waiter = completion.clone();
+                let access_for_waiter = &access;
+                let application_for_waiter = &application;
+                scope.spawn(move || {
+                    let result = super::cancel_runtime_maintenance_worker("completion-child-fixture", child_for_waiter, completion_for_waiter);
+                    let runtime_available = super::acquire_runtime_access(access_for_waiter, "infer").is_ok();
+                    let application_available = super::acquire_runtime_access(application_for_waiter, "update_runtime_core").is_ok();
+                    finished.send((result, runtime_available, application_available)).unwrap();
+                });
+                let until = Instant::now() + Duration::from_secs(2);
+                let mut stopped_without_mutex = false;
+                while Instant::now() < until {
+                    if let Ok(mut child) = child.try_lock() {
+                        if child.try_wait().unwrap().is_some() { stopped_without_mutex = true; break; }
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                let waited_for_completion = receive_finished.try_recv().is_err();
+                let runtime_was_exclusive = super::acquire_runtime_access(&access, "infer").is_err();
+                // This is the same producer operation used by the real supervisor.
+                completion.complete_after_release(runtime_lease, application_lease, Ok(())).unwrap();
+                let (result, runtime_available, application_available) = receive_finished.recv_timeout(Duration::from_secs(2)).unwrap();
+                assert!(stopped_without_mutex, "Cancellation kept the child mutex while waiting for recovery");
+                assert!(waited_for_completion, "Cancellation RPC returned before supervisor completion");
+                assert!(runtime_was_exclusive);
+                result.unwrap();
+                assert!(runtime_available && application_available, "Completion was published before both leases were released");
+            });
+        }
+    }
+
+    #[test]
+    fn cancellation_uses_registered_command_even_with_custom_task_ids() {
+        let registry = super::BACKGROUND_TASKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+        for command in ["install_runtime", "runtime_gpu_probe"] {
+            let id = "arbitrary-rocm-maintenance-id";
+            let completion = std::sync::Arc::new(super::RuntimeMaintenanceCompletion::default());
+            registry.lock().unwrap().insert(id.into(), std::sync::Arc::new(super::BackgroundTask {
+                command: command.into(), runtime_tree: None, completion: Some(completion.clone()),
+            }));
+            assert!(super::defers_task_cancellation(id));
+            let captured = super::runtime_maintenance_completion(id).unwrap();
+            assert!(std::sync::Arc::ptr_eq(&captured, &completion));
+            registry.lock().unwrap().remove(id);
+            completion.complete_after_release((), (), Ok(())).unwrap();
+            assert!(captured.wait(std::time::Duration::ZERO, || {}).is_ok());
+        }
+        assert!(!super::defers_task_cancellation("runtime_install_unregistered"));
+        for command in ["install_runtime", "rollback_runtime", "recover_runtime", "runtime_install_plan"] {
+            assert!(super::requires_bootstrap_python(command));
+        }
+        assert!(super::is_background_terminal_event("rollback_runtime", "runtime_rollback_finished"));
+    }
+
+    #[test]
+    fn failed_gpu_probe_cancellation_cannot_become_a_late_success() {
+        use std::sync::{Arc, Mutex};
+        let access = Mutex::new(super::RuntimeAccess::default());
+        let application = Mutex::new(super::RuntimeAccess::default());
+        let runtime_lease = super::acquire_runtime_access(&access, "runtime_gpu_probe").unwrap();
+        let application_lease = super::acquire_runtime_access(&application, "application_operation").unwrap();
+        let test_module = module_path!().split_once("::").unwrap().1;
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("{test_module}::runtime_cancel_process_fixture"), "--ignored"])
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        let child = Arc::new(Mutex::new(child));
+        let poisoned_child = child.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned_child.lock().unwrap();
+            panic!("worker process lock failure fixture");
+        }).join();
+        let completion = Arc::new(super::RuntimeMaintenanceCompletion::default());
+        let error = super::cancel_runtime_maintenance_worker("failed-probe-cancel-fixture", child.clone(), completion.clone())
+            .unwrap_err().to_string();
+        assert!(error.contains("worker process lock poisoned"));
+        {
+            let mut child = child.lock().unwrap_err().into_inner();
+            super::terminate_worker(&mut child).unwrap();
+        }
+        assert!(super::acquire_runtime_access(&access, "infer").is_err());
+        assert_eq!(completion.complete_after_release(runtime_lease, application_lease, Ok(())), Err(error.clone()));
+        assert_eq!(completion.wait(std::time::Duration::ZERO, || {}), Err(error));
         assert!(super::acquire_runtime_access(&access, "infer").is_ok());
     }
 
@@ -2509,6 +3010,31 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn worker_native_fault_reports_the_active_python_frame() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut command = std::process::Command::new("python");
+        command.env("PYTHONFAULTHANDLER", "").arg("-I");
+        super::isolate_python_environment(&mut command, temporary.path());
+        command.current_dir(temporary.path()).args(["-c", r#"
+import ctypes, faulthandler
+ctypes.windll.kernel32.SetErrorMode(0x0002)
+assert faulthandler.is_enabled(), 'Worker native fault diagnostics are disabled'
+def trigger_worker_native_fault():
+    faulthandler._raise_exception(0xC000001D, 1)
+trigger_worker_native_fault()
+"#]);
+        let output = command.output().expect("Python is required for native fault validation");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "The native fault must terminate its disposable process");
+        let fault = stderr.lines().find_map(super::native_fault_status);
+        assert_eq!(fault, Some(0xC000001D_u32 as i32), "{stderr}");
+        let failure = super::native_worker_failure(output.status.code(), fault).expect("Native status was lost");
+        assert!(failure.contains("Windows illegal instruction (0xC000001D)"), "{failure}");
+        assert!(stderr.contains("trigger_worker_native_fault"), "{stderr}");
+    }
+
     #[test]
     fn bundled_env_selection_preserves_canonical_path_overlap_and_missing_path_behavior() {
         let fixture = ResourceFixture::new("env-overlap");
@@ -2810,45 +3336,6 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn rocm_tools_keep_user_before_bundled_then_regular_bins_and_existing_path() {
-        let fixture = ResourceFixture::new("rocm-path-order");
-        let user = fixture.0.join("user");
-        let bundled = fixture.0.join("bundled");
-        let mut expected = Vec::new();
-        for root in [&user, &bundled] {
-            let package = root
-                .join("rocm")
-                .join("Lib")
-                .join("site-packages")
-                .join("_rocm_sdk_core_1");
-            let tool = package.join("lib").join("llvm").join("bin");
-            fixture.file(&tool.join("offload-arch.exe"));
-            let sdk_bin = package.join("bin");
-            fs::create_dir_all(&sdk_bin).unwrap();
-            expected.extend([tool, sdk_bin]);
-            fixture
-                .file(&root.join("rocm/Lib/site-packages/unrelated/lib/llvm/bin/offload-arch.exe"));
-        }
-        let mut dirs =
-            super::rocm_native_tool_dirs_from(vec![user, fixture.0.join("absent"), bundled]);
-        assert_eq!(dirs, expected);
-        let bin = fixture.0.join("bin");
-        fs::create_dir_all(&bin).unwrap();
-        dirs.extend(super::bundled_bin_candidates(None, &fixture.0));
-        expected.push(bin);
-        let joined = expected
-            .iter()
-            .map(|p| p.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(";");
-        assert_eq!(
-            super::prepend_path(Some("existing-path".into()), dirs),
-            Some(format!("{joined};existing-path"))
-        );
-    }
-
     #[test]
     fn operation_result_is_a_background_terminal_event() {
         assert!(is_background_terminal_event("run_operation", "operation_result"));
@@ -3077,32 +3564,6 @@ mod tests {
             true,
         ));
         let _ = fs::remove_dir_all(root);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn finds_rocm_native_offload_arch_tool() {
-        let root = std::env::temp_dir().join(format!(
-            "pymss-worker-rocm-tool-test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let tool_dir = root
-            .join("rocm")
-            .join("Lib")
-            .join("site-packages")
-            .join("_rocm_sdk_core")
-            .join("lib")
-            .join("llvm")
-            .join("bin");
-        std::fs::create_dir_all(&tool_dir).unwrap();
-        std::fs::write(tool_dir.join("offload-arch.exe"), "stub").unwrap();
-
-        assert_eq!(super::rocm_native_tool_dir(&root), Some(tool_dir));
-
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

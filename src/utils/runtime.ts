@@ -1,4 +1,22 @@
-import type { EnvInfo, InstalledRuntime, RuntimeBackend, RuntimeCoreVersions, RuntimeInfo } from '@/stores/app'
+import type { EnvInfo, InstalledRuntime, RuntimeBackend, RuntimeCoreVersions, RuntimeGpuProbeReport, RuntimeInfo, RuntimeHardwareDevice, RuntimeHardwareProfile, RuntimeInstallOptions, RuntimeInstallPlan, RuntimeActivationValidation } from '@/stores/app'
+
+/** A diagnostic result describes this base environment, never the dependency health or model validation. */
+export function runtimeGpuReportForEnvironment(report: RuntimeGpuProbeReport | null | undefined, env: InstalledRuntime | undefined) {
+  if (!report || !env) return undefined
+  if (report.matchesCurrentRuntime === false) return undefined
+  if (env.profileId && report.profileId && env.profileId !== report.profileId) return undefined
+  if (env.baseFingerprint && env.baseFingerprint !== report.baseFingerprint) return undefined
+  if (env.targetFingerprint && env.targetFingerprint !== report.targetFingerprint) return undefined
+  return report
+}
+
+export function runtimeGpuStatus(report: RuntimeGpuProbeReport | null | undefined, activation?: RuntimeActivationValidation | null): 'unverified' | 'available' | 'limited' | 'unavailable' {
+  if (activation?.status === 'failed') return 'unavailable'
+  if (!report || report.status === 'cancelled' || (report.fromCache && report.cacheReusable !== true)) return 'unverified'
+  if (!report.deviceCapabilities.some(device => device.basicAvailable)) return 'unavailable'
+  return report.status === 'partial' || report.deviceCapabilities.some(device => !device.basicAvailable
+    || device.modes.some(mode => mode.checks.some(check => !['passed', 'skipped'].includes(check.status)))) ? 'limited' : 'available'
+}
 
 export function supportsRuntimeManagement(info: Pick<RuntimeInfo, 'platform'> | null | undefined): boolean {
   const reported = String(info?.platform || '').toLowerCase()
@@ -133,10 +151,10 @@ export function runtimeCoreUpdateAvailable(
   const manifestStatus = runtimeManifestStatus(env, currentManifestVersion)
   if (manifestStatus !== 'current' && manifestStatus !== 'older') return false
   const pymssVersion = env.pymssVersion || env.packageVersions?.pymss || ''
-  const pymssCoreVersion = env.pymssCoreVersion || env.packageVersions?.['pymss-core'] || ''
   return Boolean(
-    (comparison?.packages?.pymss?.currentVersion === pymssVersion && comparison.packages?.pymss?.updateAvailable)
-    || (comparison?.packages?.['pymss-core']?.currentVersion === pymssCoreVersion && comparison.packages?.['pymss-core']?.updateAvailable),
+    pymssVersion
+    && comparison?.packages?.pymss?.currentVersion === pymssVersion
+    && comparison.packages.pymss.updateAvailable,
   )
 }
 
@@ -235,4 +253,78 @@ export function runtimeManifestStatus(
     if (difference !== 0) return difference < 0 ? 'older' : 'newer'
   }
   return 'current'
+}
+
+/** Session identities cannot bind a later native activation check to physical hardware. */
+export function rocmStableDeviceIds(ids: string[]): string[] {
+  return [...new Set(ids.filter(id => typeof id === 'string' && id.length <= 256 && /^(?:hip-pci|pnp):[^\s]+$/.test(id)))].sort()
+}
+
+/** Only a confirmed architecture may become an automatic download target. */
+export function rocmDeviceTargets(devices: RuntimeHardwareDevice[], selectedIds: string[], manualTargets: string[] = []): string[] {
+  const selected = new Set(selectedIds)
+  const targets = devices.filter(device => selected.has(device.id) && device.architectureConfidence === 'confirmed')
+    .map(device => device.gfx).filter((target): target is string => typeof target === 'string' && /^gfx[0-9a-f]+$/.test(target))
+  if (manualTargets.includes('all')) return ['all']
+  return [...new Set([...targets, ...manualTargets.filter(target => /^gfx[0-9a-f]+$/.test(target))])].sort()
+}
+
+export function rocmDefaultDeviceIds(devices: RuntimeHardwareDevice[], savedIds: string[]): string[] {
+  const amd = devices.filter(device => device.vendor.toLowerCase() === 'amd')
+  const saved = amd.filter(device => !device.id.startsWith('session:') && savedIds.includes(device.id)).map(device => device.id)
+  if (saved.length) return saved
+  const discrete = amd.filter(device => device.isDiscrete === true)
+  return (discrete.length ? discrete : amd.length === 1 ? amd : []).map(device => device.id)
+}
+
+export function rocmProfileSelectable(profile: RuntimeHardwareProfile): boolean {
+  return profile.installationEnabled && ['stable', 'legacy', 'preview'].includes(profile.releaseState)
+}
+
+export function rocmPreferredProfileId(profiles: RuntimeHardwareProfile[], defaultId: string | null | undefined, installedId: string | null | undefined, targets: string[], installedTorchVersion?: string | null): string {
+  const matches = profiles.filter(profile => installedId ? profile.id === installedId
+    : Boolean(installedTorchVersion && profile.torchVersion === installedTorchVersion))
+  const installed = matches.length === 1 && rocmProfileSelectable(matches[0]) ? matches[0] : undefined
+  if (installed) return installed.id
+  const preferred = profiles.find(profile => profile.id === defaultId && rocmProfileSelectable(profile)
+    && (!profile.availableTargets.length || targets.every(target => profile.availableTargets.includes(target))))
+  if (preferred) return preferred.id
+  return profiles.find(profile => profile.releaseState === 'stable' && rocmProfileSelectable(profile)
+    && targets.length > 0 && targets.every(target => profile.validatedTargets.includes(target)))?.id || ''
+}
+
+export function rocmInstallAction(env: InstalledRuntime | undefined, profile: RuntimeHardwareProfile, targets: string[]): 'install' | 'addTargets' | 'upgrade' | 'useInstalled' {
+  if (!env) return 'install'
+  if (!env.profileId && env.torchVersion && env.torchVersion === profile.torchVersion) {
+    return env.health !== 'broken' && !profile.availableTargets.length ? 'useInstalled' : 'install'
+  }
+  if (env.profileId !== profile.id || String(env.profileRevision || '') !== String(profile.revision)) return 'upgrade'
+  if (env.health === 'broken') return 'install'
+  const effectiveTargets = targets.includes('all') ? profile.availableTargets.filter(target => /^gfx[0-9a-f]+$/.test(target)) : targets
+  const missing = targets.length > 0 && effectiveTargets.length === 0
+    || effectiveTargets.some(target => !(env.installedTargets || []).includes(target))
+  return missing ? 'addTargets' : 'useInstalled'
+}
+
+export function runtimeInstallPlanMatches(plan: RuntimeInstallPlan, options: RuntimeInstallOptions): boolean {
+  if (options.profileId && plan.profileId !== options.profileId) return false
+  if (options.action && plan.action !== options.action) return false
+  if (options.selectedDeviceIds && JSON.stringify(rocmStableDeviceIds(plan.selectedDeviceIds || []))
+    !== JSON.stringify(rocmStableDeviceIds(options.selectedDeviceIds))) return false
+  if (options.targets) {
+    const actual = [...new Set(plan.requestedTargets || plan.targets || [])].sort()
+    const expected = [...new Set(options.targets)].sort()
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) return false
+  }
+  return true
+}
+
+export function runtimeInstallOptionsFromPlan(plan: RuntimeInstallPlan): RuntimeInstallOptions {
+  return {
+    profileId: plan.profileId, targets: plan.requestedTargets || plan.targets, action: plan.action,
+    ...(plan.selectedDeviceIds ? { selectedDeviceIds: rocmStableDeviceIds(plan.selectedDeviceIds) } : {}),
+    expectedProfileId: plan.expectedProfileId, expectedProfileRevision: plan.expectedProfileRevision,
+    expectedBaseFingerprint: plan.expectedBaseFingerprint, expectedTargetFingerprint: plan.expectedTargetFingerprint,
+    ...(plan.requiresPreviousReplacement ? { replacePrevious: true } : {}),
+  }
 }

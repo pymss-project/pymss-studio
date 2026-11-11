@@ -3,10 +3,11 @@ import { loadAppStore, saveAppStore } from '../../utils/appStore.ts'
 
 const studioLog = createLogger('ui.features.plugin-marketplace.toolState')
 
-// Keep the established audio-tools store intact while plugin pages gradually
-// take ownership of their own settings. Only selection is owned by Studio.
+// Keep the established audio-tools store intact. Studio owns navigation
+// preferences while plugin pages own their form settings.
 export type StoredPluginToolState = Record<string, unknown> & {
   activePluginTool?: string
+  collapsedToolCategories?: string[]
 }
 
 let queue: Promise<void> = Promise.resolve()

@@ -28,7 +28,11 @@ class PluginConcurrencyTests(unittest.TestCase):
 import sys, time
 from pathlib import Path
 import worker_plugins as p
+import worker_optional_packages
 from pymss_plugin_manager import _engine as engine
+# Same isolation as the parent fixture: ignore the developer interpreter's
+# real pymss-runtime-state.json so the temporary active.json pointer decides.
+worker_optional_packages._runtime_state_for_executable = lambda executable: {}
 p._PLUGIN_MANIFEST = Path(sys.argv[1])
 gate, label, source = Path(sys.argv[2]), sys.argv[3], sys.argv[4]
 original = engine._acquire_source
