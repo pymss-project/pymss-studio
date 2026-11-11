@@ -24,6 +24,18 @@ assert.ok(prune)
 const code = ts.transpileModule([...statements, prune].map(statement => statement.getText(source)).join('\n'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText
+const modelSource = ts.createSourceFile('model.ts', readFileSync(new URL('../src/stores/model.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true)
+const modelDeclaration = modelSource.statements.find(statement => ts.isVariableStatement(statement)
+  && statement.declarationList.declarations.some(item => item.name.getText(modelSource) === 'useModelStore'))
+const modelBody = modelDeclaration.declarationList.declarations[0].initializer.arguments[1].body
+const eligibilityFunctions = new Set(['isDeleteTaskTerminal', 'isModelDeletionPending', 'canQueueDownload'])
+const eligibilityStatements = modelBody.statements.filter(statement => ts.isFunctionDeclaration(statement)
+  ? eligibilityFunctions.has(statement.name?.text)
+  : ts.isVariableStatement(statement) && statement.declarationList.declarations.some(item => item.name.getText(modelSource) === 'pendingModelDeletions'))
+assert.equal(eligibilityStatements.length, eligibilityFunctions.size + 1)
+const eligibilityCode = ts.transpileModule(eligibilityStatements.map(statement => statement.getText(modelSource)).join('\n'), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText
 
 function environment(t) {
   const stops = [], opened = []
@@ -32,6 +44,7 @@ function environment(t) {
   const modelStore = reactive({ models })
   let finishedDrags = 0
   const state = { ref, computed, isActiveDownloadStatus, modelStore,
+    models: computed(() => modelStore.models),
     sortedModels: computed(() => modelStore.models), pagedModels: ref(models.slice(0, 3)),
     downloadTasks: ref(Object.fromEntries(['error', 'paused', 'cancelled', 'interrupted', 'preparing', 'downloading'].map(status => [status, { status }]))),
     deleteTasks: ref({ deleting: { status: 'deleting' } }), downloadQueue: ref(['queued']), showDetail: ref(true), suppressBatchClick: false,
@@ -39,9 +52,11 @@ function environment(t) {
     finishBatchDragSelection() { finishedDrags++ }, window: { getSelection: () => null },
     watch(...args) { const stop = watch(...args); stops.push(stop); return stop },
   }
+  const eligibility = vm.runInNewContext(`${eligibilityCode}\n({canQueueDownload, pendingModelDeletions})`, state)
+  modelStore.canQueueDownload = eligibility.canQueueDownload
   const view = vm.runInNewContext(`${code}\n({${[...functions, ...variables].join(',')}})`, state)
   t.after(() => stops.forEach(stop => stop()))
-  return { state, view, models, opened, finishedDrags: () => finishedDrags }
+  return { state, view, models, opened, pendingDeletions: eligibility.pendingModelDeletions, finishedDrags: () => finishedDrags }
 }
 
 test('failed and interrupted downloads can be selected again while active or ineligible models stay excluded', t => {
@@ -99,4 +114,23 @@ test('card keyboard and click events select within the active mode without openi
   h.view.toggleBatchSelectMode()
   h.view.handleModelCardClick(h.models[0], { type: 'click' })
   assert.deepEqual(h.opened, ['new'])
+})
+
+test('pending batch deletion targets become unavailable and clear only their own selections', async t => {
+  const h = environment(t)
+  h.view.toggleDownloadSelectMode()
+  h.view.setDownloadSelected(h.models[1], true)
+  h.view.setDownloadSelected(h.models[2], true)
+  h.pendingDeletions.value.set('error', 1)
+  await nextTick()
+  assert.equal(h.view.isDownloadSelectable(h.models[1]), false)
+  assert.equal(h.view.isDownloadSelectable(h.models[2]), true)
+  assert.deepEqual(Array.from(h.view.downloadSelection.value), ['paused'])
+  h.view.setDownloadSelected(h.models[1], true)
+  assert.deepEqual(Array.from(h.view.downloadSelection.value), ['paused'])
+  h.pendingDeletions.value.delete('error')
+  await nextTick()
+  assert.equal(h.view.isDownloadSelectable(h.models[1]), true)
+  h.view.setDownloadSelected(h.models[1], true)
+  assert.deepEqual(Array.from(h.view.downloadSelection.value), ['paused', 'error'])
 })

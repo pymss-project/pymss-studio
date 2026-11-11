@@ -42,7 +42,7 @@ import { formatBytes, formatSpeedMBps } from '@/utils/format'
 import { buildModelCategoryOptionsFromModels, getModelCategoryLabel, hasModelCategoryOption } from '@/utils/modelCategory'
 import { compareModelDefaultOrder } from '@/utils/modelSort'
 import { MODEL_LIBRARY_PAGE_SIZES } from '@/utils/pagination'
-import { BATCH_DOWNLOAD_CONCURRENCY, isActiveDownloadStatus } from '@/utils/downloadQueue'
+import { BATCH_DOWNLOAD_CONCURRENCY } from '@/utils/downloadQueue'
 import {
   applyLibraryIntent,
   resolveParameters,
@@ -1500,7 +1500,7 @@ function isQueuedDownload(modelName: string) {
 
 /** Whether a model can be picked for a batch download: a catalog model with nothing in flight. */
 function isDownloadSelectable(model: ModelEntry) {
-  return model.supported && !model.downloaded && !isCustomModel(model) && !isDeletingModel(model.name) && !isActiveDownloadStatus(downloadTasks.value[model.name]?.status) && !isQueuedDownload(model.name)
+  return modelStore.canQueueDownload(model.name) && !isQueuedDownload(model.name)
 }
 
 function isDownloadSelected(model: ModelEntry) {
@@ -1547,15 +1547,12 @@ function toggleDownloadSelectMode() {
 
 // A selected model can finish downloading elsewhere (or start, or be removed); drop it so the
 // count and total size only describe what the batch will actually fetch.
-watch([() => modelStore.models, downloadTasks, deleteTasks, downloadQueue], () => {
+watch(() => modelStore.models.filter(isDownloadSelectable).map(model => model.name), names => {
   if (!downloadSelection.value.length) return
-  const byName = new Map(modelStore.models.map((model) => [model.name, model]))
-  const next = downloadSelection.value.filter((name) => {
-    const model = byName.get(name)
-    return Boolean(model && isDownloadSelectable(model))
-  })
+  const selectable = new Set(names)
+  const next = downloadSelection.value.filter(name => selectable.has(name))
   if (next.length !== downloadSelection.value.length) downloadSelection.value = next
-}, { deep: true })
+})
 
 function confirmBatchDownload() {
   const names = downloadSelectedModels.value.filter(isDownloadSelectable).map((model) => model.name)

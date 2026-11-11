@@ -471,6 +471,7 @@ export const useModelStore = defineStore('model', () => {
   const downloadQueue = ref<string[]>([])
   const deleteTasks = ref<Record<string, DeleteTask>>({})
   const deleteTaskIndex = ref<Record<string, string>>({})
+  const pendingModelDeletions = ref(new Map<string, number>())
   const modelStorageSummary = ref<ModelStorageSummary | null>(null)
   const modelStorageSummaryLoadedAt = ref(0)
   const storageLoading = ref(false)
@@ -1169,7 +1170,7 @@ export const useModelStore = defineStore('model', () => {
     const app = useAppStore()
     const settings = useSettingsStore()
     const existingTask = downloadTasks.value[name]
-    if (existingTask && ['preparing', 'downloading'].includes(existingTask.status)) return false
+    if (isModelDeletionPending(name) || (existingTask && ['preparing', 'downloading'].includes(existingTask.status))) return false
     const taskId = `download_${crypto.randomUUID()}`
     downloadStates.value = { ...downloadStates.value, [name]: 'preparing' }
     downloadErrors.value = { ...downloadErrors.value, [name]: '' }
@@ -1279,12 +1280,15 @@ export const useModelStore = defineStore('model', () => {
     return cancelled
   }
 
+  function isModelDeletionPending(name: string) {
+    const deletion = deleteTasks.value[name]
+    return pendingModelDeletions.value.has(name) || Boolean(deletion && !isDeleteTaskTerminal(deletion))
+  }
+
   function canQueueDownload(name: string) {
     const model = models.value.find((item) => item.name === name)
     if (!model || !model.supported || model.downloaded || model.source === 'user') return false
-    const deletion = deleteTasks.value[name]
-    if (deletion && !isDeleteTaskTerminal(deletion)) return false
-    return !isActiveDownloadStatus(downloadTasks.value[name]?.status)
+    return !isModelDeletionPending(name) && !isActiveDownloadStatus(downloadTasks.value[name]?.status)
   }
 
   /** Starts queued downloads while slots are free. */
@@ -1468,9 +1472,11 @@ export const useModelStore = defineStore('model', () => {
   }
 
   async function deleteStorageModels(targets: ModelStorageDeleteTarget[]) {
-    // Remove every targeted download before the first deletion yields to the scheduler.
+    // Keep every target reserved until its deletion settles, including targets waiting their turn.
     for (const target of targets) {
-      if (target.kind === 'catalog') removeQueuedDownload(target.id)
+      if (target.kind !== 'catalog') continue
+      pendingModelDeletions.value.set(target.id, (pendingModelDeletions.value.get(target.id) || 0) + 1)
+      removeQueuedDownload(target.id)
     }
     batchDeleteState.value = {
       active: true,
@@ -1502,6 +1508,11 @@ export const useModelStore = defineStore('model', () => {
         }
         if (target.kind === 'catalog') clearDeleteTask(target.id)
       } finally {
+        if (target.kind === 'catalog') {
+          const remaining = (pendingModelDeletions.value.get(target.id) || 1) - 1
+          if (remaining > 0) pendingModelDeletions.value.set(target.id, remaining)
+          else pendingModelDeletions.value.delete(target.id)
+        }
         batchDeleteState.value = {
           ...batchDeleteState.value,
           completedModels: batchDeleteState.value.completedModels + 1,
@@ -1777,6 +1788,7 @@ export const useModelStore = defineStore('model', () => {
     downloadModel,
     cancelDownload,
     downloadQueue,
+    canQueueDownload,
     enqueueBatchDownload,
     removeQueuedDownload,
     clearDownloadQueue,
