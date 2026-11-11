@@ -52,7 +52,7 @@ import ModelCategorySelect from '@/components/ModelCategorySelect.vue'
 import DownloadDetailModal from '@/components/DownloadDetailModal.vue'
 import CustomModelImportDialog from '@/components/CustomModelImportDialog.vue'
 import InferenceParameterFields from '@/components/InferenceParameterFields.vue'
-import { segmentIntersectsRect, type SelectionPoint } from '@/utils/selection'
+import { edgeScrollVelocity, segmentIntersectsRect, type SelectionPoint } from '@/utils/selection'
 
 const studioLog = createLogger('ui.views.ModelsView')
 
@@ -103,6 +103,16 @@ const storageSearch = ref('')
 const storageSort = ref<'size-desc' | 'size-asc' | 'name-asc' | 'name-desc'>('size-desc')
 const storageDownloadedOnly = ref(true)
 const selectedStorageModels = ref<string[]>([])
+const storageList = ref<HTMLElement | null>(null)
+const storageError = ref('')
+const storageDrawerTop = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform) ? '0px' : '40px'
+type StorageDrag = { pointerId: number; origin: SelectionPoint; previous: SelectionPoint; startKey: string;
+  targetSelected: boolean; active: boolean; visited: Set<string>; scrollTop: number }
+let storageDrag: StorageDrag | null = null
+let storageSuppressClick = false
+let storageListenersAttached = false
+let storageScrollFrame: number | null = null
+let storageScrollTime = 0
 const contextMenuX = ref(0)
 const contextMenuY = ref(0)
 const contextMenuVisible = ref(false)
@@ -339,6 +349,14 @@ const storageModels = computed<StorageListItem[]>(() => {
 })
 
 const allStorageModelsByKey = computed(() => new Map(allStorageModels.value.map(item => [item.selectionKey, item])))
+const storageSelection = computed(() => new Set(selectedStorageModels.value))
+const storageBusy = computed(() => storageLoading.value || batchDeleteState.value.active || residualCleanupState.value.active)
+const selectableStorageModels = computed(() => storageModels.value.filter(item => canSelectStorageItem(item) || storageSelection.value.has(item.selectionKey)))
+const storageVisibleKeys = computed(() => new Set(storageModels.value.map(item => item.selectionKey)))
+const allStorageSelected = computed(() => selectableStorageModels.value.length > 0 && selectableStorageModels.value.every(item => storageSelection.value.has(item.selectionKey)))
+const someStorageSelected = computed(() => !allStorageSelected.value && storageModels.value.some(item => storageSelection.value.has(item.selectionKey)))
+const storageOutsideSelection = computed(() => selectedStorageModels.value.filter(key => !storageVisibleKeys.value.has(key)).length)
+
 const selectedStorageBytes = computed(() => selectedStorageModels.value
   .map(key => allStorageModelsByKey.value.get(key))
   .filter((item): item is NonNullable<typeof item> => Boolean(item))
@@ -358,11 +376,156 @@ const batchDeleteProgress = computed(() => {
   return Math.max(0, Math.min(100, Math.round(((batchDeleteState.value.completedModels + currentFraction) / batchDeleteState.value.totalModels) * 100)))
 })
 
-function setStorageSelected(name: string, checked: boolean) {
-  selectedStorageModels.value = checked
-    ? Array.from(new Set([...selectedStorageModels.value, name]))
-    : selectedStorageModels.value.filter((item) => item !== name)
+function canSelectStorageItem(item: StorageListItem) {
+  return item.sizeBytes > 0 && !(item.kind === 'catalog' && isDeletingModel(item.id))
 }
+function formatStorageBytes(bytes: number) { return bytes > 0 ? formatBytes(bytes) : '0 B' }
+
+function setStorageSelected(key: string, checked: boolean) {
+  if (storageBusy.value) return
+  const item = allStorageModelsByKey.value.get(key)
+  if (checked && (!item || !canSelectStorageItem(item))) return
+  if (storageSelection.value.has(key) === checked) return
+  selectedStorageModels.value = checked ? [...selectedStorageModels.value, key] : selectedStorageModels.value.filter(item => item !== key)
+}
+
+function toggleStorageRow(item: StorageListItem) { setStorageSelected(item.selectionKey, !storageSelection.value.has(item.selectionKey)) }
+function handleStorageRowClick(item: StorageListItem) {
+  if (!window.getSelection()?.toString()) toggleStorageRow(item)
+}
+function selectStorageResults(checked: boolean) {
+  finishStorageDrag()
+  if (storageBusy.value) return
+  const next = new Set(selectedStorageModels.value)
+  for (const item of storageModels.value) {
+    if (!checked) next.delete(item.selectionKey)
+    else if (canSelectStorageItem(item)) next.add(item.selectionKey)
+  }
+  selectedStorageModels.value = [...next]
+}
+function clearStorageSelection() {
+  finishStorageDrag()
+  if (!storageBusy.value) selectedStorageModels.value = []
+}
+function consumeStorageClick(event: MouseEvent) {
+  const suppress = storageSuppressClick && event.detail > 0
+  storageSuppressClick = false
+  if (suppress) { event.preventDefault(); event.stopPropagation() }
+}
+function startStorageDrag(event: PointerEvent, item: StorageListItem) {
+  if (event.pointerType !== 'mouse' || event.button !== 0 || storageBusy.value) return
+  if (!canSelectStorageItem(item) && !storageSelection.value.has(item.selectionKey)) return
+  finishStorageDrag()
+  storageSuppressClick = false
+  const point = { x: event.clientX, y: event.clientY }
+  storageDrag = { pointerId: event.pointerId, origin: point, previous: point, startKey: item.selectionKey,
+    targetSelected: !storageSelection.value.has(item.selectionKey), active: false, visited: new Set(), scrollTop: storageList.value?.scrollTop || 0 }
+}
+function paintStorageSelection(point: SelectionPoint) {
+  const state = storageDrag, list = storageList.value
+  if (!state?.active || !list || storageBusy.value) return
+  const previous = { x: state.previous.x, y: state.previous.y - (list.scrollTop - state.scrollTop) }
+  const next = new Set(selectedStorageModels.value)
+  let changed = false
+  const apply = (key: string) => {
+    if (state.visited.has(key)) return
+    state.visited.add(key)
+    const item = allStorageModelsByKey.value.get(key)
+    if (!item || (state.targetSelected && !canSelectStorageItem(item)) || next.has(key) === state.targetSelected) return
+    if (state.targetSelected) next.add(key)
+    else next.delete(key)
+    changed = true
+  }
+  apply(state.startKey)
+  const viewport = list.getBoundingClientRect()
+  for (const element of list.querySelectorAll<HTMLElement>('[data-storage-key]')) {
+    const key = element.dataset.storageKey!
+    if (state.visited.has(key)) continue
+    const item = allStorageModelsByKey.value.get(key)
+    if (!item || (state.targetSelected ? !canSelectStorageItem(item) : !next.has(key))) continue
+    const bounds = element.getBoundingClientRect()
+    const rect = { left: Math.max(bounds.left, viewport.left), top: Math.max(bounds.top, viewport.top),
+      right: Math.min(bounds.right, viewport.right), bottom: Math.min(bounds.bottom, viewport.bottom) }
+    if (rect.right > rect.left && rect.bottom > rect.top && segmentIntersectsRect(previous, point, rect)) apply(key)
+  }
+  if (changed) selectedStorageModels.value = [...next]
+  state.previous = point
+  state.scrollTop = list.scrollTop
+}
+function scrollStorageDrag(time: number) {
+  storageScrollFrame = null
+  const state = storageDrag, list = storageList.value
+  if (!state?.active || !list || storageBusy.value) return
+  const speed = edgeScrollVelocity(state.previous, list.getBoundingClientRect())
+  if (!speed) return
+  const elapsed = storageScrollTime ? Math.min(32, time - storageScrollTime) : 16
+  storageScrollTime = time
+  const before = list.scrollTop
+  list.scrollTop += speed * elapsed / 1000
+  paintStorageSelection(state.previous)
+  if (list.scrollTop !== before) storageScrollFrame = requestAnimationFrame(scrollStorageDrag)
+}
+function handleStoragePointerMove(event: PointerEvent) {
+  const state = storageDrag
+  if (!state || event.pointerId !== state.pointerId) return
+  if (!(event.buttons & 1) || storageBusy.value || document.querySelector('.n-dialog, .n-modal-mask')) { finishStorageDrag(); return }
+  const point = { x: event.clientX, y: event.clientY }
+  if (!state.active && Math.hypot(point.x - state.origin.x, point.y - state.origin.y) < 5) return
+  state.active = true
+  event.preventDefault()
+  window.getSelection()?.removeAllRanges()
+  document.documentElement.classList.add('storage-drag-selecting')
+  paintStorageSelection(point)
+  if (storageScrollFrame === null) { storageScrollTime = 0; storageScrollFrame = requestAnimationFrame(scrollStorageDrag) }
+}
+function handleStorageScroll() { if (storageDrag?.active) paintStorageSelection(storageDrag.previous) }
+function finishStorageDrag(event?: PointerEvent) {
+  if (event && storageDrag && event.pointerId !== storageDrag.pointerId) return
+  if (storageDrag && (storageDrag.active || event?.type !== 'pointerup')) storageSuppressClick = true
+  storageDrag = null
+  if (storageScrollFrame !== null) cancelAnimationFrame(storageScrollFrame)
+  storageScrollFrame = null
+  storageScrollTime = 0
+  document.documentElement.classList.remove('storage-drag-selecting')
+}
+function cancelStorageDrag() { finishStorageDrag() }
+function storagePointerOut(event: PointerEvent) { if (!event.relatedTarget) finishStorageDrag(event) }
+function storageDragKeydown(event: KeyboardEvent) { if (event.key === 'Escape') finishStorageDrag() }
+function attachStorageListeners() {
+  if (storageListenersAttached) return
+  storageListenersAttached = true
+  window.addEventListener('pointermove', handleStoragePointerMove, { passive: false })
+  window.addEventListener('pointerup', finishStorageDrag)
+  window.addEventListener('pointercancel', finishStorageDrag)
+  window.addEventListener('pointerout', storagePointerOut)
+  window.addEventListener('blur', cancelStorageDrag)
+  window.addEventListener('resize', cancelStorageDrag)
+  window.addEventListener('keydown', storageDragKeydown)
+}
+function detachStorageListeners() {
+  finishStorageDrag()
+  storageListenersAttached = false
+  window.removeEventListener('pointermove', handleStoragePointerMove)
+  window.removeEventListener('pointerup', finishStorageDrag)
+  window.removeEventListener('pointercancel', finishStorageDrag)
+  window.removeEventListener('pointerout', storagePointerOut)
+  window.removeEventListener('blur', cancelStorageDrag)
+  window.removeEventListener('resize', cancelStorageDrag)
+  window.removeEventListener('keydown', storageDragKeydown)
+}
+watch(showStorage, show => { if (show) attachStorageListeners(); else detachStorageListeners() })
+watch(storageBusy, busy => { if (busy) finishStorageDrag() })
+watch([storageSearch, storageSort, storageDownloadedOnly], () => {
+  finishStorageDrag()
+  if (storageList.value) storageList.value.scrollTop = 0
+})
+watch(allStorageModels, () => {
+  finishStorageDrag()
+  selectedStorageModels.value = selectedStorageModels.value.filter(key => (allStorageModelsByKey.value.get(key)?.sizeBytes || 0) > 0)
+})
+onBeforeUnmount(detachStorageListeners)
+onDeactivated(detachStorageListeners)
+onActivated(() => { if (showStorage.value) attachStorageListeners() })
 
 watch([search, category, modelSource, downloadedOnly, pageSize, modelSort], () => {
   page.value = 1
@@ -1146,7 +1309,7 @@ watch(() => modelStore.models.map(model => model.name), (names) => {
 watch(batchIntent, () => { if (batchPreview.value && !batchApplying.value) backToBatchEdit() }, { deep: true })
 
 function storageModelTypeLabel(item: StorageListItem) {
-  if (item.kind === 'catalog') return item.downloaded ? t('models.downloaded') : t('models.notDownloaded')
+  if (item.kind === 'catalog') return isDeletingModel(item.id) ? t('models.deleting') : item.downloaded ? t('models.downloaded') : t('models.notDownloaded')
   if (item.role === 'vad') return t('models.storageAsrVadModel')
   if (item.role === 'punctuation') return t('models.storageAsrPunctuationModel')
   return t('models.storageAsrRecognitionModel')
@@ -1452,14 +1615,19 @@ async function relinkCustomModel(model: ModelEntry, event?: MouseEvent) {
 
 async function openStorageManager() {
   showStorage.value = true
-  try {
-    await modelStore.loadModelStorageSummary()
-  } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err))
-  }
+  await refreshStorage(false)
 }
 
-
+async function refreshStorage(force = true) {
+  if (storageBusy.value) return
+  finishStorageDrag()
+  storageError.value = ''
+  try {
+    await modelStore.loadModelStorageSummary({ force })
+  } catch (err) {
+    storageError.value = errorText(err)
+  }
+}
 
 function openModelDir() {
   const path = modelStorageSummary.value?.modelDir || modelDir.value || settings.modelDir
@@ -1467,26 +1635,27 @@ function openModelDir() {
 }
 
 function confirmBatchDelete() {
+  finishStorageDrag()
+  if (storageBusy.value) return
   const targets = selectedStorageModels.value
     .map(key => allStorageModelsByKey.value.get(key))
     .filter((item): item is StorageListItem => Boolean(item))
-    .filter(item => item.kind === 'tool' || !isDeletingModel(item.id))
-    .map(({ kind, id, name, tool }) => ({ kind, id, name, tool }))
+    .filter(canSelectStorageItem)
   if (!targets.length) return
   dialog.warning({
     title: t('models.storageBatchDeleteConfirmTitle'),
     content: t('models.storageBatchDeleteConfirmContent', {
       count: targets.length,
-      size: formatBytes(selectedStorageBytes.value),
+      size: formatBytes(targets.reduce((sum, item) => sum + item.sizeBytes, 0)),
     }),
     positiveText: t('models.storageBatchDelete'),
     negativeText: t('common.cancel'),
     onPositiveClick: () => {
-      modelStore.deleteStorageModels(targets).then(() => {
+      modelStore.deleteStorageModels(targets.map(({ kind, id, name, tool }) => ({ kind, id, name, tool }))).then(() => {
         const failed = new Set(modelStore.batchDeleteState.failedModels)
         selectedStorageModels.value = selectedStorageModels.value.filter((key) => {
           const item = allStorageModelsByKey.value.get(key)
-          return Boolean(item && failed.has(item.name))
+          return Boolean(item && failed.has(item.name) && item.sizeBytes > 0)
         })
         if (modelStore.batchDeleteState.failedModels.length) {
           message.warning(t('models.batchDeleteWithFailures', { count: modelStore.batchDeleteState.failedModels.length }))
@@ -1499,6 +1668,8 @@ function confirmBatchDelete() {
 }
 
 function confirmCleanupResidual() {
+  finishStorageDrag()
+  if (storageBusy.value) return
   const summary = modelStorageSummary.value
   if (!summary?.residualFiles.length) return
   dialog.warning({
@@ -2352,27 +2523,58 @@ watch(() => route.query.parameters, async value => {
       </n-card>
     </n-modal>
 
-    <n-drawer v-model:show="showStorage" :width="760" placement="right" :z-index="isTutorialFrame() ? 3500 : undefined" :trap-focus="!isTutorialFrame()">
-      <n-drawer-content :title="t('models.storageTitle')" closable>
+    <n-drawer v-model:show="showStorage" width="min(880px, 100vw)" placement="right" class="storage-drawer"
+      :style="{ top: storageDrawerTop, height: `calc(100% - ${storageDrawerTop})` }"
+      :z-index="isTutorialFrame() ? 3500 : undefined" :trap-focus="!isTutorialFrame()">
+      <n-drawer-content :title="t('models.storageTitle')" closable :body-style="{ overflow: 'hidden' }"
+        :body-content-style="{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' }">
+        <template #header>
+          <div class="storage-heading">
+            <span>{{ t('models.storageTitle') }}</span>
+            <div class="storage-selection-bar" role="region" :aria-label="t('models.storageBatchDelete')">
+              <n-checkbox :checked="allStorageSelected" :indeterminate="someStorageSelected" :disabled="storageBusy || !selectableStorageModels.length"
+                :aria-disabled="storageBusy || !selectableStorageModels.length"
+                :title="t('models.storageSelectionHint')" @update:checked="selectStorageResults">{{ t('models.storageSelectAll') }}</n-checkbox>
+              <div class="storage-selection-bar__count" role="status" aria-live="polite" aria-atomic="true">
+                <span>{{ t('models.storageSelected', { count: selectedStorageModels.length, size: formatStorageBytes(selectedStorageBytes) }) }}</span>
+                <small v-if="storageOutsideSelection">{{ t('models.storageOutsideSelection', { count: storageOutsideSelection }) }}</small>
+              </div>
+              <n-button v-if="selectedStorageModels.length" text size="small" :disabled="storageBusy" @click="clearStorageSelection">{{ t('models.storageClearSelection') }}</n-button>
+              <n-button class="storage-selection-bar__delete" size="small" type="error" secondary
+                :disabled="!selectedStorageModels.length || hasDeletingSelectedStorageModels || storageBusy" @click="confirmBatchDelete">
+                <template #icon><n-icon :component="TrashOutline" /></template>{{ t('models.storageDeleteSelected') }}
+              </n-button>
+            </div>
+          </div>
+        </template>
         <div class="storage-panel">
           <div class="storage-summary">
             <div class="storage-stat">
               <span>{{ t('models.storageTotal') }}</span>
-              <strong>{{ formatBytes(modelStorageSummary?.totalBytes || 0) }}</strong>
+              <strong>{{ formatStorageBytes(modelStorageSummary?.totalBytes || 0) }}</strong>
             </div>
             <div class="storage-stat">
               <span>{{ t('models.storageDownloadedCount') }}</span>
               <strong>{{ modelStorageSummary?.downloadedCount || 0 }}</strong>
             </div>
             <div class="storage-stat">
-              <span>{{ t('models.storageResidual') }}</span>
-              <strong>{{ formatBytes(modelStorageSummary?.residualBytes || 0) }}</strong>
+              <div class="storage-stat__heading">
+                <span>{{ t('models.storageResidual') }}</span>
+                <n-button text type="warning" size="tiny" :disabled="!modelStorageSummary?.residualFiles.length || storageBusy" @click="confirmCleanupResidual">{{ t('models.storageCleanup') }}</n-button>
+              </div>
+              <strong>{{ formatStorageBytes(modelStorageSummary?.residualBytes || 0) }}</strong>
             </div>
           </div>
 
           <div class="storage-dir">
             <span class="text-muted">{{ t('models.modelDir') }}:</span>
-            <code>{{ modelStorageSummary?.modelDir || modelDir || settings.modelDir || '?' }}</code>
+            <code :title="modelStorageSummary?.modelDir || modelDir || settings.modelDir">{{ modelStorageSummary?.modelDir || modelDir || settings.modelDir || '?' }}</code>
+            <n-button size="small" quaternary :loading="storageLoading" :disabled="storageBusy" @click="refreshStorage()">
+              <template #icon><n-icon :component="RefreshOutline" /></template>{{ t('models.storageRefresh') }}
+            </n-button>
+            <n-button size="small" quaternary @click="openModelDir">
+              <template #icon><n-icon :component="FolderOpenOutline" /></template>{{ t('models.openModelDir') }}
+            </n-button>
           </div>
 
           <div class="storage-toolbar">
@@ -2389,39 +2591,13 @@ watch(() => route.query.parameters, async value => {
               ]"
               style="width:160px"
             />
-            <n-switch v-model:value="storageDownloadedOnly" size="small" />
-            <span class="text-sm text-muted">{{ t('models.downloadedOnly') }}</span>
+            <label class="storage-downloaded-toggle">
+              <n-switch v-model:value="storageDownloadedOnly" size="small" :aria-label="t('models.downloadedOnly')" />
+              <span class="text-sm text-muted">{{ t('models.downloadedOnly') }}</span>
+            </label>
           </div>
 
-          <div class="storage-actions">
-            <n-button size="small" secondary :loading="storageLoading" @click="modelStore.loadModelStorageSummary({ force: true })">
-              <template #icon><n-icon :component="RefreshOutline" /></template>
-              {{ t('models.storageRefresh') }}
-            </n-button>
-            <n-button size="small" secondary @click="openModelDir">
-              <template #icon><n-icon :component="FolderOpenOutline" /></template>
-              {{ t('models.openModelDir') }}
-            </n-button>
-            <n-button
-              size="small"
-              type="error"
-              secondary
-              :disabled="!selectedStorageModels.length || hasDeletingSelectedStorageModels || batchDeleteState.active || residualCleanupState.active"
-              @click="confirmBatchDelete"
-            >
-              {{ t('models.storageBatchDelete') }}
-              <span v-if="selectedStorageModels.length">（{{ selectedStorageModels.length }} / {{ formatBytes(selectedStorageBytes) }}）</span>
-            </n-button>
-            <n-button
-              size="small"
-              type="warning"
-              secondary
-              :disabled="!(modelStorageSummary?.residualFiles.length) || batchDeleteState.active || residualCleanupState.active"
-              @click="confirmCleanupResidual"
-            >
-              {{ t('models.storageCleanup') }}
-            </n-button>
-          </div>
+          <n-alert v-if="storageError" type="error" :bordered="false">{{ storageError }}</n-alert>
 
           <div v-if="batchDeleteState.active" class="storage-progress-card">
             <strong>{{ t('models.batchDeleting', { count: batchDeleteState.totalModels }) }}</strong>
@@ -2453,27 +2629,38 @@ watch(() => route.query.parameters, async value => {
             />
           </div>
 
-          <div class="storage-list">
-            <label
+          <div ref="storageList" class="storage-list" :aria-busy="storageLoading" @scroll="handleStorageScroll"
+            @pointerdown.capture="storageSuppressClick = false" @click.capture="consumeStorageClick">
+            <div
               v-for="item in storageModels"
               :key="item.selectionKey"
               class="storage-row"
+              :class="{ 'storage-row--selected': storageSelection.has(item.selectionKey), 'storage-row--disabled': storageBusy || (!canSelectStorageItem(item) && !storageSelection.has(item.selectionKey)) }"
+              :data-storage-key="item.selectionKey" role="button" :aria-pressed="storageSelection.has(item.selectionKey)"
+              :aria-disabled="storageBusy || (!canSelectStorageItem(item) && !storageSelection.has(item.selectionKey))"
+              :tabindex="storageBusy || (!canSelectStorageItem(item) && !storageSelection.has(item.selectionKey)) ? -1 : 0"
+              @click="handleStorageRowClick(item)" @keydown.enter.self.prevent="toggleStorageRow(item)" @keydown.space.self.prevent="toggleStorageRow(item)"
             >
+              <span class="storage-row__checkbox" @pointerdown="startStorageDrag($event, item)">
               <n-checkbox
-                :checked="selectedStorageModels.includes(item.selectionKey)"
-                :disabled="item.sizeBytes <= 0 || (item.kind === 'catalog' && isDeletingModel(item.id)) || batchDeleteState.active || residualCleanupState.active"
+                :checked="storageSelection.has(item.selectionKey)" :aria-label="t('models.storageSelectItem', { name: item.name })"
+                :disabled="storageBusy || (!canSelectStorageItem(item) && !storageSelection.has(item.selectionKey))"
+                :aria-disabled="storageBusy || (!canSelectStorageItem(item) && !storageSelection.has(item.selectionKey))"
                 @update:checked="(checked: boolean) => setStorageSelected(item.selectionKey, checked)"
+                @click.stop
               />
+              </span>
               <div class="storage-row__main">
-                <strong>{{ item.name }}</strong>
-                <span>{{ t('models.storageFileCount', { count: item.fileCount }) }}</span>
+                <strong :title="item.name">{{ item.name }}</strong>
+                <span>{{ t('models.storageFileCount', { count: item.fileCount }) }}<template v-if="!item.downloaded && item.expectedSizeBytes > item.sizeBytes"> · {{ t('models.storageExpectedSize', { size: formatBytes(item.expectedSizeBytes) }) }}</template></span>
               </div>
-              <n-tag size="small" :bordered="false" :type="item.kind === 'tool' ? 'info' : item.downloaded ? 'success' : 'default'">
+              <n-tag size="small" :bordered="false" :type="item.kind === 'tool' ? 'info' : isDeletingModel(item.id) ? 'warning' : item.downloaded ? 'success' : 'default'">
                 {{ storageModelTypeLabel(item) }}
               </n-tag>
-              <strong class="storage-row__size">{{ formatBytes(item.sizeBytes || item.expectedSizeBytes) }}</strong>
-            </label>
-            <div v-if="!storageModels.length" class="empty-state storage-empty">
+              <strong class="storage-row__size">{{ formatStorageBytes(item.sizeBytes) }}</strong>
+            </div>
+            <div v-if="storageLoading && !modelStorageSummary" class="empty-state storage-empty"><n-spin size="small" /></div>
+            <div v-else-if="!storageModels.length" class="empty-state storage-empty">
               <n-icon :component="CubeOutline" size="36" color="var(--on-surface-muted)" />
               <span class="text-muted">{{ t('models.searchEmpty') }}</span>
             </div>
@@ -3177,7 +3364,8 @@ watch(() => route.query.parameters, async value => {
 }
 :global(html.models-drag-selecting), :global(html.models-drag-selecting *) { user-select: none !important; cursor: pointer !important; }
 
-.header-actions.batch-select-bar {
+.header-actions.batch-select-bar,
+.storage-selection-bar {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -3462,9 +3650,16 @@ watch(() => route.query.parameters, async value => {
 }
 
 .storage-panel {
-  display: grid;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
   gap: 14px;
 }
+
+.storage-panel > :not(.storage-list) { flex-shrink: 0; }
+.storage-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; width: 100%; gap: 10px 16px; }
+.storage-heading > span { flex-shrink: 0; }
 
 .storage-summary {
   display: grid;
@@ -3473,7 +3668,7 @@ watch(() => route.query.parameters, async value => {
 }
 
 .storage-stat {
-  padding: 14px;
+  padding: 12px;
   border: 1px solid var(--outline);
   border-radius: 12px;
   background: var(--surface-1);
@@ -3484,6 +3679,9 @@ watch(() => route.query.parameters, async value => {
   font-size: 12px;
   color: var(--on-surface-muted);
 }
+
+.storage-stat > span, .storage-stat__heading { min-height: 24px; display: flex; align-items: center; }
+.storage-stat__heading { justify-content: space-between; flex-wrap: wrap; gap: 4px; }
 
 .storage-stat strong {
   display: block;
@@ -3500,19 +3698,24 @@ watch(() => route.query.parameters, async value => {
 }
 
 .storage-dir code {
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--on-surface-muted);
 }
 
-.storage-toolbar,
-.storage-actions {
+.storage-toolbar {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
 }
+
+.storage-downloaded-toggle { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.storage-selection-bar { margin-left: auto; font-weight: 400; }
+.storage-selection-bar__count { display: grid; gap: 2px; color: var(--on-surface-muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.storage-selection-bar__count small { font-size: 11px; }
 
 .storage-toolbar .n-input {
   flex: 1;
@@ -3520,23 +3723,38 @@ watch(() => route.query.parameters, async value => {
 }
 
 .storage-list {
-  display: grid;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
   gap: 8px;
-  max-height: 56vh;
   overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   padding-right: 4px;
+  padding-bottom: 4px;
 }
 
 .storage-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: 32px minmax(0, 1fr) auto 84px;
+  flex-shrink: 0;
   align-items: center;
   gap: 12px;
   padding: 12px;
   border-radius: 12px;
   border: 1px solid var(--outline);
   background: var(--surface-1);
+  cursor: pointer;
 }
+
+.storage-row:hover:not(.storage-row--disabled) { border-color: var(--primary-border); }
+.storage-row:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.storage-row--selected { border-color: var(--primary-border); background: color-mix(in srgb, var(--primary-soft) 55%, var(--surface-1)); box-shadow: inset 3px 0 var(--primary); }
+.storage-row--disabled { cursor: not-allowed; }
+.storage-row--disabled .storage-row__main { color: var(--on-surface-muted); }
+.storage-row__checkbox { display: grid; place-items: center; width: 32px; height: 32px; }
+:global(html.storage-drag-selecting), :global(html.storage-drag-selecting *) { user-select: none !important; cursor: pointer !important; }
 
 .storage-row__main {
   min-width: 0;
@@ -3559,6 +3777,15 @@ watch(() => route.query.parameters, async value => {
 .storage-row__size {
   font-size: 13px;
   white-space: nowrap;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 600px) {
+  .storage-row { grid-template-columns: 32px minmax(0, 1fr) auto; gap: 6px 10px; }
+  .storage-row > .n-tag { grid-column: 2; justify-self: start; }
+  .storage-row__checkbox { grid-row: 1 / span 2; }
+  .storage-row__size { grid-column: 3; grid-row: 1 / span 2; }
 }
 
 .storage-empty {

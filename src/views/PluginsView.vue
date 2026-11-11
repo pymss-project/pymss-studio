@@ -650,7 +650,7 @@ async function requestCancel(id?: string) {
                     <n-tag v-else-if="pluginUpdateState(pluginUpdate(plugin)) === 'error'" type="warning" size="small">{{ t('plugins.updateCheckFailed') }}</n-tag>
                   </div>
                   <div class="plugin-installed-metadata">
-                    <span class="plugin-id">{{ plugin.name }}<span v-if="plugin.version"> · {{ plugin.version }}</span></span>
+                    <span class="plugin-id" :title="`${plugin.name}${plugin.version ? ` · ${plugin.version}` : ''}`">{{ plugin.name }}<span v-if="plugin.version"> · {{ plugin.version }}</span></span>
                     <div class="plugin-category-list"><n-tag v-for="value in entryCategories(plugin, offer)" :key="value || 'other'" size="small" :bordered="false">{{ categoryLabel(value) }}</n-tag></div>
                   </div>
                 </div>
@@ -707,7 +707,7 @@ async function requestCancel(id?: string) {
                 <div class="plugin-installed-icon"><n-icon :component="ExtensionPuzzleOutline" :size="22" /></div>
                 <div class="plugin-installed-main">
                   <div class="plugin-installed-header"><h2>{{ catalogTitle(offer) }}</h2><n-tag v-if="incompatible(offer)" size="small" type="warning">{{ t('plugins.incompatible') }}</n-tag><n-tag v-else size="small" :bordered="false">{{ t('plugins.notInstalled') }}</n-tag><n-tag v-if="bundledOffers.has(offer.name)" size="small">{{ t('plugins.preinstalled') }}</n-tag></div>
-                  <div class="plugin-installed-metadata"><span class="plugin-id">{{ offer.name }}<span v-if="offer.version"> · {{ offer.version }}</span></span><div class="plugin-category-list"><n-tag v-for="value in entryCategories(undefined, offer)" :key="value || 'other'" size="small" :bordered="false">{{ categoryLabel(value) }}</n-tag></div></div>
+                  <div class="plugin-installed-metadata"><span class="plugin-id" :title="`${offer.name}${offer.version ? ` · ${offer.version}` : ''}`">{{ offer.name }}<span v-if="offer.version"> · {{ offer.version }}</span></span><div class="plugin-category-list"><n-tag v-for="value in entryCategories(undefined, offer)" :key="value || 'other'" size="small" :bordered="false">{{ categoryLabel(value) }}</n-tag></div></div>
                 </div>
                 <p v-if="entryDescription(undefined, offer)" class="plugin-installed-description" :title="entryDescription(undefined, offer)">{{ entryDescription(undefined, offer) }}</p>
               </div>
@@ -907,6 +907,17 @@ async function requestCancel(id?: string) {
 .plugin-open-chevron { margin-left: 7px; }
 .plugin-library-entry > .plugins-help, .plugin-library-entry > .plugin-error, .plugin-library-entry > .plugin-load-error { margin: 8px 0 0 48px; }
 .plugin-installed-card > .n-select { max-width: 400px; margin: 8px 0 0 48px; }
+.plugins-installed:not(.plugins-installed--card) { gap: 8px; }
+.plugins-installed:not(.plugins-installed--card) > .plugin-library-entry { min-height: 78px; padding: 12px 18px; }
+@media (min-width: 901px) {
+  .plugins-installed:not(.plugins-installed--card) > .plugin-library-entry { padding-block: 16px; }
+  .plugins-installed:not(.plugins-installed--card) .plugin-installed-toggle { grid-template-columns: 36px minmax(0, 1fr) 176px; column-gap: 16px; row-gap: 4px; }
+  .plugins-installed:not(.plugins-installed--card) .plugin-installed-main { display: contents; }
+  .plugins-installed:not(.plugins-installed--card) .plugin-installed-header { grid-column: 2; grid-row: 1; min-width: 0; }
+  .plugins-installed:not(.plugins-installed--card) .plugin-installed-metadata { grid-column: 3; grid-row: 1 / span 2; min-width: 0; flex-direction: column; align-items: flex-start; gap: 4px; }
+  .plugins-installed:not(.plugins-installed--card) .plugin-id { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .plugins-installed:not(.plugins-installed--card) .plugin-installed-description { grid-row: 2; display: block; white-space: nowrap; text-overflow: ellipsis; line-height: 18px; }
+}
 .plugins-installed--card { grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)); gap: 14px; }
 .plugins-installed--card .plugin-library-entry { display: flex; flex-direction: column; min-height: 180px; padding: 18px; cursor: pointer; }
 .plugins-installed--card .plugin-installed-summary { display: contents; }
