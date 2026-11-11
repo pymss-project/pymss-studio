@@ -17,6 +17,7 @@ import { resolveParameters } from '@/features/inference/parameters'
 /** How the model library lays its entries out. */
 export type ModelViewMode = 'card' | 'list'
 import { useSettingsStore } from '@/stores/settings'
+import { BATCH_DOWNLOAD_CONCURRENCY, enqueueDownloads, isActiveDownloadStatus, takeQueuedDownloads } from '@/utils/downloadQueue'
 
 const studioLog = createLogger('ui.stores.model')
 
@@ -466,8 +467,12 @@ export const useModelStore = defineStore('model', () => {
   const modelInferenceBaseSources = ref<Record<string, ModelEntry['defaultInferenceParamsSource']>>({})
   const modelPreferences = ref<Record<string, ModelPreference>>({})
   const downloadTaskIndex = ref<Record<string, string>>({})
+  /** Models waiting for a free slot in a batch download, in start order. Not persisted. */
+  const downloadQueue = ref<string[]>([])
+  const downloadsClosing = ref(false)
   const deleteTasks = ref<Record<string, DeleteTask>>({})
   const deleteTaskIndex = ref<Record<string, string>>({})
+  const pendingModelDeletions = ref(new Map<string, number>())
   const modelStorageSummary = ref<ModelStorageSummary | null>(null)
   const modelStorageSummaryLoadedAt = ref(0)
   const storageLoading = ref(false)
@@ -1163,10 +1168,12 @@ export const useModelStore = defineStore('model', () => {
   }
 
   async function downloadModel(name: string, force = false): Promise<boolean> {
+    removeQueuedDownload(name)
+    if (downloadsClosing.value) return false
     const app = useAppStore()
     const settings = useSettingsStore()
     const existingTask = downloadTasks.value[name]
-    if (existingTask && ['preparing', 'downloading'].includes(existingTask.status)) return false
+    if (isModelDeletionPending(name) || (existingTask && ['preparing', 'downloading'].includes(existingTask.status))) return false
     const taskId = `download_${crypto.randomUUID()}`
     downloadStates.value = { ...downloadStates.value, [name]: 'preparing' }
     downloadErrors.value = { ...downloadErrors.value, [name]: '' }
@@ -1194,12 +1201,14 @@ export const useModelStore = defineStore('model', () => {
       }
       const pendingTask = downloadTasks.value[name]
       if (!pendingTask || pendingTask.taskId !== taskId || pendingTask.status !== 'preparing') return false
+      if (downloadsClosing.value) { await cancelDownload(name); return false }
       await app.checkRuntimeInfo()
       if (!app.runtimeInfo?.ready) {
         throw new Error('请先完成并激活 Python 运行环境后再下载模型')
       }
       const currentTask = downloadTasks.value[name]
       if (!currentTask || currentTask.taskId !== taskId || currentTask.status !== 'preparing') return false
+      if (downloadsClosing.value) { await cancelDownload(name); return false }
       await invoke<{ taskId: string; started: boolean }>('start_model_download', {
         payload: {
           taskId,
@@ -1216,6 +1225,10 @@ export const useModelStore = defineStore('model', () => {
         await invoke<boolean>('cancel_task', { taskId }).catch(() => false)
         return false
       }
+      if (downloadsClosing.value && isActiveDownloadStatus(startedTask.status)) {
+        await cancelDownload(name)
+        return false
+      }
       if (startedTask.status === 'cancelled' || startedTask.status === 'paused') {
         await invoke<boolean>('cancel_task', { taskId }).catch(() => false)
         return false
@@ -1230,6 +1243,8 @@ export const useModelStore = defineStore('model', () => {
     } catch (err) {
       const currentTask = downloadTasks.value[name]
       if (!currentTask || currentTask.taskId !== taskId || ['paused', 'cancelled'].includes(currentTask.status)) return false
+      // Stop waiting requests before asynchronous cleanup can release another download slot.
+      if (!app.runtimeInfo?.ready) clearDownloadQueue()
       // The command may have spawned the worker even if its IPC response was lost. A best-effort
       // cancellation prevents that worker from continuing after the UI has reported a failure.
       await invoke<boolean>('cancel_task', { taskId }).catch(() => false)
@@ -1254,8 +1269,10 @@ export const useModelStore = defineStore('model', () => {
   }
 
   async function cancelDownload(name: string, pause = false) {
+    const wasQueued = downloadQueue.value.includes(name)
+    removeQueuedDownload(name)
     const task = downloadTasks.value[name]
-    if (!task || !['preparing', 'downloading'].includes(task.status)) return false
+    if (!task || !['preparing', 'downloading'].includes(task.status)) return wasQueued
     if (task.status === 'preparing') {
       downloadTasks.value = {
         ...downloadTasks.value,
@@ -1276,11 +1293,62 @@ export const useModelStore = defineStore('model', () => {
     return cancelled
   }
 
+  function isModelDeletionPending(name: string) {
+    const deletion = deleteTasks.value[name]
+    return pendingModelDeletions.value.has(name) || Boolean(deletion && !isDeleteTaskTerminal(deletion))
+  }
+
+  function canQueueDownload(name: string) {
+    if (downloadsClosing.value) return false
+    const model = models.value.find((item) => item.name === name)
+    if (!model || !model.supported || model.downloaded || model.source === 'user') return false
+    return !isModelDeletionPending(name) && !isActiveDownloadStatus(downloadTasks.value[name]?.status)
+  }
+
+  /** Starts queued downloads while slots are free. */
+  function pumpDownloadQueue() {
+    if (downloadsClosing.value) return
+    while (downloadQueue.value.length) {
+      const activeCount = Object.values(downloadTasks.value).filter((task) => isActiveDownloadStatus(task.status)).length
+      const { start } = takeQueuedDownloads(downloadQueue.value, activeCount, BATCH_DOWNLOAD_CONCURRENCY)
+      const name = start[0]
+      if (!name) return
+      downloadQueue.value = downloadQueue.value.slice(1)
+      // A model can become downloaded or busy while it waits; skip it rather than restart it.
+      if (!canQueueDownload(name)) continue
+      // downloadModel marks the task 'preparing' before its first await, so the next iteration
+      // already counts it as active.
+      downloadModel(name).catch((err) => {
+        studioLog.warn('queued model download failed to start', { model: name, error: err instanceof Error ? err.message : String(err) })
+      }).finally(() => pumpDownloadQueue())
+    }
+  }
+
+  /** Queues models for download. Returns how many were added. */
+  function enqueueBatchDownload(names: string[]) {
+    const before = downloadQueue.value.length
+    downloadQueue.value = enqueueDownloads(downloadQueue.value, names, (name) => !canQueueDownload(name))
+    const added = downloadQueue.value.length - before
+    pumpDownloadQueue()
+    return added
+  }
+
+  function removeQueuedDownload(name: string) {
+    downloadQueue.value = downloadQueue.value.filter((item) => item !== name)
+  }
+
+  function clearDownloadQueue() {
+    downloadQueue.value = []
+  }
+
+  watch(downloadTasks, () => pumpDownloadQueue(), { deep: true })
+
   async function deleteModel(name: string, source: 'single' | 'batch' = 'single') {
     const existingTask = deleteTasks.value[name]
     if (existingTask && !isDeleteTaskTerminal(existingTask)) {
       throw new Error('Model deletion already in progress')
     }
+    removeQueuedDownload(name)
     const settings = useSettingsStore()
     const taskId = `delete_${Date.now()}`
     deleteTasks.value = {
@@ -1416,6 +1484,12 @@ export const useModelStore = defineStore('model', () => {
   }
 
   async function deleteStorageModels(targets: ModelStorageDeleteTarget[]) {
+    // Keep every target reserved until its deletion settles, including targets waiting their turn.
+    for (const target of targets) {
+      if (target.kind !== 'catalog') continue
+      pendingModelDeletions.value.set(target.id, (pendingModelDeletions.value.get(target.id) || 0) + 1)
+      removeQueuedDownload(target.id)
+    }
     batchDeleteState.value = {
       active: true,
       totalModels: targets.length,
@@ -1446,6 +1520,11 @@ export const useModelStore = defineStore('model', () => {
         }
         if (target.kind === 'catalog') clearDeleteTask(target.id)
       } finally {
+        if (target.kind === 'catalog') {
+          const remaining = (pendingModelDeletions.value.get(target.id) || 1) - 1
+          if (remaining > 0) pendingModelDeletions.value.set(target.id, remaining)
+          else pendingModelDeletions.value.delete(target.id)
+        }
         batchDeleteState.value = {
           ...batchDeleteState.value,
           completedModels: batchDeleteState.value.completedModels + 1,
@@ -1642,6 +1721,13 @@ export const useModelStore = defineStore('model', () => {
     return result
   }
 
+  // Freeze before other close guards can release runtime waits or download slots.
+  registerWindowCloseGuard(() => {
+    if (!isTauriRuntime()) return
+    downloadsClosing.value = true
+    clearDownloadQueue()
+  }, 110, () => { downloadsClosing.value = false })
+
   // Model downloads/imports/deletions use background workers but are not part of
   // the separation task list. Stop any active worker before the main window closes.
   registerWindowCloseGuard(async () => {
@@ -1720,6 +1806,11 @@ export const useModelStore = defineStore('model', () => {
     deleteModel,
     downloadModel,
     cancelDownload,
+    downloadQueue,
+    canQueueDownload,
+    enqueueBatchDownload,
+    removeQueuedDownload,
+    clearDownloadQueue,
     deleteModels,
     deleteStorageModels,
     loadModelStorageSummary,
