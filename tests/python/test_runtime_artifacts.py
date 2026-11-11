@@ -415,12 +415,20 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
         self.assertEqual(installed.returncode, 0, installed.stderr)
 
     def test_release_jobs_share_the_same_published_lock_and_no_torch_detector(self):
+        import yaml
+
         workflow = (ROOT / ".github/workflows/release-windows.yml").read_text(encoding="utf-8")
+        jobs = yaml.safe_load(workflow)["jobs"]
         for variant in ("cpu", "cuda", "online", "rocm"):
-            job = re.search(r"^  windows-" + variant + r"-prepare:\n(.*?)(?=^  \S|\Z)", workflow, re.M | re.S)
+            job = jobs.get(f"windows-{variant}-prepare")
             self.assertIsNotNone(job, variant)
-            self.assertIn("needs: windows-rocm-runtime-assets", job.group(1), variant)
-            self.assertIn("name: rocm-runtime-resources\n          path: python", job.group(1), variant)
+            needs = job["needs"]
+            self.assertIn("windows-rocm-runtime-assets", [needs] if isinstance(needs, str) else needs, variant)
+            resources = [step for step in job["steps"]
+                         if step.get("uses", "").startswith("actions/download-artifact@")
+                         and step.get("with", {}).get("name") == "rocm-runtime-resources"]
+            self.assertEqual(len(resources), 1, variant)
+            self.assertEqual(resources[0]["with"]["path"], "python", variant)
         self.assertIn("scripts/build-rocm-detector.py", workflow)
         self.assertIn("windows-x64-rocm-runtime-assets", workflow)
         self.assertIn("--wheelhouse release/rocm-runtime-assets/wheels", workflow)

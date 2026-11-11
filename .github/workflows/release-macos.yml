@@ -18,6 +18,7 @@ jobs:
           - os: macos-14
             arch: arm64
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     env:
       PYMSS_VERSION: ${{ inputs.version }}
     steps:

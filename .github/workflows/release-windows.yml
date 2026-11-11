@@ -29,9 +29,61 @@ on:
         default: false
 
 jobs:
+  windows-bundled-tools:
+    name: Prepare shared Windows bundled tools
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Download and verify bundled tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          function Get-BundledFile([string]$Uri, [string]$Destination) {
+            & curl.exe --location --fail --retry 2 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 300 --output $Destination $Uri
+            if ($LASTEXITCODE -ne 0) { throw "Bundled tool download failed with exit code $LASTEXITCODE" }
+            if ((Get-Item -LiteralPath $Destination).Length -eq 0) { throw "Bundled tool download is empty: $Destination" }
+          }
+          $bin = "release/bin"
+          New-Item -ItemType Directory -Force -Path $bin | Out-Null
+          Get-BundledFile "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" "release/ffmpeg.zip"
+          Expand-Archive -Path "release/ffmpeg.zip" -DestinationPath "release/ffmpeg" -Force
+          $ffmpegBin = Get-ChildItem -Path "release/ffmpeg" -Recurse -Directory -Filter "bin" |
+            Where-Object { Test-Path (Join-Path $_.FullName "ffmpeg.exe") } |
+            Select-Object -First 1
+          if (-not $ffmpegBin) { throw "ffmpeg bin directory not found" }
+          foreach ($toolName in @("ffmpeg.exe", "ffprobe.exe")) {
+            Copy-Item -LiteralPath (Join-Path $ffmpegBin.FullName $toolName) -Destination "$bin/$toolName" -Force
+          }
+          Get-BundledFile "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip" "release/aria2.zip"
+          Expand-Archive -Path "release/aria2.zip" -DestinationPath "release/aria2" -Force
+          $aria2 = Get-ChildItem -Path "release/aria2" -Recurse -File -Filter "aria2c.exe" | Select-Object -First 1
+          if (-not $aria2) { throw "aria2c.exe not found" }
+          Copy-Item -LiteralPath $aria2.FullName -Destination "$bin/aria2c.exe" -Force
+          Get-BundledFile "https://aka.ms/vs/17/release/vc_redist.x64.exe" "$bin/VC_redist.x64.exe"
+          foreach ($toolName in @("ffmpeg.exe", "ffprobe.exe", "aria2c.exe")) {
+            $versionFlag = if ($toolName -eq "aria2c.exe") { "--version" } else { "-version" }
+            $versionOutput = & (Join-Path $bin $toolName) $versionFlag
+            if ($LASTEXITCODE -ne 0) { throw "$toolName verification failed with exit code $LASTEXITCODE" }
+            $versionOutput | Select-Object -First 1
+          }
+          foreach ($toolName in @("ffmpeg.exe", "ffprobe.exe", "aria2c.exe", "VC_redist.x64.exe")) {
+            $toolPath = Join-Path $bin $toolName
+            if ((Get-Item -LiteralPath $toolPath).Length -eq 0) { throw "Bundled tool is empty: $toolName" }
+            $digest = (Get-FileHash -LiteralPath $toolPath -Algorithm SHA256).Hash
+            Write-Output "$toolName SHA256: $digest"
+          }
+      - name: Upload shared bundled tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-bundled-tools
+          path: release/bin
+          compression-level: 0
+          if-no-files-found: error
+
   windows-rocm-runtime-assets:
     name: Resolve shared ROCm binary lock and HIP detector
     runs-on: windows-latest
+    timeout-minutes: 120
     env:
       PYMSS_VERSION_INPUT: ${{ inputs.version }}
       PYMSS_ROCM_PROFILE: ${{ inputs.rocm_profile }}
@@ -132,7 +184,8 @@ jobs:
   windows-cuda-prepare:
     name: Windows x64 CUDA prepare
     runs-on: windows-latest
-    needs: windows-rocm-runtime-assets
+    timeout-minutes: 180
+    needs: [windows-rocm-runtime-assets, windows-bundled-tools]
     outputs:
       version: ${{ steps.meta.outputs.version }}
       stage_name: ${{ steps.meta.outputs.stage_name }}
@@ -186,45 +239,11 @@ jobs:
           PYMSS_BUILD_OFFICIAL: ${{ github.repository == 'pymss-project/pymss-studio' && github.repository_owner == 'pymss-project' && 'true' || 'false' }}
         run: pnpm plugins:build --no-bundle
 
-      - name: Prepare Windows bundled tools
-        shell: pwsh
-        run: |
-          $bin = "release/bin"
-          New-Item -ItemType Directory -Force -Path $bin | Out-Null
-
-          $ffmpegZip = "release/ffmpeg-release-essentials.zip"
-          $ffmpegExtract = "release/ffmpeg"
-          Invoke-WebRequest `
-            -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" `
-            -OutFile $ffmpegZip
-          if (Test-Path $ffmpegExtract) { Remove-Item $ffmpegExtract -Recurse -Force }
-          Expand-Archive -Path $ffmpegZip -DestinationPath $ffmpegExtract -Force
-          $ffmpegBin = Get-ChildItem -Path $ffmpegExtract -Recurse -Directory -Filter "bin" |
-            Where-Object { Test-Path (Join-Path $_.FullName "ffmpeg.exe") } |
-            Select-Object -First 1
-          if (-not $ffmpegBin) { throw "ffmpeg bin directory not found" }
-          Copy-Item (Join-Path $ffmpegBin.FullName "ffmpeg.exe") "$bin/ffmpeg.exe" -Force
-          Copy-Item (Join-Path $ffmpegBin.FullName "ffprobe.exe") "$bin/ffprobe.exe" -Force
-          $ffprobeOutput = & "$bin/ffprobe.exe" -version
-          $ffprobeExitCode = $LASTEXITCODE
-          $ffprobeOutput | Select-Object -First 1
-          if ($ffprobeExitCode -ne 0) { throw "ffprobe.exe verification failed with exit code $ffprobeExitCode" }
-
-          $aria2Zip = "release/aria2-1.37.0-win-64bit-build1.zip"
-          $aria2Extract = "release/aria2"
-          Invoke-WebRequest `
-            -Uri "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip" `
-            -OutFile $aria2Zip
-          if (Test-Path $aria2Extract) { Remove-Item $aria2Extract -Recurse -Force }
-          Expand-Archive -Path $aria2Zip -DestinationPath $aria2Extract -Force
-          $aria2Exe = Get-ChildItem -Path $aria2Extract -Recurse -File -Filter "aria2c.exe" | Select-Object -First 1
-          if (-not $aria2Exe) { throw "aria2c.exe not found" }
-          Copy-Item $aria2Exe.FullName "$bin/aria2c.exe" -Force
-
-          $vcRedist = "$bin/VC_redist.x64.exe"
-          if (Test-Path $vcRedist) { Remove-Item $vcRedist -Force }
-          & curl.exe --location --fail --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 600 --output $vcRedist "https://aka.ms/vs/17/release/vc_redist.x64.exe"
-          if ($LASTEXITCODE -ne 0 -or !(Test-Path $vcRedist)) { throw "VC_redist.x64.exe download failed with exit code $LASTEXITCODE" }
+      - name: Download shared Windows bundled tools
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-bundled-tools
+          path: release/bin
 
       - name: Stage portable directory
         shell: pwsh
@@ -294,6 +313,7 @@ jobs:
   windows-cuda-7z:
     name: Windows x64 CUDA portable 7z
     runs-on: windows-latest
+    timeout-minutes: 120
     needs: windows-cuda-prepare
     steps:
       - name: Download CUDA stage artifact
@@ -323,6 +343,7 @@ jobs:
   windows-cuda-exe:
     name: Windows x64 CUDA setup exe
     runs-on: windows-latest
+    timeout-minutes: 120
     needs: windows-cuda-prepare
     env:
       PYMSS_VERSION: ${{ needs.windows-cuda-prepare.outputs.version }}
@@ -341,7 +362,8 @@ jobs:
   windows-cpu-prepare:
     name: Windows x64 CPU prepare
     runs-on: windows-latest
-    needs: windows-rocm-runtime-assets
+    timeout-minutes: 180
+    needs: [windows-rocm-runtime-assets, windows-bundled-tools]
     outputs:
       version: ${{ steps.meta.outputs.version }}
       stage_name: ${{ steps.meta.outputs.stage_name }}
@@ -395,45 +417,11 @@ jobs:
           PYMSS_BUILD_OFFICIAL: ${{ github.repository == 'pymss-project/pymss-studio' && github.repository_owner == 'pymss-project' && 'true' || 'false' }}
         run: pnpm plugins:build --no-bundle
 
-      - name: Prepare Windows bundled tools
-        shell: pwsh
-        run: |
-          $bin = "release/bin"
-          New-Item -ItemType Directory -Force -Path $bin | Out-Null
-
-          $ffmpegZip = "release/ffmpeg-release-essentials.zip"
-          $ffmpegExtract = "release/ffmpeg"
-          Invoke-WebRequest `
-            -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" `
-            -OutFile $ffmpegZip
-          if (Test-Path $ffmpegExtract) { Remove-Item $ffmpegExtract -Recurse -Force }
-          Expand-Archive -Path $ffmpegZip -DestinationPath $ffmpegExtract -Force
-          $ffmpegBin = Get-ChildItem -Path $ffmpegExtract -Recurse -Directory -Filter "bin" |
-            Where-Object { Test-Path (Join-Path $_.FullName "ffmpeg.exe") } |
-            Select-Object -First 1
-          if (-not $ffmpegBin) { throw "ffmpeg bin directory not found" }
-          Copy-Item (Join-Path $ffmpegBin.FullName "ffmpeg.exe") "$bin/ffmpeg.exe" -Force
-          Copy-Item (Join-Path $ffmpegBin.FullName "ffprobe.exe") "$bin/ffprobe.exe" -Force
-          $ffprobeOutput = & "$bin/ffprobe.exe" -version
-          $ffprobeExitCode = $LASTEXITCODE
-          $ffprobeOutput | Select-Object -First 1
-          if ($ffprobeExitCode -ne 0) { throw "ffprobe.exe verification failed with exit code $ffprobeExitCode" }
-
-          $aria2Zip = "release/aria2-1.37.0-win-64bit-build1.zip"
-          $aria2Extract = "release/aria2"
-          Invoke-WebRequest `
-            -Uri "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip" `
-            -OutFile $aria2Zip
-          if (Test-Path $aria2Extract) { Remove-Item $aria2Extract -Recurse -Force }
-          Expand-Archive -Path $aria2Zip -DestinationPath $aria2Extract -Force
-          $aria2Exe = Get-ChildItem -Path $aria2Extract -Recurse -File -Filter "aria2c.exe" | Select-Object -First 1
-          if (-not $aria2Exe) { throw "aria2c.exe not found" }
-          Copy-Item $aria2Exe.FullName "$bin/aria2c.exe" -Force
-
-          $vcRedist = "$bin/VC_redist.x64.exe"
-          if (Test-Path $vcRedist) { Remove-Item $vcRedist -Force }
-          & curl.exe --location --fail --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 600 --output $vcRedist "https://aka.ms/vs/17/release/vc_redist.x64.exe"
-          if ($LASTEXITCODE -ne 0 -or !(Test-Path $vcRedist)) { throw "VC_redist.x64.exe download failed with exit code $LASTEXITCODE" }
+      - name: Download shared Windows bundled tools
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-bundled-tools
+          path: release/bin
 
       - name: Stage portable directory
         shell: pwsh
@@ -493,6 +481,7 @@ jobs:
   windows-cpu-7z:
     name: Windows x64 CPU portable 7z
     runs-on: windows-latest
+    timeout-minutes: 120
     needs: windows-cpu-prepare
     steps:
       - name: Download CPU stage artifact
@@ -521,6 +510,7 @@ jobs:
   windows-cpu-exe:
     name: Windows x64 CPU setup exe
     runs-on: windows-latest
+    timeout-minutes: 120
     needs: windows-cpu-prepare
     env:
       PYMSS_VERSION: ${{ needs.windows-cpu-prepare.outputs.version }}
@@ -541,7 +531,8 @@ jobs:
   windows-online-prepare:
     name: Windows x64 online runtime prepare
     runs-on: windows-latest
-    needs: windows-rocm-runtime-assets
+    timeout-minutes: 180
+    needs: [windows-rocm-runtime-assets, windows-bundled-tools]
     outputs:
       version: ${{ steps.meta.outputs.version }}
       stage_name: ${{ steps.meta.outputs.stage_name }}
@@ -587,32 +578,12 @@ jobs:
           PYMSS_BUILD_UPDATE_SUPPORTED: 'true'
           PYMSS_BUILD_OFFICIAL: ${{ github.repository == 'pymss-project/pymss-studio' && github.repository_owner == 'pymss-project' && 'true' || 'false' }}
         run: pnpm plugins:build --no-bundle
-      - name: Prepare Windows bundled tools
-        shell: pwsh
-        run: |
-          $bin = "release/bin"
-          New-Item -ItemType Directory -Force -Path $bin | Out-Null
-          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "release/ffmpeg.zip"
-          Expand-Archive -Path "release/ffmpeg.zip" -DestinationPath "release/ffmpeg" -Force
-          $ffmpeg = Get-ChildItem "release/ffmpeg" -Recurse -File -Filter "ffmpeg.exe" | Select-Object -First 1
-          if (-not $ffmpeg) { throw "ffmpeg.exe not found" }
-          Copy-Item $ffmpeg.FullName "$bin/ffmpeg.exe" -Force
-          $ffprobe = Get-ChildItem "release/ffmpeg" -Recurse -File -Filter "ffprobe.exe" | Select-Object -First 1
-          if (-not $ffprobe) { throw "ffprobe.exe not found" }
-          Copy-Item $ffprobe.FullName "$bin/ffprobe.exe" -Force
-          $ffprobeOutput = & "$bin/ffprobe.exe" -version
-          $ffprobeExitCode = $LASTEXITCODE
-          $ffprobeOutput | Select-Object -First 1
-          if ($ffprobeExitCode -ne 0) { throw "ffprobe.exe verification failed with exit code $ffprobeExitCode" }
-          Invoke-WebRequest -Uri "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip" -OutFile "release/aria2.zip"
-          Expand-Archive -Path "release/aria2.zip" -DestinationPath "release/aria2" -Force
-          $aria2 = Get-ChildItem "release/aria2" -Recurse -File -Filter "aria2c.exe" | Select-Object -First 1
-          if (-not $aria2) { throw "aria2c.exe not found" }
-          Copy-Item $aria2.FullName "$bin/aria2c.exe" -Force
-          $vcRedist = "$bin/VC_redist.x64.exe"
-          if (Test-Path $vcRedist) { Remove-Item $vcRedist -Force }
-          & curl.exe --location --fail --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 600 --output $vcRedist "https://aka.ms/vs/17/release/vc_redist.x64.exe"
-          if ($LASTEXITCODE -ne 0 -or !(Test-Path $vcRedist)) { throw "VC_redist.x64.exe download failed with exit code $LASTEXITCODE" }
+      - name: Download shared Windows bundled tools
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-bundled-tools
+          path: release/bin
+
       - name: Stage online portable directory
         shell: pwsh
         run: |
@@ -654,6 +625,7 @@ jobs:
   windows-online-7z:
     name: Windows x64 online portable 7z
     runs-on: windows-latest
+    timeout-minutes: 120
     needs: windows-online-prepare
     steps:
       - uses: actions/download-artifact@v4
@@ -690,6 +662,7 @@ jobs:
   windows-online-exe:
     name: Windows x64 online setup exe
     runs-on: windows-latest
+    timeout-minutes: 120
     needs: windows-online-prepare
     env:
       PYMSS_VERSION: ${{ needs.windows-online-prepare.outputs.version }}
@@ -709,7 +682,8 @@ jobs:
   windows-rocm-prepare:
     name: Windows x64 ROCm prepare
     runs-on: windows-latest
-    needs: windows-rocm-runtime-assets
+    timeout-minutes: 180
+    needs: [windows-rocm-runtime-assets, windows-bundled-tools]
     outputs:
       version: ${{ steps.meta.outputs.version }}
       stage_name: ${{ steps.meta.outputs.stage_name }}
@@ -765,30 +739,12 @@ jobs:
           PYMSS_BUILD_UPDATE_SUPPORTED: 'true'
           PYMSS_BUILD_OFFICIAL: ${{ github.repository == 'pymss-project/pymss-studio' && github.repository_owner == 'pymss-project' && 'true' || 'false' }}
         run: pnpm plugins:build --no-bundle
-      - name: Prepare ROCm portable tools
-        shell: pwsh
-        run: |
-          $bin = "release/bin"
-          New-Item -ItemType Directory -Force -Path $bin | Out-Null
-          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "release/ffmpeg.zip"
-          Expand-Archive -Path "release/ffmpeg.zip" -DestinationPath "release/ffmpeg" -Force
-          $ffmpeg = Get-ChildItem "release/ffmpeg" -Recurse -File -Filter "ffmpeg.exe" | Select-Object -First 1
-          Copy-Item $ffmpeg.FullName "$bin/ffmpeg.exe" -Force
-          $ffprobe = Get-ChildItem "release/ffmpeg" -Recurse -File -Filter "ffprobe.exe" | Select-Object -First 1
-          if (-not $ffprobe) { throw "ffprobe.exe not found" }
-          Copy-Item $ffprobe.FullName "$bin/ffprobe.exe" -Force
-          $ffprobeOutput = & "$bin/ffprobe.exe" -version
-          $ffprobeExitCode = $LASTEXITCODE
-          $ffprobeOutput | Select-Object -First 1
-          if ($ffprobeExitCode -ne 0) { throw "ffprobe.exe verification failed with exit code $ffprobeExitCode" }
-          Invoke-WebRequest -Uri "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip" -OutFile "release/aria2.zip"
-          Expand-Archive -Path "release/aria2.zip" -DestinationPath "release/aria2" -Force
-          $aria2 = Get-ChildItem "release/aria2" -Recurse -File -Filter "aria2c.exe" | Select-Object -First 1
-          Copy-Item $aria2.FullName "$bin/aria2c.exe" -Force
-          $vcRedist = "$bin/VC_redist.x64.exe"
-          if (Test-Path $vcRedist) { Remove-Item $vcRedist -Force }
-          & curl.exe --location --fail --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 600 --output $vcRedist "https://aka.ms/vs/17/release/vc_redist.x64.exe"
-          if ($LASTEXITCODE -ne 0 -or !(Test-Path $vcRedist)) { throw "VC_redist.x64.exe download failed with exit code $LASTEXITCODE" }
+      - name: Download shared Windows bundled tools
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-bundled-tools
+          path: release/bin
+
       - name: Stage ROCm portable directory
         shell: pwsh
         run: |
@@ -850,6 +806,7 @@ jobs:
   windows-rocm-7z:
     name: Windows x64 ROCm portable 7z
     runs-on: windows-latest
+    timeout-minutes: 120
     needs: windows-rocm-prepare
     steps:
       - uses: actions/download-artifact@v4
@@ -873,6 +830,7 @@ jobs:
   windows-rocm-exe:
     name: Windows x64 ROCm setup exe
     runs-on: windows-latest
+    timeout-minutes: 120
     needs: windows-rocm-prepare
     env:
       PYMSS_VERSION: ${{ needs.windows-rocm-prepare.outputs.version }}
