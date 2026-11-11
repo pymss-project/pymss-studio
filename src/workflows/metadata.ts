@@ -3,8 +3,11 @@ export type WorkflowMetadata = {
   author?: string
   version?: string
   studioVersion?: string
+  notes?: string
+  legacyDescription?: string
 }
 
+export const WORKFLOW_NOTES_MAX_LENGTH = 4000
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const TEXT_LIMITS = { author: 200, version: 64, studioVersion: 128 } as const
 
@@ -19,6 +22,41 @@ export function normalizeWorkflowMetadata(value: unknown): WorkflowMetadata | un
     if (typeof text !== 'string' || text.length > TEXT_LIMITS[key] || /[\u0000-\u001f]/.test(text)) return undefined
     if (text.trim()) metadata[key] = text.trim()
   }
+  if (source.notes !== undefined) {
+    const notes = source.notes
+    if (typeof notes !== 'string' || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(notes)) return undefined
+    metadata.notes = notes.trim()
+  }
+  if (source.legacyDescription !== undefined) {
+    if (typeof source.legacyDescription !== 'string') return undefined
+    if (source.legacyDescription.trim()) metadata.legacyDescription = source.legacyDescription.trim()
+  }
+  return metadata
+}
+
+type WorkflowDescriptionSource = { description?: string; metadata?: WorkflowMetadata }
+
+export function resolveWorkflowDescription(source?: WorkflowDescriptionSource | null): string {
+  return source?.metadata?.notes ?? source?.description?.trim() ?? ''
+}
+
+export function legacyWorkflowDescription(source?: WorkflowDescriptionSource | null): string {
+  if (!source) return ''
+  const current = resolveWorkflowDescription(source)
+  const candidates = [source.metadata?.legacyDescription, source.metadata?.notes !== undefined ? source.description : undefined]
+  const preserved: string[] = []
+  for (const candidate of candidates) {
+    const text = candidate?.trim()
+    if (text && !current.includes(text) && !preserved.some(value => value.includes(text))) preserved.push(text)
+  }
+  return preserved.join('\n\n')
+}
+
+export function mergeWorkflowDescription(source: WorkflowDescriptionSource, incoming: WorkflowMetadata): WorkflowMetadata {
+  const metadata = { ...(source.metadata ?? incoming), notes: incoming.notes ?? '' }
+  const legacy = legacyWorkflowDescription(source)
+  if (legacy && !metadata.notes.includes(legacy)) metadata.legacyDescription = legacy
+  else delete metadata.legacyDescription
   return metadata
 }
 

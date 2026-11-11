@@ -3,7 +3,7 @@ import test, { after, beforeEach } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createPinia } from 'pinia'
 import { createServer } from 'vite'
-import { createWorkflowMetadata, normalizeWorkflowMetadata, parseWorkflowFile, serializeWorkflowFile } from '../src/workflows/metadata.ts'
+import { createWorkflowMetadata, legacyWorkflowDescription, normalizeWorkflowMetadata, parseWorkflowFile, resolveWorkflowDescription, serializeWorkflowFile, WORKFLOW_NOTES_MAX_LENGTH } from '../src/workflows/metadata.ts'
 
 const vite = await createServer({
   configFile: false,
@@ -46,7 +46,7 @@ test('standard JSON exports put metadata first and keep schema versions and defi
 
 test('legacy files remain readable and malformed metadata is rejected without treating it as execution data', () => {
   assert.deepEqual(parseWorkflowFile(JSON.stringify(simple())), { definition: simple(), metadata: undefined })
-  for (const value of [null, [], { guid: 'invalid' }, { ...metadata(), author: 'bad\nname' }, { ...metadata(), version: 'x'.repeat(65) }]) {
+  for (const value of [null, [], { guid: 'invalid' }, { ...metadata(), author: 'bad\nname' }, { ...metadata(), version: 'x'.repeat(65) }, { ...metadata(), legacyDescription: 42 }]) {
     assert.equal(normalizeWorkflowMetadata(value), undefined)
     assert.throws(() => parseWorkflowFile(JSON.stringify({ ...simple(), _metadata: value })), /metadata/)
   }
@@ -240,4 +240,145 @@ test('an editor first-saving after export keeps the published GUID and details',
   assert.deepEqual(edited.metadata, exported._metadata)
   assert.deepEqual(edited.metadata, published.metadata)
   assert.equal(edited.name, 'Edited later')
+})
+
+test('multiline author notes round-trip through workflow files with matching text validation', () => {
+  const header = { ...metadata(), notes: '  输入要求\n\t保留原始音轨\r\n输出说明  ' }
+  const normalized = { ...header, notes: header.notes.trim() }
+  assert.deepEqual(parseWorkflowFile(serializeWorkflowFile(simple(), header)).metadata, normalized)
+  assert.equal(normalizeWorkflowMetadata({ ...header, notes: ' \n\t ' }).notes, '')
+  for (const notes of [42, [], 'bad\u0000text', 'bad\u000btext', 'bad\u007ftext']) {
+    assert.equal(normalizeWorkflowMetadata({ ...header, notes }), undefined)
+    assert.throws(() => parseWorkflowFile(JSON.stringify({ ...simple(), _metadata: { ...header, notes } })), /metadata/)
+  }
+  assert.equal(normalizeWorkflowMetadata({ ...header, notes: 'x'.repeat(WORKFLOW_NOTES_MAX_LENGTH) }).notes.length, WORKFLOW_NOTES_MAX_LENGTH)
+})
+
+test('notes edits preserve newer publication fields, graph revisions and selection across windows', async () => {
+  const overview = store()
+  await overview.initialize()
+  const original = await overview.saveWorkflow({ name: 'Workflow', definition: simple(), metadata: metadata() })
+  const other = await overview.saveWorkflow({ name: 'Other', definition: simple() })
+  const notesEditor = store()
+  await notesEditor.initialize()
+  const stale = JSON.parse(JSON.stringify(notesEditor.workflows.find(item => item.id === original.id)))
+  const published = await overview.updateWorkflowMetadata(original.id, { ...original.metadata, author: 'Current author', version: '2.0.0' })
+  const saved = await notesEditor.updateWorkflowNotes(original.id, 'Input requirements\nOutput instructions')
+  assert.deepEqual(saved.metadata, { ...published.metadata, notes: 'Input requirements\nOutput instructions' })
+  assert.equal(saved.updatedAt, original.updatedAt)
+  assert.equal(notesEditor.selectedWorkflowId, other.id)
+  const edited = await overview.saveWorkflow({ ...stale, name: 'Edited graph', expectedUpdatedAt: stale.updatedAt })
+  assert.deepEqual(edited.metadata, saved.metadata)
+  const cleared = await notesEditor.updateWorkflowNotes(original.id, ' \n ')
+  assert.deepEqual(cleared.metadata, { ...published.metadata, notes: '' })
+  await assert.rejects(notesEditor.updateWorkflowNotes(original.id, 'x'.repeat(4001)), /metadata/)
+  await notesEditor.deleteWorkflow(original.id)
+  await assert.rejects(notesEditor.updateWorkflowNotes(original.id, 'Notes'), /no longer exists/)
+})
+
+test('exports use saved notes and preserve edits made while the file is being written', async () => {
+  const overview = store()
+  await overview.initialize()
+  const original = await overview.saveWorkflow({ name: 'Workflow', definition: simple(), metadata: { ...metadata(), notes: 'Earlier notes' } })
+  const notesEditor = store()
+  await notesEditor.initialize()
+  await notesEditor.updateWorkflowNotes(original.id, 'Current notes')
+  const published = await overview.exportWorkflow(original.id, { ...original.metadata, version: '2.0.0' }, async (entry, prepared) => {
+    assert.equal(prepared.guid, original.metadata.guid)
+    assert.equal(prepared.notes, 'Current notes')
+    assert.equal(parseWorkflowFile(serializeWorkflowFile(entry.definition, prepared)).metadata.notes, 'Current notes')
+    await notesEditor.updateWorkflowNotes(original.id, 'Later notes')
+    return true
+  })
+  assert.equal(published.metadata.guid, original.metadata.guid)
+  assert.equal(published.metadata.version, '2.0.0')
+  assert.equal(published.metadata.notes, 'Later notes')
+})
+
+test('a legacy workflow receives one GUID on its first notes save and retains it through later updates', async () => {
+  storage.set(key, JSON.stringify({ workflows: [{ id: 'old', name: 'Legacy', definition: simple(), createdAt: 10, updatedAt: 20 }], selectedWorkflowId: 'old' }))
+  const workflow = store()
+  await workflow.initialize()
+  const first = await workflow.updateWorkflowNotes('old', 'First notes')
+  const guid = first.metadata.guid
+  const updated = await workflow.updateWorkflowNotes('old', 'Updated notes')
+  assert.equal(updated.metadata.guid, guid)
+  const edited = await workflow.saveWorkflow({ ...updated, name: 'Edited', expectedUpdatedAt: 20 })
+  assert.equal(edited.metadata.guid, guid)
+  const published = await workflow.updateWorkflowMetadata('old', { ...edited.metadata, version: '2.0.0' })
+  assert.equal(published.metadata.guid, guid)
+  const duplicate = await workflow.duplicateWorkflow('old')
+  assert.notEqual(duplicate.metadata.guid, guid)
+  assert.equal(duplicate.metadata.notes, 'Updated notes')
+  await workflow.reload()
+  assert.equal(workflow.workflows.find(item => item.id === 'old').metadata.guid, guid)
+})
+
+test('description reads use one value without writing or discarding differing legacy content', async () => {
+  const header = metadata()
+  const cases = [
+    { description: 'Earlier description', expected: 'Earlier description', legacy: '' },
+    { description: '', metadata: { ...header, notes: 'Current description' }, expected: 'Current description', legacy: '' },
+    { description: 'Same content', metadata: { ...header, notes: 'Same content' }, expected: 'Same content', legacy: '' },
+    { description: 'Earlier description', metadata: { ...header, notes: 'Current description' }, expected: 'Current description', legacy: 'Earlier description' },
+    { description: 'Earlier description', metadata: { ...header, notes: '' }, expected: '', legacy: 'Earlier description' },
+  ]
+  for (const [index, item] of cases.entries()) {
+    const entry = { id: `workflow-${index}`, name: `Workflow ${index}`, definition: simple(), ...item }
+    storage.set(key, JSON.stringify({ workflows: [entry], selectedWorkflowId: entry.id }))
+    const before = storage.get(key)
+    const workflow = store()
+    await workflow.initialize()
+    assert.equal(resolveWorkflowDescription(workflow.workflows[0]), item.expected)
+    assert.equal(legacyWorkflowDescription(workflow.workflows[0]), item.legacy)
+    assert.equal(storage.get(key), before)
+  }
+})
+
+test('saving a unified description preserves old text until it is appended, and old editor snapshots cannot overwrite it', async () => {
+  const workflow = store()
+  await workflow.initialize()
+  const original = await workflow.saveWorkflow({ name: 'Workflow', description: 'Earlier description', definition: simple(), metadata: { ...metadata(), notes: 'Current description' } })
+  const stale = JSON.parse(JSON.stringify(original))
+  const saved = await workflow.updateWorkflowNotes(original.id, 'Updated description')
+  assert.equal(saved.metadata.guid, original.metadata.guid)
+  assert.equal(saved.description, 'Updated description')
+  assert.equal(saved.metadata.legacyDescription, 'Earlier description')
+  assert.equal(legacyWorkflowDescription(saved), 'Earlier description')
+  const editor = store()
+  await editor.initialize()
+  const edited = await editor.saveWorkflow({ ...stale, name: 'Updated graph', expectedUpdatedAt: stale.updatedAt })
+  assert.equal(edited.description, saved.description)
+  assert.deepEqual(edited.metadata, saved.metadata)
+  const cleared = await workflow.updateWorkflowNotes(original.id, '')
+  assert.equal(resolveWorkflowDescription(cleared), '')
+  assert.equal(cleared.description, '')
+  assert.equal(legacyWorkflowDescription(cleared), 'Earlier description')
+  const combined = await workflow.updateWorkflowNotes(original.id, 'Updated description\n\nEarlier description')
+  assert.equal(combined.metadata.legacyDescription, undefined)
+  assert.equal(legacyWorkflowDescription(combined), '')
+  assert.equal(combined.description, combined.metadata.notes)
+})
+
+test('oversized legacy descriptions and conflicts export losslessly without migrating stored content', async () => {
+  const longText = '完整说明\n'.repeat(1200)
+  for (const notes of [undefined, 'Current description']) {
+    const entry = { id: 'legacy', name: 'Legacy', description: longText.trim(), definition: simple(), metadata: { ...metadata(), ...(notes === undefined ? {} : { notes }) }, createdAt: 10, updatedAt: 20 }
+    storage.set(key, JSON.stringify({ workflows: [entry], selectedWorkflowId: entry.id }))
+    const workflow = store()
+    await workflow.initialize()
+    const before = JSON.parse(storage.get(key)).workflows[0]
+    let file
+    await workflow.exportWorkflow(entry.id, entry.metadata, async (current, prepared) => {
+      file = parseWorkflowFile(serializeWorkflowFile(current.definition, prepared))
+      return true
+    })
+    assert.deepEqual(JSON.parse(storage.get(key)).workflows[0].metadata, before.metadata)
+    assert.equal(file.metadata.notes, notes ?? longText.trim())
+    assert.equal(file.metadata.legacyDescription, notes === undefined ? undefined : longText.trim())
+    const imported = await workflow.saveWorkflow({ name: 'Imported', ...file })
+    assert.equal(resolveWorkflowDescription(imported), notes ?? longText.trim())
+    assert.equal(legacyWorkflowDescription(imported), notes === undefined ? '' : longText.trim())
+    await assert.rejects(workflow.updateWorkflowNotes(imported.id, longText), /metadata/)
+  }
 })

@@ -237,9 +237,11 @@ mod tests {
         let mut registry = EditorRegistry::default();
         registry.reserve("simple-a", "a", WorkflowEditorKind::Simple).unwrap();
         let before = registry.snapshot();
-        let (_, changed) = registry.mutate("main", &json!({ "action": "metadata", "workflowId": "a" }),
-            || Ok(json!({ "state": {} }))).unwrap();
-        assert!(changed.is_none());
+        for action in ["metadata", "notes"] {
+            let (_, changed) = registry.mutate("main", &json!({ "action": action, "workflowId": "a" }),
+                || Ok(json!({ "state": {} }))).unwrap();
+            assert!(changed.is_none());
+        }
         assert_eq!(registry.snapshot().revision, before.revision);
         assert_eq!(registry.snapshot().editors[0].label, "simple-a");
         assert!(registry.mutate("main", &json!({ "action": "upsert", "entry": { "id": "a" } }),

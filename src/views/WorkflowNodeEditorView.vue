@@ -25,6 +25,7 @@ import {
   WorkflowRevisionConflictError,
   type WorkflowEntry,
 } from '@/stores/workflow'
+import { resolveWorkflowDescription } from '@/workflows/metadata'
 import {
   isGraphWorkflowDefinition,
   isWorkflowSaveNodeType,
@@ -210,7 +211,7 @@ function loadWorkflow(item?: WorkflowEntry | null) {
   }
   editingId.value = item.id
   name.value = item.name
-  description.value = item.description
+  description.value = resolveWorkflowDescription(item)
   if (!isGraphWorkflowDefinition(item.definition)) {
     formatError.value = t('workflows.graphEditorFormatRequired')
     defaultDevice.value = 'auto'

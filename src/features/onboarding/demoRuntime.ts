@@ -1,6 +1,6 @@
 import { createDemoAudio, createDemoModels, createDemoWorkflow } from './demoData.ts'
 import type { TutorialAdapter } from './demoContext'
-import { normalizeWorkflowMetadata } from '../../workflows/metadata.ts'
+import { mergeWorkflowDescription, normalizeWorkflowMetadata, WORKFLOW_NOTES_MAX_LENGTH } from '../../workflows/metadata.ts'
 
 export type DemoConfig = { locale: string; themeMode: string; themeAccent: string; platform: string; progress: Record<string, unknown> }
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
@@ -136,17 +136,30 @@ export function createDemoRuntime(config: DemoConfig) {
       if (payload.action === 'upsert') {
         const entry = { ...payload.entry, updatedAt: Date.now() }
         const existing = state.workflows.find((item: any) => item.id === entry.id)
-        if (existing?.metadata) entry.metadata = existing.metadata
+        if (existing) {
+          if (existing.metadata) entry.metadata = existing.metadata
+          entry.description = existing.description
+        }
         state.workflows = [entry, ...state.workflows.filter((item: any) => item.id !== entry.id)]
         state.selectedWorkflowId = entry.id
-      } else if (payload.action === 'metadata') {
+      } else if (payload.action === 'metadata' || payload.action === 'notes') {
         const entry = state.workflows.find((item: any) => item.id === payload.workflowId)
         const metadata = normalizeWorkflowMetadata(payload.metadata)
         if (!entry || !metadata) throw new Error('Invalid workflow metadata')
+        if (payload.action === 'notes' && (metadata.notes?.length ?? 0) > WORKFLOW_NOTES_MAX_LENGTH) throw new Error('Invalid workflow metadata')
         if (payload.requireMatchingGuid && entry.metadata && entry.metadata.guid !== metadata.guid) {
           throw new Error(`WORKFLOW_METADATA_GUID_CONFLICT:${entry.metadata.guid}`)
         }
-        entry.metadata = { ...metadata, guid: entry.metadata?.guid ?? metadata.guid }
+        if (payload.action === 'metadata' && payload.requireMatchingGuid) {
+          for (const key of ['notes', 'legacyDescription'] as const) {
+            if (entry.metadata?.[key] !== undefined) metadata[key] = entry.metadata[key]
+            else delete metadata[key]
+          }
+        }
+        entry.metadata = payload.action === 'notes'
+          ? mergeWorkflowDescription(entry, metadata)
+          : { ...metadata, guid: entry.metadata?.guid ?? metadata.guid }
+        if (payload.action === 'notes') entry.description = entry.metadata.notes
       } else if (payload.action === 'select') state.selectedWorkflowId = payload.workflowId
       else if (payload.action === 'delete') state.workflows = state.workflows.filter((item: any) => item.id !== payload.workflowId)
       else throw new Error('Unknown tutorial workflow operation')

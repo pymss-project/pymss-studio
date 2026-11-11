@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useDialog, useMessage, type DropdownOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import {
   AlertCircleOutline,
   CheckmarkCircle,
   CubeOutline,
+  DownloadOutline,
   EllipsisHorizontalOutline,
   GitNetworkOutline,
   InformationCircleOutline,
@@ -22,7 +23,10 @@ import { storeToRefs } from 'pinia'
 import WorkflowCreateChooser from '@/components/workflow/WorkflowCreateChooser.vue'
 import WorkflowOverviewPreview from '@/components/workflow/WorkflowOverviewPreview.vue'
 import WorkflowInfo from '@/components/workflow/WorkflowInfo.vue'
-import { useModelStore } from '@/stores/model'
+import WorkflowDescriptionDialog from '@/components/workflow/WorkflowDescriptionDialog.vue'
+import WorkflowDescriptionPreview from '@/components/workflow/WorkflowDescriptionPreview.vue'
+import WorkflowDescriptionEditor from '@/components/workflow/WorkflowDescriptionEditor.vue'
+import { useModelStore, type ModelEntry } from '@/stores/model'
 import { useWorkflowNodeStore } from '@/stores/workflowNodes'
 import {
   WorkflowGuidConflictError,
@@ -40,7 +44,7 @@ import { WorkflowEditorInUseError } from '@/utils/workflowEditorState'
 import { themeIsDark } from '@/utils/theme'
 import { hasInvalidSimpleStructure, isGraphWorkflowDefinition, isSimpleWorkflowDefinition } from '@/workflows/formats'
 import { litegraphToComfy } from '@/litegraph/graphAdapter'
-import { createWorkflowMetadata, parseWorkflowFile, serializeWorkflowFile, type WorkflowMetadata } from '@/workflows/metadata'
+import { createWorkflowMetadata, legacyWorkflowDescription, parseWorkflowFile, resolveWorkflowDescription, serializeWorkflowFile, type WorkflowMetadata } from '@/workflows/metadata'
 import { isTauriRuntime } from '@/utils/appStore'
 import {
   countWorkflowSaveOutputs,
@@ -55,10 +59,10 @@ const model = useModelStore()
 const workflowNodes = useWorkflowNodeStore()
 void workflowNodes.load().catch(() => undefined)
 const { workflows, selectedWorkflowId, selectedWorkflow, simpleEditorOpenWorkflowId } = storeToRefs(workflow)
-const { downloadedModels } = storeToRefs(model)
+const pendingModelDownloads = ref(new Set<string>())
+let modelCatalogLoad: Promise<void> | null = null
 const editingId = ref('')
 const name = ref('')
-const description = ref('')
 const query = ref('')
 type WorkflowTypeFilter = 'all' | 'simple' | 'advanced'
 type WorkflowKind = Exclude<WorkflowTypeFilter, 'all'> | 'invalid'
@@ -66,6 +70,12 @@ const typeFilter = ref<WorkflowTypeFilter>('all')
 const importFileInputRef = ref<HTMLInputElement | null>(null)
 const createChooserOpen = ref(false)
 const settingsOpen = ref(false)
+const settingsClosing = ref(false)
+const nameSaving = ref(false)
+const descriptionEditor = ref<InstanceType<typeof WorkflowDescriptionEditor> | null>(null)
+let descriptionFocusRequested = false
+let pendingDescriptionEdit = ''
+let pendingNameSave: Promise<boolean> | null = null
 const overviewInfoOpen = ref(false)
 const overviewInfoButton = ref<HTMLButtonElement | null>(null)
 const moreActionsElement = ref<HTMLElement | null>(null)
@@ -81,6 +91,8 @@ const exportBusy = ref(false)
 const exportWorkflowId = ref('')
 const exportMetadata = ref<WorkflowMetadata>({ guid: '' })
 const exportStudioVersion = ref(packageMeta.version)
+const descriptionDialogOpen = ref(false)
+const descriptionWorkflowId = ref('')
 type WorkflowCreateType = 'simple' | 'advanced'
 const contextMenuX = ref(0)
 const contextMenuY = ref(0)
@@ -143,7 +155,8 @@ const filteredWorkflows = computed(() => {
     if (!value) return true
     return (
       item.name.toLowerCase().includes(value)
-      || item.description.toLowerCase().includes(value)
+      || resolveWorkflowDescription(item).toLowerCase().includes(value)
+      || legacyWorkflowDescription(item).toLowerCase().includes(value)
     )
   })
 })
@@ -240,6 +253,8 @@ function workflowMenuOptionsFor(current: WorkflowEntry | null): DropdownOption[]
     },
   ]
   if (current.metadata) options.push({ key: 'info', label: t('workflows.workflowInfo') })
+  if (resolveWorkflowDescription(current) || legacyWorkflowDescription(current)) options.push({ key: 'view-description', label: t('workflows.viewFullDescription') })
+  options.push({ key: 'notes', label: t('workflows.editDescription') })
   options.push(
     { type: 'divider', key: 'workflow-actions-divider' },
     { key: 'duplicate', label: t('workflows.duplicate') },
@@ -251,7 +266,7 @@ function workflowMenuOptionsFor(current: WorkflowEntry | null): DropdownOption[]
 
 const workflowMenuOptions = computed(() => workflowMenuOptionsFor(contextWorkflow.value))
 const selectedWorkflowMenuOptions = computed(() => workflowMenuOptionsFor(selectedWorkflow.value))
-const selectedDescriptionPreview = computed(() => selectedWorkflow.value?.description.replace(/\s+/g, ' ').trim() || '')
+const selectedDescriptionPreview = computed(() => resolveWorkflowDescription(selectedWorkflow.value))
 const selectedPublicationPreview = computed(() => {
   const metadata = selectedWorkflow.value?.metadata
   return [
@@ -274,24 +289,95 @@ const selectedDraft = computed(() =>
     : null)
 const selectedSummary = computed((): { error: string } | null =>
   selectedWorkflow.value ? { error: workflowDefinitionError(selectedWorkflow.value.definition) } : null)
-const selectedModels = computed(() => {
-  if (isComfyWorkflow.value) {
-    const downloaded = new Set(downloadedModels.value.map(item => item.name))
-    return (selectedComfyOverview.value?.models || []).map(name => ({ name, downloaded: downloaded.has(name) }))
-  }
-  const draft = selectedDraft.value
-  if (!draft || !draft.steps.length) return [] as { name: string; downloaded: boolean }[]
-  const downloaded = new Set(downloadedModels.value.map(item => item.name))
+type WorkflowModelItem = { name: string; entry: ModelEntry | null; downloaded: boolean }
+
+function workflowModelEntry(name: string) {
+  return model.models.find(item => item.name === name)
+    || model.models.find(item => item.aliases?.includes(name)) || null
+}
+
+const selectedModels = computed<WorkflowModelItem[]>(() => {
+  const names = isComfyWorkflow.value
+    ? selectedComfyOverview.value?.models || []
+    : selectedDraft.value?.steps.map(step => step.model.trim()) || []
   const seen = new Set<string>()
-  const list: { name: string; downloaded: boolean }[] = []
-  for (const step of draft.steps) {
-    const modelName = step.model.trim()
-    if (!modelName || seen.has(modelName)) continue
-    seen.add(modelName)
-    list.push({ name: modelName, downloaded: downloaded.has(modelName) })
+  const list: WorkflowModelItem[] = []
+  for (const name of names) {
+    const entry = workflowModelEntry(name)
+    const key = entry?.name || name
+    if (!name || seen.has(key)) continue
+    seen.add(key)
+    list.push({ name, entry, downloaded: Boolean(entry?.supported && entry.downloaded) })
   }
   return list
 })
+
+function workflowModelDownloadTask(item: WorkflowModelItem) {
+  return model.downloadTasks[item.entry?.name || item.name]
+}
+
+function workflowModelDownloadBusy(item: WorkflowModelItem) {
+  return pendingModelDownloads.value.has(item.name)
+    || ['preparing', 'downloading'].includes(workflowModelDownloadTask(item)?.status || '')
+}
+
+function workflowModelDownloadBlocked(item: WorkflowModelItem) {
+  if (item.entry?.source === 'user') return t('models.customFilesMissing')
+  if (item.entry && !item.entry.supported) return item.entry.unsupportedReason || t('models.unsupported')
+  if (item.entry && model.deleteTasks[item.entry.name]?.status === 'deleting') return t('models.deleting')
+  if (!item.entry && model.modelsLoaded) return t('workflows.modelDownloadUnavailable')
+  return ''
+}
+
+function workflowModelDownloadLabel(item: WorkflowModelItem) {
+  const task = workflowModelDownloadTask(item)
+  if (task?.status === 'downloading') {
+    const progress = Number.isFinite(task.progress) ? Math.max(0, Math.min(100, Math.round(task.progress))) : 0
+    return `${t('models.cardDownloading')} ${progress}%`
+  }
+  if (workflowModelDownloadBusy(item)) return t('models.cardDownloadPreparing')
+  if (item.entry?.source === 'user') return t('models.customFilesMissing')
+  if (item.entry && !item.entry.supported) return t('models.unsupported')
+  if (item.entry && model.deleteTasks[item.entry.name]?.status === 'deleting') return t('models.deleting')
+  if (task?.status === 'error') return t('models.cardDownloadError')
+  if (task?.status === 'paused') return t('models.cardDownloadPaused')
+  if (task?.status === 'interrupted') return t('models.cardDownloadInterrupted')
+  return t('workflows.modelNotDownloadedShort')
+}
+
+function workflowModelDownloadAction(item: WorkflowModelItem) {
+  const status = workflowModelDownloadTask(item)?.status
+  if (status === 'error') return t('common.retry')
+  if (status === 'paused' || status === 'interrupted' || status === 'cancelled') return t('common.resume')
+  return t('common.download')
+}
+
+async function downloadWorkflowModel(item: WorkflowModelItem) {
+  if (workflowModelDownloadBusy(item)) return
+  pendingModelDownloads.value.add(item.name)
+  try {
+    let entry = workflowModelEntry(item.name)
+    if (!model.modelsLoaded) {
+      if (!modelCatalogLoad) modelCatalogLoad = model.loadModels().finally(() => { modelCatalogLoad = null })
+      await modelCatalogLoad
+      entry = workflowModelEntry(item.name)
+    }
+    if (entry?.supported && entry.downloaded) return
+    const current = { name: item.name, entry, downloaded: Boolean(entry?.downloaded) }
+    const blocked = workflowModelDownloadBlocked(current)
+    if (blocked) {
+      message.error(`${item.name}: ${blocked}`)
+      return
+    }
+    if (!entry || entry.downloaded) return
+    const started = await model.downloadModel(entry.name)
+    if (started) message.success(`${t('models.downloadStarted')}: ${entry.name}`)
+  } catch (error) {
+    message.error(`${item.name}: ${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    pendingModelDownloads.value.delete(item.name)
+  }
+}
 const selectedError = computed(() => selectedSummary.value?.error || '')
 const missingModelCount = computed(() => selectedModels.value.filter(item => !item.downloaded).length)
 const selectedReady = computed(() => Boolean(selectedWorkflow.value) && !selectedError.value)
@@ -369,9 +455,10 @@ async function flushWorkflowDefaultsQueue() {
   }
 }
 
-function updateSelectedWorkflowDefaults(patch: WorkflowDefaultsPatch) {
+async function updateSelectedWorkflowDefaults(patch: WorkflowDefaultsPatch) {
   const current = selectedWorkflow.value
   if (!current || !selectedDraft.value || !selectedSimpleAnalysis.value?.editable || isNodeEditorOpen.value) return
+  if (!await saveMeta() || selectedWorkflowId.value !== current.id) return
   const pending = pendingWorkflowDefaults.get(current.id)
   if (!pending) workflowDefaultsQueue.push(current.id)
   pendingWorkflowDefaults.set(current.id, { ...pending, ...patch })
@@ -397,7 +484,6 @@ function updateSelectedDefaultNormalize(value: string | number | boolean | null)
 function syncWorkflowDetails(item: WorkflowEntry | null) {
   editingId.value = item?.id || ''
   name.value = item?.name || ''
-  description.value = item?.description || ''
 }
 
 function editWorkflow(item: WorkflowEntry) {
@@ -406,37 +492,73 @@ function editWorkflow(item: WorkflowEntry) {
 }
 
 async function saveMeta() {
+  const id = selectedWorkflow.value?.id
+  if (descriptionEditor.value && !await descriptionEditor.value.flush()) return false
+  if (selectedWorkflow.value?.id !== id) return true
+  return saveWorkflowName()
+}
+
+function saveWorkflowName(): Promise<boolean> {
+  if (pendingNameSave) return pendingNameSave
+  pendingNameSave = persistWorkflowName().finally(() => { pendingNameSave = null })
+  return pendingNameSave
+}
+
+async function persistWorkflowName() {
   const current = selectedWorkflow.value
-  if (!current || isNodeEditorOpen.value) return
+  if (!current || isNodeEditorOpen.value) return true
   const targetId = current.id
   const trimmedName = name.value.trim()
   if (!trimmedName) {
     name.value = current.name
-    return
+    return true
   }
-  if (trimmedName === current.name && description.value.trim() === current.description) return
+  if (trimmedName === current.name) return true
+  nameSaving.value = true
   try {
     const entry = await workflow.saveWorkflow({
       id: targetId,
       name: trimmedName,
-      description: description.value,
       definition: current.definition,
       expectedUpdatedAt: current.updatedAt,
     })
     // Guard against a race: if the user switched workflows while saveWorkflow was
     // awaiting, do not clobber the newly selected workflow's displayed fields.
-    if (selectedWorkflowId.value !== targetId) return
+    if (selectedWorkflowId.value !== targetId) return true
     editingId.value = entry.id
     name.value = entry.name
-    description.value = entry.description
+    return true
   } catch (error) {
     if (error instanceof WorkflowRevisionConflictError && selectedWorkflowId.value === targetId) {
       syncWorkflowDetails(selectedWorkflow.value)
     }
     message.error(error instanceof WorkflowEditorInUseError ? t('workflows.editorInUseHint') : error instanceof WorkflowRevisionConflictError
       ? t('workflows.revisionConflictTitle')
-      : error instanceof Error ? error.message : t('workflows.saveFailed'))
+       : error instanceof Error ? error.message : t('workflows.saveFailed'))
+    return false
+  } finally {
+    nameSaving.value = false
   }
+}
+
+async function closeWorkflowSettings(keepDraft = false) {
+  if (settingsClosing.value) return
+  settingsClosing.value = true
+  try {
+    if (!keepDraft && descriptionEditor.value && !await descriptionEditor.value.flush()) return
+    if (!await saveWorkflowName()) return
+    settingsOpen.value = false
+  } finally { settingsClosing.value = false }
+}
+
+function handleSettingsShow(show: boolean) {
+  if (!show) void closeWorkflowSettings()
+}
+
+async function focusDescriptionEditor() {
+  if (!descriptionFocusRequested) return
+  await descriptionEditor.value?.focus()
+  descriptionFocusRequested = false
 }
 
 async function openEditorWindow(kind: 'simple' | 'node', workflowId: string, newWorkflow: boolean) {
@@ -475,7 +597,6 @@ function openWorkflowCreateChooser() {
 async function createAdvancedWorkflow() {
   editingId.value = ''
   name.value = ''
-  description.value = ''
   await openNodeEditor({ forceNew: true, skipWarning: true })
 }
 
@@ -560,6 +681,14 @@ function handleWorkflowMenuSelect(key: string | number, current: WorkflowEntry |
   closeWorkflowContextMenu()
   if (!current) return
 
+  if (key === 'notes') {
+    openWorkflowDescription(current, true)
+    return
+  }
+  if (key === 'view-description') {
+    openWorkflowDescription(current)
+    return
+  }
   if (key === 'edit') {
     openWorkflowEditor(current)
     return
@@ -729,6 +858,44 @@ async function handleImportWorkflow(event: Event) {
   }
 }
 
+function openWorkflowDescription(current: WorkflowEntry, editing = false) {
+  overviewInfoOpen.value = false
+  contextInfoOpen.value = false
+  closeWorkflowContextMenu()
+  if (editing) {
+    if (descriptionDialogOpen.value) {
+      pendingDescriptionEdit = current.id
+      descriptionDialogOpen.value = false
+    } else void openDescriptionSettings(current)
+    return
+  }
+  descriptionWorkflowId.value = current.id
+  descriptionDialogOpen.value = true
+}
+
+async function openDescriptionSettings(current: WorkflowEntry) {
+  if (settingsOpen.value && selectedWorkflowId.value !== current.id) {
+    await closeWorkflowSettings()
+    if (settingsOpen.value) return
+  }
+  if (selectedWorkflowId.value !== current.id) editWorkflow(current)
+  await nextTick()
+  descriptionFocusRequested = true
+  if (settingsOpen.value) await focusDescriptionEditor()
+  else settingsOpen.value = true
+}
+
+function editDescriptionFromReader() {
+  const current = workflows.value.find(item => item.id === descriptionWorkflowId.value)
+  if (current) openWorkflowDescription(current, true)
+}
+
+function afterDescriptionReaderLeave() {
+  const current = workflows.value.find(item => item.id === pendingDescriptionEdit)
+  pendingDescriptionEdit = ''
+  if (current) void openDescriptionSettings(current)
+}
+
 async function confirmExportWorkflow() {
   if (exportBusy.value) return
   exportBusy.value = true
@@ -820,11 +987,11 @@ onUnmounted(() => {
   closeWorkflowContextMenu()
 })
 
-watch([workflows, selectedWorkflowId], () => {
+watch([() => selectedWorkflow.value?.id, () => selectedWorkflow.value?.name], () => {
   // A reload restores the editor's persisted selection. Hydrate the overview
   // without selecting (and persisting) an older entry during that refresh.
   syncRefreshedWorkflowDetails(selectedWorkflow.value)
-}, { immediate: true, deep: true })
+}, { immediate: true })
 </script>
 
 <template>
@@ -973,9 +1140,11 @@ watch([workflows, selectedWorkflowId], () => {
                   </button>
                 </template>
                 <WorkflowInfo v-if="overviewInfoOpen" id="workflow-overview-info" :key="selectedWorkflow.id"
-                  :workflow-name="selectedWorkflow.name" :metadata="selectedWorkflow.metadata" @close="closeOverviewInfo" />
+                  :workflow-name="selectedWorkflow.name" :metadata="selectedWorkflow.metadata" @close="closeOverviewInfo"
+                  :description="selectedDescriptionPreview" @edit-description="openWorkflowDescription(selectedWorkflow, true)"
+                  @view-description="openWorkflowDescription(selectedWorkflow)" />
               </n-popover>
-              <p v-if="selectedDescriptionPreview" class="wf-overview__description" :title="selectedWorkflow.description">{{ selectedDescriptionPreview }}</p>
+              <WorkflowDescriptionPreview v-if="selectedDescriptionPreview" class="wf-overview__description" :text="selectedDescriptionPreview" @view="openWorkflowDescription(selectedWorkflow)" />
               <n-button class="wf-settings-button" secondary :disabled="isNodeEditorOpen" @click="settingsOpen = true">
                 <template #icon><n-icon :component="SettingsOutline" /></template>
                 {{ t('workflows.settingsTitle') }}
@@ -1052,8 +1221,12 @@ watch([workflows, selectedWorkflowId], () => {
     <n-popover :show="contextInfoOpen && !!contextInfoWorkflow?.metadata" trigger="manual" placement="bottom-start"
       :x="contextInfoX" :y="contextInfoY" :show-arrow="false" to="body" @clickoutside="contextInfoOpen = false">
       <WorkflowInfo v-if="contextInfoOpen && contextInfoWorkflow?.metadata" :key="contextInfoWorkflow.id"
-        :workflow-name="contextInfoWorkflow.name" :metadata="contextInfoWorkflow.metadata" @close="closeContextInfo" />
+        :workflow-name="contextInfoWorkflow.name" :metadata="contextInfoWorkflow.metadata" @close="closeContextInfo"
+        :description="resolveWorkflowDescription(contextInfoWorkflow)" @edit-description="openWorkflowDescription(contextInfoWorkflow, true)"
+        @view-description="openWorkflowDescription(contextInfoWorkflow)" />
     </n-popover>
+
+    <WorkflowDescriptionDialog v-model:show="descriptionDialogOpen" :workflow-id="descriptionWorkflowId" @edit="editDescriptionFromReader" @after-leave="afterDescriptionReaderLeave" />
 
     <n-modal v-model:show="exportDialogOpen" preset="card" :title="t('workflows.exportWorkflow')"
       style="width: min(520px, calc(100vw - 48px)); max-height: calc(100dvh - 112px)"
@@ -1069,13 +1242,11 @@ watch([workflows, selectedWorkflowId], () => {
           <n-input v-model:value="exportMetadata.version" placeholder="1.0.0" :maxlength="64" :disabled="exportBusy"
             :input-props="{ id: 'workflow-export-version' }" />
         </n-form-item>
-        <n-form-item label="GUID" label-for="workflow-export-guid">
-          <n-input :value="exportMetadata.guid" readonly :input-props="{ id: 'workflow-export-guid' }" />
-        </n-form-item>
-        <n-form-item :label="t('workflows.workflowStudioVersion')" label-for="workflow-export-studio-version">
-          <n-input :value="exportStudioVersion" readonly :input-props="{ id: 'workflow-export-studio-version' }" />
-        </n-form-item>
       </n-form>
+      <dl class="workflow-export-metadata">
+        <div><dt>GUID</dt><dd><code>{{ exportMetadata.guid }}</code></dd></div>
+        <div><dt>{{ t('workflows.workflowStudioVersion') }}</dt><dd>{{ exportStudioVersion }}</dd></div>
+      </dl>
       <template #footer>
         <n-space justify="end">
           <n-button :disabled="exportBusy" @click="exportDialogOpen = false">{{ t('common.cancel') }}</n-button>
@@ -1084,7 +1255,9 @@ watch([workflows, selectedWorkflowId], () => {
       </template>
     </n-modal>
 
-    <n-modal v-model:show="settingsOpen" preset="card" class="wf-settings-modal" :title="t('workflows.settingsTitle')"
+    <n-modal :show="settingsOpen" preset="card" class="wf-settings-modal" :title="t('workflows.settingsTitle')"
+      :mask-closable="!settingsClosing" :close-on-esc="!settingsClosing" :closable="!settingsClosing"
+      @update:show="handleSettingsShow" @after-enter="focusDescriptionEditor"
       style="width: min(640px, calc(100vw - 48px)); max-height: calc(100dvh - 112px)"
       :content-style="{ minHeight: 0, overflow: 'auto' }"
       :bordered="false" role="dialog" aria-modal="true" :aria-label="t('workflows.settingsTitle')">
@@ -1092,28 +1265,26 @@ watch([workflows, selectedWorkflowId], () => {
           <p class="wf-muted">{{ t('workflows.settingsAutosave') }}</p>
           <section class="wf-section">
             <label for="workflow-settings-name">{{ t('workflows.settingsName') }}</label>
-            <n-input :input-props="{ id: 'workflow-settings-name' }" v-model:value="name" :disabled="isNodeEditorOpen || updatingWorkflowDefaults"
+            <n-input :input-props="{ id: 'workflow-settings-name' }" v-model:value="name" :disabled="isNodeEditorOpen || updatingWorkflowDefaults || settingsClosing || nameSaving"
               :placeholder="t('workflows.untitled')" @blur="saveMeta" @keydown.enter="(event: KeyboardEvent) => (event.target as HTMLElement)?.blur()" />
-            <label for="workflow-settings-description">{{ t('workflows.settingsDescription') }}</label>
-            <n-input :input-props="{ id: 'workflow-settings-description' }" v-model:value="description" type="textarea" :autosize="{ minRows: 2, maxRows: 5 }"
-              :disabled="isNodeEditorOpen || updatingWorkflowDefaults" :placeholder="t('workflows.descriptionPlaceholder')" @blur="saveMeta" />
+            <WorkflowDescriptionEditor v-if="settingsOpen" :key="selectedWorkflow.id" ref="descriptionEditor" :workflow-id="selectedWorkflow.id" :disabled="settingsClosing" @keep-draft="closeWorkflowSettings(true)" />
           </section>
           <section v-if="selectedDraft && selectedSimpleAnalysis?.editable" class="wf-section">
             <h3>{{ t('workflows.runParams') }}</h3>
             <div class="wf-param-grid">
               <div class="wf-param">
                 <label>{{ t('workflows.defaultDevice') }}</label>
-                <n-select :value="selectedDraft.defaultDevice" :options="deviceOptions" :disabled="isNodeEditorOpen || updatingWorkflowDefaults"
+                <n-select :value="selectedDraft.defaultDevice" :options="deviceOptions" :to="true" :disabled="isNodeEditorOpen || updatingWorkflowDefaults"
                   :loading="updatingWorkflowDefaults" :aria-label="t('workflows.defaultDevice')" @update:value="updateSelectedDefaultDevice" />
               </div>
               <div class="wf-param">
                 <label>{{ t('workflows.defaultFormat') }}</label>
-                <n-select :value="selectedDraft.defaultFormat" :options="formatOptions" :disabled="isNodeEditorOpen || updatingWorkflowDefaults"
+                <n-select :value="selectedDraft.defaultFormat" :options="formatOptions" :to="true" :disabled="isNodeEditorOpen || updatingWorkflowDefaults"
                   :loading="updatingWorkflowDefaults" :aria-label="t('workflows.defaultFormat')" @update:value="updateSelectedDefaultFormat" />
               </div>
               <div class="wf-param">
                 <label>{{ t('workflows.defaultNormalize') }}</label>
-                <n-select :value="normalizeMode(selectedDraft.defaultNormalize)" :options="normalizeOptions" :disabled="isNodeEditorOpen || updatingWorkflowDefaults"
+                <n-select :value="normalizeMode(selectedDraft.defaultNormalize)" :options="normalizeOptions" :to="true" :disabled="isNodeEditorOpen || updatingWorkflowDefaults"
                   :loading="updatingWorkflowDefaults" :aria-label="t('workflows.defaultNormalize')" @update:value="updateSelectedDefaultNormalize" />
               </div>
             </div>
@@ -1125,7 +1296,17 @@ watch([workflows, selectedWorkflowId], () => {
               <span v-for="item in selectedModels" :key="item.name" class="wf-chip" :class="{ 'wf-chip--warn': !item.downloaded }" :title="item.name">
                 <n-icon :component="CubeOutline" />
                 <span class="wf-chip__name">{{ item.name }}</span>
-                <small v-if="!item.downloaded">{{ t('workflows.modelNotDownloadedShort') }}</small>
+                <template v-if="!item.downloaded">
+                  <small v-if="workflowModelDownloadBlocked(item)" :title="workflowModelDownloadBlocked(item)">{{ workflowModelDownloadLabel(item) }}</small>
+                  <button v-else class="wf-chip__download" type="button" :disabled="workflowModelDownloadBusy(item)"
+                    :aria-busy="workflowModelDownloadBusy(item)"
+                    :aria-label="`${workflowModelDownloadAction(item)} ${item.name}`"
+                    :title="model.downloadErrors[item.entry?.name || item.name] || `${workflowModelDownloadAction(item)} ${item.name}`"
+                    @click.stop="downloadWorkflowModel(item)">
+                    <span class="wf-chip__download-status">{{ workflowModelDownloadLabel(item) }}</span>
+                    <span class="wf-chip__download-action"><n-icon :component="DownloadOutline" />{{ workflowModelDownloadAction(item) }}</span>
+                  </button>
+                </template>
               </span>
             </div>
             <p v-else class="wf-muted">{{ t('workflows.noModelsConfigured') }}</p>
@@ -1146,6 +1327,11 @@ watch([workflows, selectedWorkflowId], () => {
 </template>
 
 <style scoped>
+.workflow-export-metadata { display: grid; gap: 12px; margin: 0; padding-top: 12px; border-top: 1px solid var(--outline); }
+.workflow-export-metadata > div { display: grid; gap: 4px; }
+.workflow-export-metadata dt { color: var(--on-surface-muted); font-size: 12px; }
+.workflow-export-metadata dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; user-select: text; }
+.workflow-export-metadata code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
 .workflows-page {
   max-width: var(--page-max-width);
   margin: 0 auto;
@@ -1602,17 +1788,6 @@ watch([workflows, selectedWorkflowId], () => {
 
 .wf-overview__description {
   grid-column: 1 / -1;
-  margin: 0;
-  color: var(--on-surface-muted);
-  font-size: 13px;
-  line-height: 1.65;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  max-height: 3.3em;
-  overflow: hidden;
-  white-space: normal;
-  overflow-wrap: anywhere;
 }
 
 .wf-overview__publication {
@@ -1787,7 +1962,8 @@ watch([workflows, selectedWorkflowId], () => {
   white-space: nowrap;
 }
 
-.wf-chip small {
+.wf-chip small,
+.wf-chip__download {
   flex: 0 0 auto;
   padding: 1px 7px;
   border-radius: 999px;
@@ -1796,6 +1972,16 @@ watch([workflows, selectedWorkflowId], () => {
   font-size: 10px;
   font-weight: 700;
 }
+
+.wf-chip__download { display: inline-grid; align-items: center; border: 0; font-family: inherit; line-height: 1.5; white-space: nowrap; cursor: pointer; }
+.wf-chip__download-status, .wf-chip__download-action { grid-area: 1 / 1; }
+.wf-chip__download-action { display: inline-flex; visibility: hidden; align-items: center; justify-content: center; gap: 3px; }
+.wf-chip__download:not(:disabled):is(:hover, :focus-visible) { color: var(--primary-strong); background: var(--primary-soft); }
+.wf-chip__download:not(:disabled):is(:hover, :focus-visible) .wf-chip__download-status { visibility: hidden; }
+.wf-chip__download:not(:disabled):is(:hover, :focus-visible) .wf-chip__download-action { visibility: visible; }
+.wf-chip__download:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.wf-chip__download:disabled { cursor: default; opacity: 0.75; }
+.wf-chip .wf-chip__download .n-icon { font-size: 11px; color: inherit; }
 
 .wf-chip--warn {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warning) 40%, var(--outline));

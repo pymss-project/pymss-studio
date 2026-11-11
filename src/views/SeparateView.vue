@@ -60,6 +60,9 @@ import { isTutorialFrame } from '@/features/onboarding/demoContext'
 import { useBeginnerGuideStore } from '@/stores/beginnerGuide'
 import { visibleParameterGuides } from '@/features/onboarding/parameters'
 import InferenceParameterFields from '@/components/InferenceParameterFields.vue'
+import WorkflowDescriptionDialog from '@/components/workflow/WorkflowDescriptionDialog.vue'
+import WorkflowDescriptionEditor from '@/components/workflow/WorkflowDescriptionEditor.vue'
+import { legacyWorkflowDescription, resolveWorkflowDescription } from '@/workflows/metadata'
 import { resolveParameters, type CustomParameterIntent, type ParameterMode, type ResolvedInferenceSnapshot } from '@/features/inference/parameters'
 
 const studioLog = createLogger('ui.views.SeparateView')
@@ -263,9 +266,16 @@ const queueScope = ref<'session' | 'no-results'>('session')
 const removingRunRecords = ref(false)
 watch(showQueueModal, show => { if (!show) queueScope.value = 'session' })
 const workflowMetaEditor = ref<WorkflowEntry | null>(null)
+const workflowMetaCurrent = computed(() => workflows.value.find(item => item.id === workflowMetaEditor.value?.id))
 const workflowNameDraft = ref('')
-const workflowNoteDraft = ref('')
 const workflowMetaSaving = ref(false)
+const workflowDescriptionOpen = ref(false)
+const workflowDescriptionId = ref('')
+const workflowDescriptionEditor = ref<InstanceType<typeof WorkflowDescriptionEditor> | null>(null)
+const workflowMetaClosing = ref(false)
+let workflowDescriptionFocusRequested = false
+let pendingWorkflowDescriptionEdit = ''
+let pendingWorkflowNameSave: Promise<boolean> | null = null
 if (route.query.mode === 'workflow') runMode.value = 'workflow'
 const focusedSeparationJobId = ref<string | null>(null)
 const composingNewJob = ref(false)
@@ -591,7 +601,11 @@ const contextMenuOptions = computed<DropdownOption[]>(() => {
     return [{ key: 'edit-model-note', label: t('models.editNote') }]
   }
   if (contextMenuKind.value === 'workflow' && contextWorkflow.value) {
-    return [{ key: 'edit-workflow-meta', label: t('workflows.editMeta') }]
+    return [
+      { key: 'view-workflow-description', label: t('workflows.viewFullDescription') },
+      { key: 'edit-workflow-description', label: t('workflows.editDescription') },
+      { key: 'edit-workflow-meta', label: t('workflows.editMeta') },
+    ]
   }
   return []
 })
@@ -657,36 +671,62 @@ function saveModelNote() {
   message.success(t('models.noteSaved'))
 }
 
-function openWorkflowMetaEditor(item: WorkflowEntry) {
+async function openWorkflowMetaEditor(item: WorkflowEntry, focusDescription = false) {
+  if (showWorkflowMetaEditor.value && workflowMetaEditor.value?.id !== item.id) {
+    await closeWorkflowMetaEditor()
+    if (showWorkflowMetaEditor.value) return
+  }
+  const alreadyOpen = showWorkflowMetaEditor.value
   workflowMetaEditor.value = item
   workflowNameDraft.value = item.name
-  workflowNoteDraft.value = item.description
+  workflowDescriptionFocusRequested = focusDescription
   showWorkflowMetaEditor.value = true
+  if (alreadyOpen) await focusWorkflowDescription()
 }
 
-function closeWorkflowMetaEditor() {
-  showWorkflowMetaEditor.value = false
-  workflowMetaEditor.value = null
+async function closeWorkflowMetaEditor(keepDraft = false) {
+  if (workflowMetaClosing.value) return
+  workflowMetaClosing.value = true
+  try {
+    if (!keepDraft && workflowDescriptionEditor.value && !await workflowDescriptionEditor.value.flush()) return
+    if (!await saveWorkflowMetaName()) return
+    showWorkflowMetaEditor.value = false
+    workflowMetaEditor.value = null
+  } finally { workflowMetaClosing.value = false }
 }
 
 function handleWorkflowMetaEditorUpdate(value: boolean) {
-  showWorkflowMetaEditor.value = value
-  if (!value) workflowMetaEditor.value = null
+  if (!value) void closeWorkflowMetaEditor()
+}
+
+async function focusWorkflowDescription() {
+  if (!workflowDescriptionFocusRequested) return
+  await workflowDescriptionEditor.value?.focus()
+  workflowDescriptionFocusRequested = false
 }
 
 async function saveWorkflowMeta() {
-  const current = workflowMetaEditor.value
-  if (!current || workflowMetaSaving.value) return
+  const id = workflowMetaCurrent.value?.id
+  if (workflowDescriptionEditor.value && !await workflowDescriptionEditor.value.flush()) return false
+  if (workflowMetaCurrent.value?.id !== id) return true
+  return saveWorkflowMetaName()
+}
+
+function saveWorkflowMetaName(): Promise<boolean> {
+  if (pendingWorkflowNameSave) return pendingWorkflowNameSave
+  pendingWorkflowNameSave = persistWorkflowMetaName().finally(() => { pendingWorkflowNameSave = null })
+  return pendingWorkflowNameSave
+}
+
+async function persistWorkflowMetaName() {
+  const current = workflowMetaCurrent.value
+  if (!current) return true
   const trimmedName = workflowNameDraft.value.trim()
   if (!trimmedName) {
     message.error(t('workflows.nameRequired'))
-    return
+    return false
   }
-  const trimmedNote = workflowNoteDraft.value.trim()
-  if (trimmedName === current.name && trimmedNote === current.description) {
-    closeWorkflowMetaEditor()
-    return
-  }
+  if (trimmedName === current.name) return true
 
   const selectedIdBeforeSave = selectedWorkflowId.value
   workflowMetaSaving.value = true
@@ -694,7 +734,6 @@ async function saveWorkflowMeta() {
     await workflow.saveWorkflow({
       id: current.id,
       name: trimmedName,
-      description: trimmedNote,
       definition: current.definition,
       format: current.format,
       formatVersion: current.formatVersion,
@@ -704,10 +743,10 @@ async function saveWorkflowMeta() {
     if (selectedWorkflowId.value === current.id && selectedIdBeforeSave !== current.id) {
       workflow.selectWorkflow(selectedIdBeforeSave)
     }
-    closeWorkflowMetaEditor()
-    message.success(t('workflows.saved'))
+    return true
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error))
+    return false
   } finally {
     workflowMetaSaving.value = false
   }
@@ -724,6 +763,32 @@ function handleSeparateContextMenuSelect(key: string | number) {
   if (key === 'edit-workflow-meta' && 'id' in item) {
     openWorkflowMetaEditor(item as WorkflowEntry)
   }
+  if ((key === 'view-workflow-description' || key === 'edit-workflow-description') && 'id' in item) {
+    openWorkflowDescription(item as WorkflowEntry, key === 'edit-workflow-description')
+  }
+}
+
+function openWorkflowDescription(item: WorkflowEntry, editing = false) {
+  if (editing) {
+    if (workflowDescriptionOpen.value) {
+      pendingWorkflowDescriptionEdit = item.id
+      workflowDescriptionOpen.value = false
+    } else void openWorkflowMetaEditor(item, true)
+    return
+  }
+  workflowDescriptionId.value = item.id
+  workflowDescriptionOpen.value = true
+}
+
+function editWorkflowDescriptionFromReader() {
+  const current = workflows.value.find(item => item.id === workflowDescriptionId.value)
+  if (current) openWorkflowDescription(current, true)
+}
+
+function afterWorkflowDescriptionReaderLeave() {
+  const current = workflows.value.find(item => item.id === pendingWorkflowDescriptionEdit)
+  pendingWorkflowDescriptionEdit = ''
+  if (current) void openWorkflowMetaEditor(current, true)
 }
 
 function workflowValidationError() {
@@ -771,7 +836,7 @@ const filteredWorkflows = computed(() => {
   return [...workflows.value]
     .filter((item) => {
       if (!query) return true
-      return item.name.toLowerCase().includes(query) || item.description.toLowerCase().includes(query)
+    return item.name.toLowerCase().includes(query) || resolveWorkflowDescription(item).toLowerCase().includes(query) || legacyWorkflowDescription(item).toLowerCase().includes(query)
     })
     .sort((a, b) => b.updatedAt - a.updatedAt)
 })
@@ -2675,13 +2740,12 @@ async function retryCurrentTask() {
                     <template #prefix><n-icon :component="SearchOutline" /></template>
                   </n-input>
                 </div>
-                <div v-if="filteredWorkflows.length" class="target-list" role="listbox" :aria-label="t('separate.workflow')">
+                <div v-if="filteredWorkflows.length" class="target-list" role="list" :aria-label="t('separate.workflow')">
+                  <div v-for="item in filteredWorkflows" :key="item.id" class="workflow-target-item" role="listitem">
                   <button
-                    v-for="item in filteredWorkflows"
-                    :key="item.id"
                     type="button"
-                    role="option"
-                    :aria-selected="selectedWorkflowId === item.id"
+                    :aria-pressed="selectedWorkflowId === item.id"
+                    :aria-label="item.name"
                     :aria-disabled="Boolean(workflowIssue(item))"
                     :title="workflowIssue(item) || item.name"
                     class="target-row workflow-target"
@@ -2705,10 +2769,12 @@ async function retryCurrentTask() {
                       <span class="target-row__meta">
                         <span class="target-row__tag">{{ t('separate.workflow') }}</span>
                         <span v-if="workflowIssue(item)" class="target-row__issue">{{ workflowIssueSummary(item) }}</span>
-                        <span v-else class="target-row__desc" :title="item.description">{{ item.description || t('separate.workflowNoDescription') }}</span>
+                        <span v-else class="target-row__desc">{{ resolveWorkflowDescription(item) || t('separate.workflowNoDescription') }}</span>
                       </span>
                     </span>
                   </button>
+                  <n-button class="workflow-target-info" quaternary circle size="small" :aria-label="`${t('workflows.viewFullDescription')} · ${item.name}`" :title="t('workflows.viewFullDescription')" @click.stop="openWorkflowDescription(item)"><template #icon><n-icon :component="InformationCircleOutline" /></template></n-button>
+                  </div>
                 </div>
                 <div v-else class="stage-empty">
                   <div class="stage-empty__glyph"><n-icon :component="GitNetworkOutline" /></div>
@@ -2792,54 +2858,46 @@ async function retryCurrentTask() {
 
     <n-modal
       :show="showWorkflowMetaEditor"
+      :mask-closable="!workflowMetaClosing" :close-on-esc="!workflowMetaClosing"
       @update:show="handleWorkflowMetaEditorUpdate"
+      @after-enter="focusWorkflowDescription"
     >
       <n-card
         class="separate-workflow-meta-modal"
-        :title="t('workflows.editMeta')"
+        :title="t('workflows.settingsTitle')"
+        :aria-label="t('workflows.settingsTitle')"
         :bordered="false"
-        closable
+        :closable="!workflowMetaClosing"
         role="dialog"
         aria-modal="true"
-        @close="closeWorkflowMetaEditor"
+        @close="closeWorkflowMetaEditor()"
       >
         <div v-if="workflowMetaEditor" class="separate-workflow-meta-modal__body">
+          <p class="text-sm text-muted">{{ t('workflows.settingsAutosave') }}</p>
           <label class="separate-workflow-meta-modal__field">
             <span>{{ t('workflows.name') }}</span>
             <n-input
               v-model:value="workflowNameDraft"
-              :disabled="workflowMetaSaving"
+              :disabled="workflowMetaSaving || workflowMetaClosing"
               :placeholder="t('workflows.namePlaceholder')"
               maxlength="120"
               show-count
+              @blur="saveWorkflowMeta" @keydown.enter="(event: KeyboardEvent) => (event.target as HTMLElement)?.blur()"
             />
           </label>
-          <label class="separate-workflow-meta-modal__field">
-            <span>{{ t('workflows.note') }}</span>
-            <n-input
-              v-model:value="workflowNoteDraft"
-              type="textarea"
-              :disabled="workflowMetaSaving"
-              :autosize="{ minRows: 4, maxRows: 8 }"
-              clearable
-              :maxlength="240"
-              show-count
-              :placeholder="t('workflows.notePlaceholder')"
-            />
-          </label>
+          <WorkflowDescriptionEditor v-if="showWorkflowMetaEditor && workflowMetaCurrent" :key="workflowMetaCurrent.id" ref="workflowDescriptionEditor" :workflow-id="workflowMetaCurrent.id" :disabled="workflowMetaClosing" @keep-draft="closeWorkflowMetaEditor(true)" />
         </div>
         <template #footer>
           <div class="separate-workflow-meta-modal__footer">
-            <n-button secondary :disabled="workflowMetaSaving" @click="closeWorkflowMetaEditor">
-              {{ t('common.cancel') }}
-            </n-button>
-            <n-button type="primary" :loading="workflowMetaSaving" :disabled="!workflowMetaEditor" @click="saveWorkflowMeta">
-              {{ t('common.save') }}
+            <n-button secondary :disabled="workflowMetaClosing" @click="closeWorkflowMetaEditor()">
+              {{ t('common.close') }}
             </n-button>
           </div>
         </template>
       </n-card>
     </n-modal>
+
+    <WorkflowDescriptionDialog v-model:show="workflowDescriptionOpen" :workflow-id="workflowDescriptionId" @edit="editWorkflowDescriptionFromReader" @after-leave="afterWorkflowDescriptionReaderLeave" />
 
     <n-modal v-model:show="showEnsembleModal" :mask-closable="true">
       <n-card
@@ -4413,6 +4471,9 @@ async function retryCurrentTask() {
   color: var(--on-surface-muted);
   line-height: 1.4;
 }
+.workflow-target-item { position: relative; min-width: 0; }
+.workflow-target-item .workflow-target { padding-right: 46px; }
+.workflow-target-info { position: absolute; top: 50%; right: 10px; transform: translateY(-50%); }
 
 .target-row__issue {
   min-width: 0;

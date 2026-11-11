@@ -4,9 +4,10 @@ import { useI18n } from 'vue-i18n'
 import { useMessage } from 'naive-ui'
 import { CloseOutline, CopyOutline } from '@vicons/ionicons5'
 import type { WorkflowMetadata } from '@/workflows/metadata'
+import WorkflowDescriptionPreview from './WorkflowDescriptionPreview.vue'
 
-const props = defineProps<{ workflowName: string; metadata: WorkflowMetadata }>()
-const emit = defineEmits<{ close: [] }>()
+const props = defineProps<{ workflowName: string; metadata: WorkflowMetadata; description: string }>()
+const emit = defineEmits<{ close: []; 'edit-description': []; 'view-description': [] }>()
 const { t } = useI18n()
 const message = useMessage()
 const panel = ref<HTMLElement | null>(null)
@@ -61,7 +62,12 @@ async function copyGuid() {
         <dt>{{ t('workflows.workflowStudioVersion') }}</dt>
         <dd>{{ metadata.studioVersion }}</dd>
       </div>
+      <div v-if="description" class="workflow-info__notes">
+        <dt>{{ t('workflows.workflowDescription') }}</dt>
+        <dd><WorkflowDescriptionPreview :text="description" @view="emit('view-description')" /></dd>
+      </div>
     </dl>
+    <n-button class="workflow-info__edit-notes" text type="primary" size="small" @click="emit('edit-description')">{{ t('workflows.editDescription') }}</n-button>
   </section>
 </template>
 
@@ -77,4 +83,7 @@ async function copyGuid() {
 .workflow-info__guid { display: flex; align-items: center; gap: 8px; }
 .workflow-info__guid code { flex: 1; min-width: 0; font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
 .workflow-info__guid .n-button { flex-shrink: 0; }
+.workflow-info__fields > .workflow-info__notes { grid-template-columns: 1fr; gap: 6px; }
+.workflow-info__notes dd { white-space: pre-wrap; line-height: 1.6; }
+.workflow-info__edit-notes { margin-top: 16px; }
 </style>

@@ -595,6 +595,20 @@ fn normalize_workflow_metadata(value: &Value) -> Option<Value> {
             }
         }
     }
+    if let Some(value) = source.get("notes") {
+        let text = value.as_str()?;
+        if text.chars().any(|c| (c < ' ' && !matches!(c, '\n' | '\r' | '\t')) || c == '\u{7f}')
+        {
+            return None;
+        }
+        metadata["notes"] = Value::String(text.trim().to_string());
+    }
+    if let Some(value) = source.get("legacyDescription") {
+        let text = value.as_str()?.trim();
+        if !text.is_empty() {
+            metadata["legacyDescription"] = Value::String(text.to_string());
+        }
+    }
     Some(metadata)
 }
 
@@ -602,6 +616,21 @@ fn workflow_entry_metadata(entry: &Value) -> Option<Value> {
     entry.get("metadata")
         .or_else(|| entry.get("definition")?.get("_metadata"))
         .and_then(normalize_workflow_metadata)
+}
+
+fn workflow_legacy_description(entry: &Value, metadata: Option<&Value>) -> String {
+    let notes = metadata.and_then(|value| value.get("notes")).and_then(Value::as_str);
+    let description = entry.get("description").and_then(Value::as_str).unwrap_or("").trim();
+    let current = notes.unwrap_or(description);
+    let candidates = [metadata.and_then(|value| value.get("legacyDescription")).and_then(Value::as_str), notes.map(|_| description)];
+    let mut preserved: Vec<String> = Vec::new();
+    for candidate in candidates.into_iter().flatten() {
+        let text = candidate.trim();
+        if !text.is_empty() && !current.contains(text) && !preserved.iter().any(|value| value.contains(text)) {
+            preserved.push(text.to_string());
+        }
+    }
+    preserved.join("\n\n")
 }
 
 fn apply_workflow_mutation(mut state: Value, mutation: &Value) -> AppResult<Value> {
@@ -683,6 +712,11 @@ fn apply_workflow_mutation(mut state: Value, mutation: &Value) -> AppResult<Valu
                     return Err(AppError::Worker("invalid workflow metadata".into()));
                 }
                 if let Some(index) = existing_index {
+                    if let Some(description) = workflow_list[index].get("description") {
+                        entry["description"] = description.clone();
+                    } else if let Some(object) = entry.as_object_mut() {
+                        object.remove("description");
+                    }
                     let created_at = workflow_list[index]
                         .get("createdAt")
                         .and_then(Value::as_u64)
@@ -708,7 +742,7 @@ fn apply_workflow_mutation(mut state: Value, mutation: &Value) -> AppResult<Valu
                 state_object.insert("selectedWorkflowId".into(), Value::String(workflow_id));
             }
         }
-        "metadata" => {
+        "metadata" | "notes" => {
             let workflow_id = mutation.get("workflowId").and_then(Value::as_str)
                 .filter(|id| !id.trim().is_empty())
                 .ok_or_else(|| AppError::Worker("workflow id is required".into()))?;
@@ -718,7 +752,13 @@ fn apply_workflow_mutation(mut state: Value, mutation: &Value) -> AppResult<Valu
                 .ok_or_else(|| AppError::Worker("workflow no longer exists".into()))?;
             let mut metadata = mutation.get("metadata").and_then(normalize_workflow_metadata)
                 .ok_or_else(|| AppError::Worker("invalid workflow metadata".into()))?;
-            if let Some(existing) = workflow_entry_metadata(&workflow_list[index]) {
+            if mutation.get("action").and_then(Value::as_str) == Some("notes")
+                && metadata.get("notes").and_then(Value::as_str).is_some_and(|text| text.encode_utf16().count() > 4000)
+            {
+                return Err(AppError::Worker("invalid workflow metadata".into()));
+            }
+            let existing_metadata = workflow_entry_metadata(&workflow_list[index]);
+            if let Some(existing) = existing_metadata.as_ref() {
                 if mutation.get("requireMatchingGuid").and_then(Value::as_bool) == Some(true)
                     && existing["guid"] != metadata["guid"]
                 {
@@ -727,6 +767,26 @@ fn apply_workflow_mutation(mut state: Value, mutation: &Value) -> AppResult<Valu
                     )));
                 }
                 metadata["guid"] = existing["guid"].clone();
+            }
+            if mutation.get("action").and_then(Value::as_str) == Some("notes") {
+                let notes = metadata.get("notes").and_then(Value::as_str).unwrap_or("").to_string();
+                let legacy = workflow_legacy_description(&workflow_list[index], existing_metadata.as_ref());
+                metadata = existing_metadata.unwrap_or(metadata);
+                metadata["notes"] = Value::String(notes.clone());
+                if !legacy.is_empty() && !notes.contains(&legacy) {
+                    metadata["legacyDescription"] = Value::String(legacy);
+                } else if let Some(object) = metadata.as_object_mut() {
+                    object.remove("legacyDescription");
+                }
+                workflow_list[index]["description"] = Value::String(notes);
+            } else if mutation.get("requireMatchingGuid").and_then(Value::as_bool) == Some(true) {
+                for key in ["notes", "legacyDescription"] {
+                    if let Some(value) = existing_metadata.as_ref().and_then(|existing| existing.get(key)) {
+                        metadata[key] = value.clone();
+                    } else if let Some(object) = metadata.as_object_mut() {
+                        object.remove(key);
+                    }
+                }
             }
             // Do not alter graph revisions, ordering or selection for a publication-only edit.
             workflow_list[index]["metadata"] = metadata;
@@ -958,6 +1018,66 @@ mod tests {
         assert!(saved.get("conflict").is_none());
         assert_eq!(saved["state"]["workflows"][0]["metadata"], published["metadata"]);
         assert_eq!(saved["state"]["workflows"][0]["name"], "Saved by editor");
+    }
+
+    #[test]
+    fn workflow_notes_allow_multiline_text_and_reject_invalid_data() {
+        let guid = "0d971bdd-6b5b-4245-8dd0-aad662b657c9";
+        let metadata = json!({ "guid": guid, "notes": "  Input requirements\n\tKeep original audio\r\nOutput instructions  " });
+        assert_eq!(super::normalize_workflow_metadata(&metadata).unwrap()["notes"], "Input requirements\n\tKeep original audio\r\nOutput instructions");
+        for notes in [json!(42), json!([]), json!("bad\u{0000}text"), json!("bad\u{000b}text"), json!("bad\u{007f}text")] {
+            assert!(super::normalize_workflow_metadata(&json!({ "guid": guid, "notes": notes })).is_none());
+        }
+        assert!(super::normalize_workflow_metadata(&json!({ "guid": guid, "notes": "x".repeat(4000) })).is_some());
+        assert_eq!(super::normalize_workflow_metadata(&json!({ "guid": guid, "notes": " \n\t " })).unwrap()["notes"], "");
+    }
+
+    #[test]
+    fn workflow_notes_edits_preserve_publication_and_survive_export_and_editor_saves() {
+        let guid = "0d971bdd-6b5b-4245-8dd0-aad662b657c9";
+        let entry = json!({ "id": "a", "name": "Workflow", "createdAt": 10, "updatedAt": 20,
+            "definition": { "version": 1, "steps": [] }, "metadata": { "guid": guid, "author": "Current author", "version": "2.0.0" } });
+        let state = json!({ "workflows": [entry.clone(), { "id": "b", "updatedAt": 30 }], "selectedWorkflowId": "b" });
+        let saved = super::apply_workflow_mutation(state, &json!({ "action": "notes", "workflowId": "a",
+            "metadata": { "guid": "33333333-3333-4333-8333-333333333333", "author": "Stale author", "version": "1.0.0", "notes": "Input requirements\nOutput instructions" } })).unwrap();
+        let current = &saved["state"]["workflows"][0];
+        assert_eq!(current["metadata"], json!({ "guid": guid, "author": "Current author", "version": "2.0.0", "notes": "Input requirements\nOutput instructions" }));
+        assert_eq!(current["updatedAt"], 20);
+        assert_eq!(current["definition"], entry["definition"]);
+        assert_eq!(saved["state"]["selectedWorkflowId"], "b");
+        let published = super::apply_workflow_mutation(saved["state"].clone(), &json!({ "action": "metadata", "workflowId": "a", "requireMatchingGuid": true,
+            "metadata": { "guid": guid, "version": "3.0.0", "notes": "Stale notes" } })).unwrap();
+        assert_eq!(published["state"]["workflows"][0]["metadata"]["notes"], current["metadata"]["notes"]);
+        let mut stale = entry;
+        stale["updatedAt"] = json!(40);
+        let edited = super::apply_workflow_mutation(published["state"].clone(), &json!({ "action": "upsert", "entry": stale, "expectedUpdatedAt": 20 })).unwrap();
+        assert_eq!(edited["state"]["workflows"][0]["metadata"], published["state"]["workflows"][0]["metadata"]);
+        let cleared = super::apply_workflow_mutation(edited["state"].clone(), &json!({ "action": "notes", "workflowId": "a", "metadata": { "guid": guid, "notes": " \n " } })).unwrap();
+        assert_eq!(cleared["state"]["workflows"][0]["metadata"], json!({ "guid": guid, "version": "3.0.0", "notes": "" }));
+    }
+
+    #[test]
+    fn workflow_descriptions_preserve_legacy_text_and_ignore_stale_graph_snapshots() {
+        let guid = "0d971bdd-6b5b-4245-8dd0-aad662b657c9";
+        let entry = json!({ "id": "a", "name": "Workflow", "description": "Earlier description", "createdAt": 10, "updatedAt": 20,
+            "definition": { "version": 1, "steps": [] }, "metadata": { "guid": guid, "notes": "Current description", "version": "1.0.0" } });
+        let state = json!({ "workflows": [entry.clone()], "selectedWorkflowId": "a" });
+        let saved = super::apply_workflow_mutation(state, &json!({ "action": "notes", "workflowId": "a", "metadata": { "guid": guid, "notes": "Updated description" } })).unwrap();
+        let current = &saved["state"]["workflows"][0];
+        assert_eq!(current["description"], "Updated description");
+        assert_eq!(current["metadata"]["legacyDescription"], "Earlier description");
+        assert_eq!(current["updatedAt"], 20);
+        let edited = super::apply_workflow_mutation(saved["state"].clone(), &json!({ "action": "upsert", "entry": entry, "expectedUpdatedAt": 20 })).unwrap();
+        assert_eq!(edited["state"]["workflows"][0]["description"], "Updated description");
+        assert_eq!(edited["state"]["workflows"][0]["metadata"], current["metadata"]);
+        let cleared = super::apply_workflow_mutation(edited["state"].clone(), &json!({ "action": "notes", "workflowId": "a", "metadata": { "guid": guid, "notes": "" } })).unwrap();
+        assert_eq!(cleared["state"]["workflows"][0]["description"], "");
+        assert_eq!(cleared["state"]["workflows"][0]["metadata"]["legacyDescription"], "Earlier description");
+        let merged = super::apply_workflow_mutation(cleared["state"].clone(), &json!({ "action": "notes", "workflowId": "a", "metadata": { "guid": guid, "notes": "Updated description\n\nEarlier description" } })).unwrap();
+        assert!(merged["state"]["workflows"][0]["metadata"].get("legacyDescription").is_none());
+        let before = merged["state"].clone();
+        assert!(super::apply_workflow_mutation(before.clone(), &json!({ "action": "notes", "workflowId": "a", "metadata": { "guid": guid, "notes": "x".repeat(4001) } })).is_err());
+        assert!(super::normalize_workflow_metadata(&json!({ "guid": guid, "notes": "x".repeat(6000), "legacyDescription": "y".repeat(8000) })).is_some());
     }
 
     #[test]
