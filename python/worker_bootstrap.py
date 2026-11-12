@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 import uuid
@@ -2694,9 +2695,15 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
             previous = transaction.previous_manifest()
             if previous and payload.get("replacePrevious") is not True:
                 raise ValueError("The existing rollback version must be explicitly selected for replacement")
+            downloads = install_plan.get("artifacts", []) if install_plan.get("resolutionStatus") == "locked" else []
+            if action == "addTargets":
+                installed_names = set(cached.get("acceleratorPackageArtifacts") or {})
+                downloads = [item for item in downloads if item["role"] == "device" and item["name"] not in installed_names]
+            download_bytes = sum(item["bytes"] for item in downloads)
             space_report = transaction.preflight(
                 _dir_size_bytes(env_dir) if env_dir.is_dir() else 0,
                 _dir_size_bytes(transaction.previous) if previous else 0,
+                estimated_bytes=download_bytes, download_bytes=download_bytes,
             )
         except (OSError, ValueError, RuntimeSpaceError) as error:
             from worker_protocol import emit_error
@@ -2878,7 +2885,7 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
             accelerator_sources = seed_state.get("acceleratorPackageSources") or {}
             _verify_runtime_pip_check(env_python)
         elif install_plan.get("resolutionStatus") == "locked":
-            from worker_runtime_artifacts import build_locked_requirements
+            from worker_runtime_artifacts import build_locked_requirements, download_locked_artifacts
             artifacts = install_plan["artifacts"]
             if action == "addTargets":
                 before = _probe_python_runtime(env_python, _backend_extra_names(manifest, backend))
@@ -2892,8 +2899,20 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
                 installed_names = set((cached.get("acceleratorPackageArtifacts") or {}))
                 artifacts = [item for item in artifacts if item["role"] == "device" and item["name"] not in installed_names]
             if artifacts:
-                locked_requirements_path.write_text(build_locked_requirements(install_plan, artifacts=artifacts), encoding="utf-8")
-                run_pip(["--require-hashes", "--no-deps", "--only-binary=:all:", "-r", str(locked_requirements_path)], "locked")
+                def download_notice(filename: str, provider: str) -> None:
+                    message = f"Downloading locked runtime package: {filename} ({provider})"
+                    append_log("locked", message)
+                    _emit("runtime_install_log", {"stage": "locked", "message": message}, task_id)
+
+                # Keep interrupted downloads inside the transaction's candidate
+                # so crash recovery removes them together with that environment.
+                with tempfile.TemporaryDirectory(prefix=".wheels-", dir=env_dir) as wheelhouse:
+                    download_locked_artifacts(install_plan, wheelhouse, artifacts=artifacts, notify=download_notice,
+                                              source=str(payload.get("source") or "").strip().lower(), locale=locale)
+                    locked_requirements_path.write_text(
+                        build_locked_requirements(install_plan, artifacts=artifacts, wheelhouse=wheelhouse), encoding="utf-8",
+                    )
+                    run_pip(["--no-index", "--require-hashes", "--no-deps", "--only-binary=:all:", "-r", str(locked_requirements_path)], "locked")
             base_probe = _probe_python_runtime(env_python, _backend_extra_names(manifest, backend))
             versions = _probe_python_package_versions(env_python, [item["name"] for item in install_plan["artifacts"]])
             frozen_accelerators = _probed_accelerator_versions(

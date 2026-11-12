@@ -123,7 +123,7 @@ jobs:
           $arguments = @('scripts/runtime-artifacts.py', 'resolve', '--profile', $env:PYMSS_ROCM_PROFILE,
             '--profile-revision', $env:PYMSS_ROCM_REVISION, '--channel', $env:PYMSS_ROCM_CHANNEL,
             '--manifest', 'release/rocm-distribution-manifest.json',
-            '--base-url', "https://github.com/${{ github.repository }}/releases/download/v$version",
+            '--base-url', "https://www.modelscope.cn/datasets/huanlinoto/Pymss-Studio-Dist/resolve/master/wheels",
             '--output', 'release/rocm-runtime-assets')
           if ($targets.Count) { $arguments += @('--targets') + $targets }
           & python @arguments
@@ -135,7 +135,7 @@ jobs:
             $defaultArguments = @('scripts/runtime-artifacts.py', 'resolve', '--profile', $defaultProfile,
               '--profile-revision', $defaultRecipe.revision, '--channel', $defaultRecipe.releaseState,
               '--manifest', 'release/rocm-distribution-manifest.json',
-              '--base-url', "https://github.com/${{ github.repository }}/releases/download/v$version",
+              '--base-url', "https://www.modelscope.cn/datasets/huanlinoto/Pymss-Studio-Dist/resolve/master/wheels",
               '--output', 'release/rocm-runtime-assets')
             if ($defaultRecipe.installMode -eq 'multiarch') { $defaultArguments += @('--targets', 'all') }
             & python @defaultArguments

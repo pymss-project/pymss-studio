@@ -7,21 +7,35 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import http.client
 import json
+import os
 import re
+import ssl
+import tempfile
 from pathlib import Path
-from typing import Any, Iterable
-from urllib.parse import unquote, urlsplit
+from typing import Any, Callable, Iterable
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, unquote, urlsplit
+from urllib.request import HTTPRedirectHandler, Request
 
 from pip._vendor.packaging.tags import compatible_tags, cpython_tags
 from pip._vendor.packaging.utils import canonicalize_name, parse_wheel_filename
 from pip._vendor.packaging.version import Version
+
+from worker_proxy import build_proxy_opener
 
 SCHEMA_VERSION = 1
 _MAX_LOCK_BYTES = 4 * 1024 * 1024
 _SHA256 = re.compile(r"[a-f0-9]{64}\Z")
 _TARGET = re.compile(r"gfx[0-9a-f]{3,5}\Z")
 _IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9.-]{0,95}\Z")
+_RELEASE_VERSION = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\Z")
+_GITHUB_RELEASE_ROOT = "https://github.com/pymss-project/pymss-studio/releases/download"
+_RUNTIME_MIRRORS = (
+    ("ModelScope", "https://www.modelscope.cn/datasets/huanlinoto/Pymss-Studio-Dist/resolve/master"),
+    ("Hugging Face", "https://huggingface.co/datasets/HuanLin/Pymss-Studio-Dist/resolve/main"),
+)
 
 
 def _digest(value: Any) -> str:
@@ -248,6 +262,112 @@ def build_locked_requirements(plan: dict[str, Any], *, artifacts: list[dict[str,
             url = path.as_uri()
         lines.append(f"{artifact['name']} @ {url} --hash=sha256:{artifact['sha256']}\n")
     return "".join(lines)
+
+
+def artifact_download_urls(artifact: dict[str, Any]) -> list[str]:
+    url = _url(artifact.get("url"), "wheel URL", False)
+    for root in (_GITHUB_RELEASE_ROOT, *(root for _, root in _RUNTIME_MIRRORS)):
+        if not url.startswith(root + "/"):
+            continue
+        parts = url[len(root) + 1:].split("/")
+        version = unquote(parts[0]).removeprefix("v")
+        shared = root != _GITHUB_RELEASE_ROOT and parts[0] == "wheels"
+        if (len(parts) != 2 or not (shared or _RELEASE_VERSION.fullmatch(version))
+                or unquote(parts[-1]) != artifact["filename"]):
+            raise ValueError("Invalid official runtime artifact location")
+        return [f"{mirror}/{quote(version, safe='')}/{quote(artifact['filename'], safe='')}"
+                for _, mirror in _RUNTIME_MIRRORS]
+    if _github_host(urlsplit(url).hostname or ""):
+        raise ValueError("Online runtime artifacts must not download from GitHub")
+    return [url]
+
+
+def _github_host(host: str) -> bool:
+    host = host.rstrip(".").lower()
+    return any(host == domain or host.endswith("." + domain)
+               for domain in ("github.com", "githubusercontent.com", "githubassets.com", "github.io"))
+
+
+class _RuntimeRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        target = urlsplit(new_url)
+        if (target.scheme != "https" or not target.hostname or target.username or target.password
+                or _github_host(target.hostname)):
+            raise URLError("Runtime download redirect is not permitted")
+        return super().redirect_request(request, response, code, message, headers, new_url)
+
+
+def download_locked_artifacts(
+    plan: dict[str, Any], wheelhouse: Path | str, *, artifacts: list[dict[str, Any]] | None = None,
+    notify: Callable[[str, str], None] | None = None,
+    source: str = "", locale: str = "",
+) -> Path:
+    chosen = plan["artifacts"] if artifacts is None else artifacts
+    known = {item["name"]: item for item in plan["artifacts"]}
+    if any(known.get(item["name"]) != item for item in chosen):
+        raise ValueError("The requested artifact is not part of the locked plan")
+    for artifact in chosen:
+        _identity(artifact, "wheel", False)
+        filename = _text(artifact.get("filename"), "wheel filename", 255)
+        if Path(filename).name != filename or "/" in filename or "\\" in filename:
+            raise ValueError("Artifact filename must be a basename")
+    wheelhouse = Path(wheelhouse).resolve()
+    wheelhouse.mkdir(parents=True, exist_ok=True)
+    opener = build_proxy_opener(_RuntimeRedirectHandler())
+    use_hf = source == "huggingface" or (
+        source != "modelscope" and locale and not locale.lower().startswith("zh")
+    )
+    preferred = 1 if use_hf else 0
+    for artifact in chosen:
+        path = wheelhouse / artifact["filename"]
+        try:
+            verify_artifact_file(path, artifact)
+            continue
+        except RuntimeError:
+            pass
+        failures = []
+        urls = artifact_download_urls(artifact)
+        if len(urls) == len(_RUNTIME_MIRRORS):
+            urls = [urls[preferred], urls[1 - preferred]]
+        for url in urls:
+            provider = next((name for name, root in _RUNTIME_MIRRORS if url.startswith(root + "/")), "Custom source")
+            if notify:
+                notify(artifact["filename"], provider)
+            descriptor, temporary_name = tempfile.mkstemp(prefix=".runtime-wheel-", suffix=".part", dir=wheelhouse)
+            temporary = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "wb") as destination:
+                    request = Request(url, headers={"User-Agent": "Pymss-Studio-Runtime", "Accept-Encoding": "identity"})
+                    response = opener.open(request, timeout=30)
+                    with response:
+                        size = 0
+                        digest = hashlib.sha256()
+                        while block := response.read(min(1024 * 1024, artifact["bytes"] - size + 1)):
+                            size += len(block)
+                            if size > artifact["bytes"]:
+                                raise RuntimeError("Artifact size mismatch")
+                            digest.update(block)
+                            destination.write(block)
+                        if size != artifact["bytes"] or digest.hexdigest() != artifact["sha256"]:
+                            raise RuntimeError("Artifact content verification failed")
+                os.replace(temporary, path)
+                # Keep the working mirror first for the rest of this installation.
+                # A missing individual file can still fall back to the other mirror.
+                for index, (_, root) in enumerate(_RUNTIME_MIRRORS):
+                    if url.startswith(root + "/"):
+                        preferred = index
+                        break
+                break
+            except (URLError, http.client.HTTPException, TimeoutError, ConnectionError, ssl.SSLError, RuntimeError) as error:
+                reason = f"HTTP {error.code}" if isinstance(error, HTTPError) else (
+                    "content verification failed" if isinstance(error, RuntimeError) else "request failed"
+                )
+                failures.append(f"{provider}: {reason}")
+            finally:
+                temporary.unlink(missing_ok=True)
+        else:
+            raise RuntimeError(f"Runtime package download failed: {artifact['filename']} ({'; '.join(failures)})")
+    return wheelhouse
 
 
 def verify_artifact_file(path: Path | str, artifact: dict[str, Any]) -> None:

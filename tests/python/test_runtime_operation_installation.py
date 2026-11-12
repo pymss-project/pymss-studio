@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import shutil
@@ -44,6 +45,9 @@ class RuntimeOperationTests(unittest.TestCase):
         self.installed = {}
         self.installed_sources = {}
         self.commands = []
+        self.requirements = []
+        self.downloads = []
+        self.download_directories = []
         self.events = []
         for patch in [
             mock.patch.object(bootstrap, "RUNTIME_ENVS_DIR", self.root),
@@ -54,6 +58,7 @@ class RuntimeOperationTests(unittest.TestCase):
             mock.patch.object(bootstrap, "machine", return_value="AMD64"),
             mock.patch.object(bootstrap.platform, "python_version", return_value="3.12.8"),
             mock.patch.object(artifacts, "artifact_lock_path", return_value=self.lock_path),
+            mock.patch.object(artifacts, "download_locked_artifacts", side_effect=self.download),
             mock.patch.object(bootstrap, "_create_runtime_venv", side_effect=self.create),
             mock.patch.object(bootstrap, "_runtime_python_works", return_value=True),
             mock.patch.object(bootstrap, "_runtime_pip_works", return_value=True),
@@ -75,8 +80,9 @@ class RuntimeOperationTests(unittest.TestCase):
         for name, version in {**self.host, **{name: "1.0" for name in self.device_names.values()}}.items():
             target = next((t for t, n in self.device_names.items() if n == name), None)
             filename = name.replace("-", "_") + "-" + version + "-py3-none-any.whl"
+            body = f"locked:{name}:{version}".encode()
             item = {"name": name, "version": version, "url": "https://example.com/" + filename,
-                    "sha256": "a" * 64, "bytes": 100, "filename": filename,
+                    "sha256": hashlib.sha256(body).hexdigest(), "bytes": len(body), "filename": filename,
                     "tags": ["py3-none-any"], "role": "device" if target else "host",
                     "targets": [target] if target else [], "dependencies": []}
             item["provenance"] = {"kind": "upstream-wheel", "source": {k: item[k] for k in ("url", "sha256", "bytes")}}
@@ -88,6 +94,13 @@ class RuntimeOperationTests(unittest.TestCase):
                  "artifacts": wheel_artifacts}
         value["lockId"] = artifacts.artifact_lock_id(value)
         return value
+
+    def download(self, plan, wheelhouse, *, artifacts, notify, source, locale):
+        self.downloads.append([item["name"] for item in artifacts])
+        self.download_directories.append(Path(wheelhouse))
+        for item in artifacts:
+            (Path(wheelhouse) / item["filename"]).write_bytes(f"locked:{item['name']}:{item['version']}".encode())
+        return Path(wheelhouse)
 
     def create(self, directory):
         python = directory / "Scripts/python.exe"
@@ -106,11 +119,15 @@ class RuntimeOperationTests(unittest.TestCase):
     def pip(self, command, **_kwargs):
         self.commands.append(command)
         requirements = Path(command[command.index("-r") + 1]).read_text()
+        self.requirements.append(requirements)
+        urls = {line.split(" @ ", 1)[0]: line.split(" @ ", 1)[1].split(" --hash", 1)[0]
+                for line in requirements.splitlines()}
         selected = [item for item in self.lock["artifacts"] if item["name"] + " @ " in requirements]
         self.installed.update({item["name"]: item["version"] for item in selected})
-        self.installed_sources.update({item["name"]: {key: item[key] for key in ("version", "sha256", "url")} for item in selected})
+        self.installed_sources.update({item["name"]: {**{key: item[key] for key in ("version", "sha256")}, "url": urls[item["name"]]}
+                                       for item in selected})
         report = {"version": "1", "install": [{"metadata": {"name": item["name"], "version": item["version"]},
-                   "download_info": {"url": item["url"], "archive_info": {"hashes": {"sha256": item["sha256"]}}}}
+                   "download_info": {"url": urls[item["name"]], "archive_info": {"hashes": {"sha256": item["sha256"]}}}}
                   for item in selected]}
         Path(command[command.index("--report") + 1]).write_text(json.dumps(report))
         return mock.Mock(stdout=io.StringIO(), returncode=0, wait=mock.Mock(return_value=0))
@@ -127,6 +144,36 @@ class RuntimeOperationTests(unittest.TestCase):
         state = self.state()
         return {"expected" + key[0].upper() + key[1:]: state[key]
                 for key in ("profileId", "profileRevision", "baseFingerprint", "targetFingerprint")}
+
+    def test_locked_install_prefetches_selected_wheels_and_keeps_pip_offline(self):
+        self.assertEqual(self.install(source="huggingface", locale="zh-CN"), 0)
+        self.assertEqual(artifacts.download_locked_artifacts.call_args.kwargs["source"], "huggingface")
+        self.assertEqual(artifacts.download_locked_artifacts.call_args.kwargs["locale"], "zh-cn")
+        self.assertEqual(len(self.downloads), 1)
+        self.assertIn(self.device_names["gfx1031"], self.downloads[0])
+        self.assertNotIn(self.device_names["gfx1101"], self.downloads[0])
+        self.assertTrue(self.commands)
+        self.assertTrue(all("--no-index" in command and "--require-hashes" in command for command in self.commands))
+        self.assertTrue(all("file:///" in text and "https://" not in text for text in self.requirements))
+        self.assertEqual(list(self.root.rglob(".wheels-*")), [])
+        self.assertEqual(self.download_directories[0].parent, self.root / "rocm")
+
+    def test_space_estimate_includes_only_selected_downloads(self):
+        with mock.patch.object(transactions.RocmTransaction, "preflight", return_value={}) as preflight:
+            self.assertEqual(self.install(), 0)
+            selected = set(self.host) | {self.device_names["gfx1031"]}
+            expected = sum(item["bytes"] for item in self.lock["artifacts"] if item["name"] in selected)
+            self.assertEqual(preflight.call_args.kwargs, {"estimated_bytes": expected, "download_bytes": expected})
+            self.assertEqual(self.install(action="addTargets", targets=["gfx1101"], **self.expected()), 0)
+            expected = next(item["bytes"] for item in self.lock["artifacts"] if item["name"] == self.device_names["gfx1101"])
+            self.assertEqual(preflight.call_args.kwargs, {"estimated_bytes": expected, "download_bytes": expected})
+
+    def test_insufficient_wheelhouse_space_fails_before_creating_a_transaction(self):
+        with mock.patch.object(transactions.RocmTransaction, "preflight", side_effect=transactions.RuntimeSpaceError("insufficient")):
+            self.assertEqual(self.install(), 1)
+        self.assertFalse(self.commands)
+        self.assertFalse(self.downloads)
+        self.assertFalse((self.root / ".rocm-transaction.json").exists())
 
     def prepare_legacy(self):
         self.create(self.root / "rocm")

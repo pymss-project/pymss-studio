@@ -141,11 +141,14 @@ class RocmTransaction:
             raise RuntimeRecoveryError("The previous ROCm environment is incomplete")
         return manifest
 
-    def preflight(self, current_bytes: int, previous_bytes: int, estimated_bytes: int | None = None) -> dict[str, int]:
+    def preflight(self, current_bytes: int, previous_bytes: int, estimated_bytes: int | None = None,
+                  *, download_bytes: int = 0) -> dict[str, int]:
         # Free space already excludes both existing environments. Budget a fresh
         # environment plus download/unpack space without deleting either one.
         candidate = max(current_bytes, estimated_bytes or 0, 1024 ** 3)
-        required = candidate * 2 + 128 * 1024 ** 2
+        # Locked installations retain the complete wheelhouse during pip's
+        # unpacking. It needs space in addition to the candidate environment.
+        required = candidate * 2 + download_bytes + 128 * 1024 ** 2
         free = shutil.disk_usage(self.root).free
         if free < required:
             raise RuntimeSpaceError(f"Insufficient disk space for a recoverable ROCm installation: required={required}, available={free}")

@@ -86,6 +86,7 @@ class SocksRoutingTests(unittest.TestCase):
     rejects a socks5:// proxy value outright, so a SOCKS proxy has to reach it some other way."""
 
     def setUp(self):
+        self.enterContext(mock.patch("worker_proxy._configured_proxy", None))
         import socket
         # Both are replaced, so both have to be put back or the rest of the suite inherits a
         # process still pointed at a proxy that does not exist.

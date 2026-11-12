@@ -5,7 +5,7 @@ import { useRouter } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { NIcon, useDialog, useMessage, type DropdownOption, type DropdownDividerOption } from 'naive-ui'
-import { ExtensionPuzzleOutline, RefreshOutline, SearchOutline, FolderOpenOutline, EllipsisHorizontalOutline, TerminalOutline, BuildOutline, TrashOutline, CheckmarkCircleOutline, PowerOutline, ChevronDownOutline, OpenOutline, ArrowForwardOutline, ListOutline, GridOutline } from '@vicons/ionicons5'
+import { ExtensionPuzzleOutline, AddCircleOutline, RefreshOutline, SearchOutline, FolderOpenOutline, EllipsisHorizontalOutline, TerminalOutline, BuildOutline, TrashOutline, CheckmarkCircleOutline, PowerOutline, ChevronDownOutline, OpenOutline, ArrowForwardOutline, ListOutline, GridOutline } from '@vicons/ionicons5'
 import { usePluginMarketplace, type CatalogPlugin, type InstalledPlugin, type PluginAction, type PluginCompatibility, type PluginUpdate } from '@/features/plugin-marketplace/composable'
 import { useSettingsStore } from '@/stores/settings'
 import PluginLogDialog from '@/features/plugin-marketplace/PluginLogDialog.vue'
@@ -543,14 +543,18 @@ async function requestCancel(id?: string) {
       <div class="plugins-header-controls">
         <div class="plugins-actions">
 
-          <n-button v-if="snapshot" :loading="!!updateCheck" :disabled="disabled || !snapshot.installed.some(canCheckPluginUpdate)" @click="perform('check_updates', undefined, undefined, { expectedRuntime: snapshot.runtime.identity })">
+          <n-button v-if="snapshot" secondary :loading="!!updateCheck" :disabled="disabled || !snapshot.installed.some(canCheckPluginUpdate)" @click="perform('check_updates', undefined, undefined, { expectedRuntime: snapshot.runtime.identity })">
+            <template #icon><n-icon :component="RefreshOutline" /></template>
             {{ t('plugins.checkUpdates') }}
           </n-button>
-          <n-button v-if="updateCount || batchBusy" type="primary" :loading="batchBusy" :disabled="disabled || !updateCount" @click="openBatchUpdate">
+          <n-button v-if="updateCount || batchBusy" type="primary" secondary :loading="batchBusy" :disabled="disabled || !updateCount" @click="openBatchUpdate">
             {{ t('plugins.updateAll') }}<template v-if="updateCount"> ({{ updateCount }})</template>
           </n-button>
-          <n-button :disabled="!activity && !logs.length" :aria-label="activeTasks.length ? `${t('tasks.logs')} · ${t('plugins.runningTasks', { count: activeTasks.length })}` : t('tasks.logs')" @click="openPluginLogs()"><template #icon><n-spin v-if="activeTasks.length" :size="14" aria-hidden="true" /><n-icon v-else :component="TerminalOutline" /></template>{{ t('tasks.logs') }}<span v-if="activeTasks.length" class="plugins-running-count" role="status" aria-live="polite">{{ t('plugins.runningTasks', { count: activeTasks.length }) }}</span></n-button>
-          <n-button :disabled="installDisabled() || !snapshot" @click="showSource = true">{{ t('plugins.installSource') }}</n-button>
+          <n-button secondary :disabled="!activity && !logs.length" :aria-label="activeTasks.length ? `${t('tasks.logs')} · ${t('plugins.runningTasks', { count: activeTasks.length })}` : t('tasks.logs')" @click="openPluginLogs()"><template #icon><n-spin v-if="activeTasks.length" :size="14" aria-hidden="true" /><n-icon v-else :component="TerminalOutline" /></template>{{ t('tasks.logs') }}<span v-if="activeTasks.length" class="plugins-running-count" role="status" aria-live="polite">{{ t('plugins.runningTasks', { count: activeTasks.length }) }}</span></n-button>
+          <n-button secondary :disabled="installDisabled() || !snapshot" @click="showSource = true">
+            <template #icon><n-icon :component="AddCircleOutline" /></template>
+            {{ t('plugins.installSource') }}
+          </n-button>
           <n-dropdown v-if="snapshot" trigger="click" :options="[{ label: t('plugins.refreshCatalog'), key: 'refresh', icon: menuIcon(RefreshOutline), disabled }, { label: t('plugins.reverify'), key: 'verify', icon: menuIcon(CheckmarkCircleOutline), disabled }]" @select="libraryMenuAction"><n-button secondary :loading="loading" :disabled="disabled" :aria-label="t('plugins.moreMarketActions')"><template #icon><n-icon :component="EllipsisHorizontalOutline" /></template></n-button></n-dropdown>
         </div>
         <div v-if="snapshot" class="plugins-update-summary" aria-live="polite">

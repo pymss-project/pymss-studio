@@ -211,6 +211,16 @@ class RuntimeTransactionTests(unittest.TestCase):
         self.assertEqual(self.tag(self.tx.previous / "environment"), "original")
         self.assertFalse(self.tx.journal.exists())
 
+    def test_space_preflight_reserves_the_retained_wheelhouse(self):
+        gib = 1024 ** 3
+        available = 6 * gib
+        with mock.patch("worker_runtime_transactions.shutil.disk_usage",
+                        return_value=shutil._ntuple_diskusage(10 * gib, 4 * gib, available)):
+            self.tx.preflight(0, 0, estimated_bytes=2 * gib)
+            with self.assertRaises(RuntimeSpaceError):
+                self.tx.preflight(0, 0, estimated_bytes=2 * gib, download_bytes=2 * gib)
+        self.assertFalse(self.tx.journal.exists())
+
     def test_invalid_journal_and_changed_pointer_preserve_all_copies(self):
         self.tx.journal.write_text(json.dumps({"version": 1, "id": "../outside", "operation": "install",
                                              "activate": True, "hadCurrent": True, "snapshot": {}}))

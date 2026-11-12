@@ -310,18 +310,24 @@ for (const platform of ['darwin']) {
 
 test('Linux dispatches runtime installation through the existing task queue', async () => {
   const calls = []
-  const app = appStore(async command => {
+  let installationPayload
+  const app = appStore(async (command, args) => {
     calls.push(command)
     if (command === 'runtime_info') return { platform: 'linux', ready: false }
-    if (command === 'start_runtime_install') return true
+    if (command === 'start_runtime_install') {
+      installationPayload = args.payload
+      return true
+    }
     throw new Error(`unexpected ${command}`)
   })
   await app.checkRuntimeInfo()
   assert.equal(app.runtimeManagementSupported, true)
+  useSettingsStore().downloadSource = 'huggingface'
   assert.equal(app.runtimeDebugSupported, false)
   await assert.rejects(() => app.updateDebugRuntime('debug_runtime_write_file', { path: '/runtime/active-runtime.json', content: '{}' }), /only available on Windows/)
   const taskId = await within(app.installRuntime('rocm'), 'Linux runtime installation ACK')
   assert.ok(calls.includes('start_runtime_install'))
+  assert.equal(installationPayload.source, 'huggingface')
   assert.equal(app.runtimeInstallBackend, 'rocm')
   assert.equal(app.runtimeInstallStatus, 'installing')
   app.handleRuntimeEvent({ type: 'task_cancelled', taskId })
@@ -1761,7 +1767,7 @@ test('ROCm plan and install forward target actions and all expected state guards
   await app.runtimeInstallPlan('rocm', target)
   const taskId = await app.installRuntime('rocm', 'auto', 'zh-CN', target)
   assert.deepEqual(calls[0], ['runtime_install_plan', { payload: { backend: 'rocm', ...target } }])
-  assert.deepEqual(calls[1], ['start_runtime_install', { payload: { taskId, backend: 'rocm', mirror: 'auto', locale: 'zh-CN', ...target } }])
+  assert.deepEqual(calls[1], ['start_runtime_install', { payload: { taskId, backend: 'rocm', mirror: 'auto', locale: 'zh-CN', source: 'modelscope', ...target } }])
   app.handleRuntimeEvent({ type: 'runtime_install_finished', taskId, payload: { backend: 'rocm', activated: false } })
   await pause()
 })

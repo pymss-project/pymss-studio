@@ -709,6 +709,7 @@ export const useAppStore = defineStore('app', () => {
     runtimeInstallActivationValidation.value = null
     try {
       await startRuntimeBackground('start_runtime_install', taskId, { taskId, backend, mirror, locale, ...target,
+        source: settings.downloadSource,
         ...(target.selectedDeviceIds ? { selectedDeviceIds: rocmStableDeviceIds(target.selectedDeviceIds) } : {}),
       }, 'runtime_install_finished')
     } catch (error) {

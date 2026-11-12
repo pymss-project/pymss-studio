@@ -34,6 +34,9 @@ class ProxyConfig:
         return self.scheme == "socks5h"
 
 
+_configured_proxy: ProxyConfig | None = None
+
+
 def _normalize_url(value: str) -> str:
     value = value.strip()
     if value and "://" not in value:
@@ -132,6 +135,20 @@ def _set_bypass_env(config: ProxyConfig) -> None:
     os.environ["no_proxy"] = value
 
 
+def build_proxy_opener(*handlers: Any) -> urllib.request.OpenerDirector:
+    """Build a guarded opener using this worker's configured transport policy."""
+    config = _configured_proxy or load_proxy_config()
+    if config.mode == "system":
+        proxy = urllib.request.ProxyHandler()
+    elif config.mode == "custom" and config.scheme in {"http", "https"}:
+        proxy = urllib.request.ProxyHandler({"http": config.url, "https": config.url})
+    else:
+        # SOCKS already routes at the socket layer. Rediscovering the Windows
+        # HTTP proxy here would add an unrelated proxy in front of that route.
+        proxy = urllib.request.ProxyHandler({})
+    return urllib.request.build_opener(proxy, *handlers)
+
+
 def configure_process_proxy(config: ProxyConfig) -> None:
     """Configure urllib and third-party libraries once for this worker process.
 
@@ -140,6 +157,10 @@ def configure_process_proxy(config: ProxyConfig) -> None:
     proxy URL explicitly (see effective_proxy_url) and no longer relies on
     process-global state set here.
     """
+    global _configured_proxy
+    # Keep the original config: applying SOCKS removes HTTP_PROXY, which may
+    # have been the input when the worker was launched without the JSON config.
+    _configured_proxy = config
     if config.mode == "none":
         os.environ["NO_PROXY"] = "*"
         os.environ["no_proxy"] = "*"
