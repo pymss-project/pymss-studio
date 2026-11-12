@@ -276,6 +276,7 @@ class DownloadCacheIntegrityTest(unittest.TestCase):
         self.dest = self.root / "model.bin"
         self.files = [("model.bin", self.dest)]
         self.payload = b"complete-model-payload"
+        self.entry = SimpleNamespace(name="model", relpath="model.bin", size_bytes=0)
         self.download_calls = []
         self.fetch = self.enterContext(mock.patch.object(
             self.module, "fetch_modelscope_file_index", side_effect=URLError("index unavailable"),
@@ -298,31 +299,74 @@ class DownloadCacheIntegrityTest(unittest.TestCase):
         self.enterContext(mock.patch("worker_download.effective_source_for", return_value="modelscope"))
 
     def command(self, **payload):
-        with mock.patch("worker_download.files_for_studio_model", return_value=(SimpleNamespace(name="model"), self.files)):
+        with mock.patch("worker_download.files_for_studio_model", return_value=(self.entry, self.files)):
             return cmd_download_model({"model": "model", "taskId": "cache-integrity", **payload})
 
-    def test_command_rejects_unverified_cache_after_index_failure(self):
+    def test_command_redownloads_unverifiable_cache_after_index_failure(self):
         self.dest.write_bytes(b"truncated")
 
         result = self.command()
 
-        self.assertEqual(result, 1)
+        self.assertEqual(result, 0)
         self.fetch.assert_called_once_with(timeout=30, proxy="")
-        self.assertEqual(self.download_calls, [])
-        self.assertEqual(self.dest.read_bytes(), b"truncated")
-        self.assertFalse(any(call.args[0] == "download_done" for call in self.events.call_args_list))
-        self.model_info.assert_not_called()
-        self.assertIn("cached", self.failures.call_args.args[1].lower())
+        self.assertEqual(self.download_calls, [self.dest])
+        self.assertEqual(self.dest.read_bytes(), self.payload)
+        self.assertTrue(any(call.args[0] == "download_done" for call in self.events.call_args_list))
 
-    def test_direct_download_rejects_unverified_cache_after_index_failure(self):
+    def test_direct_download_redownloads_unverifiable_cache_after_index_failure(self):
         self.dest.write_bytes(b"truncated")
 
-        with self.assertRaisesRegex(RuntimeError, "cached"):
-            download_studio_model(self.module, "model", self.files, proxy="")
+        result = download_studio_model(self.module, "model", self.files, proxy="")
 
         self.fetch.assert_called_once_with(timeout=30, proxy="")
+        self.assertEqual(self.download_calls, [self.dest])
+        self.assertEqual(self.dest.read_bytes(), self.payload)
+        self.assertEqual(result["downloaded"], [str(self.dest)])
+
+    def test_catalog_cache_is_reused_without_a_metadata_request(self):
+        self.entry.size_bytes = len(self.payload)
+        self.dest.write_bytes(self.payload)
+        self.assertEqual(self.command(), 0)
+        self.fetch.assert_not_called()
         self.assertEqual(self.download_calls, [])
-        self.assertEqual(self.dest.read_bytes(), b"truncated")
+
+    def test_direct_catalog_cache_is_reused_without_metadata(self):
+        self.entry.size_bytes = len(self.payload)
+        self.dest.write_bytes(self.payload)
+        result = download_studio_model(self.module, "model", self.files, entry=self.entry)
+        self.assertEqual(result, {"downloaded": [], "skipped": [str(self.dest)]})
+        self.fetch.assert_not_called()
+
+    def test_wrong_primary_size_is_downloaded_using_catalog_metadata(self):
+        self.entry.size_bytes = len(self.payload)
+        self.dest.write_bytes(b"truncated")
+        self.assertEqual(self.command(), 0)
+        self.assertEqual(self.download_calls, [self.dest])
+        self.assertEqual(self.dest.read_bytes(), self.payload)
+
+    def test_huggingface_does_not_query_modelscope_even_with_missing_files(self):
+        self.entry.size_bytes = len(self.payload)
+        self.assertEqual(self.command(source="huggingface"), 0)
+        self.fetch.assert_not_called()
+        self.assertEqual(self.download_calls, [self.dest])
+
+    def test_empty_secondary_is_not_counted_as_complete(self):
+        self.entry.size_bytes = len(self.payload)
+        self.dest.write_bytes(self.payload)
+        auxiliary = self.root / "config.yaml"
+        auxiliary.touch()
+        self.files.append(("config.yaml", auxiliary))
+        self.assertEqual(self.command(), 0)
+        self.assertEqual(self.download_calls, [auxiliary])
+
+    def test_available_index_hash_remains_authoritative(self):
+        self.entry.size_bytes = len(self.payload)
+        self.dest.write_bytes(b"x" * len(self.payload))
+        digest = hashlib.sha256(self.payload).hexdigest()
+        result = download_studio_model(self.module, "model", self.files, entry=self.entry,
+                                      file_index={"model.bin": {"Size": len(self.payload), "Sha256": digest}})
+        self.assertEqual(result["downloaded"], [str(self.dest)])
+        self.fetch.assert_not_called()
 
     def test_explicit_force_download_can_replace_cache_without_index(self):
         self.dest.write_bytes(b"truncated")
@@ -465,7 +509,7 @@ class DownloadCommandProgressTest(unittest.TestCase):
 
         self.module.download_model = without_callback if legacy else with_callback
         self.module._download_file = downloader
-        entry = SimpleNamespace(name="model")
+        entry = SimpleNamespace(name="model", relpath=files[0][0], size_bytes=self.sizes.get(files[0][0], 0))
         with mock.patch("worker_download.files_for_studio_model", return_value=(entry, files)):
             result = cmd_download_model({"model": "model", "taskId": "transfer"})
         self.assertEqual(result, 0, self.failures.call_args)

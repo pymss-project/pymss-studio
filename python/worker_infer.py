@@ -693,6 +693,7 @@ def _prepare_separator(
                 endpoint=endpoint,
                 proxy=effective_proxy_url(),
                 task_id=task_id,
+                entry=_entry,
             )
             resolved = _resolve_studio_model(model_name, model_dir, require_supported=True, require_exists=True)
             downloaded_now = True

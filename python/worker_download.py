@@ -47,16 +47,58 @@ def _should_fallback_from_aria2_error(exc: Exception) -> bool:
     return "aria2c" in message or "ossl_provider" in message or "provider_load" in message
 
 
-def _require_index_for_cached_files(files: list[tuple[str, Path]], index: Any, *, force: bool) -> None:
-    """Do not certify pre-existing model files when the metadata lookup failed."""
-    if index is not None or force:
-        return
-    for _relpath, dest in files:
-        if dest.is_file():
-            raise RuntimeError(
-                f"Cannot verify cached file {dest.name}: the file index is unavailable. "
-                "Retry when metadata is available or force a fresh download."
-            )
+def _catalog_size_and_hash(entry: Any, relpath: str) -> tuple[int | None, str]:
+    if relpath != getattr(entry, "relpath", None):
+        return None, ""
+    size = getattr(entry, "size_bytes", 0)
+    return (size if isinstance(size, int) and size > 0 else None), getattr(entry, "sha256", "") or ""
+
+
+def _can_reuse_file(pymss_download: Any, entry: Any, relpath: str, dest: Path,
+                    size: int | None, digest: str, *, verify: bool, endpoint: str | None) -> bool:
+    secondary = bool(getattr(entry, "relpath", None)) and relpath != entry.relpath
+    if verify and endpoint is None and size is None and not digest and not secondary:
+        return False
+    return (dest.is_file() and dest.stat().st_size > 0
+            and pymss_download._already_valid(dest, size, digest))
+
+
+def _cached_model_is_usable(pymss_download: Any, entry: Any, files: list[tuple[str, Path]]) -> bool:
+    primary = getattr(entry, "relpath", None)
+    if not primary or not any(relpath == primary for relpath, _ in files):
+        return False
+    return all(_can_reuse_file(pymss_download, entry, relpath, dest,
+                               *_catalog_size_and_hash(entry, relpath), verify=True, endpoint=None)
+               for relpath, dest in files)
+
+
+def _download_file_index(pymss_download: Any, entry: Any, files: list[tuple[str, Path]], *,
+                         source: str, endpoint: str | None, verify: bool, force: bool,
+                         timeout: int, proxy: str | None, task_id: str | None,
+                         file_index: Any = _UNFETCHED_FILE_INDEX) -> Any:
+    if not verify or endpoint is not None:
+        return None
+    if file_index is not _UNFETCHED_FILE_INDEX:
+        return file_index
+    if not force and _cached_model_is_usable(pymss_download, entry, files):
+        return None
+    if source == "modelscope":
+        try:
+            return pymss_download.fetch_modelscope_file_index(timeout=timeout, proxy=proxy)
+        except (OSError, ValueError) as exc:
+            _emit_download_log(task_id, "warning", f"File index unavailable ({type(exc).__name__}); using catalog metadata")
+    return None
+
+
+def _expected_file_metadata(pymss_download: Any, entry: Any, relpath: str, index: Any, *,
+                            verify: bool, endpoint: str | None) -> tuple[Any, Any]:
+    size, digest = pymss_download._expected_size_and_hash(relpath, index)
+    if verify and endpoint is None:
+        local_size, local_digest = _catalog_size_and_hash(entry, relpath)
+        size = size if size is not None else local_size
+        if not digest and local_digest:
+            digest = local_digest
+    return size, digest
 
 
 def _download_file_with_aria2_env(
@@ -115,6 +157,7 @@ def download_studio_model(
     proxy: str | None = None,
     task_id: str | None = None,
     file_index: Any = _UNFETCHED_FILE_INDEX,
+    entry: Any = None,
 ) -> dict[str, Any]:
     """Download studio-resolved files through pymss's downloader.
 
@@ -125,27 +168,18 @@ def download_studio_model(
     """
     remote_url = pymss_download.remote_url
     download_file = pymss_download._download_file
-    already_valid = pymss_download._already_valid
-    expected_size_and_hash = pymss_download._expected_size_and_hash
-    fetch_index = pymss_download.fetch_modelscope_file_index
-    index = None
-    if verify and endpoint is None:
-        if file_index is not _UNFETCHED_FILE_INDEX:
-            # Reuse the command's lookup, including an unavailable index, so progress
-            # and validation use the same metadata without a second network request.
-            index = file_index
-        else:
-            try:
-                index = fetch_index(timeout=timeout, proxy=proxy)
-            except Exception as exc:
-                _emit_download_log(task_id, "warning", f"File index unavailable; published size/hash metadata cannot be used: {exc}")
-        _require_index_for_cached_files(files, index, force=force)
+    index = _download_file_index(pymss_download, entry, files, source=source, endpoint=endpoint,
+                                 verify=verify, force=force, timeout=timeout, proxy=proxy,
+                                 task_id=task_id, file_index=file_index)
     downloaded: list[str] = []
     skipped: list[str] = []
 
     for relpath, dest in files:
-        expected_size, expected_sha256 = expected_size_and_hash(relpath, index)
-        if not force and already_valid(dest, expected_size, expected_sha256):
+        expected_size, expected_sha256 = _expected_file_metadata(
+            pymss_download, entry, relpath, index, verify=verify, endpoint=endpoint,
+        )
+        if not force and _can_reuse_file(pymss_download, entry, relpath, dest, expected_size,
+                                         expected_sha256, verify=verify, endpoint=endpoint):
             skipped.append(str(dest))
             continue
         download_kwargs: dict[str, Any] = {"timeout": timeout}
@@ -376,10 +410,7 @@ def cmd_download_model(payload: dict[str, Any]) -> int:
     try:
         from pymss import model_download as pymss_model_download  # type: ignore
         from pymss.model_download import (  # type: ignore
-            _already_valid,
-            _expected_size_and_hash,
             download_model,
-            fetch_modelscope_file_index,
         )
     except Exception as exc:
         return emit_error("PYMSS_IMPORT_FAILED", str(exc), traceback.format_exc(), task_id=task_id)
@@ -401,22 +432,19 @@ def cmd_download_model(payload: dict[str, Any]) -> int:
         }, task_id=task_id)
         emit("download_stage", {"stage": "resolving_files", "progress": 0}, task_id=task_id)
 
-        # Fresh downloads can fall back to file counts when index metadata is unavailable.
-        # Existing cache files require a successful lookup unless a fresh download is forced.
-        index = None
-        try:
-            index = fetch_modelscope_file_index(timeout=timeout, proxy=effective_proxy_url()) if endpoint is None else None
-        except Exception as exc:
-            _emit_download_log(task_id, "warning", f"File index unavailable; published progress and validation metadata cannot be used: {exc}")
-        if endpoint is None:
-            _require_index_for_cached_files(files, index, force=force)
+        index = _download_file_index(pymss_model_download, entry, files, source=source, endpoint=endpoint,
+                                     verify=True, force=force, timeout=timeout, proxy=effective_proxy_url(),
+                                     task_id=task_id)
 
         expected_sizes: dict[str, int] = {}
         already_done: set[str] = set()
         for relpath, dest in files:
-            expected_size, expected_sha256 = _expected_size_and_hash(relpath, index)
+            expected_size, expected_sha256 = _expected_file_metadata(
+                pymss_model_download, entry, relpath, index, verify=True, endpoint=endpoint,
+            )
             expected_sizes[str(dest)] = int(expected_size or 0)
-            if not force and _already_valid(dest, expected_size, expected_sha256):
+            if not force and _can_reuse_file(pymss_model_download, entry, relpath, dest, expected_size,
+                                             expected_sha256, verify=True, endpoint=endpoint):
                 already_done.add(str(dest))
                 if not expected_sizes[str(dest)]:
                     expected_sizes[str(dest)] = dest.stat().st_size
@@ -511,6 +539,7 @@ def cmd_download_model(payload: dict[str, Any]) -> int:
             proxy=effective_proxy_url(),
             task_id=task_id,
             file_index=index,
+            entry=entry,
         )
         settled_bytes = sum(expected_sizes.get(str(dest), 0) or dest.stat().st_size for _relpath, dest in files)
     except KeyError as exc:
