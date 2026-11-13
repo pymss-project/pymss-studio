@@ -108,12 +108,22 @@ fn transactional_runtime_command(command: &str) -> bool {
 }
 
 fn supervised_runtime_command(command: &str) -> bool {
-    transactional_runtime_command(command) || command == "runtime_gpu_probe"
+    transactional_runtime_command(command) || matches!(command, "runtime_gpu_probe" | "update_runtime_core")
+}
+
+fn core_update_preparation(command: &str, payload: &Value) -> bool {
+    command == "update_runtime_core" && payload.get("prepareOnly").and_then(Value::as_bool) == Some(true)
+}
+
+fn runtime_transaction_recovery_required(command: &str, payload: &Value) -> bool {
+    command == "rollback_runtime"
+        || (command == "install_runtime" && payload.get("backend").and_then(Value::as_str).is_some_and(|backend| backend.trim().eq_ignore_ascii_case("rocm")))
+        || (command == "update_runtime_core" && !core_update_preparation(command, payload))
 }
 
 fn mark_terminal_before_exit(command: &str) -> bool {
-    // A probe can report before its native processes finish. Keep cancellation available.
-    command != "runtime_gpu_probe"
+    // Native probes and core plans can report before descendant cleanup finishes.
+    !matches!(command, "runtime_gpu_probe" | "update_runtime_core")
 }
 
 pub(crate) fn defers_task_cancellation(task_id: &str) -> bool {
@@ -237,6 +247,19 @@ struct RuntimeAccess {
     maintenance_cancel_timed_out: bool,
 }
 
+impl RuntimeAccess {
+    fn complete_supervision(&mut self, exclusive_maintenance: bool, error: Option<&str>, process_exit_unconfirmed: bool) {
+        if let Some(error) = error {
+            self.recovery_required = true;
+            self.process_exit_unconfirmed |= process_exit_unconfirmed || error.contains("RUNTIME_PROCESS_EXIT_UNCONFIRMED");
+        } else if exclusive_maintenance {
+            self.recovery_required = false;
+            self.process_exit_unconfirmed = false;
+        }
+        // Successful shared preparations cannot clear another task's failure.
+    }
+}
+
 struct RuntimeAccessGuard<'a> {
     access: &'a Mutex<RuntimeAccess>,
     updating: bool,
@@ -302,8 +325,8 @@ fn acquire_runtime_access<'a>(
     command: &str,
 ) -> AppResult<Option<RuntimeAccessGuard<'a>>> {
     let installing_plugins = command == "install_plugin";
-    let updating = matches!(command, "update_runtime_core" | "manage_plugin" | "activate_runtime" | "delete_runtime" | "install_runtime" | "rollback_runtime" | "recover_runtime" | "runtime_gpu_probe");
-    if !updating && matches!(command, "health" | "network_diagnostics" | "plugin_source_info") {
+    let updating = matches!(command, "update_runtime_core" | "manage_plugin" | "manage_optional_package" | "activate_runtime" | "delete_runtime" | "install_runtime" | "rollback_runtime" | "recover_runtime" | "runtime_gpu_probe");
+    if !updating && matches!(command, "health" | "network_diagnostics" | "plugin_source_info" | "runtime_core_versions") {
         return Ok(None);
     }
     let mut state = access
@@ -334,12 +357,13 @@ fn acquire_runtime_access<'a>(
     Ok(Some(RuntimeAccessGuard { access, updating, installing_plugins }))
 }
 
-fn worker_scratch(command: &str) -> std::io::Result<Option<tempfile::TempDir>> {
-    if matches!(command, "run_operation" | "infer_workflow") {
-        tempfile::Builder::new().prefix("pymss-worker-audio-").tempdir().map(Some)
-    } else {
-        Ok(None)
-    }
+fn worker_scratch(command: &str, payload: &Value) -> std::io::Result<Option<tempfile::TempDir>> {
+    let prefix = if matches!(command, "run_operation" | "infer_workflow") {
+        "pymss-worker-audio-"
+    } else if core_update_preparation(command, payload) {
+        "pymss-worker-runtime-"
+    } else { return Ok(None); };
+    tempfile::Builder::new().prefix(prefix).tempdir().map(Some)
 }
 
 fn query_timeout(command: &str) -> Option<std::time::Duration> {
@@ -361,11 +385,39 @@ fn query_timeout(command: &str) -> Option<std::time::Duration> {
 }
 
 fn runtime_access_command<'a>(command: &'a str, payload: &Value) -> &'a str {
-    if command == "manage_plugin" && payload.get("action").and_then(Value::as_str) == Some("install") {
-        "install_plugin"
-    } else {
-        command
+    if core_update_preparation(command, payload) {
+        return "prepare_runtime_core_update";
     }
+    if command == "plugin_marketplace" && (payload.get("recoverBinding").and_then(Value::as_bool) == Some(true)
+        || payload.get("forceVerify").and_then(Value::as_bool) == Some(true)) {
+        return "manage_plugin";
+    }
+    if command == "manage_plugin" {
+        match payload.get("action").and_then(Value::as_str) {
+            Some("install") => return "install_plugin",
+            Some("check_updates") => return "check_plugin_updates",
+            _ => {},
+        }
+    }
+    command
+}
+
+fn runtime_release_event(command: &str, payload: &Value) -> Option<Value> {
+    // Binding recovery observes its own response. Broadcasting its release would
+    // repeatedly restart recovery while an external transaction remains pending.
+    if command == "plugin_marketplace" && (payload.get("recoverBinding").and_then(Value::as_bool) == Some(true)
+        || payload.get("forceVerify").and_then(Value::as_bool) == Some(true)) {
+        return None;
+    }
+    Some(serde_json::json!({ "type": "runtime_access_released", "payload": { "command": command } }))
+}
+
+fn runtime_idle_release_event(access: &Mutex<RuntimeAccess>, event: Option<Value>) -> Option<Value> {
+    // One reader finishing does not admit exclusive recovery while another reader
+    // is still running. Wake recovery only when the last runtime user has left.
+    event.filter(|_| access.lock().is_ok_and(|state| {
+        !state.updating && state.users == 0 && state.installing_plugins == 0
+    }))
 }
 
 fn has_pending_runtime_transaction(app: &AppHandle) -> AppResult<bool> {
@@ -375,7 +427,7 @@ fn has_pending_runtime_transaction(app: &AppHandle) -> AppResult<bool> {
 }
 
 fn recovery_query(command: &str) -> bool {
-    matches!(command, "runtime_info" | "runtime_core_versions" | "runtime_env_sizes" | "runtime_install_plan")
+    matches!(command, "runtime_info" | "runtime_env_sizes" | "runtime_install_plan")
 }
 
 fn acquire_worker_runtime_access(app: &AppHandle, command: &str, payload: &Value) -> AppResult<Option<RuntimeAccessGuard<'static>>> {
@@ -1652,6 +1704,7 @@ fn run_worker_with_payload_inner(
 ) -> AppResult<Value> {
     let _application_access = acquire_application_operation()?;
     let _runtime_access = acquire_worker_runtime_access(app, command, payload.as_ref().unwrap_or(&Value::Null))?;
+    let release_event = _runtime_access.as_ref().and_then(|_| runtime_release_event(command, payload.as_ref().unwrap_or(&Value::Null)));
     let exclusive_query = recovery_query(command) && _runtime_access.as_ref().is_some_and(|lease| lease.updating);
     let mut result = execute_worker_with_payload(app, command, payload, operation_id, command != "recover_runtime" && !exclusive_query);
     if command == "recover_runtime" {
@@ -1672,6 +1725,9 @@ fn run_worker_with_payload_inner(
     }
     drop(_runtime_access);
     drop(_application_access);
+    if let Some(event) = runtime_idle_release_event(&RUNTIME_ACCESS, release_event) {
+        let _ = app.emit("pymss://worker-event", event);
+    }
     if command == "recover_runtime" {
         if let Ok(payload) = &result {
             let _ = app.emit("pymss://worker-event", serde_json::json!({"type": "runtime_recovered", "payload": payload}));
@@ -1684,7 +1740,7 @@ fn run_worker_with_payload_inner(
 fn execute_worker_with_payload(
     app: &AppHandle, command: &str, payload: Option<Value>, operation_id: &str, emit_events: bool,
 ) -> AppResult<Value> {
-    let scratch = worker_scratch(command)?;
+    let scratch = worker_scratch(command, payload.as_ref().unwrap_or(&Value::Null))?;
     let payload_file = match payload {
         Some(value) => Some(make_payload_file(command, None, value)?),
         None => None,
@@ -1897,6 +1953,7 @@ fn spawn_worker_background_inner(
 ) -> AppResult<()> {
     let mut application_access = Some(acquire_application_operation()?);
     let mut runtime_access = acquire_worker_runtime_access(&app, command, &payload)?;
+    let release_event = runtime_access.as_ref().and_then(|_| runtime_release_event(command, &payload));
     let mut registered_task_ids = vec![task_id.clone()];
     if let Some(tasks) = payload.get("tasks").and_then(Value::as_array) {
         for item in tasks {
@@ -1924,9 +1981,8 @@ fn spawn_worker_background_inner(
     }
 
     let command_name = command.to_string();
-    let needs_transaction_recovery = command == "rollback_runtime"
-        || (command == "install_runtime" && payload.get("backend").and_then(Value::as_str).is_some_and(|backend| backend.trim().eq_ignore_ascii_case("rocm")));
-    let scratch = worker_scratch(command)?;
+    let needs_transaction_recovery = runtime_transaction_recovery_required(command, &payload);
+    let scratch = worker_scratch(command, &payload)?;
     let mut audio_scope = if command == "run_operation" {
         let directory = operation_output_directory(&payload, &default_output_dir(&app)?)?;
         payload.as_object_mut()
@@ -2138,11 +2194,9 @@ fn spawn_worker_background_inner(
             // Dropping here also handles a failed wait while both leases are held.
             if exit_status.is_some() { scope.finish(); }
         }
-        // The parent owns scratch so forced worker cancellation also removes
-        // temporary AUDIO files, even when Python cannot execute its finally.
-        drop(scratch);
         let mut recovery_error = None;
         let mut recovery_payload = None;
+        let mut scratch_cleanup_allowed = true;
         if supervised_runtime_command(&command_name) {
             for id in &registered_task_ids { mark_task_terminal(&app, id); }
             let stopped = if exit_status.is_none() {
@@ -2152,6 +2206,7 @@ fn spawn_worker_background_inner(
                     .and_then(|tree| tree.stop_and_confirm().map_err(AppError::from))
             };
             let process_exit_unconfirmed = stopped.is_err();
+            scratch_cleanup_allowed = !process_exit_unconfirmed;
             let recovered = stopped.and_then(|_| {
                 if !needs_transaction_recovery { return Ok(None); }
                 execute_worker_with_payload(
@@ -2164,10 +2219,10 @@ fn spawn_worker_background_inner(
             match recovered {
                 Ok(payload) => { recovery_payload = payload; }
                 Err(error) => {
-                    recovery_error = Some(if transactional_runtime_command(&command_name) {
+                    recovery_error = Some(if transactional_runtime_command(&command_name) || needs_transaction_recovery {
                         format!("RUNTIME_RECOVERY_FAILED: {error}")
                     } else {
-                        format!("RUNTIME_PROCESS_EXIT_UNCONFIRMED: GPU probe processes could not be stopped: {error}")
+                        format!("RUNTIME_PROCESS_EXIT_UNCONFIRMED: Runtime descendants could not be stopped: {error}")
                     });
                     core_terminal_events.clear();
                     core_terminal_error = None;
@@ -2175,11 +2230,14 @@ fn spawn_worker_background_inner(
                 }
             }
             if let Ok(mut access) = RUNTIME_ACCESS.lock() {
-                access.recovery_required = recovery_error.is_some();
-                access.process_exit_unconfirmed = process_exit_unconfirmed
-                    || recovery_error.as_ref().is_some_and(|error| error.contains("RUNTIME_PROCESS_EXIT_UNCONFIRMED"));
+                access.complete_supervision(transactional_runtime_command(&command_name) || needs_transaction_recovery,
+                                            recovery_error.as_deref(), process_exit_unconfirmed);
             }
         }
+        // Keep private scratch until every descendant has stopped. An unconfirmed
+        // process tree retains its files for recovery instead of racing cleanup.
+        if scratch_cleanup_allowed { drop(scratch); }
+        else if let Some(scratch) = scratch { let _ = scratch.keep(); }
         if let Some(completion) = &maintenance_completion {
             let outcome = recovery_error.clone().map_or(Ok(()), Err);
             if let Err(message) = completion.complete_after_release(runtime_access.take(), application_access.take(), outcome) {
@@ -2191,6 +2249,9 @@ fn spawn_worker_background_inner(
         } else {
             drop(runtime_access.take());
             drop(application_access.take());
+        }
+        if let Some(event) = runtime_idle_release_event(&RUNTIME_ACCESS, release_event) {
+            let _ = app.emit("pymss://worker-event", event);
         }
         // Retain the consumed IDs for notification: draining them once for logging
         // and again for emission loses the plugin supervisor's cancellation ACK.
@@ -2448,10 +2509,10 @@ mod tests {
 
     #[test]
     fn worker_scratch_is_scoped_and_cleans_orphaned_child_files() {
-        let first = super::worker_scratch("infer_workflow").unwrap().unwrap();
-        let second = super::worker_scratch("run_operation").unwrap().unwrap();
+        let first = super::worker_scratch("infer_workflow", &json!(null)).unwrap().unwrap();
+        let second = super::worker_scratch("run_operation", &json!(null)).unwrap().unwrap();
         assert_ne!(first.path(), second.path());
-        assert!(super::worker_scratch("list_nodes").unwrap().is_none());
+        assert!(super::worker_scratch("list_nodes", &json!(null)).unwrap().is_none());
         let path = first.path().to_path_buf();
         let nested = path.join("pymss-audio-aborted");
         fs::create_dir_all(&nested).unwrap();
@@ -2541,9 +2602,10 @@ mod tests {
             assert!(result.is_err(), "{command} must wait for the core update");
             assert!(result.err().unwrap().to_string().contains("RUNTIME_BUSY"));
         }
-        for command in ["runtime_info", "runtime_core_versions", "runtime_env_sizes", "runtime_install_plan"] {
+        for command in ["runtime_info", "runtime_env_sizes", "runtime_install_plan"] {
             assert!(super::acquire_runtime_access(&access, command).is_err(), "{command}");
         }
+        assert!(super::acquire_runtime_access(&access, "runtime_core_versions").unwrap().is_none());
         assert!(super::acquire_runtime_access(&access, "health").unwrap().is_none());
         drop(update);
         assert!(super::acquire_runtime_access(&access, "infer").is_ok());
@@ -2554,11 +2616,12 @@ mod tests {
         let access = std::sync::Mutex::new(super::RuntimeAccess::default());
         for maintenance in ["install_runtime", "rollback_runtime", "recover_runtime"] {
             let lease = super::acquire_runtime_access(&access, maintenance).unwrap();
-            for command in ["infer", "env_info", "runtime_info", "runtime_core_versions", "runtime_env_sizes",
+            for command in ["infer", "env_info", "runtime_info", "runtime_env_sizes",
                             "runtime_install_plan", "manage_plugin", "install_plugin", "manage_optional_package",
                             "diagnose_rocm", "install_runtime", "rollback_runtime", "recover_runtime"] {
                 assert!(super::acquire_runtime_access(&access, command).is_err(), "{maintenance} must exclude {command}");
             }
+            assert!(super::acquire_runtime_access(&access, "runtime_core_versions").unwrap().is_none());
             drop(lease);
         }
         let query = super::acquire_runtime_access(&access, "runtime_info").unwrap();
@@ -2740,6 +2803,169 @@ mod tests {
         drop(update);
         assert_eq!(super::runtime_access_command("manage_plugin", &json!({"action":"update"})), "manage_plugin");
         assert_eq!(super::runtime_access_command("run_operation", &json!({"action":"install"})), "run_operation");
+    }
+
+    #[test]
+    fn plugin_update_checks_share_runtime_access_without_admitting_writers() {
+        let access = std::sync::Mutex::new(super::RuntimeAccess::default());
+        let command = super::runtime_access_command("manage_plugin", &json!({"action": "check_updates"}));
+        let info = super::acquire_runtime_access(&access, "runtime_info").unwrap();
+        let check = super::acquire_runtime_access(&access, command).unwrap();
+        let inference = super::acquire_runtime_access(&access, "infer").unwrap();
+        for writer in ["manage_plugin", "install_plugin", "update_runtime_core", "activate_runtime", "runtime_gpu_probe"] {
+            assert!(super::acquire_runtime_access(&access, writer).is_err(), "{writer}");
+        }
+        drop(info);
+        drop(check);
+        drop(inference);
+        let update = super::acquire_runtime_access(&access, "update_runtime_core").unwrap();
+        assert!(super::acquire_runtime_access(&access, command).is_err());
+        drop(update);
+        assert_eq!(super::runtime_access_command("run_operation", &json!({"action": "check_updates"})), "run_operation");
+    }
+
+    #[test]
+    fn remote_core_version_queries_do_not_reserve_or_recover_the_runtime() {
+        let access = std::sync::Mutex::new(super::RuntimeAccess::default());
+        let update = super::acquire_runtime_access(&access, "update_runtime_core").unwrap();
+        assert!(super::acquire_runtime_access(&access, "runtime_core_versions").unwrap().is_none());
+        assert!(!super::recovery_query("runtime_core_versions"));
+        assert!(super::acquire_runtime_access(&access, "infer").is_err());
+        drop(update);
+        let application_update = super::acquire_runtime_access(&access, "update_runtime_core").unwrap();
+        assert!(super::acquire_runtime_access(&access, "application_operation").is_err());
+        drop(application_update);
+    }
+
+    #[test]
+    fn plugin_inventory_recovery_requires_exclusive_runtime_access() {
+        let access = std::sync::Mutex::new(super::RuntimeAccess::default());
+        let reader = super::acquire_runtime_access(&access, "infer").unwrap();
+        for payload in [json!({"recoverBinding": true}), json!({"forceVerify": true})] {
+            let command = super::runtime_access_command("plugin_marketplace", &payload);
+            assert!(super::acquire_runtime_access(&access, command).is_err());
+        }
+        assert!(super::acquire_runtime_access(&access, super::runtime_access_command("plugin_marketplace", &json!({}))).is_ok());
+        drop(reader);
+        let recovery = super::acquire_runtime_access(&access, super::runtime_access_command("plugin_marketplace", &json!({"recoverBinding": true}))).unwrap();
+        assert!(super::acquire_runtime_access(&access, "infer").is_err());
+        drop(recovery);
+    }
+
+    #[test]
+    fn runtime_release_notifications_cover_queries_without_restarting_binding_recovery() {
+        for command in ["list_models", "list_nodes", "describe_operation", "optional_package_status", "run_operation", "plugin_marketplace"] {
+            let event = super::runtime_release_event(command, &json!({})).unwrap();
+            assert_eq!(event["type"], "runtime_access_released");
+            assert_eq!(event["payload"], json!({"command": command}));
+        }
+        for payload in [json!({"recoverBinding": true}), json!({"forceVerify": true})] {
+            assert!(super::runtime_release_event("plugin_marketplace", &payload).is_none());
+            assert!(super::runtime_release_event("list_models", &payload).is_some());
+        }
+        for payload in [json!({"recoverBinding": false}), json!({"recoverBinding": "true"}), json!({"forceVerify": false})] {
+            assert!(super::runtime_release_event("plugin_marketplace", &payload).is_some());
+        }
+    }
+
+    #[test]
+    fn runtime_release_notifications_wait_until_all_runtime_users_have_finished() {
+        let access = std::sync::Mutex::new(super::RuntimeAccess::default());
+        let event = || super::runtime_release_event("list_nodes", &json!({}));
+        let inference = super::acquire_runtime_access(&access, "infer").unwrap();
+        for _ in 0..3 {
+            let query = super::acquire_runtime_access(&access, "list_nodes").unwrap();
+            drop(query);
+            assert!(super::runtime_idle_release_event(&access, event()).is_none());
+        }
+        drop(inference);
+        assert!(super::runtime_idle_release_event(&access, event()).is_some());
+
+        let first_install = super::acquire_runtime_access(&access, "install_plugin").unwrap();
+        let last_install = super::acquire_runtime_access(&access, "install_plugin").unwrap();
+        drop(first_install);
+        assert!(super::runtime_idle_release_event(&access, event()).is_none());
+        drop(last_install);
+        assert!(super::runtime_idle_release_event(&access, event()).is_some());
+
+        let update = super::acquire_runtime_access(&access, "update_runtime_core").unwrap();
+        assert!(super::runtime_idle_release_event(&access, event()).is_none());
+        drop(update);
+        assert!(super::runtime_idle_release_event(&access, event()).is_some());
+    }
+
+    #[test]
+    fn core_preparation_shares_runtime_access_but_never_admits_concurrent_maintenance() {
+        let access = std::sync::Mutex::new(super::RuntimeAccess::default());
+        let prepare = super::runtime_access_command("update_runtime_core", &json!({"prepareOnly": true}));
+        let inference = super::acquire_runtime_access(&access, "infer").unwrap();
+        let preparation = super::acquire_runtime_access(&access, prepare).unwrap();
+        let operation = super::acquire_runtime_access(&access, "run_operation").unwrap();
+        for writer in ["update_runtime_core", "install_runtime", "rollback_runtime", "recover_runtime",
+                       "activate_runtime", "delete_runtime", "manage_plugin", "install_plugin", "manage_optional_package", "runtime_gpu_probe"] {
+            assert!(super::acquire_runtime_access(&access, writer).is_err(), "{writer}");
+        }
+        drop(inference);
+        drop(preparation);
+        drop(operation);
+        for writer in ["update_runtime_core", "install_runtime", "rollback_runtime", "recover_runtime", "install_plugin", "manage_optional_package", "runtime_gpu_probe"] {
+            let mutation = super::acquire_runtime_access(&access, writer).unwrap();
+            assert!(super::acquire_runtime_access(&access, prepare).is_err(), "{writer}");
+            drop(mutation);
+        }
+        for payload in [json!({}), json!({"prepareOnly": false}), json!({"prepareOnly": "true"})] {
+            assert_eq!(super::runtime_access_command("update_runtime_core", &payload), "update_runtime_core");
+        }
+        assert!(super::deferred_terminal_command("update_runtime_core"));
+        assert!(super::is_background_terminal_event("update_runtime_core", "runtime_core_update_plan"));
+        assert!(super::supervised_runtime_command("update_runtime_core"));
+        assert!(!super::mark_terminal_before_exit("update_runtime_core"));
+        assert!(!super::runtime_transaction_recovery_required("update_runtime_core", &json!({"prepareOnly": true})));
+        for payload in [json!({}), json!({"prepareOnly": false}), json!({"prepareOnly": "true"})] {
+            assert!(super::runtime_transaction_recovery_required("update_runtime_core", &payload));
+        }
+    }
+
+    #[test]
+    fn successful_shared_preparation_preserves_another_tasks_unconfirmed_process_failure() {
+        let mut access = super::RuntimeAccess::default();
+        access.complete_supervision(false, Some("RUNTIME_PROCESS_EXIT_UNCONFIRMED: child alive"), true);
+        access.complete_supervision(false, None, false);
+        assert!(access.recovery_required);
+        assert!(access.process_exit_unconfirmed);
+        access.complete_supervision(false, Some("RUNTIME_RECOVERY_FAILED: another error"), false);
+        assert!(access.process_exit_unconfirmed);
+        access.complete_supervision(true, None, false);
+        assert!(!access.recovery_required);
+        assert!(!access.process_exit_unconfirmed);
+    }
+
+    #[test]
+    fn optional_package_publication_and_uninstall_exclude_runtime_users() {
+        let access = std::sync::Mutex::new(super::RuntimeAccess::default());
+        let operation = super::acquire_runtime_access(&access, "run_operation").unwrap();
+        assert!(super::acquire_runtime_access(&access, "manage_optional_package").is_err());
+        drop(operation);
+        let mutation = super::acquire_runtime_access(&access, "manage_optional_package").unwrap();
+        for command in ["infer", "run_operation", "optional_package_status", "update_runtime_core", "manage_optional_package"] {
+            assert!(super::acquire_runtime_access(&access, command).is_err(), "{command}");
+        }
+        drop(mutation);
+        assert!(super::acquire_runtime_access(&access, "run_operation").is_ok());
+    }
+
+    #[test]
+    fn core_preparation_scratch_is_owned_until_the_worker_exits() {
+        let payload = json!({"prepareOnly": true});
+        let first = super::worker_scratch("update_runtime_core", &payload).unwrap().unwrap();
+        let second = super::worker_scratch("update_runtime_core", &payload).unwrap().unwrap();
+        let orphan = first.path().join("plan/resolve-report.json");
+        fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+        fs::write(&orphan, b"partial resolution").unwrap();
+        drop(first);
+        assert!(!orphan.exists());
+        assert!(second.path().is_dir());
+        assert!(super::worker_scratch("update_runtime_core", &json!({"prepareOnly": false})).unwrap().is_none());
     }
 
     #[test]

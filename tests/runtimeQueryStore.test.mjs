@@ -1125,6 +1125,39 @@ test('post-update version discovery waits for the refreshed runtime snapshot', a
   app.$dispose()
 })
 
+test('core preparation keeps cached runtime information and in-flight environment checks usable', async () => {
+  const calls = []
+  const dispatched = deferred()
+  const app = appStore(async (command, args) => {
+    calls.push({ command, args })
+    if (command === 'runtime_info') return { ready: true, pymssVersion: '2.3.5', logPath: 'previous-update.log' }
+    if (command === 'start_env_check') return { started: true }
+    if (command === 'start_runtime_core_update') { dispatched.resolve(); return true }
+    throw new Error(`unexpected ${command}`)
+  })
+  const cached = await app.ensureRuntimeInfo()
+  await app.checkEnvInBackground()
+  const request = calls.find(call => call.command === 'start_env_check').args.requestId
+  const preparation = app.prepareRuntimeCoreUpdate('cpu', 'pypi', '', { mode: 'update' })
+  await within(dispatched.promise, 'plan dispatch')
+  try {
+    app.handleRuntimeEvent({ type: 'runtime_core_update_started', taskId: app.runtimeCoreUpdateTaskId,
+      payload: { backend: 'cpu', logPath: 'preparation.log' } })
+    assert.equal(app.runtimeInfo.logPath, 'previous-update.log')
+    app.handleWorkerEvent({ type: 'env_info', requestId: request, payload: {
+      pythonVersion: '3.12.10', pymssAvailable: true, torchAvailable: true,
+    } })
+    assert.equal(app.envReady, true)
+    assert.equal(app.envLoading, false)
+    assert.deepEqual(await within(app.ensureRuntimeInfo(), 'cached information during preparation'), cached)
+    assert.equal(calls.filter(call => call.command === 'runtime_info').length, 1)
+  } finally {
+    app.handleRuntimeEvent({ type: 'runtime_core_update_plan', taskId: app.runtimeCoreUpdateTaskId, payload: preparedCorePlan })
+    await preparation
+    app.$dispose()
+  }
+})
+
 test('core planning releases the write queue for confirmation and apply forwards the confirmed plan', async () => {
   const calls = []
   const dispatched = deferred()

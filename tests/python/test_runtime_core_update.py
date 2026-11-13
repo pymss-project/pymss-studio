@@ -199,6 +199,7 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
         expected_resolution_cores=None,
         expected_pip_environment=None,
         pip_check_error=None,
+        on_resolve=None,
     ):
         bundled_root, env, python = self.make_env(backend, manifest_version=manifest_version, bundled=bundled, platform=platform, bootstrap=bootstrap)
         if state_overrides:
@@ -222,6 +223,8 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
                 self.assertEqual(kwargs["env"].get(key), value)
             command_status = 0 if "--dry-run" in command else pip_status
             if "--dry-run" in command:
+                if on_resolve:
+                    on_resolve(command)
                 self.assertFalse(any(value.startswith("pymss-core") for value in command),
                                  "pymss-core must be resolved as a pymss dependency")
                 for requirement in expected_resolution_cores or ():

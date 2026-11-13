@@ -45,6 +45,104 @@ class CorePlanTests(unittest.TestCase):
         plan = next(event["payload"] for event in events if event["type"] == "runtime_core_update_plan")
         self.assertEqual(plan["targetVersions"], {"pymss": "2.1.4", "pymss-core": "0.1.6"})
 
+    def test_preparation_preserves_other_staging_and_never_recovers_transactions(self):
+        foreign = self.case.envs / ".overlays/cpu/.other.staging"
+        foreign.mkdir(parents=True)
+        (foreign / "keep").write_bytes(b"owned by another operation")
+        with mock.patch.object(worker, "_recover_runtime_transactions", wraps=worker._recover_runtime_transactions) as recover:
+            status, *_ = self.case.run_update(prepare_only=True)
+        self.assertEqual(status, 0)
+        recover.assert_not_called()
+        self.assertEqual((foreign / "keep").read_bytes(), b"owned by another operation")
+
+    def test_preparation_requires_explicit_recovery_before_using_an_interrupted_runtime(self):
+        for name in (".rocm-transaction.json", ".overlay-activation.json", ".cpu.reinstalling", ".cpu.core-backup", ".cpu.core-updating"):
+            with self.subTest(marker=name):
+                marker = self.case.envs / name
+                marker.write_text("interrupted", encoding="utf-8")
+                with mock.patch.object(worker, "_recover_runtime_transactions") as recover:
+                    status, commands, *_rest, events = self.case.run_update(prepare_only=True)
+                self.assertNotEqual(status, 0)
+                self.assertEqual(commands, [])
+                self.assertEqual(events[-1]["payload"]["code"], "RUNTIME_RECOVERY_REQUIRED")
+                self.assertEqual(marker.read_text(encoding="utf-8"), "interrupted")
+                recover.assert_not_called()
+                marker.unlink()
+
+    def test_preparation_preserves_the_previous_update_log_even_when_resolution_fails(self):
+        root = self.case.envs / ".overlays/cpu"
+        root.mkdir(parents=True)
+        log = root / "pymss-core-update.log"
+        log.write_text("original update failure", encoding="utf-8")
+        status, *_rest, events = self.case.run_update(prepare_only=True)
+        self.assertEqual(status, 0)
+        self.assertEqual(log.read_text(encoding="utf-8"), "original update failure")
+        started = next(event["payload"] for event in events if event["type"] == "runtime_core_update_started")
+        self.assertNotIn("logPath", started)
+
+        def fail(_command):
+            raise RuntimeError("resolution failed")
+
+        status, *_rest, events = self.case.run_update(prepare_only=True, on_resolve=fail)
+        self.assertNotEqual(status, 0)
+        self.assertEqual(log.read_text(encoding="utf-8"), "original update failure")
+        self.assertNotIn("logPath", events[-1]["payload"])
+        self.assertTrue(Path(events[-1]["payload"]["planLogPath"]).is_file())
+
+    def test_preparation_does_not_require_user_recovery_for_separate_bundle_markers(self):
+        bundle = self.case.root / "bundled-envs"
+        bundle.mkdir()
+        marker = bundle / ".overlay-activation.json"
+        marker.write_bytes(b"immutable bundle marker")
+        status, *_ = self.case.run_update(prepare_only=True, bundled=True)
+        self.assertEqual(status, 0)
+        self.assertEqual(marker.read_bytes(), b"immutable bundle marker")
+
+    def test_preparation_owns_and_cleans_only_its_scratch_directory(self):
+        scratch = self.case.root / "scratch"
+        scratch.mkdir()
+        reports = []
+
+        def inspect(command):
+            report = Path(command[command.index("--report") + 1])
+            self.assertEqual(report.parent.parent, scratch)
+            reports.append(report)
+
+        with mock.patch.dict(os.environ, {"PYMSS_SCRATCH_DIR": str(scratch)}):
+            for _ in range(2):
+                self.assertEqual(self.case.run_update(prepare_only=True, on_resolve=inspect)[0], 0)
+        self.assertNotEqual(reports[0].parent, reports[1].parent)
+        self.assertEqual(list(scratch.iterdir()), [])
+
+    def test_cancelled_preparation_leaves_the_active_runtime_and_foreign_files_untouched(self):
+        scratch = self.case.root / "scratch"
+        scratch.mkdir()
+        foreign = self.case.envs / ".overlays/cpu/.other.staging"
+        foreign.mkdir(parents=True)
+        (foreign / "keep").write_bytes(b"preserved")
+
+        def cancel(_command):
+            raise KeyboardInterrupt
+
+        with mock.patch.dict(os.environ, {"PYMSS_SCRATCH_DIR": str(scratch)}), self.assertRaises(KeyboardInterrupt):
+            self.case.run_update(prepare_only=True, on_resolve=cancel)
+        self.assertNotIn("overlayPath", json.loads(self.case.active.read_text(encoding="utf-8")))
+        self.assertEqual((foreign / "keep").read_bytes(), b"preserved")
+        self.assertEqual(list(scratch.iterdir()), [])
+
+    def test_read_only_target_discovery_does_not_create_an_environment_cache(self):
+        _root, env, python = self.case.make_env()
+        state = env / "pymss-runtime-state.json"
+        state.unlink()
+        with mock.patch.object(worker, "RUNTIME_ENVS_DIR", self.case.envs), \
+             mock.patch.object(worker, "ACTIVE_RUNTIME_FILE", self.case.active), \
+             mock.patch.object(worker, "BUNDLED_RUNTIME_ENVS_DIR", None), \
+             mock.patch.object(worker, "_manifest", return_value=manifest()), \
+             mock.patch.object(worker, "_probe_python_runtime", return_value=probe("cpu")):
+            target = worker._target_runtime_from_payload({"pythonPath": str(python)}, "cpu", repair=False)
+        self.assertIsNotNone(target[0])
+        self.assertFalse(state.exists())
+
     def test_apply_uses_the_confirmed_versions_after_upstream_changes(self):
         latest = {"pymss": "2.1.4", "pymss-core": "0.1.6"}
         def change_upstream(_plan, _active):

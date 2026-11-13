@@ -8,6 +8,7 @@ import type { PluginCategory, PluginLocales } from './presentation'
 import { useSettingsStore } from '@/stores/settings'
 import { canApplyPluginUpdate, canCheckPluginUpdate, pluginUpdateKey, type PluginUpdateSelection, type PluginUpdateState } from './updates'
 import { installedPluginKey } from './library'
+import { isRuntimeAdmissionBusyError, retryRuntimeQuery } from '@/utils/runtimeQueries'
 
 export type PluginRequirements = {
   sdkVersion: number | null
@@ -85,6 +86,7 @@ export type PluginInventory = {
   installed: InstalledPlugin[]
   pluginsDir: string
   verificationError?: string | null
+  recoveryRequired?: boolean
   runtime: { identity: string; pythonPath: string; bindingDir?: string; managementSupported?: boolean; updateSourceIdentity?: string }
   preinstalled?: { name: string; version: string; installed: boolean }[]
   preinstalledPending?: string[]
@@ -152,8 +154,9 @@ export type PluginUpdateBatch = {
 const updateBatch = ref<PluginUpdateBatch | null>(null)
 const batchBusy = computed(() => !!updateBatch.value && updateBatch.value.phase !== 'finished')
 const taskBusy = computed(() => activities.value.some(running))
-const busy = computed(() => batchBusy.value || taskBusy.value)
-const exclusiveBusy = computed(() => batchBusy.value || activities.value.some(task => running(task) && task.action !== 'install'))
+const recoveringBinding = ref(false)
+const busy = computed(() => batchBusy.value || taskBusy.value || recoveringBinding.value)
+const exclusiveBusy = computed(() => batchBusy.value || recoveringBinding.value || activities.value.some(task => running(task) && task.action !== 'install'))
 let batchCompletion: Promise<void> | undefined
 const logRecords = ref<LogRecord[]>([])
 const logs = computed(() => logRecords.value.map(record => record.message))
@@ -165,6 +168,10 @@ let inventoryRequest: Promise<void> | undefined
 let runtimeReload: Promise<void> | undefined
 type RuntimeReloadOptions = { includeCatalog?: boolean }
 let deferredRuntimeReload: RuntimeReloadOptions | undefined
+type BindingRecovery = { runtime: string; generation: number }
+let recoveryPending: BindingRecovery | undefined
+let recoveryAwaitingRelease: BindingRecovery | undefined
+let bindingRecoveryRequest: Promise<void> | undefined
 let catalogRequest: { generation: number; promise: Promise<void> } | undefined
 let unlisten: UnlistenFn | undefined
 let listening: Promise<void> | undefined
@@ -180,6 +187,7 @@ type TaskControl = {
   awaitingAcknowledgement: boolean
   dispatched: boolean
   invoked: boolean
+  workerObserved: boolean
   completion: Promise<boolean>
   resolve: (receivedInventory: boolean) => void
   reject: (error: Error) => void
@@ -218,6 +226,68 @@ function applySnapshot(next: PluginMarketplace) {
   const after = new Map(next.installed.filter(plugin => plugin.managed).map(plugin => [plugin.name, pluginUpdateKey(plugin, next.runtime)]))
   updates.value = Object.fromEntries(Object.entries(updates.value).filter(([name]) => before.has(name) && before.get(name) === after.get(name)))
   snapshot.value = next
+  if (!next.recoveryRequired) {
+    recoveryPending = undefined
+    recoveryAwaitingRelease = undefined
+  }
+  else if (recoveryPending?.runtime !== next.runtime.identity || recoveryPending.generation !== runtimeGeneration) {
+    recoveryPending = { runtime: next.runtime.identity, generation: runtimeGeneration }
+    recoveryAwaitingRelease = undefined
+  }
+}
+
+function recoverPendingBinding(batchId?: string): Promise<void> {
+  if (bindingRecoveryRequest) return bindingRecoveryRequest
+  const pending = recoveryPending
+  if (!pending || closing || taskBusy.value || (batchBusy.value && batchId !== updateBatch.value?.id)) return Promise.resolve()
+  const current = () => !closing && recoveryPending === pending && pending.generation === runtimeGeneration
+    && snapshot.value?.runtime.identity === pending.runtime
+  recoveryAwaitingRelease = undefined
+  recoveringBinding.value = true
+  const request = (async () => {
+    try {
+      await start()
+      if (!current()) return
+      const inventory = await retryRuntimeQuery(
+        () => invoke<PluginInventory>('plugin_marketplace', { payload: {
+          includeCatalog: false, recoverBinding: true, expectedRuntime: pending.runtime,
+          defaultPolicy: useSettingsStore().pluginDefaultsPolicy,
+        } }),
+        { shouldRetry: failure => current() && isRuntimeAdmissionBusyError(failure) },
+      )
+      if (!current() || inventory.runtime.identity !== pending.runtime) return
+      applySnapshot({ ...snapshot.value!, ...inventory, catalog: snapshot.value!.catalog,
+        catalogError: snapshot.value!.catalogError, catalogSource: snapshot.value!.catalogSource,
+        recoveryRequired: inventory.recoveryRequired === true })
+      if (!inventory.recoveryRequired) pluginRevision.value += 1
+    } catch (failure) {
+      if (current()) {
+        if (isRuntimeAdmissionBusyError(failure)) recoveryAwaitingRelease = pending
+        else error.value = String(failure)
+      }
+    }
+  })().finally(() => {
+    if (bindingRecoveryRequest === request) {
+      bindingRecoveryRequest = undefined
+      recoveringBinding.value = false
+    }
+  })
+  bindingRecoveryRequest = request
+  return request
+}
+
+function scheduleBindingRecovery() {
+  const pending = recoveryPending
+  if (!pending || closing) return
+  queueMicrotask(() => {
+    const recover = () => {
+      if (recoveryPending === pending && recoveryAwaitingRelease === pending) void recoverPendingBinding()
+    }
+    // A busy response can arrive after the competing operation released its lease.
+    // Preserve that wakeup until the current recovery attempt has settled.
+    if (bindingRecoveryRequest) void bindingRecoveryRequest.then(recover)
+    else recover()
+  })
 }
 
 function clearUpdateChecks() { updates.value = {} }
@@ -261,6 +331,11 @@ async function start() {
 }
 
 function handleEvent(event: WorkerEvent) {
+      if (recoveryPending && (event.type.endsWith('_done') || event.type.endsWith('_finished') || event.type.endsWith('_result')
+          || ['runtime_access_released', 'env_info', 'runtime_info', 'runtime_env_sizes', 'task_cancelled'].includes(event.type)
+          || event.type === 'error' && Boolean(event.taskId))) {
+        scheduleBindingRecovery()
+      }
       const control = [...tasks.values()].find(task => event.taskId && task.acceptedIds.has(event.taskId))
       if (!control) {
         if ([...tasks.values()].some(task => task.awaitingAcknowledgement)) {
@@ -273,6 +348,7 @@ function handleEvent(event: WorkerEvent) {
         }
         return
       }
+      control.workerObserved = true
       if (event.type === 'plugin_stage' || event.type === 'plugin_log') {
           const phase = event.payload.phase
           updateActivity(control, { updatedAt: Date.now(),
@@ -289,13 +365,15 @@ function handleEvent(event: WorkerEvent) {
           const installed = control.action === 'install'
             ? [...new Map([...(snapshot.value?.installed || []), ...inventory.installed].map(plugin => [installedPluginKey(plugin), plugin])).values()]
             : inventory.installed
-          applySnapshot({ catalog: [], catalogError: null, ...snapshot.value, ...inventory, installed })
+          applySnapshot({ catalog: [], catalogError: null, ...snapshot.value, ...inventory, installed,
+            recoveryRequired: inventory.recoveryRequired === true })
           if (control.action === 'check_updates') {
             const checked_at = new Date().toISOString()
             updates.value = { ...updates.value, ...Object.fromEntries(Object.entries(inventory.updates || {}).map(([name, result]) => [name, { checked_at, ...result }])) }
           }
           pluginRevision.value += 1
           finish(control, undefined, true)
+          if (recoveryPending) queueMicrotask(() => { void recoverPendingBinding() })
         } else finish(control)
       } else if (event.type === 'error') {
         finish(control, String(event.payload.message || 'Plugin operation failed'))
@@ -306,7 +384,7 @@ function handleEvent(event: WorkerEvent) {
 }
 
 async function loadSnapshot(includeCatalog: boolean, prepare = true, forceVerify = false, batchId?: string) {
-  if (closing || taskBusy.value || (batchBusy.value && batchId !== updateBatch.value?.id)) return
+  if (closing || taskBusy.value || recoveringBinding.value || (batchBusy.value && batchId !== updateBatch.value?.id)) return
   inventoryRequested.value = true
   const request = ++sequence
   loading.value = true
@@ -314,7 +392,13 @@ async function loadSnapshot(includeCatalog: boolean, prepare = true, forceVerify
   try {
     const settings = useSettingsStore()
     await settings.initialize()
-    const result = await invoke<PluginMarketplace>('plugin_marketplace', { payload: { includeCatalog, defaultPolicy: settings.pluginDefaultsPolicy, ...(forceVerify ? { forceVerify: true } : {}) } })
+    const read = () => invoke<PluginMarketplace>('plugin_marketplace', { payload: {
+      includeCatalog, defaultPolicy: settings.pluginDefaultsPolicy,
+      ...(forceVerify ? { forceVerify: true } : {}),
+    } })
+    const result = forceVerify ? await read() : await retryRuntimeQuery(read, {
+      shouldRetry: () => !closing && request === sequence,
+    })
     if (request !== sequence) return
     const runtimeChanged = snapshot.value?.runtime.identity !== result.runtime.identity
     if (runtimeChanged) updates.value = {}
@@ -322,7 +406,11 @@ async function loadSnapshot(includeCatalog: boolean, prepare = true, forceVerify
       ? { ...result, catalog: snapshot.value.catalog, catalogError: snapshot.value.catalogError, catalogSource: snapshot.value.catalogSource }
       : result)
     if (runtimeChanged) pluginRevision.value += 1
-    if (prepare && result.preinstalledPending?.length) {
+    if (recoveryPending) {
+      await start()
+      if (!forceVerify) await recoverPendingBinding(batchId)
+    }
+    if (prepare && !snapshot.value?.recoveryRequired && snapshot.value?.preinstalledPending?.length) {
       loading.value = false
       await manage('prepare_preinstalled')
     }
@@ -343,6 +431,9 @@ function reloadRuntimeInventory(options: RuntimeReloadOptions = {}) {
   deferredRuntimeReload = undefined
   inventoryRequested.value = true
   const generation = ++runtimeGeneration
+  recoveryPending = undefined
+  recoveryAwaitingRelease = undefined
+  const pendingRecovery = bindingRecoveryRequest
   ++sequence
   ++catalogSequence
   snapshot.value = null
@@ -359,6 +450,7 @@ function reloadRuntimeInventory(options: RuntimeReloadOptions = {}) {
   const reload = (async () => {
     await Promise.all(pending)
     await pendingBatch
+    await pendingRecovery
     if (generation !== runtimeGeneration) return
     if (closing) { deferredRuntimeReload ||= options; return }
     await loadSnapshot(false)
@@ -402,7 +494,10 @@ async function loadCatalog() {
   const runtime = snapshot.value.runtime.identity
   catalogLoading.value = true
   try {
-    const catalog = await invoke<Pick<PluginMarketplace, 'catalog' | 'catalogError' | 'catalogSource' | 'runtime'>>('plugin_marketplace', { payload: { catalogOnly: true } })
+    const catalog = await retryRuntimeQuery(
+      () => invoke<Pick<PluginMarketplace, 'catalog' | 'catalogError' | 'catalogSource' | 'runtime'>>('plugin_marketplace', { payload: { catalogOnly: true } }),
+      { shouldRetry: () => !closing && request === catalogSequence && generation === sequence },
+    )
     if (request !== catalogSequence || generation !== sequence || snapshot.value?.runtime.identity !== runtime || catalog.runtime.identity !== runtime) return
     applySnapshot({ ...snapshot.value, catalog: catalog.catalog, catalogError: catalog.catalogError, catalogSource: catalog.catalogSource })
   } catch (failure) {
@@ -461,7 +556,7 @@ async function manageTask(action: PluginAction, options: ManageOptions = {}, bat
   const name = options.name || options.target || ''
   if (closing || (batchBusy.value && batchId !== updateBatch.value?.id)
       || activities.value.some(task => running(task) && task.action !== 'install')
-      || loading.value || catalogLoading.value || (action !== 'install' && taskBusy.value)) {
+      || loading.value || catalogLoading.value || recoveringBinding.value || (action !== 'install' && taskBusy.value)) {
     throw new Error('Plugin management is already running')
   }
   if (activities.value.some(task => running(task) && task.name === name)) throw new Error('This plugin already has an active task')
@@ -479,15 +574,27 @@ async function manageTask(action: PluginAction, options: ManageOptions = {}, bat
     { id, batchId, action, name, runtime: snapshot.value?.runtime.identity, phase: 'queued', status: 'running', error: '', startedAt: now, updatedAt: now, finishedAt: null }]
   const retainedIds = new Set(activities.value.map(task => task.id))
   logRecords.value = logRecords.value.filter(record => retainedIds.has(record.context.pluginTaskId as string))
-  tasks.set(id, { id, workerId: id, action, options, runtime: snapshot.value?.runtime.identity, runtimeGeneration: generation,
-    acceptedIds: new Set([id]), awaitingAcknowledgement: false, dispatched: false, invoked: false, completion, resolve, reject })
+  const control: TaskControl = { id, workerId: id, action, options, runtime: snapshot.value?.runtime.identity, runtimeGeneration: generation,
+    acceptedIds: new Set([id]), awaitingAcknowledgement: false, dispatched: false, invoked: false, workerObserved: false, completion, resolve, reject }
+  tasks.set(id, control)
   pump()
   try {
     receivedInventory = await completion
   } finally {
     // Failed imports and cancelled tasks may still have changed on-disk state.
     const operationError = error.value
-    if (generation === runtimeGeneration && !receivedInventory && !taskBusy.value) await loadSnapshot(false, false, false, batchId)
+    if (generation === runtimeGeneration && !receivedInventory) {
+      const recoverBinding = action !== 'check_updates' && control.invoked && (control.workerObserved || !control.awaitingAcknowledgement)
+      if (recoverBinding && control.runtime && snapshot.value?.runtime.identity === control.runtime) {
+        const pending = { runtime: control.runtime, generation }
+        recoveryPending = pending
+        recoveryAwaitingRelease = undefined
+        if (!taskBusy.value) {
+          await bindingRecoveryRequest
+          if (recoveryPending === pending) await recoverPendingBinding(batchId)
+        }
+      } else if (!taskBusy.value) await loadSnapshot(false, false, false, batchId)
+    }
     if (generation === runtimeGeneration && operationError) error.value = operationError
   }
 }
@@ -569,18 +676,22 @@ async function cancelWorker(control: TaskControl) {
 registerWindowCloseGuard(async () => {
   if (!busy.value && !runtimeReload) return
   closing = true
+  recoveryAwaitingRelease = undefined
   stopBatchUpdates()
   const pendingBatch = batchCompletion
   const pendingReload = runtimeReload
+  const pendingRecovery = bindingRecoveryRequest
   try {
     const pending = [...tasks.values()]
     await Promise.all(pending.map(task => cancel(task.id)))
     await Promise.all(pending.map(task => task.completion.catch(() => undefined)))
     await pendingBatch
     await pendingReload
+    await pendingRecovery
   } finally { closing = false; pump() }
 }, 70, () => {
   if (deferredRuntimeReload) void reloadRuntimeInventory(deferredRuntimeReload)
+  else if (inventoryRequested.value) void loadSnapshot(false, false)
 })
 
 export function usePluginMarketplace() {

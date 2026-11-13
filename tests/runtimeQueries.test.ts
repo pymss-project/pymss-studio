@@ -1,9 +1,53 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { createRuntimeQueryQueue, createRuntimeReadCache, isRuntimeBusyError } from '../src/utils/runtimeQueries.ts'
+import { createRuntimeQueryQueue, createRuntimeReadCache, isRuntimeAdmissionBusyError, isRuntimeBusyError, retryRuntimeQuery } from '../src/utils/runtimeQueries.ts'
 
 const busy = new Error('worker error: Another runtime operation is in progress. Wait for it to finish and retry.')
+const accessBusy = 'worker error: RUNTIME_BUSY: The runtime is in use. Wait for running operations to finish before updating core packages or starting another operation.'
+
+test('runtime admission errors are recognized without accepting unrelated failures', () => {
+  assert.equal(isRuntimeBusyError(accessBusy), true)
+  assert.equal(isRuntimeBusyError(new Error(accessBusy)), true)
+  assert.equal(isRuntimeBusyError({ code: 'RUNTIME_BUSY', message: 'Runtime occupied' }), true)
+  assert.equal(isRuntimeBusyError('RUNTIME_RECOVERY_REQUIRED: RUNTIME_BUSY'), false)
+  assert.equal(isRuntimeAdmissionBusyError(accessBusy), true)
+  assert.equal(isRuntimeAdmissionBusyError(busy), false)
+  assert.equal(isRuntimeAdmissionBusyError({ code: 'RUNTIME_BUSY', message: 'worker already started' }), false)
+})
+
+test('recovery admission retries never replay a worker-side busy error', async () => {
+  let attempts = 0
+  await assert.rejects(retryRuntimeQuery(async () => {
+    attempts += 1
+    throw busy
+  }, { delaysMs: [1], wait: async () => {}, shouldRetry: isRuntimeAdmissionBusyError }), /Another runtime operation/)
+  assert.equal(attempts, 1)
+})
+
+test('independent reads retry admission conflicts without serializing each other', async () => {
+  let release!: () => void
+  const waiting = new Promise<void>(resolve => { release = resolve })
+  let attempts = 0
+  const first = retryRuntimeQuery(async () => {
+    if (++attempts === 1) throw new Error(accessBusy)
+    return 'inventory'
+  }, { delaysMs: [1], wait: () => waiting })
+  assert.equal(await retryRuntimeQuery(async () => 'catalog'), 'catalog')
+  release()
+  assert.equal(await first, 'inventory')
+  assert.equal(attempts, 2)
+})
+
+test('a cancelled or superseded read cannot dispatch another retry', async () => {
+  let current = true
+  let attempts = 0
+  await assert.rejects(retryRuntimeQuery(async () => {
+    attempts += 1
+    throw new Error(accessBusy)
+  }, { delaysMs: [1], shouldRetry: () => current, wait: async () => { current = false } }), /RUNTIME_BUSY/)
+  assert.equal(attempts, 1)
+})
 
 test('page reads reuse an in-flight query and a recent result, then expire', async () => {
   let clock = 0

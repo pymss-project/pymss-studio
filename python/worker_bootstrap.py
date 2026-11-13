@@ -392,6 +392,19 @@ def _recover_runtime_transactions() -> None:
     _recover_core_update_transactions()
 
 
+def _runtime_recovery_pending(manifest: dict[str, Any]) -> bool:
+    """Observe managed transactions that this installation's recovery can complete."""
+    if any((RUNTIME_ENVS_DIR / name).exists() for name in (".rocm-transaction.json", ".overlay-activation.json")):
+        return True
+    for backend in manifest.get("backends", {}):
+        if _supported_backend(backend, manifest) and any(
+            (RUNTIME_ENVS_DIR / f".{backend}.{suffix}").exists()
+            for suffix in ("reinstalling", "core-backup", "core-updating")
+        ):
+            return True
+    return False
+
+
 def _bootstrap_python_path() -> Path:
     python_path = Path(os.environ.get("PYMSS_STUDIO_BOOTSTRAP_PYTHON") or sys.executable)
     return python_path if python_path.is_file() else Path(sys.executable)
@@ -1778,7 +1791,7 @@ def cmd_rollback_runtime(payload: dict[str, Any]) -> int:
         return emit_error("RUNTIME_ROLLBACK_FAILED", str(error), task_id=task_id, recoverable=True)
 
 
-def _target_runtime_from_payload(payload: dict[str, Any], backend: str) -> tuple[dict[str, Any] | None, Path, Path, Path] | None:
+def _target_runtime_from_payload(payload: dict[str, Any], backend: str, *, repair: bool = True) -> tuple[dict[str, Any] | None, Path, Path, Path] | None:
     if not _supported_backend(backend):
         return None
     target_python = _runtime_command_path(Path(str(payload.get("pythonPath")))) if payload.get("pythonPath") else None
@@ -1809,7 +1822,7 @@ def _target_runtime_from_payload(payload: dict[str, Any], backend: str) -> tuple
                 backend,
                 target_python,
                 _manifest(),
-                persist=not _is_bundled_runtime_env(env_dir),
+                persist=repair and not _is_bundled_runtime_env(env_dir),
             )
         if state is not None and _is_bundled_runtime_env(env_dir):
             state["source"] = "bundled"
@@ -1830,7 +1843,7 @@ def _target_runtime_from_payload(payload: dict[str, Any], backend: str) -> tuple
             state["source"] = "bundled"
         return state, env_dir, env_state_path, active_python
 
-    state = _read_installed_env_state(backend)
+    state = _read_installed_env_state(backend, repair=repair)
     env_dir = _env_dir(backend)
     env_state_path = _env_state_path(backend)
     python_path = _env_python_path(backend)
@@ -1839,7 +1852,7 @@ def _target_runtime_from_payload(payload: dict[str, Any], backend: str) -> tuple
 
     if python_path.is_file():
         return (
-            _discover_runtime_state(backend, python_path, _manifest(), persist=True),
+            _discover_runtime_state(backend, python_path, _manifest(), persist=repair),
             env_dir,
             env_state_path,
             python_path,
@@ -3113,14 +3126,20 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
     mode = str(payload.get("mode") or ("repair" if payload.get("repairDependencies") else "update"))
     channel = "prerelease" if payload.get("channel") == "prerelease" else "stable"
     manifest = _manifest()
-    _recover_runtime_transactions()
+    if prepare_only:
+        if _runtime_recovery_pending(manifest):
+            from worker_protocol import emit_error
+            return emit_error("RUNTIME_RECOVERY_REQUIRED", "Recover the runtime before preparing an update plan.",
+                              task_id=task_id, recoverable=True)
+    else:
+        _recover_runtime_transactions()
     supported = _supported_backend(backend)
     if not supported:
         from worker_protocol import emit_error
         return emit_error("RUNTIME_BACKEND_UNSUPPORTED", f"Unsupported runtime backend: {backend or 'missing'}", task_id=task_id)
     backend, _spec = supported
 
-    target = _target_runtime_from_payload(payload, backend)
+    target = _target_runtime_from_payload(payload, backend, repair=not prepare_only)
     if not target:
         from worker_protocol import emit_error
         return emit_error("RUNTIME_NOT_INSTALLED", f"Backend {backend} is not installed", task_id=task_id)
@@ -3231,7 +3250,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
         return emit_error("RUNTIME_CORE_UPDATE_FAILED", f"Failed to resolve runtime core versions: {exc}", task_id=task_id, recoverable=True)
     overlay_backend_root = _runtime_overlay_root() / backend
     overlay_backend_root.mkdir(parents=True, exist_ok=True)
-    log_path = overlay_backend_root / "pymss-core-update.log"
+    log_path = overlay_backend_root / ("pymss-core-plan.log" if prepare_only else "pymss-core-update.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     operation = "repair runtime dependencies" if repair_dependencies else "update pymss core"
     log_path.write_text(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {operation} mirror={mirror}\n", encoding="utf-8")
@@ -3239,7 +3258,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
         "runtime_core_update_started",
         {
             "backend": backend,
-            "logPath": str(log_path),
+            **({"logPath": str(log_path)} if not prepare_only else {}),
             "mode": mode,
         },
         task_id,
@@ -3352,18 +3371,22 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             if installed:
                 requirement.specifier &= SpecifierSet(f">={installed}")
             requirements[0] = str(requirement)
-        # Cancellation can terminate this bootstrap process before its finally block runs.
-        # Runtime operations are serialized, so any staging directory left from an earlier
-        # process is safe to reclaim before starting the next generation.
-        for stale_staging in overlay_backend_root.glob(".*.staging"):
-            if stale_staging.is_dir():
-                shutil.rmtree(stale_staging, ignore_errors=True)
-        generation = f"{manifest.get('manifestVersion')}-{time.time_ns()}"
-        staging_generation = overlay_backend_root / f".{generation}.staging"
-        final_generation = overlay_backend_root / generation
+        if prepare_only:
+            # Studio owns the parent scratch directory, including cleanup after a forced
+            # worker exit. Plans never reclaim another operation's candidate generation.
+            staging_generation = Path(tempfile.mkdtemp(prefix="pymss-core-plan-", dir=os.environ.get("PYMSS_SCRATCH_DIR") or None))
+        else:
+            # Applying updates is exclusive, so abandoned candidate generations can be
+            # reclaimed here without disturbing a live preparation.
+            for stale_staging in overlay_backend_root.glob(".*.staging"):
+                if stale_staging.is_dir():
+                    shutil.rmtree(stale_staging, ignore_errors=True)
+            generation = f"{manifest.get('manifestVersion')}-{time.time_ns()}"
+            staging_generation = overlay_backend_root / f".{generation}.staging"
+            final_generation = overlay_backend_root / generation
         staging_site_packages = staging_generation / "site-packages"
-        shutil.rmtree(staging_generation, ignore_errors=True)
-        staging_site_packages.mkdir(parents=True)
+        if not prepare_only:
+            staging_site_packages.mkdir(parents=True)
         wheel_cache = _runtime_overlay_root() / ".wheel-cache"
         wheel_cache.mkdir(parents=True, exist_ok=True)
 
@@ -3553,7 +3576,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             detail=f"详细更新日志：{log_path}",
             task_id=task_id,
             recoverable=True,
-            extra={"backend": backend, "logPath": str(log_path)},
+            extra={"backend": backend, "planLogPath" if prepare_only else "logPath": str(log_path)},
         )
     finally:
         if staging_generation and staging_generation.is_dir():

@@ -6,6 +6,13 @@
 export const RUNTIME_BUSY_RETRY_DELAYS_MS = [100, 250, 500] as const
 
 const RUNTIME_BUSY_MESSAGE = 'Another runtime operation is in progress. Wait for it to finish and retry.'
+const RUNTIME_ACCESS_BUSY_MESSAGE = 'RUNTIME_BUSY: The runtime is in use. Wait for running operations to finish before updating core packages or starting another operation.'
+
+/** Rust rejects admission before starting the worker, so no operation has been replayed. */
+export function isRuntimeAdmissionBusyError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return message === RUNTIME_ACCESS_BUSY_MESSAGE || message === `worker error: ${RUNTIME_ACCESS_BUSY_MESSAGE}`
+}
 
 /**
  * Worker errors are surfaced by Rust as `worker error: <worker message>`; the
@@ -14,8 +21,9 @@ const RUNTIME_BUSY_MESSAGE = 'Another runtime operation is in progress. Wait for
  * retryable.
  */
 export function isRuntimeBusyError(error: unknown): boolean {
+  if (error !== null && typeof error === 'object' && 'code' in error && error.code === 'RUNTIME_BUSY') return true
   const message = error instanceof Error ? error.message : String(error)
-  return message === RUNTIME_BUSY_MESSAGE || message === `worker error: ${RUNTIME_BUSY_MESSAGE}`
+  return [RUNTIME_BUSY_MESSAGE, RUNTIME_ACCESS_BUSY_MESSAGE].some(value => message === value || message === `worker error: ${value}`)
 }
 
 export type RuntimeQueryQueueOptions = {
@@ -25,23 +33,30 @@ export type RuntimeQueryQueueOptions = {
 
 const defaultWait = (delayMs: number) => new Promise<void>(resolve => setTimeout(resolve, delayMs))
 
-/** Queues distinct operations; only read queries retry the worker's lock-busy error. */
-export function createRuntimeQueryQueue(options: RuntimeQueryQueueOptions = {}) {
+/** Retry read admission conflicts without making independent reads wait for each other. */
+export async function retryRuntimeQuery<T>(
+  operation: () => Promise<T>,
+  options: RuntimeQueryQueueOptions & { shouldRetry?: (error: unknown) => boolean } = {},
+): Promise<T> {
   const delaysMs = options.delaysMs || RUNTIME_BUSY_RETRY_DELAYS_MS
   const wait = options.wait || defaultWait
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await operation()
+    } catch (error) {
+      if (!isRuntimeBusyError(error) || attempt === delaysMs.length || options.shouldRetry?.(error) === false) throw error
+      await wait(Math.max(0, delaysMs[attempt]))
+      if (options.shouldRetry?.(error) === false) throw error
+    }
+  }
+}
+
+/** Queues distinct operations; only read queries retry the worker's lock-busy error. */
+export function createRuntimeQueryQueue(options: RuntimeQueryQueueOptions = {}) {
   let tail: Promise<void> = Promise.resolve()
 
   return function runRuntimeQuery<T>(operation: () => Promise<T>, { retryBusy = true } = {}): Promise<T> {
-    const current = tail.then(async () => {
-      for (let attempt = 0; ; attempt += 1) {
-        try {
-          return await operation()
-        } catch (error) {
-          if (!retryBusy || !isRuntimeBusyError(error) || attempt === delaysMs.length) throw error
-          await wait(Math.max(0, delaysMs[attempt]))
-        }
-      }
-    })
+    const current = tail.then(() => retryBusy ? retryRuntimeQuery(operation, options) : operation())
     // A failed query must not prevent the next fresh query from starting.
     tail = current.then(() => undefined, () => undefined)
     return current

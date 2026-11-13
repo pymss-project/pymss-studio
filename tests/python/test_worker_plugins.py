@@ -265,6 +265,99 @@ def setup(plugin):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(output.getvalue())["payload"]["catalog"], [])
 
+    def test_checking_updates_does_not_recover_the_plugin_binding(self):
+        from pymss_plugin_manager import PluginService
+
+        self.install(self.source())
+        with mock.patch.object(PluginService, "manage", return_value={"updates": {}}), \
+             mock.patch.object(plugins, "_recover_for_read", side_effect=AssertionError("read must not recover")) as recover:
+            code, events = self.manage("check_updates")
+        self.assertEqual(code, 0, events)
+        self.assertEqual(events[-1]["type"], "plugin_manage_result")
+        self.assertEqual(events[-1]["payload"]["installed"][0]["name"], "hello")
+        recover.assert_not_called()
+
+    def test_marketplace_inventory_is_read_only_unless_recovery_is_requested(self):
+        self.install(self.source())
+        with mock.patch.object(plugins, "_recover_for_read", side_effect=AssertionError("read must not recover")) as recover, \
+             redirect_stdout(io.StringIO()) as output:
+            code = plugins.cmd_plugin_marketplace({"includeCatalog": False})
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertEqual(json.loads(output.getvalue())["payload"]["installed"][0]["name"], "hello")
+        recover.assert_not_called()
+
+    def test_explicit_marketplace_recovery_restores_an_interrupted_publication(self):
+        self.install(self.source())
+        backup = self.root / "backups/hello"
+        backup.parent.mkdir(exist_ok=True)
+        (self.root / "installed/hello").rename(backup)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(plugins.cmd_plugin_marketplace({"includeCatalog": False}), 0)
+        self.assertTrue(backup.is_dir())
+        with redirect_stdout(io.StringIO()) as output:
+            code = plugins.cmd_plugin_marketplace({"includeCatalog": False, "recoverBinding": True})
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertTrue(json.loads(output.getvalue())["payload"]["installed"][0]["loaded"])
+        self.assertFalse(backup.exists())
+
+    def test_read_only_inventory_identifies_recoverable_backups_after_restart(self):
+        self.install(self.source())
+        backup = self.root / "backups/hello"
+        backup.parent.mkdir(exist_ok=True)
+        (self.root / "installed/hello").rename(backup)
+        with mock.patch.object(plugins, "_recover_for_read", side_effect=AssertionError("read must not recover")), \
+             redirect_stdout(io.StringIO()) as output:
+            code = plugins.cmd_plugin_marketplace({"includeCatalog": False})
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertTrue(json.loads(output.getvalue())["payload"]["recoveryRequired"])
+        self.assertTrue(backup.is_dir())
+        with redirect_stdout(io.StringIO()) as output:
+            code = plugins.cmd_plugin_marketplace({"includeCatalog": False, "recoverBinding": True, "expectedRuntime": self.root.name})
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertFalse(json.loads(output.getvalue())["payload"]["recoveryRequired"])
+
+    def test_recovery_cannot_modify_a_different_runtime_binding(self):
+        self.install(self.source())
+        with mock.patch.object(plugins, "_recover_for_read") as recover, redirect_stdout(io.StringIO()) as output:
+            code = plugins.cmd_plugin_marketplace({"includeCatalog": False, "recoverBinding": True, "expectedRuntime": "previous-runtime"})
+        self.assertNotEqual(code, 0, output.getvalue())
+        recover.assert_not_called()
+
+    def test_recovery_observation_ignores_unprepared_plugins_and_other_bindings(self):
+        state = {"plugins": {"hello": {"state": "enabled"}}}
+        self.assertFalse(plugins._binding_recovery_pending(self.root, state))
+        self.assertFalse(self.root.exists())
+        state["plugins"]["hello"] = {"state": "removed", "pending": {"action": "uninstall", "binding": "other-runtime"}}
+        self.assertFalse(plugins._binding_recovery_pending(self.root, state))
+        state["plugins"]["hello"]["pending"]["binding"] = self.root.name
+        self.assertTrue(plugins._binding_recovery_pending(self.root, state))
+        present = self.root / "installed/hello"
+        present.mkdir(parents=True)
+        self.assertFalse(plugins._binding_recovery_pending(self.root, state))
+        transaction = self.root / "transactions/install-active"
+        transaction.mkdir(parents=True)
+        (transaction / "keep").write_bytes(b"live transaction")
+        self.assertTrue(plugins._binding_recovery_pending(self.root, state))
+        self.assertEqual((transaction / "keep").read_bytes(), b"live transaction")
+
+    def test_unreadable_recovery_metadata_does_not_hide_installed_plugins(self):
+        self.install(self.source())
+        directory = self.root / "backups"
+        directory.mkdir(exist_ok=True)
+        original = Path.iterdir
+
+        def inspect(path):
+            if path == directory:
+                raise PermissionError("recovery metadata unavailable")
+            return original(path)
+
+        with mock.patch.object(Path, "iterdir", inspect), redirect_stdout(io.StringIO()) as output:
+            code = plugins.cmd_plugin_marketplace({"includeCatalog": False})
+        self.assertEqual(code, 0, output.getvalue())
+        snapshot = json.loads(output.getvalue())["payload"]
+        self.assertTrue(snapshot["installed"][0]["loaded"])
+        self.assertTrue(snapshot["recoveryRequired"])
+
     def test_recovery_restores_previous_version_after_interrupted_publication(self):
         self.install(self.source())
         backup = self.root / "backups/hello"

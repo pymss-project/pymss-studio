@@ -486,7 +486,8 @@ export const useAppStore = defineStore('app', () => {
   const runtimeBackgroundOperations = new Map<string, RuntimeBackgroundOperation>()
 
   function startRuntimeBackground(command: string, taskId: string, payload: Record<string, unknown>, finishedEvent: string) {
-    invalidateRuntimeReads()
+    const preparingCore = command === 'start_runtime_core_update' && payload.prepareOnly === true
+    if (!preparingCore) invalidateRuntimeReads()
     let resolveStarted!: () => void
     let rejectStarted!: (error: unknown) => void
     let resolveCompleted!: () => void
@@ -515,12 +516,14 @@ export const useAppStore = defineStore('app', () => {
         // Subscribe before dispatch so even an immediate terminal event releases the queue.
         await import('@/utils/events').then(({ registerWorkerEvents }) => registerWorkerEvents())
         if (operation.cancelled) return
-        await withRuntimeMutation(async () => {
+        const dispatch = async () => {
           operation.dispatched = true
           await invoke(command, { payload })
           resolveStarted()
           await completed
-        })
+        }
+        if (preparingCore) await dispatch()
+        else await withRuntimeMutation(dispatch)
       } catch (error) {
         rejectStarted(error)
         throw error
@@ -1062,10 +1065,11 @@ export const useAppStore = defineStore('app', () => {
           studioLog.warn('Failed to refresh models after a runtime change', error)
         })
       } else if (event?.type === 'runtime_core_update_started') {
-        if (runtimeCoreUpdateStatus.value !== 'preparing') runtimeCoreUpdateStatus.value = 'updating'
+        const preparing = runtimeCoreUpdateStatus.value === 'preparing'
+        if (!preparing) runtimeCoreUpdateStatus.value = 'updating'
         runtimeCoreUpdateMode.value = event.payload?.mode || 'update'
         runtimeCoreUpdateMessage.value = event.payload?.backend || ''
-        if (event.payload?.logPath) runtimeInfo.value = { ...(runtimeInfo.value || {}), logPath: event.payload.logPath }
+        if (!preparing && event.payload?.logPath) runtimeInfo.value = { ...(runtimeInfo.value || {}), logPath: event.payload.logPath }
       } else if (event?.type === 'runtime_core_update_stage' || event?.type === 'runtime_core_update_log') {
         if (event?.type === 'runtime_core_update_stage') runtimeCoreUpdateStage.value = event.payload?.stage || ''
         runtimeCoreUpdateMessage.value = event.payload?.message || event.payload?.stage || ''

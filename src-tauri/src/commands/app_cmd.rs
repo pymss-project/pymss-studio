@@ -2219,7 +2219,8 @@ pub async fn plugin_diagnostics(app: AppHandle, payload: Option<Value>) -> AppRe
 
 #[tauri::command]
 pub async fn plugin_marketplace(app: AppHandle, payload: Option<Value>) -> AppResult<Value> {
-    run_worker_with_payload(&app, "plugin_marketplace", payload)
+    tauri::async_runtime::spawn_blocking(move || run_worker_with_payload(&app, "plugin_marketplace", payload))
+        .await.map_err(|error| AppError::Worker(error.to_string()))?
 }
 
 #[tauri::command]

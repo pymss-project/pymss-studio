@@ -736,11 +736,37 @@ def _manifest_contributions(plugin: Path) -> dict[str, Any]:
     return {"views": views}
 
 
-def _inventory(root: Path, *, verify: bool = False, default_policy: str | None = None) -> dict[str, Any]:
+def _binding_recovery_pending(root: Path, state: dict[str, Any]) -> bool:
+    """Observe recovery inputs without creating locks or changing a live binding."""
+    try:
+        for store in ("backups", "disabled-backups", "transactions"):
+            directory = root / store
+            if not directory.is_dir():
+                continue
+            for path in directory.iterdir():
+                if path.is_dir() and (
+                    store != "transactions" and _NAME.fullmatch(path.name)
+                    or store == "transactions" and path.name.startswith(("install-", "removed-"))
+                ):
+                    return True
+        return any(
+            entry.get("state") == "removed" and entry.get("pending") == {"action": "uninstall", "binding": root.name}
+            and not any((root / store / name).exists() for store in ("installed", "disabled", "backups", "disabled-backups"))
+            and not (root / "transactions" / f"removed-{name}").exists()
+            for name, entry in state["plugins"].items()
+        )
+    except OSError:
+        # An unreadable recovery directory must not hide healthy installations or
+        # be mistaken for proof that no recovery remains necessary.
+        return True
+
+
+def _inventory(root: Path, *, verify: bool = False, default_policy: str | None = None, recover: bool = True) -> dict[str, Any]:
     """List installations from their manifests; ``verify`` also imports them in a child process."""
     if not _management_supported():
         return _readonly_inventory(root)
-    _recover_for_read(root)
+    if recover:
+        _recover_for_read(root)
     installed = [*_installed(root), *_installed(root, disabled=True)]
     bundles = _bundled()
     state, observations = _application_state(root)
@@ -866,6 +892,7 @@ def _inventory(root: Path, *, verify: bool = False, default_policy: str | None =
         "preinstalledPending": available if policy == "auto" and not state["migrationWarnings"] else [],
         "preinstalledAvailable": available,
         "inventoryWarnings": state["migrationWarnings"],
+        "recoveryRequired": _binding_recovery_pending(root, state),
     }
 
 
@@ -883,8 +910,13 @@ def _catalog_source_info(*, failed: bool = False) -> dict:
 def cmd_plugin_marketplace(payload: dict[str, Any]) -> int:
     try:
         root = _root()
+        if payload.get("expectedRuntime") not in {None, root.name}:
+            raise ValueError("Active runtime changed; refresh the plugin inventory before recovery")
         snapshot = ({"runtime": {"identity": root.name, "pythonPath": sys.executable}}
-                    if payload.get("catalogOnly") else _inventory(root, verify=payload.get("forceVerify") is True, default_policy=payload.get("defaultPolicy")))
+                    if payload.get("catalogOnly") else _inventory(
+                        root, verify=payload.get("forceVerify") is True, default_policy=payload.get("defaultPolicy"),
+                        recover=payload.get("recoverBinding") is True or payload.get("forceVerify") is True,
+                    ))
         try:
             if payload.get("includeCatalog", True) and _management_supported():
                 with _plugin_registry():
@@ -1078,7 +1110,9 @@ def cmd_manage_plugin(payload: dict[str, Any]) -> int:
         with _plugin_registry():
             outcome = _service(root).manage(action, **{key: value for key, value in payload.items() if key != "action"})
         _stage(task_id, "Refreshing plugin status", "refreshing")
-        snapshot = _inventory(root, default_policy=payload.get("defaultPolicy"))
+        # Update checks share the runtime with running operations; their result refresh
+        # must not attempt to recover or replace the plugin binding.
+        snapshot = _inventory(root, default_policy=payload.get("defaultPolicy"), recover=action != "check_updates")
         snapshot["updates"] = outcome["updates"]
         emit("plugin_manage_result", snapshot, task_id=task_id)
         return 0

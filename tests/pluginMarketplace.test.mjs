@@ -48,13 +48,419 @@ async function reset() {
   await market.refresh()
 }
 const nextTurn = () => new Promise(resolve => setImmediate(resolve))
-
-const installedResult = name => ({ ...empty(), updates: {}, installed: [{ name, managed: true, loaded: true, operations: [] }] })
+const runtimeBusy = 'worker error: RUNTIME_BUSY: The runtime is in use. Wait for running operations to finish before updating core packages or starting another operation.'
 
 test('creating the marketplace does not request inventory before it is used', () => {
   assert.equal(market.inventoryRequested.value, false)
   assert.equal(requests.length, 0)
 })
+
+test('inventory refresh retries a short runtime admission conflict', async () => {
+  await reset()
+  let calls = 0
+  globalThis.__pluginInvoke = async command => {
+    assert.equal(command, 'plugin_marketplace')
+    if (++calls === 1) throw new Error(runtimeBusy)
+    return empty()
+  }
+  await market.refreshInventory()
+  assert.equal(calls, 2)
+  assert.equal(market.error.value, '')
+  assert.equal(market.loading.value, false)
+})
+
+test('a runtime switch supersedes a waiting inventory retry', async () => {
+  await reset()
+  let oldCalls = 0
+  globalThis.__pluginInvoke = async () => {
+    oldCalls += 1
+    throw new Error(runtimeBusy)
+  }
+  const old = market.refreshInventory()
+  await nextTurn()
+  globalThis.__pluginInvoke = async () => empty('new-runtime')
+  await market.reloadRuntimeInventory()
+  await old
+  assert.equal(oldCalls, 1)
+  assert.equal(market.snapshot.value.runtime.identity, 'new-runtime')
+  assert.equal(market.error.value, '')
+})
+
+test('catalog queries retry short admission conflicts independently of inventory', async () => {
+  await reset()
+  let catalogCalls = 0
+  globalThis.__pluginInvoke = async (command, args) => {
+    assert.equal(command, 'plugin_marketplace')
+    if (args.payload.catalogOnly && ++catalogCalls === 1) throw new Error(runtimeBusy)
+    return empty()
+  }
+  await market.openMarketplace(true)
+  assert.equal(catalogCalls, 2)
+  assert.equal(market.snapshot.value.catalogError, null)
+  assert.equal(market.catalogLoading.value, false)
+})
+
+test('persistent runtime maintenance ends read retries and preserves the displayed inventory', async () => {
+  await reset()
+  const previous = market.snapshot.value
+  let calls = 0
+  globalThis.__pluginInvoke = async () => {
+    calls += 1
+    throw new Error(runtimeBusy)
+  }
+  await market.refreshInventory()
+  assert.equal(calls, 4)
+  assert.equal(market.snapshot.value, previous)
+  assert.match(market.error.value, /RUNTIME_BUSY/)
+  assert.equal(market.loading.value, false)
+})
+
+test('explicit plugin verification does not retry a maintenance operation', async () => {
+  await reset()
+  let calls = 0
+  globalThis.__pluginInvoke = async (_command, args) => {
+    assert.equal(args.payload.forceVerify, true)
+    calls += 1
+    throw new Error(runtimeBusy)
+  }
+  await market.refresh(true)
+  assert.equal(calls, 1)
+  assert.match(market.error.value, /RUNTIME_BUSY/)
+})
+
+test('only interrupted writers request an exclusive recovery refresh', async () => {
+  for (const action of ['install', 'check_updates']) {
+    await reset()
+    const completion = market.manage(action, { name: 'hello' })
+    const rejected = assert.rejects(completion, /cancelled/)
+    await nextTurn()
+    event('task_cancelled')
+    await rejected
+    const refresh = requests.filter(request => request.command === 'plugin_marketplace').at(-1)
+    assert.equal(refresh.payload.recoverBinding, action === 'install' ? true : undefined)
+  }
+})
+
+test('writer terminal events before the start ACK still request transaction recovery', async () => {
+  for (const terminal of ['error', 'task_cancelled']) {
+    await reset()
+    let acknowledge
+    globalThis.__pluginInvoke = async (command, args) => {
+      requests.push({ command, ...args })
+      if (command === 'manage_plugin') return new Promise(resolve => { acknowledge = resolve })
+      return empty()
+    }
+    const completion = market.manage('install', { name: 'hello' })
+    const rejected = assert.rejects(completion, terminal === 'error' ? /publication interrupted/ : /cancelled/)
+    await nextTurn()
+    const taskId = requests.find(request => request.command === 'manage_plugin').payload.taskId
+    event(terminal, { message: 'publication interrupted' }, taskId)
+    await rejected
+    const refresh = requests.filter(request => request.command === 'plugin_marketplace').at(-1)
+    acknowledge({ taskId })
+    await nextTurn()
+    assert.equal(refresh.payload.recoverBinding, true, terminal)
+  }
+})
+
+test('interrupted writers retain recovery after an admission conflict and preserve their original error', async () => {
+  for (const terminal of ['error', 'task_cancelled']) {
+    await reset()
+    let occupied = true
+    let recoveries = 0
+    globalThis.__pluginInvoke = async (command, args) => {
+      requests.push({ command, ...args })
+      if (command === 'manage_plugin') return { taskId: args.payload.taskId }
+      if (args.payload.recoverBinding) {
+        recoveries += 1
+        assert.equal(args.payload.expectedRuntime, 'cpu-runtime')
+        if (occupied) throw new Error(runtimeBusy)
+        return { ...installedResult('hello'), recoveryRequired: false }
+      }
+      return empty()
+    }
+    const completion = market.manage('install', { name: 'hello' })
+    const rejected = assert.rejects(completion, terminal === 'error' ? /publication interrupted/ : /cancelled/)
+    await nextTurn()
+    const taskId = requests.find(request => request.command === 'manage_plugin').payload.taskId
+    event(terminal, { message: 'publication interrupted' }, taskId)
+    await rejected
+    const attempts = recoveries
+    assert.equal(attempts, 4)
+    assert.equal(market.error.value, terminal === 'error' ? 'publication interrupted' : '')
+    occupied = false
+    event('task_done', {}, 'running-operation')
+    await nextTurn()
+    assert.equal(recoveries, attempts + 1)
+    assert.equal(market.snapshot.value.installed[0].name, 'hello')
+    assert.equal(market.snapshot.value.recoveryRequired, false)
+    assert.equal(market.error.value, terminal === 'error' ? 'publication interrupted' : '')
+    event('task_done', {}, 'another-operation')
+    await nextTurn()
+    assert.equal(recoveries, attempts + 1)
+  }
+})
+
+test('switching runtime discards deferred recovery of an interrupted writer', async () => {
+  await reset()
+  let recoveries = 0
+  globalThis.__pluginInvoke = async (command, args) => {
+    requests.push({ command, ...args })
+    if (command === 'manage_plugin') return { taskId: args.payload.taskId }
+    assert.equal(args.payload.recoverBinding, true)
+    recoveries += 1
+    throw new Error(runtimeBusy)
+  }
+  const completion = market.manage('install', { name: 'hello' })
+  const rejected = assert.rejects(completion, /cancelled/)
+  await nextTurn()
+  event('task_cancelled')
+  await rejected
+  const attempts = recoveries
+  assert.equal(attempts, 4)
+  globalThis.__pluginInvoke = async (_command, args) => {
+    assert.equal(args.payload.recoverBinding, undefined)
+    return empty('new-runtime')
+  }
+  await market.reloadRuntimeInventory()
+  event('task_done', {}, 'old-running-operation')
+  await nextTurn()
+  assert.equal(recoveries, attempts)
+  assert.equal(market.snapshot.value.runtime.identity, 'new-runtime')
+  assert.equal(market.error.value, '')
+})
+
+test('opening a crashed binding recovers it through a separate exclusive request', async () => {
+  await reset()
+  let recoveries = 0
+  globalThis.__pluginInvoke = async (_command, args) => {
+    if (args.payload.recoverBinding) {
+      recoveries += 1
+      assert.equal(args.payload.expectedRuntime, 'cpu-runtime')
+      return { ...installedResult('hello'), catalog: [], recoveryRequired: false }
+    }
+    return { ...empty(), recoveryRequired: true }
+  }
+  await market.refreshInventory()
+  assert.equal(recoveries, 1)
+  assert.equal(market.snapshot.value.installed[0].name, 'hello')
+  assert.equal(market.snapshot.value.recoveryRequired, false)
+  assert.equal(market.snapshot.value.catalog.length, 1)
+  assert.equal(market.busy.value, false)
+})
+
+test('a completed install can schedule recovery of a sibling interrupted publication', async () => {
+  await reset()
+  let recoveries = 0
+  globalThis.__pluginInvoke = async (command, args) => {
+    requests.push({ command, ...args })
+    if (command === 'manage_plugin') return { taskId: args.payload.taskId }
+    if (args.payload.recoverBinding) recoveries += 1
+    return empty()
+  }
+  const completion = market.manage('install', { name: 'hello' })
+  await nextTurn()
+  event('plugin_manage_result', { ...installedResult('hello'), recoveryRequired: true })
+  await completion
+  await nextTurn()
+  assert.equal(recoveries, 1)
+  assert.equal(market.snapshot.value.recoveryRequired, false)
+})
+
+test('a busy binding recovery resumes when the running operation finishes', async () => {
+  await reset()
+  let occupied = true
+  let recoveries = 0
+  globalThis.__pluginInvoke = async (_command, args) => {
+    if (!args.payload.recoverBinding) return { ...empty(), recoveryRequired: true }
+    recoveries += 1
+    if (occupied) throw new Error(runtimeBusy)
+    return { ...installedResult('hello'), recoveryRequired: false }
+  }
+  await market.refreshInventory()
+  assert.equal(market.snapshot.value.recoveryRequired, true)
+  const attempts = recoveries
+  occupied = false
+  event('task_done', {}, 'running-operation')
+  await nextTurn()
+  assert.equal(recoveries, attempts + 1)
+  assert.equal(market.snapshot.value.recoveryRequired, false)
+})
+
+test('query lease release resumes interrupted plugin recovery regardless of the query result event', async () => {
+  for (const [command, result] of [['list_models', 'models'], ['list_nodes', 'nodes_list'],
+    ['describe_operation', 'operation_spec'], ['optional_package_status', 'optional_package_status']]) {
+    await reset()
+    let occupied = true
+    let recoveries = 0
+    globalThis.__pluginInvoke = async (command, args) => {
+      requests.push({ command, ...args })
+      if (command === 'manage_plugin') return { taskId: args.payload.taskId }
+      recoveries += 1
+      if (occupied) throw new Error(runtimeBusy)
+      return { ...installedResult('hello'), recoveryRequired: false }
+    }
+    const completion = market.manage('install', { name: 'hello' })
+    const rejected = assert.rejects(completion, /cancelled/)
+    await nextTurn()
+    event('task_cancelled')
+    await rejected
+    const attempts = recoveries
+    assert.equal(attempts, 4, command)
+    event(result, {}, null)
+    await nextTurn()
+    assert.equal(recoveries, attempts, 'query output does not mean its lease has been released')
+    occupied = false
+    event('runtime_access_released', { command }, null)
+    await nextTurn()
+    assert.equal(recoveries, attempts + 1, command)
+    assert.equal(market.snapshot.value.recoveryRequired, false)
+    assert.equal(market.error.value, '')
+  }
+})
+
+test('a lease release arriving before the final busy response is not lost', async () => {
+  await reset()
+  let recoveries = 0
+  let rejectBusy
+  let finalAttempt
+  const waiting = new Promise(resolve => { finalAttempt = resolve })
+  globalThis.__pluginInvoke = async (_command, args) => {
+    if (!args.payload.recoverBinding) return { ...empty(), recoveryRequired: true }
+    if (++recoveries < 4) throw new Error(runtimeBusy)
+    if (recoveries === 4) return new Promise((_resolve, reject) => {
+      rejectBusy = reject
+      finalAttempt()
+    })
+    return { ...installedResult('hello'), recoveryRequired: false }
+  }
+  const refresh = market.refreshInventory()
+  await waiting
+  event('runtime_access_released', { command: 'list_models' }, null)
+  await nextTurn()
+  rejectBusy(new Error(runtimeBusy))
+  await refresh
+  await nextTurn()
+  assert.equal(recoveries, 5)
+  assert.equal(market.snapshot.value.recoveryRequired, false)
+  assert.equal(market.error.value, '')
+})
+
+test('closing the window discards recovery wakeups waiting on a busy response', async () => {
+  await reset()
+  const { runWindowCloseGuards } = await vite.ssrLoadModule('/src/utils/windowCloseGuards.ts')
+  let recoveries = 0
+  let rejectBusy
+  let finalAttempt
+  const waiting = new Promise(resolve => { finalAttempt = resolve })
+  globalThis.__pluginInvoke = async (_command, args) => {
+    if (!args.payload.recoverBinding) return { ...empty(), recoveryRequired: true }
+    if (++recoveries < 4) throw new Error(runtimeBusy)
+    if (recoveries === 4) return new Promise((_resolve, reject) => {
+      rejectBusy = reject
+      finalAttempt()
+    })
+    return empty()
+  }
+  const refresh = market.refreshInventory()
+  await waiting
+  const close = runWindowCloseGuards()
+  await nextTurn()
+  event('runtime_access_released', { command: 'list_models' }, null)
+  await nextTurn()
+  rejectBusy(new Error(runtimeBusy))
+  await Promise.all([close, refresh])
+  await nextTurn()
+  assert.equal(recoveries, 4)
+  globalThis.__pluginInvoke = async () => empty()
+  await market.refreshInventory()
+})
+
+test('an unfinished external transaction stays pending without a recovery feedback loop', async () => {
+  await reset()
+  let recoveries = 0
+  globalThis.__pluginInvoke = async (_command, args) => {
+    if (args.payload.recoverBinding) recoveries += 1
+    return { ...empty(), recoveryRequired: true }
+  }
+  await market.refreshInventory()
+  assert.equal(recoveries, 1)
+  event('plugin_marketplace', { recoveryRequired: true }, undefined)
+  event('error', { message: 'query error' }, null)
+  await nextTurn()
+  assert.equal(recoveries, 1)
+  assert.equal(market.busy.value, false)
+  globalThis.__pluginInvoke = async () => empty()
+  await market.refreshInventory()
+})
+
+test('query release notifications only retry recovery rejected by runtime admission', async () => {
+  for (const outcome of ['pending', 'failed']) {
+    await reset()
+    let recoveries = 0
+    globalThis.__pluginInvoke = async (_command, args) => {
+      if (args.payload.recoverBinding) {
+        recoveries += 1
+        if (outcome === 'failed') throw new Error('Recovery metadata is unavailable')
+      }
+      return { ...empty(), recoveryRequired: true }
+    }
+    await market.refreshInventory()
+    assert.equal(recoveries, 1)
+    for (let index = 0; index < 3; index += 1) {
+      event('error', { message: 'Node discovery failed' }, null)
+      event('runtime_access_released', { command: 'list_nodes' }, null)
+      await nextTurn()
+    }
+    assert.equal(recoveries, 1, outcome)
+    assert.equal(market.busy.value, false)
+    assert.equal(market.snapshot.value.recoveryRequired, true)
+  }
+})
+
+test('switching runtime stops pending recovery retries for the old binding', async () => {
+  await reset()
+  let recoveries = 0
+  globalThis.__pluginInvoke = async (_command, args) => {
+    if (!args.payload.recoverBinding) return { ...empty(), recoveryRequired: true }
+    recoveries += 1
+    throw new Error(runtimeBusy)
+  }
+  const first = market.refreshInventory()
+  await nextTurn()
+  globalThis.__pluginInvoke = async (_command, args) => {
+    assert.equal(args.payload.recoverBinding, undefined)
+    return empty('new-runtime')
+  }
+  await market.reloadRuntimeInventory()
+  await first
+  assert.equal(recoveries, 1)
+  assert.equal(market.snapshot.value.runtime.identity, 'new-runtime')
+  assert.equal(market.error.value, '')
+})
+
+test('closing the window waits for an admitted binding recovery', async () => {
+  await reset()
+  const { runWindowCloseGuards } = await vite.ssrLoadModule('/src/utils/windowCloseGuards.ts')
+  let completeRecovery
+  globalThis.__pluginInvoke = async (_command, args) => {
+    if (args.payload.recoverBinding) return new Promise(resolve => { completeRecovery = resolve })
+    return { ...empty(), recoveryRequired: true }
+  }
+  const refresh = market.refreshInventory()
+  await nextTurn()
+  let closed = false
+  const close = runWindowCloseGuards().then(() => { closed = true })
+  await nextTurn()
+  assert.equal(closed, false)
+  completeRecovery({ ...empty(), recoveryRequired: false })
+  await Promise.all([close, refresh])
+  assert.equal(closed, true)
+  globalThis.__pluginInvoke = async () => empty()
+  await market.refreshInventory()
+})
+
+const installedResult = name => ({ ...empty(), updates: {}, installed: [{ name, managed: true, loaded: true, operations: [] }] })
 
 test('inventory usage remains recorded after a failed query and a later runtime can recover', async () => {
   market.snapshot.value = null
@@ -294,11 +700,16 @@ test('unrelated events cannot complete an active plugin task', async () => {
 
 test('failed starts release busy state and keep the error after inventory refresh', async () => {
   await reset()
+  let starts = 0
   globalThis.__pluginInvoke = async command => {
-    if (command === 'manage_plugin') throw new Error('RUNTIME_BUSY')
+    if (command === 'manage_plugin') {
+      starts += 1
+      throw new Error(runtimeBusy)
+    }
     return empty()
   }
   await assert.rejects(market.manage('install', { name: 'hello' }), /RUNTIME_BUSY/)
+  assert.equal(starts, 1)
   assert.equal(market.busy.value, false)
   assert.match(market.error.value, /RUNTIME_BUSY/)
   assert.ok(market.logs.value.some(line => line.includes('RUNTIME_BUSY')))
@@ -1147,9 +1558,11 @@ test('late recovery of an old failed task cannot restore its error after a runti
   await nextTurn()
   event('error', { message: 'Old dependency failure' })
   await nextTurn()
-  await market.reloadRuntimeInventory()
+  const reload = market.reloadRuntimeInventory()
+  await nextTurn()
+  assert.equal(market.snapshot.value, null)
   oldResponse(empty('old-runtime'))
-  await rejected
+  await Promise.all([reload, rejected])
   assert.equal(market.snapshot.value.runtime.identity, 'replacement-runtime')
   assert.equal(market.error.value, '')
   assert.equal(market.loading.value, false)
