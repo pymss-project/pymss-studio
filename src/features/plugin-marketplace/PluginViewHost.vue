@@ -22,6 +22,7 @@ import { useAppStore } from '@/stores/app'
 import { registerWindowCloseGuard } from '@/utils/windowCloseGuards'
 import { getThemeOverrides } from '@/utils/theme'
 import { pluginSdkCapabilities, pluginSdkVersion, supportsPluginCapability } from './sdkContract'
+import { isTutorialFrame, tutorialAdapter } from '@/features/onboarding/demoContext'
 
 type PluginViewContribution = {
   id: string
@@ -562,7 +563,7 @@ onMounted(async () => {
         log.warn('Failed to register plugin file drop events', failure)
       }
     }
-    src.value = pluginViewUrl(
+    src.value = isTutorialFrame() ? tutorialAdapter().assetUrl(`pymss-tutorial-plugin:${props.pluginName}/${props.view.id}`) : pluginViewUrl(
       props.pluginName, props.view.id, props.view.entryPath || props.view.entry, convertFileSrc,
     )
     status.value = 'loading'

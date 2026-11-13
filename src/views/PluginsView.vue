@@ -600,15 +600,14 @@ async function requestCancel(id?: string) {
         </div>
         <span class="plugins-result-count" aria-live="polite">{{ visibleEntries.length }} / {{ libraryEntries.length }}</span>
       </div>
-      <div class="plugins-library-bar">
+      <div class="plugins-library-bar" data-guide="plugin-library">
         <n-popover trigger="click" placement="bottom-start">
           <template #trigger>
-            <button type="button" class="plugins-runtime" :title="snapshot.runtime.pythonPath" :aria-label="t('plugins.librarySettings')">
-              <n-icon :component="TerminalOutline" /><span>{{ t('plugins.librarySettings') }}</span><n-icon :component="ChevronDownOutline" />
+            <button type="button" class="plugins-runtime" :aria-label="t('plugins.librarySettings')">
+              <n-icon :component="ExtensionPuzzleOutline" /><span>{{ t('plugins.librarySettings') }}</span><n-icon :component="ChevronDownOutline" />
             </button>
           </template>
           <div class="plugins-runtime-details">
-            <strong>{{ t('plugins.runtimeScope') }}</strong><code>{{ snapshot.runtime.pythonPath }}</code>
             <strong class="plugins-effective-source">{{ sourceStatus }}</strong>
             <strong>{{ t('plugins.sourceLabel') }}</strong>
             <n-select :value="settings.pluginSource || 'auto'" :options="sourceOptions" :aria-label="t('plugins.sourceLabel')"
@@ -868,7 +867,6 @@ async function requestCancel(id?: string) {
 .plugins-runtime:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .plugins-runtime > span, .plugins-runtime > .n-icon { flex-shrink: 0; }
 .plugins-runtime-details { display: grid; gap: 10px; width: min(360px, calc(100vw - 48px)); font-size: 12px; }
-.plugins-runtime-details code { white-space: normal; overflow-wrap: anywhere; font: 11px/1.6 var(--font-mono); }
 .plugins-library-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 16px; margin: 6px 0 16px; }
 .plugins-library-hint { color: var(--on-surface-muted); font-size: 11px; }
 .plugins-list-skeleton { display: grid; gap: 10px; margin-top: 10px; }

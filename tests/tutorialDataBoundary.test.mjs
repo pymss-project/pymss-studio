@@ -5,8 +5,99 @@ import vm from 'node:vm'
 import ts from 'typescript'
 import { createDemoRuntime } from '../src/features/onboarding/demoRuntime.ts'
 import { visibleParameterGuides } from '../src/features/onboarding/parameters.ts'
+import { BEGINNER_GUIDE_STEPS, normalizeBeginnerGuideProgress } from '../src/features/onboarding/guide.ts'
 
 const config = { locale: 'en', themeMode: 'dark', themeAccent: 'blue', platform: 'win32', progress: { step: 0, stepId: 'workspace' } }
+
+test('current progress resumes by step ID without migrating obsolete formats', () => {
+  for (const stepId of ['modelManage', 'inference', 'resultEditor', 'workflowOutput', 'runtime', 'help']) {
+    const progress = normalizeBeginnerGuideProgress({ status: 'active', stepId, step: 0 })
+    assert.equal(BEGINNER_GUIDE_STEPS[progress.step].id, stepId)
+  }
+  const resumed = normalizeBeginnerGuideProgress({ status: 'active', stepId: 'inference', parameter: 'presets' })
+  assert.equal(resumed.stepId, 'inference')
+  assert.equal(resumed.parameter, 'presets')
+  assert.deepEqual(normalizeBeginnerGuideProgress({ status: 'active', step: 3 }), { status: 'active', step: 0, stepId: 'workspace' })
+  assert.equal(normalizeBeginnerGuideProgress({ status: 'active', stepId: 'toolConvert', step: 13 }).stepId, 'workspace')
+  assert.equal(normalizeBeginnerGuideProgress({ status: 'completed', stepId: 'help' }).status, 'completed')
+  for (const stepId of ['modelBatch', 'resultManage', 'pluginsOverview']) {
+    assert.ok(BEGINNER_GUIDE_STEPS.some(step => step.id === stepId && step.anchor))
+  }
+})
+
+test('parameter-source and preset lessons follow the actual model capabilities', () => {
+  const context = { hasModel: true, defaults: {}, format: 'wav', canSaveDefaults: false }
+  assert.equal(visibleParameterGuides(context)[0].id, 'parameterSource')
+  assert.equal(visibleParameterGuides(context).some(item => item.id === 'presets'), false)
+  assert.deepEqual(visibleParameterGuides({ ...context, supportsPresets: true }).slice(0, 2).map(item => item.id), ['parameterSource', 'presets'])
+  assert.equal(visibleParameterGuides({ ...context, hasModel: false, supportsPresets: true }).some(item => ['parameterSource', 'presets'].includes(item.id)), false)
+})
+
+test('plugin sources and tool assets are isolated and use the current plugin SDK contract', async t => {
+  const runtime = createDemoRuntime(config), other = createDemoRuntime(config)
+  t.after(() => { runtime.dispose(); other.dispose() })
+  const initial = await runtime.invoke('plugin_marketplace', { payload: { includeCatalog: true } })
+  const contract = JSON.parse(readFileSync(new URL('../python/plugin-sdk.json', import.meta.url), 'utf8'))
+  assert.equal(initial.installed[0].contributions.views[0].sdkVersion, contract.version)
+  const settings = await runtime.invoke('load_app_store', { name: 'app-settings' })
+  await runtime.invoke('save_app_store', { name: 'app-settings', data: { ...settings, pluginSource: 'gitcode' } })
+  assert.equal((await runtime.invoke('plugin_marketplace')).catalogSource.provider, 'gitcode')
+  assert.equal((await other.invoke('plugin_marketplace')).catalogSource.provider, 'github')
+  initial.installed[0].name = 'Changed only in response'
+  assert.equal((await runtime.invoke('plugin_marketplace')).installed[0].name, 'pymss.convert')
+  const url = runtime.assetUrl('pymss-tutorial-plugin:pymss.convert/tool')
+  await runtime.invoke('set_plugin_view_root', { root: initial.pluginsDir })
+  await assert.rejects(runtime.invoke('set_plugin_view_root', { root: 'C:/Private/Plugins' }), /sample plugin views/)
+  const html = await (await fetch(url)).text()
+  assert.match(html, /pymss.ready/)
+  assert.doesNotMatch(html, /type=["']file["']/)
+  assert.throws(() => runtime.assetUrl('pymss-tutorial-plugin:untrusted/tool'), /sample assets/)
+  await assert.rejects(runtime.invoke('manage_plugin', { payload: { action: 'install', source: 'https://example.com' } }), /not available/)
+  runtime.dispose()
+  await assert.rejects(fetch(url))
+})
+
+test('batch download and deletion modify only temporary models and cancelled downloads cannot complete', async t => {
+  const runtime = createDemoRuntime(config), other = createDemoRuntime(config)
+  t.after(() => { runtime.dispose(); other.dispose() })
+  const events = []
+  const handler = runtime.callback(event => events.push(event.payload))
+  await runtime.invoke('plugin:event|listen', { event: 'pymss://worker-event', handler })
+  const available = runtime.models.find(model => !model.downloaded)
+  assert.ok(available)
+  await runtime.invoke('start_model_download', { payload: { model: available.name, taskId: 'download_cancelled' } })
+  await runtime.invoke('cancel_task', { taskId: 'download_cancelled' })
+  await new Promise(resolve => setTimeout(resolve, 350))
+  assert.equal(available.downloaded, false)
+  assert.equal(events.some(event => event.taskId === 'download_cancelled' && event.type === 'download_done'), false)
+  await runtime.invoke('start_model_download', { payload: { model: available.name, taskId: 'download_completed' } })
+  await new Promise(resolve => setTimeout(resolve, 350))
+  assert.equal((await runtime.invoke('list_models')).models.find(model => model.name === available.name).downloaded, true)
+  assert.equal(other.models.find(model => model.name === available.name).downloaded, false)
+  await runtime.invoke('start_model_delete', { payload: { model: available.name, taskId: 'delete_completed' } })
+  await new Promise(resolve => setTimeout(resolve, 350))
+  assert.equal(available.downloaded, false)
+  assert.ok(events.some(event => event.type === 'model_delete_done' && event.taskId === 'delete_completed'))
+  await assert.rejects(runtime.invoke('start_model_download', { payload: { model: 'foreign', taskId: 'download_foreign' } }), /Unknown tutorial model/)
+})
+
+test('result file cleanup only accepts the session sample outputs', async t => {
+  const runtime = createDemoRuntime(config)
+  t.after(() => runtime.dispose())
+  const paths = runtime.task.outputs.map(item => item.path)
+  assert.deepEqual((await runtime.invoke('move_paths_to_trash', { paths })).trashed, paths)
+  await assert.rejects(runtime.invoke('move_paths_to_trash', { paths: ['C:/Private/recording.wav'] }), /sample outputs/)
+  await assert.rejects(runtime.invoke('move_paths_to_trash', { paths: [runtime.output + '/../private.wav'] }), /sample outputs/)
+})
+
+test('native audio plugins remain disabled in the tutorial', async t => {
+  const runtime = createDemoRuntime(config)
+  t.after(() => runtime.dispose())
+  assert.equal((await runtime.invoke('plugin_host_capabilities')).enabled, false)
+  await assert.rejects(runtime.invoke('plugin_host_request', { request: { op: 'pause', projectId: runtime.initialProject.id } }), /unavailable/)
+  await assert.rejects(runtime.invoke('plugin_host_request', { request: { op: 'load', path: 'C:/Private/effect.vst3' } }), /unavailable/)
+  assert.deepEqual(runtime.unknown, [])
+})
 
 test('resumed encoding parameters remain available in the matching tutorial output format', async t => {
   for (const [parameter, format] of [['wavBitDepth', 'wav'], ['flacBitDepth', 'flac'], ['mp3BitRate', 'mp3'], ['m4aBitRate', 'm4a'], ['m4aCodec', 'm4a']]) {
@@ -65,8 +156,9 @@ test('storage statistics describe sample files without inspecting the real model
   const runtime = createDemoRuntime(config)
   t.after(() => runtime.dispose())
   const summary = await runtime.invoke('get_model_storage_summary', { payload: { modelDir: 'C:/Private/Models' } })
-  assert.equal(summary.downloadedCount, runtime.models.length)
-  assert.equal(summary.totalBytes, runtime.models.reduce((total, model) => total + model.sizeBytes, 0))
+  const downloaded = runtime.models.filter(model => model.downloaded)
+  assert.equal(summary.downloadedCount, downloaded.length)
+  assert.equal(summary.totalBytes, downloaded.reduce((total, model) => total + model.sizeBytes, 0))
   assert.ok(summary.modelDir.includes('Pymss-Demo'))
   assert.ok(summary.models.every(model => model.files.every(file => file.path.startsWith(summary.modelDir + '/'))))
   summary.models[0].name = 'Changed only in response'

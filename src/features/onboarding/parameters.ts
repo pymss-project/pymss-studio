@@ -1,6 +1,6 @@
 import type { ParameterHelpTopic } from '../inference/parameterHelp'
 
-export type ParameterGuideId = 'tta' | 'wavBitDepth' | 'flacBitDepth' | 'mp3BitRate' | 'm4aBitRate' | 'm4aCodec'
+export type ParameterGuideId = 'parameterSource' | 'presets' | 'tta' | 'wavBitDepth' | 'flacBitDepth' | 'mp3BitRate' | 'm4aBitRate' | 'm4aCodec'
   | 'normalize' | 'batch_size' | 'overlap_size' | 'num_overlap' | 'chunk_size' | 'window_size' | 'aggression'
   | 'post_process_threshold' | 'standardize' | 'enable_post_process' | 'high_end_process' | 'modelDefaults'
 export type ParameterGuide = {
@@ -12,6 +12,8 @@ export type ParameterGuide = {
 }
 
 export const PARAMETER_GUIDES: readonly ParameterGuide[] = [
+  { id: 'parameterSource', group: 'inference', title: 'parameterEditor.parameterSource', description: 'beginnerGuide.parameterSourceDescription' },
+  { id: 'presets', group: 'inference', title: 'parameterEditor.presets.label', description: 'beginnerGuide.presetsDescription' },
   { id: 'tta', group: 'inference', title: 'separate.tta', description: 'beginnerGuide.ttaFieldDescription', diagram: 'tta' },
   { id: 'batch_size', group: 'inference', title: 'inference.batchSize', description: 'parameterHelp.batchDetail', diagram: 'batch' },
   { id: 'overlap_size', group: 'inference', title: 'parameterEditor.overlapPercent', description: 'beginnerGuide.overlapFieldDescription', diagram: 'overlap' },
@@ -38,10 +40,13 @@ export function visibleParameterGuides(context: {
   defaults: Record<string, unknown>
   format: string
   canSaveDefaults: boolean
+  supportsPresets?: boolean
 }): ParameterGuide[] {
   const type = String(context.modelType || '').trim().toLowerCase()
   const formatFields: Record<string, string[]> = { wav: ['wavBitDepth'], flac: ['flacBitDepth'], mp3: ['mp3BitRate'], m4a: ['m4aBitRate', 'm4aCodec'] }
   return PARAMETER_GUIDES.filter(item => {
+    if (item.id === 'parameterSource') return context.hasModel
+    if (item.id === 'presets') return context.hasModel && context.supportsPresets === true
     if (item.id === 'tta') return true
     if (['wavBitDepth', 'flacBitDepth', 'mp3BitRate', 'm4aBitRate', 'm4aCodec'].includes(item.id)) return formatFields[context.format]?.includes(item.id) === true
     if (item.id === 'normalize') return context.hasModel

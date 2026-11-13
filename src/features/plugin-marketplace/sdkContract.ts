@@ -1,4 +1,4 @@
-import contract from '../../../python/plugin-sdk.json'
+import contract from '../../../python/plugin-sdk.json' with { type: 'json' }
 
 export const pluginSdkVersion = contract.version
 export const pluginSdkCapabilities: readonly string[] = Object.freeze(contract.capabilities)

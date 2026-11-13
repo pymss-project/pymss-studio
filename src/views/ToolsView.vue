@@ -259,7 +259,7 @@ onMounted(async () => {
       @update:value="selectMobileTool"
     />
 
-    <div class="audio-tools-workspace">
+    <div class="audio-tools-workspace" data-guide="audio-tools">
       <nav class="audio-tools-nav" :aria-label="t('tools.toolNavigation')">
         <section v-for="category in categories" :key="category.id">
           <button

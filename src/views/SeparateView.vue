@@ -427,6 +427,11 @@ watch(expandedInferenceSections, names => {
 async function locateGuidedParameter() {
   await nextTick()
   if (!beginnerGuide.parameterStep || !showSettingsDrawer.value || parameterHelpPage.value !== null) return
+  if (isTutorialFrame() && guidedParameter.value?.group === 'inference'
+      && !['parameterSource', 'tta'].includes(guidedParameter.value.id)) {
+    parameterDraftMode.value = 'custom'
+    await nextTick()
+  }
   if (guideRequiresAdvanced.value && !expandedInferenceSections.value.includes('inference')) {
     expandedInferenceSections.value = ['inference']
     await nextTick()
@@ -1813,6 +1818,7 @@ const availableParameterGuides = computed(() => visibleParameterGuides({
   defaults: currentModelDefaults.value,
   format: effectiveFormat.value,
   canSaveDefaults: false,
+  supportsPresets: supportsInferencePresets(currentModelInfo.value?.inferenceParamMeta?.resolution),
 }))
 watch(availableParameterGuides, items => { if (!beginnerGuide.demoActive || isTutorialFrame()) beginnerGuide.registerParameters(items) }, { immediate: true })
 
@@ -2985,14 +2991,14 @@ async function retryCurrentTask() {
             <div class="parameter-section-heading">
               <div class="parameter-section-heading__title">
                 <h3>{{ t('parameterEditor.inferenceGroup') }}</h3>
-                <div v-if="showParameterPresets" class="parameter-presets" role="group" :aria-label="t('parameterEditor.presets.label')">
+                <div v-if="showParameterPresets" class="parameter-presets" data-parameter-guide="presets" role="group" :aria-label="t('parameterEditor.presets.label')">
                   <n-button v-for="preset in INFERENCE_PRESETS" :key="preset.id" size="tiny" secondary
                     :type="selectedParameterPreset === preset.id ? 'primary' : 'default'"
                     :aria-pressed="selectedParameterPreset === preset.id" :disabled="parameterPresetsDisabled"
                     @click="applyParameterPreset(preset)">{{ t(preset.label) }}</n-button>
                 </div>
               </div>
-              <div class="parameter-section-heading__actions">
+              <div class="parameter-section-heading__actions" data-parameter-guide="parameterSource">
                 <n-radio-group class="parameter-source-switch" :value="parameterDraftMode" name="inference-parameter-source" size="small" :disabled="applyingParameters" :aria-label="t('parameterEditor.parameterSource')" @update:value="(value: 'model' | 'custom') => parameterDraftMode = value">
                   <n-radio-button value="model">{{ t('parameterEditor.followModel') }}</n-radio-button>
                   <n-radio-button value="custom">{{ t('parameterEditor.source.custom') }}</n-radio-button>

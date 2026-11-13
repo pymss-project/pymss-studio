@@ -2,7 +2,7 @@
 import { createLogger } from '@/utils/logger'
 import { isTutorialFrame } from '@/features/onboarding/demoContext'
 
-import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
+import { computed, h, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useI18n } from 'vue-i18n'
@@ -26,7 +26,7 @@ import {
   GridOutline,
   ListOutline,
   CheckboxOutline,
-  CloseOutline,
+  ChevronDownOutline,
 } from '@vicons/ionicons5'
 import {
   useModelStore,
@@ -178,6 +178,8 @@ let suppressBatchClick = false
 let batchListenersAttached = false
 let modelPageActive = true
 const showBatchEditor = ref(false)
+const batchEditorSelection = ref<string[]>([])
+const batchEditorSkipped = ref<string[]>([])
 const batchIntent = ref<CustomParameterIntent>({})
 const batchReferenceName = ref('')
 const batchLoadState = ref<Record<string, 'loading' | 'error'>>({})
@@ -923,18 +925,30 @@ async function saveInferenceDefaults() {
 /* ---- Batch editor ---- */
 
 const editableBatchSelection = computed(() => batchSelection.value.filter(name => canEditModelParameters(findModelEntry(name))))
-const batchSelectableOnPage = computed(() => pagedModels.value.filter(model => canEditModelParameters(model) || isBatchSelected(model.name)))
+const batchSelectableOnPage = computed(() => pagedModels.value.filter(model => canSelectBatchModel(model) || isBatchSelected(model.name)))
 const batchSelectedOnPage = computed(() => pagedModels.value.filter(model => isBatchSelected(model.name)).length)
 const batchOutsidePage = computed(() => batchSelection.value.length - batchSelectedOnPage.value)
+const batchOutsideFilter = computed(() => {
+  const visible = new Set(sortedModels.value.map(model => model.name))
+  return batchSelection.value.filter(name => !visible.has(name)).length
+})
 const allBatchPageSelected = computed(() => batchSelectableOnPage.value.length > 0 && batchSelectableOnPage.value.every(model => isBatchSelected(model.name)))
 const someBatchPageSelected = computed(() => batchSelectedOnPage.value > 0 && !allBatchPageSelected.value)
+const batchSelectionOptions = computed<DropdownOption[]>(() => [{ key: 'filtered',
+  label: t('models.batchSelectFiltered', { count: sortedModels.value.filter(canSelectBatchModel).length }),
+  disabled: !sortedModels.value.some(canSelectBatchModel),
+}])
+
+function canSelectBatchModel(model: ModelEntry | null | undefined) {
+  return Boolean(model && (isDownloadSelectable(model) || canEditModelParameters(model)))
+}
 
 function isBatchSelected(name: string) {
   return batchSelectionSet.value.has(name)
 }
 
 function setBatchSelected(name: string, checked: boolean) {
-  if (checked && !canEditModelParameters(modelStore.models.find(model => model.name === name))) return
+  if (checked && !canSelectBatchModel(modelStore.models.find(model => model.name === name))) return
   if (isBatchSelected(name) === checked) return
   const next = batchSelection.value.filter(item => item !== name)
   if (checked) next.push(name)
@@ -942,30 +956,34 @@ function setBatchSelected(name: string, checked: boolean) {
 }
 
 function toggleBatchSelectMode() {
-  downloadSelectMode.value = false
-  downloadSelection.value = []
   finishBatchDragSelection()
   batchSelectMode.value = !batchSelectMode.value
   if (batchSelectMode.value) showDetail.value = false
   if (!batchSelectMode.value) batchSelection.value = []
 }
 
-function selectEditableOnPage(checked: boolean) {
+function selectBatchPage(checked: boolean) {
   finishBatchDragSelection()
   const next = new Set(batchSelection.value)
   for (const model of pagedModels.value) {
     if (!checked) next.delete(model.name)
-    else if (canEditModelParameters(model)) next.add(model.name)
+    else if (canSelectBatchModel(model)) next.add(model.name)
   }
   batchSelection.value = [...next]
 }
 
+function selectBatchFiltered() {
+  finishBatchDragSelection()
+  batchSelection.value = [...new Set([...batchSelection.value, ...sortedModels.value.filter(canSelectBatchModel).map(model => model.name)])]
+}
+
+function clearBatchSelection() {
+  finishBatchDragSelection()
+  batchSelection.value = []
+}
+
 function handleModelCardClick(model: ModelEntry, event: MouseEvent | KeyboardEvent) {
   if (event.type === 'keydown') suppressBatchClick = false
-  if (downloadSelectMode.value) {
-    setDownloadSelected(model, !isDownloadSelected(model))
-    return
-  }
   if (!batchSelectMode.value) { selectModel(model); return }
   if (event.type === 'click' && window.getSelection()?.toString()) return
   setBatchSelected(model.name, !isBatchSelected(model.name))
@@ -982,7 +1000,7 @@ function consumeBatchClick(event: MouseEvent) {
 
 function startBatchDragSelection(event: PointerEvent, model: ModelEntry) {
   if (!batchSelectMode.value || event.pointerType !== 'mouse' || event.button !== 0) return
-  if (!canEditModelParameters(model) && !isBatchSelected(model.name)) return
+  if (!canSelectBatchModel(model) && !isBatchSelected(model.name)) return
   finishBatchDragSelection()
   suppressBatchClick = false
   const origin = { x: event.clientX, y: event.clientY }
@@ -1009,7 +1027,7 @@ function handleBatchPointerMove(event: PointerEvent) {
     if (state.visited.has(name)) return
     state.visited.add(name)
     const model = entries.get(name)
-    if (state.targetSelected) { if (model && canEditModelParameters(model)) next.add(name) }
+    if (state.targetSelected) { if (model && canSelectBatchModel(model)) next.add(name) }
     else next.delete(name)
   }
   apply(state.startName)
@@ -1068,7 +1086,7 @@ onActivated(() => { modelPageActive = true; if (batchSelectMode.value) attachBat
 onDeactivated(() => { modelPageActive = false; detachBatchListeners() })
 onBeforeUnmount(detachBatchListeners)
 
-const batchReferenceOptions = computed(() => batchSelection.value
+const batchReferenceOptions = computed(() => batchEditorSelection.value
   .filter(name => resolutionOf(findModelEntry(name)))
   .map(name => ({ label: name, value: name })))
 const batchReferenceModel = computed(() => findModelEntry(batchReferenceName.value))
@@ -1104,8 +1122,12 @@ async function loadBatchMetadata(names: string[], force = false) {
 }
 
 function openBatchEditor() {
-  if (!batchSelection.value.length) return
+  const names = [...editableBatchSelection.value]
+  if (!names.length) return
   batchSession += 1
+  batchEditorSelection.value = names
+  const included = new Set(names)
+  batchEditorSkipped.value = batchSelection.value.filter(name => !included.has(name))
   batchIntent.value = {}
   batchPreview.value = null
   batchExcluded.value = []
@@ -1113,7 +1135,6 @@ function openBatchEditor() {
   batchLoadState.value = {}
   batchReferenceName.value = ''
   showBatchEditor.value = true
-  const names = batchSelection.value.filter(name => canEditModelParameters(findModelEntry(name)))
   pickBatchReference()
   void loadBatchMetadata(names)
 }
@@ -1169,10 +1190,10 @@ function buildBatchPreview(kind: BatchPreview['kind']) {
     kind,
     revision: modelStore.modelInferenceRevision,
     intent,
-    rows: batchSelection.value.map(name => buildBatchRow(name, intent, kind)),
+    rows: batchEditorSelection.value.map(name => buildBatchRow(name, intent, kind)),
   }
   batchStaleNames.value = []
-  batchExcluded.value = batchExcluded.value.filter(name => batchSelection.value.includes(name))
+  batchExcluded.value = batchExcluded.value.filter(name => batchEditorSelection.value.includes(name))
 }
 
 function previewBatch() {
@@ -1295,8 +1316,6 @@ async function applyBatch() {
     message.success(t(preview.kind === 'reset' ? 'parameterEditor.batch.restored' : 'parameterEditor.batch.applied', { count: rows.length }))
     batchApplying.value = false
     closeBatchEditor()
-    batchSelection.value = []
-    batchSelectMode.value = false
   } catch (error) {
     if (isRevisionConflict(error)) {
       message.warning(t('parameterEditor.batch.revisionChanged'))
@@ -1314,6 +1333,7 @@ watch(() => modelStore.models.map(model => model.name), (names) => {
   const known = new Set(names)
   if (batchSelection.value.some(name => !known.has(name))) batchSelection.value = batchSelection.value.filter(name => known.has(name))
 })
+watch(modelDir, clearBatchSelection)
 
 // Editing the shared intent after a preview invalidates that preview.
 watch(batchIntent, () => { if (batchPreview.value && !batchApplying.value) backToBatchEdit() }, { deep: true })
@@ -1487,90 +1507,52 @@ async function downloadModel(model: ModelEntry, event?: MouseEvent) {
   }
 }
 
-// ---- Batch download: selection mode ----
-const downloadSelectMode = ref(false)
-const modelSelectionActive = computed(() => batchSelectMode.value || downloadSelectMode.value)
-const downloadSelection = ref<string[]>([])
-const downloadSelectionSet = computed(() => new Set(downloadSelection.value))
+// Batch actions derive their own eligible targets from the shared selection.
 const downloadQueueSet = computed(() => new Set(downloadQueue.value))
 
 function isQueuedDownload(modelName: string) {
   return downloadQueueSet.value.has(modelName)
 }
 
-/** Whether a model can be picked for a batch download: a catalog model with nothing in flight. */
 function isDownloadSelectable(model: ModelEntry) {
   return modelStore.canQueueDownload(model.name) && !isQueuedDownload(model.name)
 }
 
-function isDownloadSelected(model: ModelEntry) {
-  return downloadSelectionSet.value.has(model.name)
-}
-
-/** Selectable models across every page of the current filter, so "select all" means all results. */
-const downloadSelectableModels = computed(() => sortedModels.value.filter(isDownloadSelectable))
-const downloadSelectablePageModels = computed(() => pagedModels.value.filter(isDownloadSelectable))
-const downloadSelectedModels = computed(() => modelStore.models.filter((model) => downloadSelectionSet.value.has(model.name)))
-const downloadSelectedBytes = computed(() => downloadSelectedModels.value.reduce((sum, model) => sum + (model.sizeBytes || 0), 0))
-const allDownloadsSelected = computed(() => downloadSelectableModels.value.length > 0
-  && downloadSelectableModels.value.every((model) => downloadSelectionSet.value.has(model.name)))
-const someDownloadsSelected = computed(() => !allDownloadsSelected.value
-  && downloadSelectableModels.value.some((model) => downloadSelectionSet.value.has(model.name)))
-
-function setDownloadSelected(model: ModelEntry, checked: boolean) {
-  if (checked && !isDownloadSelectable(model)) return
-  downloadSelection.value = checked
-    ? Array.from(new Set([...downloadSelection.value, model.name]))
-    : downloadSelection.value.filter((name) => name !== model.name)
-}
-
-function toggleDownloadSelectAll(checked: boolean) {
-  downloadSelection.value = checked ? downloadSelectableModels.value.map((model) => model.name) : []
-}
-
-function selectDownloadPage() {
-  downloadSelection.value = Array.from(new Set([...downloadSelection.value, ...downloadSelectablePageModels.value.map((model) => model.name)]))
-}
-
-function clearDownloadSelection() {
-  downloadSelection.value = []
-}
-
-function toggleDownloadSelectMode() {
-  finishBatchDragSelection()
-  batchSelectMode.value = false
-  batchSelection.value = []
-  downloadSelectMode.value = !downloadSelectMode.value
-  if (downloadSelectMode.value) showDetail.value = false
-  else downloadSelection.value = []
-}
-
-// A selected model can finish downloading elsewhere (or start, or be removed); drop it so the
-// count and total size only describe what the batch will actually fetch.
-watch(() => modelStore.models.filter(isDownloadSelectable).map(model => model.name), names => {
-  if (!downloadSelection.value.length) return
-  const selectable = new Set(names)
-  const next = downloadSelection.value.filter(name => selectable.has(name))
-  if (next.length !== downloadSelection.value.length) downloadSelection.value = next
-})
+const downloadSelectedModels = computed(() => modelStore.models.filter(model => isBatchSelected(model.name) && isDownloadSelectable(model)))
 
 function confirmBatchDownload() {
-  const names = downloadSelectedModels.value.filter(isDownloadSelectable).map((model) => model.name)
-  if (!names.length) return
+  const targets = [...downloadSelectedModels.value]
+  if (!targets.length) return
+  const names = targets.map(model => model.name)
+  const included = new Set(names)
+  const skipped = batchSelection.value.filter(name => !included.has(name))
+  const size = targets.reduce((sum, model) => sum + (model.sizeBytes || 0), 0)
+  const directory = settings.modelDir
+  const modelList = (items: string[], label: string) => h('details', { class: 'model-batch-confirm__details' }, [
+    h('summary', label), h('ul', { class: 'model-batch-confirm__list' }, items.map(name => h('li', { key: name }, name))),
+  ])
   dialog.info({
     title: t('models.batchDownloadConfirmTitle'),
-    content: t('models.batchDownloadConfirmContent', {
-      count: names.length,
-      size: formatBytes(downloadSelectedBytes.value),
-      concurrency: BATCH_DOWNLOAD_CONCURRENCY,
-    }),
+    content: () => h('div', [
+      h('p', t('models.batchDownloadConfirmContent', { count: names.length, size: formatBytes(size), concurrency: BATCH_DOWNLOAD_CONCURRENCY })),
+      modelList(names, t('models.batchDownloadList', { count: names.length })),
+      ...(skipped.length ? [h('p', t('models.batchDownloadSkipped', { count: skipped.length })),
+        modelList(skipped, t('models.batchSkippedList', { count: skipped.length }))] : []),
+    ]),
     positiveText: t('common.confirm'),
     negativeText: t('common.cancel'),
     onPositiveClick: () => {
-      const added = modelStore.enqueueBatchDownload(names)
+      if (settings.modelDir !== directory) {
+        message.warning(t('models.batchDirectoryChanged'))
+        return
+      }
+      const current = names.filter(name => {
+        const model = modelStore.models.find(model => model.name === name)
+        return model && isDownloadSelectable(model)
+      })
+      const added = modelStore.enqueueBatchDownload(current)
       if (added) message.success(t('models.batchDownloadQueued', { count: added }))
-      downloadSelection.value = []
-      downloadSelectMode.value = false
+      else message.info(t('models.batchNoDownloadSelection'))
     },
   })
 }
@@ -1849,27 +1831,34 @@ watch(() => route.query.parameters, async value => {
         </div>
         <p>{{ t('models.subtitle') }}</p>
       </div>
-      <div
-        v-if="batchSelectMode"
-        class="header-actions batch-select-bar"
-        role="region"
-        :aria-label="t('parameterEditor.batch.title')"
-      >
-        <n-checkbox :checked="allBatchPageSelected" :indeterminate="someBatchPageSelected" :disabled="!batchSelectableOnPage.length"
-          :title="t('parameterEditor.batch.selectHint')" @update:checked="selectEditableOnPage">{{ t('parameterEditor.batch.selectPage') }}</n-checkbox>
-        <div class="batch-select-bar__selection">
-          <span class="batch-select-bar__count" aria-live="polite" aria-atomic="true">
-            {{ t('parameterEditor.batch.selectedCount', { count: batchSelection.length }) }}
-            <span v-if="batchOutsidePage">{{ t('parameterEditor.batch.outsidePage', { count: batchOutsidePage }) }}</span>
-          </span>
-          <n-button v-if="batchSelection.length" text size="small" :title="t('parameterEditor.batch.clearAllPages')" @click="batchSelection = []">
-            {{ t('parameterEditor.batch.clearSelection') }}
-          </n-button>
+      <div v-if="batchSelectMode" class="header-actions batch-select-bar" data-guide="model-batch" role="region" :aria-label="t('models.batchSelect')">
+        <div class="batch-select-bar__scope">
+          <n-checkbox :checked="allBatchPageSelected" :indeterminate="someBatchPageSelected" :disabled="!batchSelectableOnPage.length"
+            @update:checked="selectBatchPage">{{ t('models.batchSelectPage') }}</n-checkbox>
+          <n-dropdown trigger="click" :options="batchSelectionOptions" @select="selectBatchFiltered">
+            <n-button quaternary size="small" :title="t('models.batchSelectionScope')" :aria-label="t('models.batchSelectionScope')">
+              <template #icon><n-icon :component="ChevronDownOutline" /></template>
+            </n-button>
+          </n-dropdown>
         </div>
-        <n-button type="primary" :disabled="!editableBatchSelection.length" @click="openBatchEditor">
-          {{ t('parameterEditor.batch.editSelected') }}
-        </n-button>
-        <n-button secondary @click="toggleBatchSelectMode">{{ t('parameterEditor.batch.exitSelect') }}</n-button>
+        <span class="batch-select-bar__count" aria-live="polite" aria-atomic="true">
+          {{ t('models.batchSelectedCount', { count: batchSelection.length }) }}
+          <span v-if="batchOutsidePage">{{ t('models.batchOutsidePage', { count: batchOutsidePage }) }}</span>
+          <span v-if="batchOutsideFilter">{{ t('models.batchOutsideFilter', { count: batchOutsideFilter }) }}</span>
+        </span>
+        <span :title="downloadSelectedModels.length ? undefined : t('models.batchNoDownloadSelection')">
+          <n-button secondary :disabled="!downloadSelectedModels.length" @click="confirmBatchDownload">
+            <template #icon><n-icon :component="CloudDownloadOutline" /></template>
+            {{ t('models.batchDownloadCount', { count: downloadSelectedModels.length }) }}
+          </n-button>
+        </span>
+        <span :title="editableBatchSelection.length ? undefined : t('models.batchNoEditSelection')">
+          <n-button type="primary" :disabled="!editableBatchSelection.length" @click="openBatchEditor">
+            {{ t('models.batchEditCount', { count: editableBatchSelection.length }) }}
+          </n-button>
+        </span>
+        <n-button text size="small" :disabled="!batchSelection.length" @click="clearBatchSelection">{{ t('parameterEditor.batch.clearSelection') }}</n-button>
+        <n-button secondary data-guide-action="batch-exit" @click="toggleBatchSelectMode">{{ t('parameterEditor.batch.exitSelect') }}</n-button>
       </div>
       <div v-else class="header-actions" data-guide="model-management">
         <n-tooltip v-if="!customModelsSupported" trigger="hover">
@@ -1885,25 +1874,13 @@ watch(() => route.query.parameters, async value => {
           <template #icon><n-icon :component="AddCircleOutline" /></template>
           {{ t('models.customImport') }}
         </n-button>
-        <n-button
-          :type="downloadSelectMode ? 'primary' : 'default'"
-          secondary
-          :aria-pressed="downloadSelectMode"
-          @click="toggleDownloadSelectMode"
-        >
-          <template #icon><n-icon :component="downloadSelectMode ? CloseOutline : CheckboxOutline" /></template>
-          {{ downloadSelectMode ? t('models.batchSelectExit') : t('models.batchSelect') }}
-        </n-button>
         <n-button secondary @click="openStorageManager">
           <template #icon><n-icon :component="ServerOutline" /></template>
           {{ t('models.storageManage') }}
         </n-button>
-        <n-button
-          secondary
-          :aria-pressed="false"
-          @click="toggleBatchSelectMode"
-        >
-          {{ t('parameterEditor.batch.enterSelect') }}
+        <n-button secondary data-guide="model-batch" :aria-pressed="batchSelectMode" @click="toggleBatchSelectMode">
+          <template #icon><n-icon :component="CheckboxOutline" /></template>
+          {{ t('models.batchSelect') }}
         </n-button>
         <n-button secondary :loading="isLoading" data-guide="model-library-fallback" @click="loadModels">
           <template #icon><n-icon :component="RefreshOutline" /></template>
@@ -1972,35 +1949,6 @@ watch(() => route.query.parameters, async value => {
       </div>
     </div>
 
-    <!-- Batch selection bar -->
-    <div v-if="downloadSelectMode" class="batch-bar" role="region" :aria-label="t('models.batchSelect')">
-      <n-checkbox
-        :checked="allDownloadsSelected"
-        :indeterminate="someDownloadsSelected"
-        :disabled="!downloadSelectableModels.length"
-        @update:checked="toggleDownloadSelectAll"
-      >
-        {{ t('models.batchSelectAll', { count: downloadSelectableModels.length }) }}
-      </n-checkbox>
-      <n-button size="small" quaternary :disabled="!downloadSelectablePageModels.length" @click="selectDownloadPage">
-        {{ t('models.batchSelectPage') }}
-      </n-button>
-      <n-button size="small" quaternary :disabled="!downloadSelection.length" @click="clearDownloadSelection">
-        {{ t('models.batchClearSelection') }}
-      </n-button>
-      <span class="batch-bar__summary text-sm text-muted">
-        <template v-if="downloadSelection.length">
-          {{ t('models.batchSelectedSummary', { count: downloadSelection.length, size: formatBytes(downloadSelectedBytes) }) }}
-        </template>
-        <template v-else-if="!downloadSelectableModels.length">{{ t('models.batchNoDownloadable') }}</template>
-        <template v-else>{{ t('models.batchSelectHint') }}</template>
-      </span>
-      <n-button size="small" type="primary" :disabled="!downloadSelection.length" @click="confirmBatchDownload">
-        <template #icon><n-icon :component="CloudDownloadOutline" /></template>
-        {{ t('models.batchDownloadAction', { count: downloadSelection.length }) }}
-      </n-button>
-    </div>
-
     <!-- Waiting batch downloads stay visible after leaving selection mode. -->
     <div v-if="downloadQueue.length" class="batch-queue-bar">
       <span class="text-sm">{{ t('models.downloadQueueSummary', { count: downloadQueue.length }) }}</span>
@@ -2050,35 +1998,30 @@ watch(() => route.query.parameters, async value => {
             :data-batch-model="model.name"
             :data-guide="model.supported ? 'model-library' : undefined"
             :class="['model-card', {
-              'model-card--selected': !modelSelectionActive && selectedModel === model.name,
-              'model-card--selecting': modelSelectionActive,
-              'model-card--batch-selected': (batchSelectMode && isBatchSelected(model.name)) || (downloadSelectMode && isDownloadSelected(model)),
-              'model-card--batch-ineligible': (batchSelectMode && !canEditModelParameters(model) && !isBatchSelected(model.name)) || (downloadSelectMode && !isDownloadSelectable(model)),
+              'model-card--selected': !batchSelectMode && selectedModel === model.name,
+              'model-card--selecting': batchSelectMode,
+              'model-card--batch-selected': batchSelectMode && isBatchSelected(model.name),
+              'model-card--batch-ineligible': batchSelectMode && !canSelectBatchModel(model) && !isBatchSelected(model.name),
               'model-card--unsupported': !model.supported,
               'model-card--busy': isModelBusy(model)
             }]"
             tabindex="0"
             role="button"
-            :aria-label="t(downloadSelectMode ? 'models.batchSelectModelAria' : batchSelectMode ? 'parameterEditor.batch.selectModelAria' : 'models.viewDetailAria', { name: model.name })"
-            :aria-current="!modelSelectionActive && selectedModel === model.name ? 'true' : undefined"
-            :aria-pressed="downloadSelectMode ? isDownloadSelected(model) : batchSelectMode ? isBatchSelected(model.name) : undefined"
-            :aria-disabled="((batchSelectMode && !canEditModelParameters(model) && !isBatchSelected(model.name)) || (downloadSelectMode && !isDownloadSelectable(model))) ? true : undefined"
-            :title="batchSelectMode && !canEditModelParameters(model) ? t('parameterEditor.modelLibrary.notEditable') : undefined"
+            :aria-label="t(batchSelectMode ? 'models.batchSelectModelAria' : 'models.viewDetailAria', { name: model.name })"
+            :aria-current="!batchSelectMode && selectedModel === model.name ? 'true' : undefined"
+            :aria-pressed="batchSelectMode ? isBatchSelected(model.name) : undefined"
+            :aria-disabled="(batchSelectMode && !canSelectBatchModel(model) && !isBatchSelected(model.name)) ? true : undefined"
+            :title="batchSelectMode && !canSelectBatchModel(model) && !isBatchSelected(model.name) ? t('models.batchNotSelectable') : undefined"
             @click="handleModelCardClick(model, $event)"
-            @contextmenu.stop.prevent="!modelSelectionActive && openModelContextMenu($event, model)"
+            @contextmenu.stop.prevent="!batchSelectMode && openModelContextMenu($event, model)"
             @keydown.enter.self.prevent="handleModelCardClick(model, $event)"
             @keydown.space.self.prevent="handleModelCardClick(model, $event)"
           >
-          <div v-if="modelSelectionActive" class="mc-batch-select" @pointerdown.stop="startBatchDragSelection($event, model)" @click.stop>
-            <n-checkbox v-if="batchSelectMode" class="mc-batch-check" :checked="isBatchSelected(model.name)"
-              :disabled="!canEditModelParameters(model) && !isBatchSelected(model.name)"
-              :title="canEditModelParameters(model) ? t('parameterEditor.batch.selectModel') : t('parameterEditor.modelLibrary.notEditable')"
-              :aria-label="t('parameterEditor.batch.selectModelAria', { name: model.name })"
-              @update:checked="(value: boolean) => setBatchSelected(model.name, value)" />
-            <n-checkbox v-else class="mc-batch-check" :checked="isDownloadSelected(model)"
-              :disabled="!isDownloadSelectable(model)"
+          <div v-if="batchSelectMode" class="mc-batch-select" @pointerdown.stop="startBatchDragSelection($event, model)" @click.stop>
+            <n-checkbox class="mc-batch-check" :checked="isBatchSelected(model.name)"
+              :disabled="!canSelectBatchModel(model) && !isBatchSelected(model.name)"
               :aria-label="t('models.batchSelectModelAria', { name: model.name })"
-              @update:checked="(value: boolean) => setDownloadSelected(model, value)" />
+              @update:checked="(value: boolean) => setBatchSelected(model.name, value)" />
           </div>
           <!-- Card Header -->
           <div class="mc-header">
@@ -2095,7 +2038,7 @@ watch(() => route.query.parameters, async value => {
               </n-tooltip><template v-for="(part, index) in modelNameParts(model.name)" :key="index">{{ part }}<wbr /></template></span>
               <span v-if="modelNote(model)" class="mc-note" :title="modelNote(model)">{{ modelNote(model) }}</span>
             </div>
-            <div v-if="!modelSelectionActive" class="mc-controls">
+            <div v-if="!batchSelectMode" class="mc-controls">
               <n-button
                 quaternary
                 circle
@@ -2390,9 +2333,16 @@ watch(() => route.query.parameters, async value => {
           <p class="model-inference-modal__hint" aria-live="polite">
             {{ batchPreview?.kind === 'reset'
               ? t('parameterEditor.batch.resetHint', { count: batchChangedRows.length, unchanged: batchDefaultCount })
-              : t('parameterEditor.batch.hint', { count: batchSelection.length }) }}
+              : t('parameterEditor.batch.hint', { count: batchEditorSelection.length }) }}
           </p>
 
+          <n-alert v-if="batchEditorSkipped.length" type="info" :bordered="false" class="model-inference-modal__alert">
+            {{ t('models.batchParameterScope', { count: batchEditorSelection.length, skipped: batchEditorSkipped.length }) }}
+            <details class="model-batch-confirm__details">
+              <summary>{{ t('models.batchSkippedList', { count: batchEditorSkipped.length }) }}</summary>
+              <ul class="model-batch-confirm__list"><li v-for="name in batchEditorSkipped" :key="name">{{ name }}</li></ul>
+            </details>
+          </n-alert>
           <template v-if="!batchPreview">
             <div class="batch-reference-row">
               <span class="text-sm">{{ t('parameterEditor.batch.referenceModel') }}</span>
@@ -2891,7 +2841,6 @@ watch(() => route.query.parameters, async value => {
 }
 
 /* ===== Batch selection ===== */
-.batch-bar,
 .batch-queue-bar {
   display: flex;
   align-items: center;
@@ -2910,10 +2859,6 @@ watch(() => route.query.parameters, async value => {
   background: color-mix(in srgb, var(--surface-2) 40%, transparent);
 }
 
-.batch-bar__summary {
-  flex: 1;
-  min-width: 160px;
-}
 
 /* ===== Category Select ===== */
 .category-select {
@@ -3567,11 +3512,20 @@ watch(() => route.query.parameters, async value => {
   background: color-mix(in srgb, var(--primary-softer) 42%, var(--surface-1));
 }
 
-.batch-select-bar__selection {
+.batch-select-bar__scope {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 4px 8px;
+  gap: 2px;
+}
+
+:global(.model-batch-confirm__details) { margin-top: 8px; }
+:global(.model-batch-confirm__details > summary) { cursor: pointer; color: var(--on-surface-muted); }
+:global(.model-batch-confirm__list) {
+  max-height: 160px;
+  margin: 8px 0;
+  padding-left: 20px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
 }
 
 .batch-select-bar__count {

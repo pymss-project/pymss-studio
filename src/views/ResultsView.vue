@@ -732,7 +732,7 @@ function formatDurationMs(value: number | undefined) {
         <p>{{ t('results.subtitle') }}</p>
       </div>
       <div
-        class="results-page__header-actions"
+        class="results-page__header-actions" data-guide="result-management"
         :class="{ 'results-page__header-actions--selecting': selecting }"
       >
         <template v-if="selecting">
@@ -755,7 +755,7 @@ function formatDurationMs(value: number | undefined) {
             <template #icon><n-icon :component="TrashOutline" /></template>
             {{ t('results.removeSelectedCount', { count: selectedResultIds.length }) }}
           </n-button>
-          <n-button secondary @click="toggleSelecting">
+          <n-button secondary data-guide-action="result-exit" @click="toggleSelecting">
             {{ t('results.batchExit') }}
           </n-button>
         </template>

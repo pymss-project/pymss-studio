@@ -4,24 +4,27 @@ import test from 'node:test'
 import vm from 'node:vm'
 import ts from 'typescript'
 import { parse } from 'vue/compiler-sfc'
-import { computed, nextTick, reactive, ref, watch } from 'vue'
-import { isActiveDownloadStatus } from '../src/utils/downloadQueue.ts'
+import { computed, h, nextTick, reactive, ref, watch } from 'vue'
+import { BATCH_DOWNLOAD_CONCURRENCY, isActiveDownloadStatus } from '../src/utils/downloadQueue.ts'
 
 const source = ts.createSourceFile('models.ts', parse(readFileSync(new URL('../src/views/ModelsView.vue', import.meta.url), 'utf8')).descriptor.scriptSetup.content, ts.ScriptTarget.Latest, true)
-const functions = new Set(['isCustomModel', 'isDeletingModel', 'isDownloadSelectable', 'isDownloadSelected', 'isQueuedDownload',
-  'setDownloadSelected', 'toggleDownloadSelectAll', 'selectDownloadPage', 'clearDownloadSelection', 'toggleDownloadSelectMode',
-  'toggleBatchSelectMode', 'isBatchSelected', 'setBatchSelected', 'handleModelCardClick'])
-const variables = new Set(['batchSelectMode', 'batchSelection', 'batchSelectionSet', 'downloadSelectMode', 'modelSelectionActive',
-  'downloadSelection', 'downloadSelectionSet', 'downloadQueueSet', 'downloadSelectableModels', 'downloadSelectablePageModels',
-  'downloadSelectedModels', 'downloadSelectedBytes', 'allDownloadsSelected', 'someDownloadsSelected'])
+const functions = new Set(['isDeletingModel', 'isDownloadSelectable', 'isQueuedDownload', 'canSelectBatchModel', 'canEditModelParameters',
+  'toggleBatchSelectMode', 'isBatchSelected', 'setBatchSelected', 'selectBatchPage', 'selectBatchFiltered', 'clearBatchSelection',
+  'handleModelCardClick', 'confirmBatchDownload', 'openBatchEditor', 'closeBatchEditor', 'buildBatchPreview', 'applyBatch',
+  'mapWithConcurrency', 'toLibraryOverrides', 'errorText', 'isRevisionConflict'])
+const variables = new Set(['batchSelectMode', 'batchSelection', 'batchSelectionSet', 'downloadQueueSet', 'downloadSelectedModels',
+  'editableBatchSelection', 'batchSelectableOnPage', 'batchSelectedOnPage', 'batchOutsidePage', 'batchOutsideFilter',
+  'allBatchPageSelected', 'someBatchPageSelected', 'batchSelectionOptions', 'batchEditorSelection', 'batchEditorSkipped',
+  'batchSession', 'showBatchEditor', 'batchApplying', 'batchIntent', 'batchPreview', 'batchExcluded', 'batchStaleNames',
+  'batchLoadState', 'batchReferenceName', 'batchReferenceOptions', 'batchMetadataLoading', 'batchIntentEmpty', 'BATCH_METADATA_CONCURRENCY'])
 const statements = source.statements.filter(statement => ts.isFunctionDeclaration(statement)
   ? functions.has(statement.name?.text)
   : ts.isVariableStatement(statement) && statement.declarationList.declarations.some(item => variables.has(item.name.getText(source))))
 assert.equal(statements.length, functions.size + variables.size)
-const prune = source.statements.find(statement => ts.isExpressionStatement(statement) && statement.getText(source).startsWith('watch(')
-  && statement.getText(source).includes('if (!downloadSelection.value.length)'))
-assert.ok(prune)
-const code = ts.transpileModule([...statements, prune].map(statement => statement.getText(source)).join('\n'), {
+const watchers = source.statements.filter(statement => ts.isExpressionStatement(statement) && statement.getText(source).startsWith('watch(')
+  && (statement.getText(source).includes('const known = new Set(names)') || statement.getText(source).startsWith('watch(modelDir,')))
+assert.equal(watchers.length, 2)
+const code = ts.transpileModule([...statements, ...watchers].map(statement => statement.getText(source)).join('\n'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText
 const modelSource = ts.createSourceFile('model.ts', readFileSync(new URL('../src/stores/model.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true)
@@ -38,117 +41,189 @@ const eligibilityCode = ts.transpileModule(eligibilityStatements.map(statement =
 }).outputText
 
 function environment(t) {
-  const stops = [], opened = []
-  const models = ['new', 'error', 'paused', 'cancelled', 'interrupted', 'preparing', 'downloading', 'downloaded', 'custom', 'deleting', 'queued']
-    .map(name => ({ name, supported: true, downloaded: name === 'downloaded', source: name === 'custom' ? 'user' : 'catalog', sizeBytes: 100 }))
-  const modelStore = reactive({ models })
-  let finishedDrags = 0
-  const state = { ref, computed, isActiveDownloadStatus, modelStore,
+  const stops = [], opened = [], queued = [], saved = [], metadata = [], messages = []
+  const names = ['new', 'error', 'paused', 'cancelled', 'interrupted', 'preparing', 'downloading', 'downloaded', 'custom', 'deleting', 'queued', 'unsupported']
+  const modelStore = reactive({ models: names.map(name => ({ name, supported: name !== 'unsupported',
+    downloaded: ['downloaded', 'custom', 'deleting'].includes(name), source: name === 'custom' ? 'user' : 'catalog', sizeBytes: 100,
+    inferenceParamMeta: { resolution: { fingerprint: name + '-fp' } },
+  })), modelInferenceRevision: 1 })
+  let view, confirmation, finishedDrags = 0
+  const state = { ref, computed, h, isActiveDownloadStatus, BATCH_DOWNLOAD_CONCURRENCY, modelStore,
     models: computed(() => modelStore.models),
-    sortedModels: computed(() => modelStore.models), pagedModels: ref(models.slice(0, 3)),
+    filter: ref(''), sortedModels: computed(() => modelStore.models.filter(model => !state.filter.value || model.name === state.filter.value)),
+    pagedModels: ref(modelStore.models.slice(0, 3)), modelDir: ref('/models'),
     downloadTasks: ref(Object.fromEntries(['error', 'paused', 'cancelled', 'interrupted', 'preparing', 'downloading'].map(status => [status, { status }]))),
     deleteTasks: ref({ deleting: { status: 'deleting' } }), downloadQueue: ref(['queued']), showDetail: ref(true), suppressBatchClick: false,
-    canEditModelParameters: model => Boolean(model?.downloaded), selectModel: model => opened.push(model.name),
+    findModelEntry: name => modelStore.models.find(model => model.name === name), selectModel: model => opened.push(model.name),
+    resolutionOf: model => model?.inferenceParamMeta?.resolution,
     finishBatchDragSelection() { finishedDrags++ }, window: { getSelection: () => null },
+    settings: reactive({ modelDir: '/models' }), dialog: { info: options => { confirmation = options } },
+    t: (key, args = {}) => key + ':' + JSON.stringify(args), formatBytes: bytes => String(bytes),
+    message: Object.fromEntries(['success', 'info', 'warning', 'error'].map(level => [level, text => messages.push({ level, text })])),
+    studioLog: { error() {} },
+    loadBatchMetadata: names => { metadata.push([...names]); return Promise.resolve([]) }, pickBatchReference() {},
+    buildBatchRow: name => ({ name, status: 'ok', profile: { batch_size: 2 }, fingerprint: name + '-fp' }),
+    canApplyBatch: ref(true), batchChangedRows: computed(() => view.batchPreview.value?.rows || []),
     watch(...args) { const stop = watch(...args); stops.push(stop); return stop },
   }
   const eligibility = vm.runInNewContext(`${eligibilityCode}\n({canQueueDownload, pendingModelDeletions, downloadsClosing})`, state)
   modelStore.canQueueDownload = eligibility.canQueueDownload
-  const view = vm.runInNewContext(`${code}\n({${[...functions, ...variables].join(',')}})`, state)
+  modelStore.enqueueBatchDownload = names => { queued.push([...names]); state.downloadQueue.value.push(...names); return names.length }
+  modelStore.ensureModelMetadata = async name => modelStore.models.find(model => model.name === name)
+  modelStore.replaceModelInferenceOverridesBatch = async rows => { saved.push(rows) }
+  view = vm.runInNewContext(`${code}\n({${[...functions, ...variables].join(',')}})`, state)
   t.after(() => stops.forEach(stop => stop()))
-  return { state, view, models, opened, pendingDeletions: eligibility.pendingModelDeletions,
+  return { state, view, modelStore, models: modelStore.models, opened, queued, saved, metadata, messages,
+    confirmation: () => confirmation, pendingDeletions: eligibility.pendingModelDeletions,
     downloadsClosing: eligibility.downloadsClosing, finishedDrags: () => finishedDrags }
 }
 
-test('failed and interrupted downloads can be selected again while active or ineligible models stay excluded', t => {
+const selected = h => Array.from(h.view.batchSelection.value)
+const downloadable = h => Array.from(h.view.downloadSelectedModels.value, model => model.name)
+
+test('one selection accepts downloadable and installed models and derives eligible action subsets', t => {
   const h = environment(t)
-  for (const model of h.models) {
-    assert.equal(h.view.isDownloadSelectable(model), ['new', 'error', 'paused', 'cancelled', 'interrupted'].includes(model.name), model.name)
-  }
-  assert.equal(h.view.isDownloadSelectable({ name: 'unsupported', supported: false }), false)
-  h.view.toggleDownloadSelectAll(true)
-  assert.deepEqual(Array.from(h.view.downloadSelection.value), ['new', 'error', 'paused', 'cancelled', 'interrupted'])
-  assert.equal(h.view.downloadSelectedBytes.value, 500)
+  h.view.toggleBatchSelectMode()
+  h.view.selectBatchFiltered()
+  assert.deepEqual(selected(h), ['new', 'error', 'paused', 'cancelled', 'interrupted', 'downloaded', 'custom'])
+  assert.deepEqual(downloadable(h), ['new', 'error', 'paused', 'cancelled', 'interrupted'])
+  assert.deepEqual(Array.from(h.view.editableBatchSelection.value), ['downloaded', 'custom'])
+  assert.equal(h.state.showDetail.value, false)
+  assert.equal(h.view.canSelectBatchModel(h.models.find(model => model.name === 'unsupported')), false)
 })
 
-test('page selection keeps choices from other pages and changing status prunes only ineligible entries', async t => {
+test('page select and deselect preserve selections from other pages and filtered-out models', t => {
   const h = environment(t)
-  h.view.setDownloadSelected(h.models[4], true)
-  h.view.selectDownloadPage()
-  assert.deepEqual(Array.from(h.view.downloadSelection.value), ['interrupted', 'new', 'error', 'paused'])
+  h.view.setBatchSelected('custom', true)
+  h.view.selectBatchPage(true)
+  assert.deepEqual(selected(h), ['custom', 'new', 'error', 'paused'])
+  assert.equal(h.view.allBatchPageSelected.value, true)
+  assert.equal(h.view.batchOutsidePage.value, 1)
+  h.view.selectBatchPage(false)
+  assert.deepEqual(selected(h), ['custom'])
+  h.view.setBatchSelected('new', true)
+  h.state.filter.value = 'new'
+  assert.equal(h.view.batchOutsideFilter.value, 1)
+  assert.deepEqual(selected(h), ['custom', 'new'])
+})
+
+test('download state changes update action counts without dropping checked models', async t => {
+  const h = environment(t)
+  h.view.setBatchSelected('new', true)
+  h.view.setBatchSelected('error', true)
   h.state.downloadTasks.value.error.status = 'downloading'
   h.state.downloadQueue.value.push('new')
-  h.state.deleteTasks.value.paused = { status: 'deleting' }
   await nextTick()
-  assert.deepEqual(Array.from(h.view.downloadSelection.value), ['interrupted'])
+  assert.deepEqual(selected(h), ['new', 'error'])
+  assert.deepEqual(downloadable(h), [])
+  h.modelStore.models.find(model => model.name === 'error').downloaded = true
+  h.state.downloadTasks.value.error.status = 'done'
+  await nextTick()
+  assert.deepEqual(Array.from(h.view.editableBatchSelection.value), ['error'])
+  h.view.setBatchSelected('new', false)
+  assert.deepEqual(selected(h), ['error'])
 })
 
-test('download selection and parameter selection are mutually exclusive and stop an old drag', t => {
+test('model removal prunes only missing IDs and a directory change clears the shared selection', async t => {
   const h = environment(t)
-  h.view.batchSelectMode.value = true
-  h.view.batchSelection.value = ['downloaded']
-  h.view.toggleDownloadSelectMode()
-  assert.equal(h.view.batchSelectMode.value, false)
-  assert.deepEqual(Array.from(h.view.batchSelection.value), [])
-  assert.equal(h.view.downloadSelectMode.value, true)
-  assert.equal(h.state.showDetail.value, false)
-  h.view.setDownloadSelected(h.models[1], true)
+  h.view.setBatchSelected('new', true)
+  h.view.setBatchSelected('custom', true)
+  h.modelStore.models = h.modelStore.models.filter(model => model.name !== 'new')
+  await nextTick()
+  assert.deepEqual(selected(h), ['custom'])
+  h.state.modelDir.value = '/replacement'
+  await nextTick()
+  assert.deepEqual(selected(h), [])
+})
+
+test('card keyboard and click events use shared selection and only normal mode opens details', t => {
+  const h = environment(t)
   h.view.toggleBatchSelectMode()
-  assert.equal(h.view.downloadSelectMode.value, false)
-  assert.deepEqual(Array.from(h.view.downloadSelection.value), [])
-  assert.equal(h.view.batchSelectMode.value, true)
-  assert.equal(h.finishedDrags(), 2)
-})
-
-test('card keyboard and click events select within the active mode without opening details', t => {
-  const h = environment(t)
-  h.view.toggleDownloadSelectMode()
   h.view.handleModelCardClick(h.models[1], { type: 'keydown', key: 'Enter' })
-  assert.deepEqual(Array.from(h.view.downloadSelection.value), ['error'])
-  h.view.handleModelCardClick(h.models[1], { type: 'keydown', key: ' ' })
-  assert.deepEqual(Array.from(h.view.downloadSelection.value), [])
+  h.view.handleModelCardClick(h.models[7], { type: 'click' })
   h.view.handleModelCardClick(h.models[5], { type: 'click' })
+  assert.deepEqual(selected(h), ['error', 'downloaded'])
   assert.deepEqual(h.opened, [])
+  h.view.handleModelCardClick(h.models[1], { type: 'keydown', key: ' ' })
+  assert.deepEqual(selected(h), ['downloaded'])
   h.view.toggleBatchSelectMode()
-  h.view.handleModelCardClick(h.models[7], { type: 'keydown', key: 'Enter' })
-  assert.deepEqual(Array.from(h.view.batchSelection.value), ['downloaded'])
-  h.view.toggleBatchSelectMode()
+  assert.deepEqual(selected(h), [])
   h.view.handleModelCardClick(h.models[0], { type: 'click' })
   assert.deepEqual(h.opened, ['new'])
 })
 
-test('pending batch deletion targets become unavailable and clear only their own selections', async t => {
+test('pending deletions and window closure disable download targets without silently removing selections', async t => {
   const h = environment(t)
-  h.view.toggleDownloadSelectMode()
-  h.view.setDownloadSelected(h.models[1], true)
-  h.view.setDownloadSelected(h.models[2], true)
+  h.view.setBatchSelected('error', true)
   h.pendingDeletions.value.set('error', 1)
   await nextTick()
-  assert.equal(h.view.isDownloadSelectable(h.models[1]), false)
-  assert.equal(h.view.isDownloadSelectable(h.models[2]), true)
-  assert.deepEqual(Array.from(h.view.downloadSelection.value), ['paused'])
-  h.view.setDownloadSelected(h.models[1], true)
-  assert.deepEqual(Array.from(h.view.downloadSelection.value), ['paused'])
-  h.pendingDeletions.value.delete('error')
-  await nextTick()
-  assert.equal(h.view.isDownloadSelectable(h.models[1]), true)
-  h.view.setDownloadSelected(h.models[1], true)
-  assert.deepEqual(Array.from(h.view.downloadSelection.value), ['paused', 'error'])
-})
-
-test('window closure disables download selection and cancellation restores eligibility', async t => {
-  const h = environment(t)
-  h.view.toggleDownloadSelectMode()
-  h.view.toggleDownloadSelectAll(true)
+  assert.deepEqual(downloadable(h), [])
+  assert.deepEqual(selected(h), ['error'])
+  h.view.setBatchSelected('paused', true)
   h.downloadsClosing.value = true
   await nextTick()
-  assert.equal(h.view.downloadSelectableModels.value.length, 0)
-  assert.deepEqual(Array.from(h.view.downloadSelection.value), [])
-  h.view.setDownloadSelected(h.models[1], true)
-  assert.deepEqual(Array.from(h.view.downloadSelection.value), [])
+  assert.deepEqual(downloadable(h), [])
+  h.view.setBatchSelected('new', true)
+  assert.deepEqual(selected(h), ['error', 'paused'])
   h.downloadsClosing.value = false
+  h.pendingDeletions.value.delete('error')
   await nextTick()
-  assert.equal(h.view.isDownloadSelectable(h.models[1]), true)
-  h.view.setDownloadSelected(h.models[1], true)
-  assert.deepEqual(Array.from(h.view.downloadSelection.value), ['error'])
+  assert.deepEqual(downloadable(h), ['error', 'paused'])
+})
+
+test('download confirmation freezes targets, rechecks eligibility and preserves shared selection after queueing', t => {
+  const h = environment(t)
+  h.view.toggleBatchSelectMode()
+  h.view.setBatchSelected('new', true)
+  h.view.setBatchSelected('error', true)
+  h.view.setBatchSelected('downloaded', true)
+  h.view.confirmBatchDownload()
+  const content = h.confirmation().content()
+  assert.match(JSON.stringify(content.children), /batchSkippedList/)
+  h.view.setBatchSelected('paused', true)
+  h.modelStore.models.find(model => model.name === 'error').downloaded = true
+  h.confirmation().onPositiveClick()
+  assert.deepEqual(h.queued, [['new']])
+  assert.equal(h.view.batchSelectMode.value, true)
+  assert.deepEqual(selected(h), ['new', 'error', 'downloaded', 'paused'])
+})
+
+test('a pending download confirmation cannot enqueue models into a different directory', t => {
+  const h = environment(t)
+  h.view.setBatchSelected('new', true)
+  h.view.confirmBatchDownload()
+  h.state.settings.modelDir = '/elsewhere'
+  h.confirmation().onPositiveClick()
+  assert.deepEqual(h.queued, [])
+  assert.match(h.messages.at(-1).text, /batchDirectoryChanged/)
+})
+
+test('parameter editor and reset preview keep the opening target scope as models finish downloading', t => {
+  const h = environment(t)
+  h.view.setBatchSelected('new', true)
+  h.view.setBatchSelected('downloaded', true)
+  h.view.openBatchEditor()
+  assert.deepEqual(Array.from(h.view.batchEditorSelection.value), ['downloaded'])
+  assert.deepEqual(Array.from(h.view.batchEditorSkipped.value), ['new'])
+  assert.deepEqual(h.metadata, [['downloaded']])
+  h.modelStore.models.find(model => model.name === 'new').downloaded = true
+  assert.deepEqual(Array.from(h.view.editableBatchSelection.value), ['new', 'downloaded'])
+  h.view.buildBatchPreview('reset')
+  assert.deepEqual(Array.from(h.view.batchPreview.value.rows, row => row.name), ['downloaded'])
+  assert.deepEqual(Array.from(h.view.batchReferenceOptions.value, option => option.value), ['downloaded'])
+  h.view.closeBatchEditor()
+  assert.deepEqual(selected(h), ['new', 'downloaded'])
+})
+
+test('successful parameter application closes the editor but keeps multi-selection available', async t => {
+  const h = environment(t)
+  h.view.toggleBatchSelectMode()
+  h.view.setBatchSelected('downloaded', true)
+  h.view.openBatchEditor()
+  h.view.buildBatchPreview('reset')
+  await h.view.applyBatch()
+  assert.equal(h.saved.length, 1)
+  assert.equal(h.view.showBatchEditor.value, false)
+  assert.equal(h.view.batchSelectMode.value, true)
+  assert.deepEqual(selected(h), ['downloaded'])
 })

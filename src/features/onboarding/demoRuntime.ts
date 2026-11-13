@@ -1,6 +1,7 @@
 import { createDemoAudio, createDemoModels, createDemoWorkflow } from './demoData.ts'
 import type { TutorialAdapter } from './demoContext'
 import { mergeWorkflowDescription, normalizeWorkflowMetadata, WORKFLOW_NOTES_MAX_LENGTH } from '../../workflows/metadata.ts'
+import { createDemoPlugin, demoToolPage } from './demoPlugins.ts'
 
 export type DemoConfig = { locale: string; themeMode: string; themeAccent: string; platform: string; progress: Record<string, unknown> }
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
@@ -14,7 +15,7 @@ export function createDemoRuntime(config: DemoConfig) {
   const input = prefix + '/sample.wav'
   const output = prefix + '/Output'
   const models = createDemoModels().map((model, index) => ({
-    ...model, downloaded: true, modelPath: prefix + '/Models/' + index + '.ckpt', configPath: prefix + '/Models/' + index + '.yaml',
+    ...model, downloaded: index < 2, modelPath: prefix + '/Models/' + index + '.ckpt', configPath: prefix + '/Models/' + index + '.yaml',
   }))
   const waveform = createDemoAudio()
   const outputs = ['Vocals', 'Instrumental'].map(stem => ({ stem, path: output + '/' + stem + '.wav' }))
@@ -44,6 +45,8 @@ export function createDemoRuntime(config: DemoConfig) {
   const timers = new Set<ReturnType<typeof setTimeout>>()
   const unknown: string[] = []
   const commands: string[] = []
+  const cancelled = new Set<string>()
+  const plugin = createDemoPlugin(config.locale, prefix)
   let sequence = 1
   let openPopup: (path: string) => void = () => {}
   let closePopup: () => void = () => {}
@@ -73,7 +76,9 @@ export function createDemoRuntime(config: DemoConfig) {
     const timer = setTimeout(() => { timers.delete(timer); action() }, delay)
     timers.add(timer)
   }
-  const worker = (type: string, taskId: string, payload: unknown) => emit('pymss://worker-event', { type, taskId, payload })
+  const worker = (type: string, taskId: string, payload: unknown) => {
+    if (!cancelled.has(taskId) || type === 'task_cancelled') emit('pymss://worker-event', { type, taskId, payload })
+  }
   function startTask(payload: any) {
     for (let index = 1; index <= 5; index++) later(() => worker('task_progress', payload.taskId,
       { stage: 'separating', done: index, total: 5, unit: 'seconds' }), index * 180)
@@ -95,7 +100,9 @@ export function createDemoRuntime(config: DemoConfig) {
   ascii(36, 'data'); view.setUint32(40, samples * 2, true)
   for (let index = 0; index < samples; index++) view.setInt16(44 + index * 2, Math.sin(index / rate * Math.PI * 440) * 1800, true)
   const audioUrl = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }))
+  const pluginUrl = URL.createObjectURL(new Blob([demoToolPage(config.locale, input, output)], { type: 'text/html' }))
   function assetUrl(path: string) {
+    if (path === 'pymss-tutorial-plugin:pymss.convert/tool') return pluginUrl
     const normalized = String(path).replace(/\\/g, '/')
     if (normalized.startsWith(prefix + '/') || normalized.startsWith('blob:')) return normalized.startsWith('blob:') ? normalized : audioUrl
     throw new Error('Only sample assets are available in this tutorial')
@@ -112,11 +119,43 @@ export function createDemoRuntime(config: DemoConfig) {
     if (command === 'plugin:event|unlisten') { listeners.delete(args.eventId); return }
     if (command === 'plugin:event|emit' || command === 'plugin:event|emit_to') { emit(args.event, args.payload); return }
     if (command === 'list_models') return { models: copy(models), categories: ['MSS'], categoriesCn: ['MSS'], modelDir: prefix + '/Models' }
+    if (command === 'list_nodes') return { nodes: [] }
+    if (command === 'plugin_host_capabilities') return { enabled: false, platform: config.platform, formats: [], nativeEditor: false, experimental: false }
+    if (command === 'plugin_host_request') throw new Error(config.locale === 'en' ? 'Native audio plugins are unavailable in the guided tutorial' : '新手指引暂不支持原生音频插件。')
+    if (command === 'set_plugin_view_root') {
+      if (args.root !== prefix + '/Plugins') throw new Error('Only sample plugin views are available in this tutorial')
+      return
+    }
+    if (command === 'plugin_marketplace') {
+      const preference = stores.get('app-settings')?.pluginSource
+      const provider = preference === 'gitcode' ? 'gitcode' : 'github'
+      return copy({ installed: [plugin], catalog: [{ name: plugin.name, url: plugin.url,
+        description: plugin.description, tags: ['audio'], category: 'convert', locales: plugin.locales }],
+      pluginsDir: prefix + '/Plugins', catalogError: null, recoveryRequired: false,
+      runtime: { identity: 'tutorial-runtime', pythonPath: prefix + '/Runtime/python', managementSupported: true },
+      catalogSource: { supported: true, provider, preference: preference || 'auto', gitAvailable: false,
+        httpProviders: ['github', 'gitcode'] } })
+    }
+    if (command === 'start_model_download' || command === 'start_model_delete') {
+      const model = models.find(item => item.name === payload.model)
+      if (!model || typeof payload.taskId !== 'string' || !payload.taskId) throw new Error('Unknown tutorial model')
+      const downloading = command === 'start_model_download'
+      worker(downloading ? 'download_started' : 'model_delete_started', payload.taskId, { model: model.name, totalFiles: 1 })
+      later(() => {
+        if (cancelled.has(payload.taskId)) return
+        model.downloaded = downloading
+        worker(downloading ? 'download_done' : 'model_delete_done', payload.taskId, {
+          model: model.name, modelInfo: copy(model), modelDir: prefix + '/Models', completedFiles: 1, totalFiles: 1,
+          ...(downloading ? { downloaded: [model.modelPath], skipped: [] } : {}),
+        })
+      }, 300)
+      return { taskId: payload.taskId, started: true }
+    }
     if (command === 'get_model_storage_summary') {
-      const items = models.map(model => ({ name: model.name, downloaded: model.downloaded, sizeBytes: model.sizeBytes,
-        expectedSizeBytes: model.sizeBytes, files: [{ path: model.modelPath, sizeBytes: model.sizeBytes, exists: true }] }))
+      const items = models.map(model => ({ name: model.name, downloaded: model.downloaded, sizeBytes: model.downloaded ? model.sizeBytes : 0,
+        expectedSizeBytes: model.sizeBytes, files: model.downloaded ? [{ path: model.modelPath, sizeBytes: model.sizeBytes, exists: true }] : [] }))
       return { modelDir: prefix + '/Models', totalBytes: items.reduce((total, model) => total + model.sizeBytes, 0),
-        downloadedCount: items.length, models: copy(items), toolModels: [], toolModelsBytes: 0, residualFiles: [], residualBytes: 0 }
+        downloadedCount: items.filter(item => item.downloaded).length, models: copy(items), toolModels: [], toolModelsBytes: 0, residualFiles: [], residualBytes: 0 }
     }
     if (command === 'get_model_info') return copy(models.find(model => model.name === payload.model) || models[0])
     if (command === 'runtime_info') return copy(runtimeInfo)
@@ -129,7 +168,15 @@ export function createDemoRuntime(config: DemoConfig) {
     if (command === 'scan_media_paths') return { files: [input], warnings: [] }
     if (['pick_input_folder', 'pick_output_folder', 'pick_output_dir', 'pick_model_dir'].includes(command)) return output
     if (command === 'start_separation' || command === 'start_workflow_inference') return startTask(payload)
-    if (command === 'cancel_task') { worker('task_cancelled', args.taskId, {}); return true }
+    if (command === 'cancel_task') { cancelled.add(args.taskId); worker('task_cancelled', args.taskId, {}); return true }
+    if (command === 'move_paths_to_trash') {
+      const paths = Array.isArray(args.paths) ? args.paths : []
+      const allowed = new Set([...outputs.map(item => item.path), output + '/mix.wav'])
+      if (paths.some((path: unknown) => typeof path !== 'string' || !allowed.has(path.replace(/\\/g, '/')))) {
+        throw new Error('Only sample outputs are available in this tutorial')
+      }
+      return { trashed: [...paths], failed: [] }
+    }
     if (command === 'get_workflow_editors') return { revision: 0, editors: [] }
     if (command === 'mutate_workflow_store') {
       const state = copy(stores.get('workflow-state') || { workflows: [], selectedWorkflowId: '' })
@@ -198,7 +245,7 @@ export function createDemoRuntime(config: DemoConfig) {
     }
     if (command === 'reveal_path' || command === 'save_text_file_dialog') return
     if (command === 'get_runtime_env_sizes' || command === 'runtime_env_sizes') return { sizes: {}, incompleteBackends: [] }
-    if (command === 'runtime_core_versions') return { packages: { pymss: { currentVersion: '2.1.8', latestVersion: '2.1.8' }, 'pymss-core': { currentVersion: '2.1.8', latestVersion: '2.1.8' } } }
+    if (command === 'runtime_core_versions') return { packages: { pymss: { currentVersion: '2.1.8', latestVersion: '2.1.8' } } }
     if (command === 'plugin:resources|close') return
     if (command === 'plugin:window|close') { closePopup(); return }
     if (['plugin:window|is_maximized', 'plugin:window|is_minimized', 'is_current_window_maximized'].includes(command)) return false
@@ -210,7 +257,7 @@ export function createDemoRuntime(config: DemoConfig) {
   return {
     invoke, callback, assetUrl, emit, models, task, workflow, initialProject, runtimeInfo, envInfo, input, output, unknown, commands, stores,
     connectWindows(open: (path: string) => void, close: () => void) { openPopup = open; closePopup = close },
-    dispose() { timers.forEach(clearTimeout); timers.clear(); listeners.clear(); callbacks.clear(); URL.revokeObjectURL(audioUrl) },
+    dispose() { timers.forEach(clearTimeout); timers.clear(); listeners.clear(); callbacks.clear(); URL.revokeObjectURL(audioUrl); URL.revokeObjectURL(pluginUrl) },
   } satisfies TutorialAdapter & Record<string, unknown>
 }
 export type DemoRuntime = ReturnType<typeof createDemoRuntime>

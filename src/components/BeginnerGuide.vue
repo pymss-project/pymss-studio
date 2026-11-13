@@ -64,7 +64,8 @@ let preparing = false
 let unlock: (() => void) | undefined
 function targetForStep(): HTMLElement | null {
   if (guide.parameterStep) return document.querySelector(`[data-parameter-guide="${guide.currentParameter?.id}"]`)
-  if (current.value.id === 'modelManage') return document.querySelector('.n-drawer .storage-summary') || document.querySelector('[data-guide="model-management"]')
+  if (current.value.id === 'modelManage') return document.querySelector('.n-drawer .storage-summary') || document.querySelector('[data-guide="model-management"], [data-guide="model-batch"]')
+  if (current.value.id === 'pluginsOverview') return document.querySelector('.plugins-runtime-details') || document.querySelector('[data-guide="plugin-library"]')
   if (current.value.id === 'editorMix') return document.querySelector('.tutorial-native-window .track-row__head')
   if (current.value.id === 'editorClips') return document.querySelector('.tutorial-native-window .track-row__lane')
   if (current.value.id === 'editorExport') return document.querySelector('.editor-export-modal .export-dialog__footer') || document.querySelector('.transport-export')
@@ -74,6 +75,12 @@ function targetForStep(): HTMLElement | null {
     || document.querySelector('.tutorial-native-window .simple-node-editor__actions, .tutorial-native-window .litegraph-editor .toolbar')
   return document.querySelector(`[data-guide="${current.value.anchor}"]`)
 }
+function interactionTarget() {
+  if (preparing) return document.body
+  if (current.value.id === 'modelBatch') return document.querySelector<HTMLElement>('.page--models')
+  if (current.value.id === 'resultManage') return document.querySelector<HTMLElement>('.results-page')
+  return targetForStep()
+}
 async function navigateToStep() {
   if (!inFrame) return
   const request = guide.navigationRequest
@@ -82,6 +89,11 @@ async function navigateToStep() {
   try {
     const runtime = tutorialAdapter() as DemoRuntime
     const id = current.value.id
+    document.querySelector<HTMLElement>('.model-batch-modal .n-card-header__close')?.click()
+    document.querySelector<HTMLElement>('.n-dialog__close')?.click()
+    if (id !== 'modelManage') document.querySelector<HTMLElement>('.n-drawer-header__close')?.click()
+    if (id !== 'modelBatch') document.querySelector<HTMLElement>('[data-guide-action="batch-exit"]')?.click()
+    if (id !== 'resultManage') document.querySelector<HTMLElement>('[data-guide-action="result-exit"]')?.click()
     if (['run','queue'].includes(id) && frameTask && !frameTask.inputFiles.length) frameTask.inputFiles = [runtime.input]
     const popup = id.startsWith('editor') ? (route.path === '/editor' ? route.fullPath : '/editor?projectId=edit_sample-separation')
       : ['workflowEditor','workflowOutput'].includes(id) ? (route.path.startsWith('/workflow-') ? route.fullPath : '/workflow-simple-editor?workflowId=sample-workflow') : null
@@ -220,7 +232,10 @@ watch(showCoach, async show => {
 watch([() => guide.step, description], schedulePosition)
 watch(() => route.fullPath, schedulePosition)
 onBeforeUnmount(() => { disposed = true; stopTracking(); unlock?.() })
-if (inFrame) unlock = lockTutorialInteraction(() => preparing ? document.body : targetForStep(), () => guide.parameterStep)
+watch(running, active => {
+  unlock?.()
+  unlock = active ? lockTutorialInteraction(interactionTarget, () => guide.parameterStep) : undefined
+}, { immediate: true })
 
 function viewResults() {
   guide.goTo('results')
