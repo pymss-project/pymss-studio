@@ -309,6 +309,8 @@ jobs:
             "release/Pymss-Studio-${VERSION}-macos-${{ matrix.arch }}-mlx.dmg"
           rm -rf "$STAGE"
           echo "PYMSS_VERSION=$VERSION" >> "$GITHUB_ENV"
+          python3 scripts/release-assets.py report release
+          python3 scripts/release-assets.py report "$APP/Contents/Resources" --tree --title 'macOS: largest bundled resources'
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4

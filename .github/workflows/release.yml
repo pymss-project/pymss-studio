@@ -82,14 +82,14 @@ jobs:
           RELEASE_ROCM_PREVIEW_INPUT: ${{ inputs.rocm_preview_candidate }}
           RELEASE_COMMIT_INPUT: ${{ github.sha }}
         run: python scripts/resolve-release-plan.py
-      - name: Require both runtime mirror credentials
-        if: steps.plan.outputs.publish == 'true' && (steps.plan.outputs.target == 'all' || steps.plan.outputs.target == 'windows')
+      - name: Require both distribution mirror credentials
+        if: steps.plan.outputs.publish == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           MODELSCOPE_API_TOKEN: ${{ secrets.MODELSCOPE_API_TOKEN }}
         run: |
           if [[ -z "$HF_TOKEN" || -z "$MODELSCOPE_API_TOKEN" ]]; then
-            echo "Windows runtime publication requires HF_TOKEN and MODELSCOPE_API_TOKEN." >&2
+            echo "Release publication requires HF_TOKEN and MODELSCOPE_API_TOKEN for complete package mirrors." >&2
             exit 1
           fi
       - name: Preserve the published legacy runtime links
@@ -176,6 +176,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: pnpm/action-setup@v4
         with:
           version: 10.33.2
@@ -241,20 +244,7 @@ jobs:
           merge-multiple: true
           pattern: Pymss-Studio-${{ steps.release_meta.outputs.version }}-linux-x64-appimage
       - name: Validate release asset sizes
-        shell: bash
-        run: |
-          set -euo pipefail
-          max_size=$((2 * 1024 * 1024 * 1024))
-
-          shopt -s nullglob
-          for file in artifacts/*; do
-            [ -f "$file" ] || continue
-            size=$(stat -c%s "$file")
-            if [ "$size" -ge "$max_size" ]; then
-              echo "::error::Release asset must be smaller than 2 GiB: $(basename "$file") (${size} bytes)"
-              exit 1
-            fi
-          done
+        run: python3 scripts/release-assets.py report artifacts
       - name: Sign managed update assets
         if: needs.windows.result == 'success' || needs.macos.result == 'success' || needs.linux.result == 'success'
         shell: bash
@@ -315,18 +305,10 @@ jobs:
           RELEASE_NOTES_OUTPUT: ${{ runner.temp }}/pymss-release-notes.md
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [[ -f ".github/release-notes/${RELEASE_VERSION}.md" ]]; then
-            python3 scripts/generate-release-notes.py --include-published --output "$RELEASE_NOTES_OUTPUT"
-            echo "body_path=$RELEASE_NOTES_OUTPUT" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::No reviewed notes for ${RELEASE_VERSION}; using GitHub-generated release notes."
-          fi
-      - name: Generate release checksums
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd artifacts
-          find . -maxdepth 1 -type f ! -name 'SHA256SUMS' -printf '%f\n' | sort | xargs -r sha256sum > SHA256SUMS
+          python3 scripts/generate-release-notes.py --include-published --allow-missing-summary --output "$RELEASE_NOTES_OUTPUT"
+          echo "body_path=$RELEASE_NOTES_OUTPUT" >> "$GITHUB_OUTPUT"
+      - name: Select public packages and generate their checksums
+        run: python3 scripts/release-assets.py public artifacts release-public --version "$RELEASE_VERSION" --merge-published
       - name: Stage artifacts for mirror uploads
         id: stage_mirrors
         if: ${{ env.HF_TOKEN != '' || env.MODELSCOPE_API_TOKEN != '' }}
@@ -366,30 +348,11 @@ jobs:
         if: ${{ !cancelled() && steps.verify_release_tag.outcome == 'success' && steps.stage_mirrors.outcome == 'success' && (env.HF_TOKEN != '' || env.MODELSCOPE_API_TOKEN != '') }}
         uses: astral-sh/setup-uv@v6
 
-      - name: Upload release files to HuggingFace dataset
-        if: ${{ !cancelled() && steps.setup_mirror_uploads.outcome == 'success' && env.HF_TOKEN != '' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Uploading pms/${RELEASE_VERSION}/ to HuggingFace dataset HuanLin/Pymss-Studio-Dist:${RELEASE_VERSION}"
-          uvx --from "huggingface_hub[cli]" hf upload --type dataset HuanLin/Pymss-Studio-Dist "pms/${RELEASE_VERSION}" "${RELEASE_VERSION}"
-          echo "HuggingFace dataset upload completed."
-
       - name: Publish immutable runtime wheels to HuggingFace
-        if: ${{ !cancelled() && steps.setup_mirror_uploads.outcome == 'success' && needs.windows.result == 'success' && env.HF_TOKEN != '' }}
+        if: ${{ success() && steps.setup_mirror_uploads.outcome == 'success' && needs.windows.result == 'success' && env.HF_TOKEN != '' }}
         run: uv run --no-project --with huggingface_hub==2.4.0 --with modelscope-hub==0.7.1 --with pip python scripts/publish-runtime-wheels.py --provider huggingface --wheelhouse runtime-artifacts --locks runtime-artifacts
-
-      - name: Upload release files to ModelScope dataset
-        if: ${{ !cancelled() && steps.setup_mirror_uploads.outcome == 'success' && env.MODELSCOPE_API_TOKEN != '' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Uploading pms/${RELEASE_VERSION}/ to ModelScope dataset huanlinoto/Pymss-Studio-Dist:${RELEASE_VERSION}"
-          uvx modelscope upload --repo-type dataset huanlinoto/Pymss-Studio-Dist "pms/${RELEASE_VERSION}" "${RELEASE_VERSION}"
-          echo "ModelScope dataset upload completed."
-
       - name: Publish immutable runtime wheels to ModelScope
-        if: ${{ !cancelled() && steps.setup_mirror_uploads.outcome == 'success' && needs.windows.result == 'success' && env.MODELSCOPE_API_TOKEN != '' }}
+        if: ${{ success() && steps.setup_mirror_uploads.outcome == 'success' && needs.windows.result == 'success' && env.MODELSCOPE_API_TOKEN != '' }}
         run: uv run --no-project --with huggingface_hub==2.4.0 --with modelscope-hub==0.7.1 --with pip python scripts/publish-runtime-wheels.py --provider modelscope --wheelhouse runtime-artifacts --locks runtime-artifacts
 
       - name: Verify both runtime mirrors before publication
@@ -397,6 +360,20 @@ jobs:
         run: |
           uv run --no-project --with huggingface_hub==2.4.0 --with modelscope-hub==0.7.1 --with pip python scripts/publish-runtime-wheels.py --provider huggingface --wheelhouse runtime-artifacts --locks runtime-artifacts --verify-only
           uv run --no-project --with huggingface_hub==2.4.0 --with modelscope-hub==0.7.1 --with pip python scripts/publish-runtime-wheels.py --provider modelscope --wheelhouse runtime-artifacts --locks runtime-artifacts --verify-only
+
+      - name: Upload release files to HuggingFace dataset
+        if: ${{ success() && steps.setup_mirror_uploads.outcome == 'success' && env.HF_TOKEN != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          uvx --from "huggingface_hub[cli]" hf upload --type dataset HuanLin/Pymss-Studio-Dist "pms/${RELEASE_VERSION}" "${RELEASE_VERSION}"
+
+      - name: Upload release files to ModelScope dataset
+        if: ${{ success() && steps.setup_mirror_uploads.outcome == 'success' && env.MODELSCOPE_API_TOKEN != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          uvx modelscope upload --repo-type dataset huanlinoto/Pymss-Studio-Dist "pms/${RELEASE_VERSION}" "${RELEASE_VERSION}"
 
       - uses: softprops/action-gh-release@v2
         id: publish_release
@@ -407,7 +384,7 @@ jobs:
           prerelease: ${{ env.RELEASE_PRERELEASE }}
           body_path: ${{ steps.release_notes.outputs.body_path }}
           generate_release_notes: true
-          files: artifacts/*
+          files: release-public/*
 
       - uses: softprops/action-gh-release@v2
         if: needs.windows.result == 'success' || needs.macos.result == 'success' || needs.linux.result == 'success'

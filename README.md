@@ -93,7 +93,7 @@ Release packages include Python, so end users do not need to install system Pyth
 | Windows `*.7z` | Portable package. Extract the complete directory and run `Pymss Studio.exe`; keep its runtime and tools directories. |
 | macOS `*.dmg` | Apple Silicon installation image. |
 | Windows `*-update.zip` | Update package for an existing installation, rather than a first-time installer. Follow the corresponding release notes. |
-| Split files such as `*.part-000` | Download every part and follow the release's `SPLIT-ASSETS-README.txt` to merge them before extraction. |
+| Complete packages of 2 GiB or larger | Download the single complete file from Hugging Face or ModelScope using the links in the release notes. These packages are omitted from GitHub assets. |
 
 If quarantine attributes prevent a macOS application from a trusted source from opening, apply this command to the installed application:
 
@@ -186,9 +186,11 @@ The root defaults to `settings/`, `models/`, `outputs/`, `editor-projects/`, `lo
 
 ### Updates and environment management
 
-Open **Settings → About** for version and update information. Windows and macOS builds whose release channel supports in-app updates can check and install updates there. Use the release page for builds without automatic update support. On macOS, an application update replaces the entire `.app`, preserving user data; administrator authorization is requested if write permissions are insufficient. Move the app to `/Applications` before updating: updates are blocked from a read-only DMG or App Translocation location. A change to the fixed base runtime contract requires a manual installation.
+Official Windows installers and portable packages, macOS Apple Silicon applications, and Linux x64 AppImages support checking and installing software updates in **Settings → About**. Installation depends on the target release's update policy, installation location, and compatibility checks. If the application requires manual installation, use a complete package linked in the release notes.
 
-Use **Settings → Runtime** to update `pymss`, `pymss-core`, and their compatible dependencies independently of the desktop application. Review the prepared version and dependency plan before confirming. Packages are installed into a new core overlay and activated only after validation; a compatible previous core can be restored when available. Updates that require replacing fixed accelerator components are rejected, preserving the active runtime. Dependency combinations are defined in [`python/runtime-manifest.json`](./python/runtime-manifest.json).
+On macOS, an application update replaces the entire `.app`, preserving user data; administrator authorization is requested if write permissions are insufficient. Move the app to `/Applications` before updating: updates are blocked from a read-only DMG or App Translocation location. A change to the fixed macOS base runtime contract requires a manual installation. Keep Linux AppImages in a directory owned and writable by your user.
+
+Use **Settings → Runtime** to update the active environment's `pymss` engine and its compatible dependencies independently of the desktop application. The selected `pymss` release determines the `pymss-core` version through its dependency requirements; Studio resolves and installs it with the engine rather than checking or updating it separately. Review the prepared version and dependency plan before confirming. Packages are installed into a new core overlay and activated only after validation; a compatible previous core can be restored when available. Updates that require replacing fixed accelerator components are rejected, preserving the active runtime. Base runtime and accelerator constraints are defined in [`python/runtime-manifest.json`](./python/runtime-manifest.json).
 
 Optional components such as FunASR use their own directories, separate from core overlays. Installation checks compatibility with the current PyTorch version and accelerator backend. On Windows and Linux, uninstalling FunASR removes its separate component directory and any copy installed directly in the active environment; downloaded models are kept. On macOS, component operations preserve packages in the bundled base runtime; the ASR tool remains unavailable. Pip and Numba caches are stored under the data root's `temp/` directory.
 
@@ -344,7 +346,7 @@ Windows releases prepare bootstrap Python and a backend environment, build the T
 ./scripts/prepare-python-runtime.ps1 -Variant default -InitialBackend cpu
 ```
 
-These are alternative runtime preparation examples; select one rather than running them sequentially. Preparation writes `python-runtime/`, requires network access, and involves large downloads. See the [Windows](./.github/workflows/release-windows.yml) and [macOS](./.github/workflows/release-macos.yml) workflows for complete staging, signing, validation, and asset splitting.
+These are alternative runtime preparation examples; select one rather than running them sequentially. Preparation writes `python-runtime/`, requires network access, and involves large downloads. See the [Windows](./.github/workflows/release-windows.yml), [macOS](./.github/workflows/release-macos.yml), and [Linux](./.github/workflows/release-linux.yml) workflows for staging, signing, and validation. The [unified release workflow](./.github/workflows/release.yml) selects public assets and uploads complete packages to distribution mirrors.
 
 </details>
 

@@ -22,6 +22,9 @@ inputs:
 runs:
   using: composite
   steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
     - name: Install Inno Setup 7 x64
       shell: pwsh
       run: |
@@ -70,8 +73,16 @@ runs:
         } finally {
           subst $drive /D | Out-Null
         }
+        python scripts/release-assets.py report "release/${{ inputs.stage-name }}" --tree --title '${{ inputs.stage-name }}: largest runtime files'
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime size report failed' }
+        $outputs = @(Get-ChildItem -LiteralPath $releaseFull -File -Filter '*-setup.exe')
+        foreach ($file in $outputs) {
+          if ($file.Length -ge 1900MB) { Write-Output "::warning::Installer asset near 2 GiB: $($file.Name) ($($file.Length) bytes)" }
+          "- $($file.Name): $([Math]::Round($file.Length / 1MB, 2)) MiB" >> $env:GITHUB_STEP_SUMMARY
+        }
     - name: Upload Windows installer artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.output-artifact }}
         path: release/${{ inputs.output-file }}
+        if-no-files-found: error

@@ -13,11 +13,12 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 DEFAULT_REPOSITORY = "pymss-project/pymss-studio"
+GITHUB_ASSET_LIMIT = 2 * 1024**3
 PACKAGE_TYPES = (
+    ("windows-x64-online", "Windows x64", "推荐：首次启动安装环境 / Recommended: install runtime on first launch", (("-setup.exe", "安装版 / Installer"), (".7z", "便携版 / Portable"))),
     ("windows-x64-cuda", "Windows x64", "NVIDIA CUDA", (("-setup.exe", "安装版 / Installer"), (".7z", "便携版 / Portable"))),
     ("windows-x64-cpu", "Windows x64", "CPU", (("-setup.exe", "安装版 / Installer"), (".7z", "便携版 / Portable"))),
     ("windows-x64-rocm", "Windows x64", "受支持的 AMD GPU / Supported AMD GPUs", (("-setup.exe", "安装版 / Installer"), (".7z", "便携版 / Portable"))),
-    ("windows-x64-online", "Windows x64", "首次启动安装环境 / Install runtime on first launch", (("-setup.exe", "安装版 / Installer"), (".7z", "便携版 / Portable"))),
     ("macos-arm64-mlx", "macOS", "Apple Silicon · MLX", ((".dmg", "DMG"),)),
     ("linux-x64", "Linux x64", "AppImage", ((".AppImage", "AppImage"),)),
 )
@@ -26,6 +27,14 @@ UPDATE_PLATFORMS = (
     ("macos-arm64", "macOS"),
     ("linux-x64", "Linux"),
 )
+
+
+def mirror_download_roots(version: str):
+    folder = quote(version, safe="")
+    return (
+        ("Hugging Face", f"https://huggingface.co/datasets/HuanLin/Pymss-Studio-Dist/resolve/main/{folder}"),
+        ("魔搭 / ModelScope", f"https://www.modelscope.cn/datasets/huanlinoto/Pymss-Studio-Dist/resolve/master/{folder}"),
+    )
 
 
 class GitHubRedirectHandler(HTTPRedirectHandler):
@@ -92,10 +101,29 @@ def fetch_published_release(
         raise ValueError("Published release has too many assets to merge safely")
 
     metadata = {}
-    for slug, _platform in UPDATE_PLATFORMS:
+    # A later platform-only publication must retain the mirror-only packages
+    # explicitly linked by our previous notes: GitHub's asset API omits them.
+    version = release_version(tag)
+    body = release.get("body") or ""
+    mirror_only = []
+    for slug, _platform, _purpose, formats in PACKAGE_TYPES:
+        for suffix, _label in formats:
+            name = f"Pymss-Studio-{version}-{slug}{suffix}"
+            if all(f"]({root}/{quote(name, safe='')})" in body for _provider, root in mirror_download_roots(version)):
+                mirror_only.append(name)
+    if mirror_only:
+        metadata["mirror-packages"] = {"names": mirror_only}
+    update_section = body.partition("## 在线更新 / In-app updates")[2].split("\n## ", 1)[0]
+    for slug, platform in UPDATE_PLATFORMS:
         name = f"prerelease-v1-{slug}-update.json"
-        if name in assets and not (artifacts / name).is_file():
+        if (artifacts / name).is_file():
+            continue
+        if name in assets:
             metadata[name] = github_json(f"{root}/assets/{assets[name]}", token, "application/octet-stream")
+        elif match := re.search(rf"^\| {re.escape(platform)} \| (已启用 / Enabled|请手动安装 / Manual installation) \|\r?$", update_section, re.MULTILINE):
+            # Windows/Linux metadata stays on mirrors; retain the previously
+            # published status when supplementing a different platform.
+            metadata.setdefault("update-status", {})[slug] = match[1]
     return set(assets), metadata
 
 
@@ -104,16 +132,20 @@ def render_release_notes(
     repository: str = DEFAULT_REPOSITORY,
     published_assets: set[str] | None = None,
     published_metadata: dict[str, dict] | None = None,
+    allow_missing_summary: bool = False,
 ) -> str:
     version = release_version(tag)
     summary_path = notes_dir / f"{version}.md"
-    summary = re.sub(r"<!--.*?-->", "", summary_path.read_text(encoding="utf-8-sig"), flags=re.DOTALL).strip()
-    if not any(line.strip() and not line.lstrip().startswith("#") for line in summary.splitlines()):
+    summary = (re.sub(r"<!--.*?-->", "", summary_path.read_text(encoding="utf-8-sig"), flags=re.DOTALL).strip()
+               if summary_path.exists() or not allow_missing_summary else "")
+    if summary_path.exists() and not any(line.strip() and not line.lstrip().startswith("#") for line in summary.splitlines()):
         raise ValueError(f"Release summary is empty or contains only headings: {summary_path}")
 
-    assets = {path.name for path in artifacts.iterdir() if path.is_file()} | (published_assets or set())
+    mirror_only = set((published_metadata or {}).get("mirror-packages", {}).get("names", []))
+    assets = {path.name for path in artifacts.iterdir() if path.is_file()} | (published_assets or set()) | mirror_only
     repository_url = f"https://github.com/{repository}"
     download_root = f"{repository_url}/releases/download/{quote(tag, safe='')}"
+    mirror_roots = mirror_download_roots(version)
     rows = []
     platforms = set()
     for slug, platform, purpose, formats in PACKAGE_TYPES:
@@ -121,7 +153,14 @@ def render_release_notes(
         for suffix, label in formats:
             name = f"Pymss-Studio-{version}-{slug}{suffix}"
             if name in assets:
-                links.append(f"[{label}]({download_root}/{quote(name, safe='')})")
+                path = artifacts / name
+                mirrored = (path.stat().st_size >= GITHUB_ASSET_LIMIT if path.is_file()
+                            else name in mirror_only and name not in (published_assets or set()))
+                if mirrored:
+                    links.append(label + ": " + " · ".join(
+                        f"[{provider}]({root}/{quote(name, safe='')})" for provider, root in mirror_roots))
+                else:
+                    links.append(f"[{label}]({download_root}/{quote(name, safe='')})")
         if links:
             rows.append(f"| {platform} | {purpose} | {' · '.join(links)} |")
             platforms.add(slug.split("-", 1)[0])
@@ -136,7 +175,7 @@ def render_release_notes(
         metadata_name = f"prerelease-v1-{slug}-update.json"
         metadata_path = artifacts / metadata_name
         metadata = (published_metadata or {}).get(metadata_name)
-        status = "请在应用内检查 / Check in the application"
+        status = (published_metadata or {}).get("update-status", {}).get(slug, "请在应用内检查 / Check in the application")
         if metadata_path.is_file():
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         if metadata is not None:
@@ -152,6 +191,11 @@ def render_release_notes(
             "## 安装包选择 / Package selection", "",
             "| 平台 / Platform | 设备或用途 / Hardware or use | 下载 / Download |",
             "| --- | --- | --- |", *rows, "",
+            "Windows 新用户推荐在线版，首次启动后安装所需运行环境；离线版包含对应运行环境。",
+            "New Windows users can choose Online and install a runtime on first launch. Offline packages include their runtime.", "",
+            "达到 2 GiB 的完整包仅在 Hugging Face 和魔搭提供，GitHub 附件不包含这些包，无需下载分卷。",
+            "Complete packages of 2 GiB or larger are available on Hugging Face and ModelScope instead of GitHub assets. No split downloads are required.", "",
+            f"完整下载 / All downloads: [Hugging Face](https://huggingface.co/datasets/HuanLin/Pymss-Studio-Dist/tree/main/{quote(version, safe='')}) · [魔搭 / ModelScope](https://www.modelscope.cn/datasets/huanlinoto/Pymss-Studio-Dist/tree/master/{quote(version, safe='')})", "",
             "首次安装请选择上表中的完整安装包；更新归档和签名文件不用于首次安装。",
             "For a first installation, use a complete package listed above. Update archives and signature files are not installers.",
         ]),
@@ -169,7 +213,7 @@ def render_release_notes(
             f"- [新用户指南 / Start here]({repository_url}/discussions/88)",
         ]),
     ]
-    return "\n\n".join(sections) + "\n"
+    return "\n\n".join(section for section in sections if section) + "\n"
 
 
 if __name__ == "__main__":
@@ -178,6 +222,7 @@ if __name__ == "__main__":
     parser.add_argument("--notes-dir", type=Path, default=Path(".github/release-notes"))
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY", DEFAULT_REPOSITORY))
     parser.add_argument("--include-published", action="store_true", help="Merge existing assets and update metadata for this tag")
+    parser.add_argument("--allow-missing-summary", action="store_true", help="Generate download instructions when reviewed notes are not available")
     parser.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()
     tag = os.environ["RELEASE_TAG"]
@@ -189,6 +234,7 @@ if __name__ == "__main__":
     notes = render_release_notes(
         arguments.artifacts, arguments.notes_dir, tag, repository=arguments.repository,
         published_assets=published_assets, published_metadata=published_metadata,
+        allow_missing_summary=arguments.allow_missing_summary,
     )
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
     arguments.output.write_text(notes, encoding="utf-8")

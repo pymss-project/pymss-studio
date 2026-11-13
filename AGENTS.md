@@ -58,7 +58,7 @@ Staged build verification runs `python worker.py env_info` and `list_models` to 
 
 ## Release Artifacts
 
-GitHub releases may split files >2GB using `split` (workflow auto-handles). See `SPLIT-ASSETS-README.txt` in releases for merge instructions.
+GitHub releases include software packages smaller than 2 GiB, required update archives, the version-pinned macOS repair manifest, and public checksums. Larger packages remain single complete files on Hugging Face and ModelScope, linked from the release notes. Runtime wheels are shared by content hash under each mirror's `wheels/` directory and are not uploaded as software release assets.
 
 ## Component Auto-Import
 

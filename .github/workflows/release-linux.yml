@@ -116,6 +116,8 @@ jobs:
           test "${#images[@]}" -eq 1
           cp "${images[0]}" "artifacts/Pymss-Studio-${version}-linux-x64.AppImage"
           cp scripts/README-Linux.txt artifacts/README-Linux.txt
+          python3 scripts/release-assets.py report artifacts
+          python3 scripts/release-assets.py report src-tauri/resources --tree --title 'Linux: largest bundled resources'
       - uses: actions/upload-artifact@v4
         with:
           name: Pymss-Studio-${{ env.RELEASE_VERSION }}-linux-x64-appimage

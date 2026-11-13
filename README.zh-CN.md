@@ -93,7 +93,7 @@ Pymss Studio 将 [pymss](https://github.com/pymss-project/pymss) 音乐源分离
 | Windows `*.7z` | 便携版，解压完整目录后运行 `Pymss Studio.exe`；保留内置运行时和工具目录。 |
 | macOS `*.dmg` | Apple Silicon 安装镜像。 |
 | Windows `*-update.zip` | 已安装用户的更新包，不作为首次安装包使用；按对应发行说明操作。 |
-| `*.part-000` 等分卷文件 | 下载全部分卷，按发行页的 `SPLIT-ASSETS-README.txt` 合并后再解压。 |
+| 达到 2 GiB 的完整包 | 使用发行说明中的 Hugging Face 或魔搭链接下载单个完整文件；GitHub 附件不提供这些包。 |
 
 若可信来源的 macOS 应用因隔离属性无法打开，可针对已安装的应用执行：
 
@@ -186,9 +186,11 @@ ASR 的 FunASR 运行组件按需安装，模型首次使用时下载并缓存�
 
 ### 更新与环境管理
 
-在 **设置 → 关于** 查看版本与更新状态。发布通道支持应用内更新的 Windows 和 macOS 构建可在此检查并安装更新；不支持自动更新的构建通过发行页手动更新。macOS 应用更新会整体替换 `.app` 并保留用户数据，写入权限不足时请求管理员授权。更新前应将应用移入 `/Applications`；从只读 DMG 或 App Translocation 位置运行时会阻止更新。固定基础环境契约发生变化时，需要手动安装新版。
+官方 Windows 安装版与便携版、macOS Apple Silicon 应用及 Linux x64 AppImage 均支持在 **设置 → 关于** 检查并安装软件更新。能否直接安装取决于目标版本的发布策略、安装位置及兼容性检查；应用提示需要手动安装时，请使用发行说明提供的完整包。
 
-在 **设置 → 运行环境** 中，可独立更新 `pymss`、`pymss-core` 及其兼容依赖，无需更新桌面软件。确认前会展示版本和依赖计划，软件包先安装到新的核心覆盖层，验证成功后才切换；存在兼容的上一版时可回退。需要替换固定加速组件的更新会被拒绝，当前环境保持可用。依赖组合由 [`python/runtime-manifest.json`](./python/runtime-manifest.json) 定义。
+macOS 应用更新会整体替换 `.app` 并保留用户数据，写入权限不足时请求管理员授权。更新前应将应用移入 `/Applications`；从只读 DMG 或 App Translocation 位置运行时会阻止更新。macOS 固定基础环境契约发生变化时，需要手动安装新版。Linux AppImage 应放在当前用户拥有且可写的目录中。
+
+在 **设置 → 运行环境** 中，可更新当前激活环境的 `pymss` 内核及其兼容依赖，无需更新桌面软件。`pymss-core` 的版本由所选 `pymss` 发布包的依赖约束决定，随内核一起解析与安装，Studio 不单独检查或更新它。确认前会展示版本和依赖计划，软件包先安装到新的核心覆盖层，验证成功后才切换；存在兼容的上一版时可回退。需要替换固定加速组件的更新会被拒绝，当前环境保持可用。基础运行环境和加速组件约束由 [`python/runtime-manifest.json`](./python/runtime-manifest.json) 定义。
 
 FunASR 等可选组件使用独立目录，与核心覆盖层分别管理。安装时校验与当前 PyTorch 版本及加速后端的兼容性。Windows 和 Linux 卸载 FunASR 时，会删除独立组件目录，并卸载直接安装在当前环境中的副本，保留已下载的模型。macOS 的组件管理不卸载内置基础环境中的包，ASR 工具仍未开放。pip 和 Numba 缓存保存在数据根目录的 `temp/` 下。
 
@@ -344,7 +346,7 @@ Windows 发布流程准备基础 Python 和指定后端环境，构建 Tauri 可
 ./scripts/prepare-python-runtime.ps1 -Variant default -InitialBackend cpu
 ```
 
-以上是独立的环境准备示例，应选择其中一项，而非依次执行。准备脚本会写入 `python-runtime/`，需要联网且下载量较大。完整暂存、签名、校验和分卷逻辑以 [Windows 工作流](./.github/workflows/release-windows.yml) 和 [macOS 工作流](./.github/workflows/release-macos.yml) 为准。
+以上是独立的环境准备示例，应选择其中一项，而非依次执行。准备脚本会写入 `python-runtime/`，需要联网且下载量较大。完整暂存、签名与校验流程以 [Windows 工作流](./.github/workflows/release-windows.yml)、[macOS 工作流](./.github/workflows/release-macos.yml) 和 [Linux 工作流](./.github/workflows/release-linux.yml) 为准；公开附件筛选及镜像上传由[统一发布工作流](./.github/workflows/release.yml)处理。
 
 </details>
 

@@ -25,6 +25,40 @@ def asset(name, identity):
 
 
 class ReleaseNotesTests(unittest.TestCase):
+    def test_large_packages_link_to_both_mirrors_without_a_broken_github_download(self):
+        name = "Pymss-Studio-1.2.3-windows-x64-rocm-setup.exe"
+        (self.artifacts / name).write_bytes(b"a" * 1024)
+        with mock.patch.object(NOTES, "GITHUB_ASSET_LIMIT", 1024):
+            rendered = NOTES.render_release_notes(self.artifacts, self.notes, "v1.2.3")
+        self.assertIn("https://huggingface.co/datasets/HuanLin/Pymss-Studio-Dist/resolve/main/1.2.3/" + name, rendered)
+        self.assertIn("https://www.modelscope.cn/datasets/huanlinoto/Pymss-Studio-Dist/resolve/master/1.2.3/" + name, rendered)
+        self.assertNotIn("releases/download/v1.2.3/" + name, rendered)
+        self.assertIn("No split downloads", rendered)
+
+    def test_download_instructions_are_generated_even_without_reviewed_notes(self):
+        (self.notes / "1.2.3.md").unlink()
+        (self.artifacts / "Pymss-Studio-1.2.3-windows-x64-online.7z").touch()
+        rendered = NOTES.render_release_notes(self.artifacts, self.notes, "v1.2.3", allow_missing_summary=True)
+        self.assertIn("Recommended", rendered)
+        self.assertIn("Hugging Face", rendered)
+        with self.assertRaises(FileNotFoundError):
+            NOTES.render_release_notes(self.artifacts, self.notes, "v1.2.3")
+
+    def test_platform_only_republication_retains_previously_linked_mirror_only_packages(self):
+        package = self.artifacts / "Pymss-Studio-1.2.3-windows-x64-rocm.7z"
+        package.write_bytes(b"a" * 1024)
+        with mock.patch.object(NOTES, "GITHUB_ASSET_LIMIT", 1024):
+            previous = NOTES.render_release_notes(self.artifacts, self.notes, "v1.2.3")
+        package.unlink()
+        (self.artifacts / "Pymss-Studio-1.2.3-macos-arm64-mlx.dmg").touch()
+        with mock.patch.object(NOTES, "github_json", side_effect=[{**self.release, "body": previous}, []]):
+            assets, metadata = NOTES.fetch_published_release(self.artifacts, "v1.2.3", "owner/repo", "")
+        rendered = NOTES.render_release_notes(self.artifacts, self.notes, "v1.2.3", published_assets=assets, published_metadata=metadata)
+        self.assertIn("Apple Silicon", rendered)
+        self.assertIn("resolve/main/1.2.3/" + package.name, rendered)
+        self.assertIn("resolve/master/1.2.3/" + package.name, rendered)
+        self.assertNotIn("releases/download/v1.2.3/" + package.name, rendered)
+
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.artifacts = self.root / "artifacts"
@@ -57,11 +91,30 @@ class ReleaseNotesTests(unittest.TestCase):
         self.assertNotIn("1.2.2", rendered)
         self.assertEqual(rendered.count("Improve startup."), 1)
 
+    def test_macos_supplement_preserves_windows_and_linux_update_status_from_notes(self):
+        packages = ["Pymss-Studio-1.2.3-windows-x64-online.7z", "Pymss-Studio-1.2.3-linux-x64.AppImage"]
+        for package, slug, enabled in zip(packages, ("windows-x64", "linux-x64"), (True, False)):
+            (self.artifacts / package).touch()
+            (self.artifacts / f"prerelease-v1-{slug}-update.json").write_text(json.dumps(update_metadata(enabled)), encoding="utf-8")
+        previous = NOTES.render_release_notes(self.artifacts, self.notes, "v1.2.3")
+        for path in self.artifacts.iterdir():
+            path.unlink()
+        (self.artifacts / "Pymss-Studio-1.2.3-macos-arm64-mlx.dmg").touch()
+        (self.artifacts / "prerelease-v1-macos-arm64-update.json").write_text(json.dumps(update_metadata()), encoding="utf-8")
+        published = [asset(package, index) for index, package in enumerate(packages, 1)]
+        with mock.patch.object(NOTES, "github_json", side_effect=[{**self.release, "body": previous}, published]):
+            assets, metadata = NOTES.fetch_published_release(self.artifacts, "v1.2.3", "owner/repo", "")
+        rendered = NOTES.render_release_notes(self.artifacts, self.notes, "v1.2.3", published_assets=assets, published_metadata=metadata)
+        self.assertIn("| Windows | 已启用 / Enabled |", rendered)
+        self.assertIn("| Linux | 请手动安装 / Manual installation |", rendered)
+        self.assertIn("| macOS | 已启用 / Enabled |", rendered)
+
     def test_current_metadata_takes_precedence_without_downloading_the_old_copy(self):
         package = "Pymss-Studio-1.2.3-windows-x64-cpu-setup.exe"
         metadata_name = "prerelease-v1-windows-x64-update.json"
         (self.artifacts / package).touch()
         (self.artifacts / metadata_name).write_text(json.dumps(update_metadata(False)), encoding="utf-8")
+        self.release["body"] = "## 在线更新 / In-app updates\n\n| Windows | 已启用 / Enabled |\n"
         with mock.patch.object(NOTES, "github_json", side_effect=[self.release, [asset(package, 1), asset(metadata_name, 2)]]) as api:
             assets, metadata = NOTES.fetch_published_release(self.artifacts, "v1.2.3", "owner/repo", "token")
         self.assertEqual(api.call_count, 2)

@@ -333,6 +333,10 @@ jobs:
     timeout-minutes: 120
     needs: windows-cuda-prepare
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Download CUDA stage artifact
         uses: actions/download-artifact@v4
         with:
@@ -341,21 +345,14 @@ jobs:
 
       - name: Build Windows portable 7z archive
         shell: pwsh
-        run: |
-          $version = '${{ needs.windows-cuda-prepare.outputs.version }}'
-          $stageName = '${{ needs.windows-cuda-prepare.outputs.stage_name }}'
-          if (Test-Path "release/$stageName.7z") { Remove-Item "release/$stageName.7z" -Force }
-          Set-Content "release/$stageName/pymss-studio.portable" -Value "portable" -Encoding ASCII
-           Push-Location "release"
-           & "C:\Program Files\7-Zip\7z.exe" a -t7z -m0=lzma2 -mx=5 -mfb=128 -md=768m -ms=on -mf=BCJ2 -mmt=on "$stageName.7z" "$stageName"
-           if ($LASTEXITCODE -ne 0) { throw "Unable to create the CUDA portable archive" }
-           Pop-Location
+        run: python scripts/release-assets.py portable "release/${{ needs.windows-cuda-prepare.outputs.stage_name }}"
 
       - name: Upload Windows portable archive artifact
         uses: actions/upload-artifact@v4
         with:
           name: Pymss-Studio-${{ needs.windows-cuda-prepare.outputs.version }}-windows-x64-cuda-portable
           path: release/${{ needs.windows-cuda-prepare.outputs.stage_name }}.7z
+          if-no-files-found: error
 
   windows-cuda-exe:
     name: Windows x64 CUDA setup exe
@@ -509,6 +506,10 @@ jobs:
     timeout-minutes: 120
     needs: windows-cpu-prepare
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Download CPU stage artifact
         uses: actions/download-artifact@v4
         with:
@@ -517,20 +518,14 @@ jobs:
 
       - name: Build Windows CPU portable 7z archive
         shell: pwsh
-        run: |
-          $stageName = '${{ needs.windows-cpu-prepare.outputs.stage_name }}'
-          if (Test-Path "release/$stageName.7z") { Remove-Item "release/$stageName.7z" -Force }
-          Set-Content "release/$stageName/pymss-studio.portable" -Value "portable" -Encoding ASCII
-           Push-Location "release"
-           & "C:\Program Files\7-Zip\7z.exe" a -t7z -m0=lzma2 -mx=5 -mfb=128 -md=768m -ms=on -mf=BCJ2 -mmt=on "$stageName.7z" "$stageName"
-           if ($LASTEXITCODE -ne 0) { throw "Unable to create the CPU portable archive" }
-           Pop-Location
+        run: python scripts/release-assets.py portable "release/${{ needs.windows-cpu-prepare.outputs.stage_name }}"
 
       - name: Upload Windows CPU portable archive artifact
         uses: actions/upload-artifact@v4
         with:
           name: Pymss-Studio-${{ needs.windows-cpu-prepare.outputs.version }}-windows-x64-cpu-portable
           path: release/${{ needs.windows-cpu-prepare.outputs.stage_name }}.7z
+          if-no-files-found: error
 
   windows-cpu-exe:
     name: Windows x64 CPU setup exe
@@ -653,6 +648,10 @@ jobs:
     timeout-minutes: 120
     needs: windows-online-prepare
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: actions/download-artifact@v4
         with:
           name: ${{ needs.windows-online-prepare.outputs.stage_artifact }}
@@ -661,12 +660,9 @@ jobs:
         shell: pwsh
         run: |
           $stageName = '${{ needs.windows-online-prepare.outputs.stage_name }}'
-          Set-Content "release/$stageName/pymss-studio.portable" -Value "portable" -Encoding ASCII
+          python scripts/release-assets.py portable "release/$stageName"
+          if ($LASTEXITCODE -ne 0) { throw "Unable to create the Online portable archive" }
           $updateArchive = (Resolve-Path "release").Path + "\Pymss-Studio-${{ needs.windows-online-prepare.outputs.version }}-windows-x64-update.zip"
-           Push-Location release
-           & "C:\Program Files\7-Zip\7z.exe" a -t7z -m0=lzma2 -mx=5 -mfb=128 -md=768m -ms=on -mf=BCJ2 -mmt=on "$stageName.7z" "$stageName"
-           if ($LASTEXITCODE -ne 0) { throw "Unable to create the Online portable archive" }
-           Pop-Location
            Push-Location "release/$stageName"
            # Keep bundled tools in the portable archive only. Add bin here when a tool update needs to be distributed.
            & "C:\Program Files\7-Zip\7z.exe" a -tzip $updateArchive "Pymss Studio.exe" "python"
@@ -678,6 +674,7 @@ jobs:
         with:
           name: Pymss-Studio-${{ needs.windows-online-prepare.outputs.version }}-windows-x64-online-portable
           path: release/${{ needs.windows-online-prepare.outputs.stage_name }}.7z
+          if-no-files-found: error
       - name: Upload universal Windows update archive
         uses: actions/upload-artifact@v4
         with:
@@ -840,23 +837,22 @@ jobs:
     timeout-minutes: 120
     needs: windows-rocm-prepare
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: actions/download-artifact@v4
         with:
           name: ${{ needs.windows-rocm-prepare.outputs.stage_artifact }}
           path: release/${{ needs.windows-rocm-prepare.outputs.stage_name }}
       - name: Build ROCm portable archive
         shell: pwsh
-        run: |
-          $stageName = '${{ needs.windows-rocm-prepare.outputs.stage_name }}'
-          Set-Content "release/$stageName/pymss-studio.portable" -Value "portable" -Encoding ASCII
-           Push-Location release
-           & "C:\Program Files\7-Zip\7z.exe" a -t7z -m0=lzma2 -mx=5 -mfb=128 -md=768m -ms=on -mf=BCJ2 -mmt=on "$stageName.7z" "$stageName"
-           if ($LASTEXITCODE -ne 0) { throw "Unable to create the ROCm portable archive" }
-           Pop-Location
+        run: python scripts/release-assets.py portable "release/${{ needs.windows-rocm-prepare.outputs.stage_name }}"
       - uses: actions/upload-artifact@v4
         with:
           name: Pymss-Studio-${{ needs.windows-rocm-prepare.outputs.version }}-windows-x64-rocm-portable
           path: release/${{ needs.windows-rocm-prepare.outputs.stage_name }}.7z
+          if-no-files-found: error
 
   windows-rocm-exe:
     name: Windows x64 ROCm setup exe
