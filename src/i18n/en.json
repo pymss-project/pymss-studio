@@ -141,6 +141,7 @@
     "audioFile": "Audio",
     "videoFile": "Video",
     "audioTracks": "Audio tracks",
+    "audioTracksAllFiles": "Audio tracks in all files",
     "noAudioTrackSelected": "Select at least one audio track for {name}",
     "inputAudioStreamMissing": "Audio track read failed: no usable audio stream found ({path})",
     "inputMediaUnsupported": "Audio track read failed or media format is unsupported: {path}",

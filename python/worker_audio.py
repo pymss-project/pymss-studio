@@ -153,6 +153,28 @@ def _publish_export_path(temporary: Path, path: Path) -> Path:
     raise FileExistsError(f"Failed to publish a unique export filename: {path}")
 
 
+def _container_audio_tracks(container: Any) -> list[dict[str, Any]]:
+    return [{
+        "index": number,
+        "language": str(track.metadata.get("language") or ""),
+        "title": str(track.metadata.get("title") or ""),
+        "channels": int(getattr(track.codec_context, "channels", 0) or 0),
+    } for number, track in enumerate((s for s in container.streams if s.type == "audio"), start=1)]
+
+
+def _audio_tracks_by_path(paths: list[Any]) -> dict[str, list[dict[str, Any]]]:
+    """List audio tracks for many files in one worker call; unreadable files get no tracks."""
+    import av  # type: ignore
+    tracks: dict[str, list[dict[str, Any]]] = {}
+    for value in paths:
+        try:
+            with av.open(str(value)) as container:
+                tracks[str(value)] = _container_audio_tracks(container)
+        except Exception:
+            tracks[str(value)] = []
+    return tracks
+
+
 def _audio_metadata(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(str(path))
@@ -169,12 +191,7 @@ def _audio_metadata(path: Path) -> dict[str, Any]:
                 duration = float(container.duration / av.time_base)
             sample_rate = int(getattr(stream.codec_context, "sample_rate", 0) or 0)
             channels = int(getattr(stream.codec_context, "channels", 0) or 0)
-            audio_tracks = [{
-                "index": number,
-                "language": str(track.metadata.get("language") or ""),
-                "title": str(track.metadata.get("title") or ""),
-                "channels": int(getattr(track.codec_context, "channels", 0) or 0),
-            } for number, track in enumerate((s for s in container.streams if s.type == "audio"), start=1)]
+            audio_tracks = _container_audio_tracks(container)
             return {
                 "path": str(path),
                 "name": path.name,
@@ -361,6 +378,9 @@ def _apply_stereo_pan(audio: Any, pan: float) -> Any:
 
 
 def cmd_audio_metadata(payload: dict[str, Any]) -> int:
+    if isinstance(payload.get("paths"), list):
+        emit("audio_metadata", {"audioTracksByPath": _audio_tracks_by_path(payload["paths"])})
+        return 0
     path = payload.get("path")
     if not path:
         return emit_error("AUDIO_METADATA_FAILED", "Missing audio path")

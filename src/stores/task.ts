@@ -36,6 +36,7 @@ import { runtimeErrorSummary } from '@/utils/runtimeErrors'
 import { cloneWorkflow, prepareWorkbenchRun, workflowInputNodes, type WorkflowRuntimeBindings, type WorkflowWorkbenchSnapshot, type WorkflowNodeState } from '@/workflows/workbench'
 import { SEPARATE_MODEL_PAGE_SIZES, normalizePageSize } from '@/utils/pagination'
 import { createInferenceSnapshot, normalizeCustomParameterIntent, resolveParameters, type CustomParameterIntent, type ParameterMode, type ParameterResolutionMetadata, type ResolvedInferenceSnapshot } from '@/features/inference/parameters'
+import { selectTrackLanguage, trackLanguageStates } from '@/utils/audioTracks'
 
 const studioLog = createLogger('ui.stores.task')
 
@@ -1818,20 +1819,31 @@ export const useTaskStore = defineStore('task', () => {
     const existing = new Set(inputFiles.value)
     const additions = valid.filter((p) => !existing.has(p))
     if (additions.length) inputFiles.value = [...inputFiles.value, ...additions]
-    additions.filter(path => VIDEO_EXTENSIONS.includes(path.split('.').pop()?.toLowerCase() || '')).forEach(probeAudioTracks)
+    const videos = additions.filter(path => VIDEO_EXTENSIONS.includes(path.split('.').pop()?.toLowerCase() || ''))
+    if (videos.length) void probeAudioTracks(videos)
     return additions.length
   }
 
-  async function probeAudioTracks(path: string) {
+  async function probeAudioTracks(paths: string[]) {
     try {
-      const metadata = await invoke<{ audioTracks?: AudioTrackInfo[] }>('get_audio_metadata', { payload: { path } })
-      const tracks = metadata?.audioTracks || []
-      if (tracks.length < 2 || !inputFiles.value.includes(path)) return
-      inputAudioTracks.value = { ...inputAudioTracks.value, [path]: tracks }
-      inputTrackSelection.value = { ...inputTrackSelection.value, [path]: tracks.map(track => track.index) }
+      const metadata = await invoke<{ audioTracksByPath?: Record<string, AudioTrackInfo[]> }>('get_audio_metadata', { payload: { paths } })
+      const found = Object.entries(metadata?.audioTracksByPath || {})
+        .filter(([path, tracks]) => tracks.length > 1 && inputFiles.value.includes(path))
+      if (!found.length) return
+      inputAudioTracks.value = { ...inputAudioTracks.value, ...Object.fromEntries(found) }
+      inputTrackSelection.value = {
+        ...inputTrackSelection.value,
+        ...Object.fromEntries(found.map(([path, tracks]) => [path, tracks.map(track => track.index)])),
+      }
     } catch {
       // Without track info the worker still separates every track.
     }
+  }
+
+  const audioTrackLanguages = computed(() => trackLanguageStates(inputFiles.value, inputAudioTracks.value, inputTrackSelection.value))
+
+  function setAudioTrackLanguage(language: string, selected: boolean) {
+    inputTrackSelection.value = selectTrackLanguage(inputFiles.value, inputAudioTracks.value, inputTrackSelection.value, language, selected)
   }
 
   function removeInputFile(path: string) {
@@ -2396,6 +2408,8 @@ export const useTaskStore = defineStore('task', () => {
     inputFiles,
     inputAudioTracks,
     inputTrackSelection,
+    audioTrackLanguages,
+    setAudioTrackLanguage,
     inputPath,
     separateRunMode,
     ensembleEnabled,

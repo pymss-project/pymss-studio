@@ -86,6 +86,7 @@ const {
   inputFiles,
   inputAudioTracks,
   inputTrackSelection,
+  audioTrackLanguages,
   separateRunMode: runMode,
   ensembleEnabled,
   ensembleModels,
@@ -2286,6 +2287,20 @@ async function retryCurrentTask() {
               </button>
             </div>
 
+            <div v-if="audioTrackLanguages.length && runMode === 'model' && !ensembleEnabled" class="track-batch">
+              <span class="track-batch__label">{{ t('separate.audioTracksAllFiles') }}</span>
+              <n-checkbox
+                v-for="item in audioTrackLanguages"
+                :key="item.language"
+                size="small"
+                :checked="item.checked"
+                :indeterminate="item.indeterminate"
+                :disabled="isRunModeLocked"
+                :label="item.language"
+                @update:checked="(value: boolean) => task.setAudioTrackLanguage(item.language, value)"
+              />
+            </div>
+
             <div
               class="dropzone"
               :class="{ 'dropzone--dragging': isDragging, 'dropzone--filled': inputFiles.length, 'dropzone--clickable': !inputFiles.length && !isRunModeLocked }"
@@ -3760,6 +3775,19 @@ async function retryCurrentTask() {
 }
 
 .file-chip__tracks-label { color: var(--on-surface-muted); }
+
+.track-batch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  background: color-mix(in srgb, var(--primary-soft) 30%, var(--surface-2));
+}
+
+.track-batch__label { color: var(--on-surface-muted); }
 
 .dropzone__empty {
   height: 100%;

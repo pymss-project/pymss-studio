@@ -586,3 +586,27 @@ class EditorEffectTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AudioTrackProbeTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is required")
+    def test_batch_probe_lists_tracks_per_file_and_tolerates_unreadable_files(self) -> None:
+        try:
+            import av  # noqa: F401
+        except ImportError:
+            self.skipTest("PyAV is required")
+        from worker_audio import _audio_tracks_by_path
+        with tempfile.TemporaryDirectory() as tmp:
+            movie = Path(tmp) / "movie.mkv"
+            subprocess.run([
+                "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=d=0.2", "-f", "lavfi", "-i", "sine=d=0.2",
+                "-map", "0", "-map", "1", "-ac:a:1", "2", "-metadata:s:a:0", "language=jpn",
+                "-metadata:s:a:1", "language=eng", "-metadata:s:a:1", "title=Dub", "-c:a", "flac", str(movie),
+            ], check=True)
+            missing = str(Path(tmp) / "missing.mkv")
+            tracks = _audio_tracks_by_path([str(movie), missing])
+        self.assertEqual(tracks[missing], [])
+        self.assertEqual(tracks[str(movie)], [
+            {"index": 1, "language": "jpn", "title": "", "channels": 1},
+            {"index": 2, "language": "eng", "title": "Dub", "channels": 2},
+        ])

@@ -141,6 +141,7 @@
     "audioFile": "音频",
     "videoFile": "视频",
     "audioTracks": "音轨",
+    "audioTracksAllFiles": "所有文件的音轨",
     "noAudioTrackSelected": "请为 {name} 至少选择一条音轨",
     "inputAudioStreamMissing": "音轨读取失败：文件中未找到可用音轨 ({path})",
     "inputMediaUnsupported": "音轨读取失败或格式不支持：{path}",
