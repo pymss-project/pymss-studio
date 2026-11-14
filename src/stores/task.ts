@@ -82,6 +82,13 @@ type ScanMediaPathsResult = {
   warnings: string[]
 }
 
+export type AudioTrackInfo = {
+  index: number
+  language: string
+  title: string
+  channels: number
+}
+
 export type SeparationTask = {
   id: string
   jobId?: string
@@ -90,6 +97,7 @@ export type SeparationTask = {
   batchIndex?: number
   model: string
   input: string
+  audioTracks?: number[]
   jobOutput?: string
   outputPrefix?: string
   output: string
@@ -445,6 +453,7 @@ function normalizeTask(task: Partial<SeparationTask>, windows = /^[A-Za-z]:|^\\\
     ...(typeof task.batchIndex === 'number' && Number.isSafeInteger(task.batchIndex) && task.batchIndex >= 0 ? { batchIndex: task.batchIndex } : {}),
     model: task.model || '',
     input: task.input || '',
+    ...(Array.isArray(task.audioTracks) ? { audioTracks: task.audioTracks.filter(track => Number.isSafeInteger(track) && track > 0) } : {}),
     jobOutput: typeof task.jobOutput === 'string' && task.jobOutput.trim() ? normalizeOutputPath(task.jobOutput) : undefined,
     outputPrefix: typeof task.outputPrefix === 'string' && task.outputPrefix.trim() ? task.outputPrefix : undefined,
     output: normalizedOutput,
@@ -611,6 +620,9 @@ export const useTaskStore = defineStore('task', () => {
   const focusedResultTaskId = ref<string | null>(null)
   const focusedTaskId = ref<string | null>(null)
   const inputFiles = ref<string[]>([])
+  // Audio tracks of multi-track inputs (dual-audio videos) and the 1-based tracks chosen for separation.
+  const inputAudioTracks = ref<Record<string, AudioTrackInfo[]>>({})
+  const inputTrackSelection = ref<Record<string, number[]>>({})
   const separateRunMode = ref<'model' | 'workflow'>('model')
   const ensembleEnabled = ref(false)
   const ensembleModels = ref<string[]>([])
@@ -1242,6 +1254,7 @@ export const useTaskStore = defineStore('task', () => {
       ...(typeof batchIndex === 'number' && Number.isSafeInteger(batchIndex) && batchIndex >= 0 ? { batchIndex } : {}),
       model,
       input,
+      ...(inputAudioTracks.value[input] && inputTrackSelection.value[input] ? { audioTracks: [...inputTrackSelection.value[input]] } : {}),
       jobOutput: resolvedJobOutput,
       output: resolveTaskOutputPath(resolvedJobOutput, input, resultId, outputLayout),
       status: 'queued',
@@ -1340,6 +1353,7 @@ export const useTaskStore = defineStore('task', () => {
           taskId: task.id,
           model: task.model,
           input: task.input,
+          audioTracks: task.audioTracks,
           output: config.outputLayout === 'folders' ? (task.jobOutput || task.output) : task.output,
           modelDir: config.modelDir ?? (settings.modelDir || null),
           download: true,
@@ -1396,6 +1410,7 @@ export const useTaskStore = defineStore('task', () => {
             input: task.input,
             output: task.output,
             inputIndex: index + 1,
+            audioTracks: task.audioTracks,
           })),
           modelDir: config.modelDir ?? (settings.modelDir || null),
           download: true,
@@ -1803,7 +1818,20 @@ export const useTaskStore = defineStore('task', () => {
     const existing = new Set(inputFiles.value)
     const additions = valid.filter((p) => !existing.has(p))
     if (additions.length) inputFiles.value = [...inputFiles.value, ...additions]
+    additions.filter(path => VIDEO_EXTENSIONS.includes(path.split('.').pop()?.toLowerCase() || '')).forEach(probeAudioTracks)
     return additions.length
+  }
+
+  async function probeAudioTracks(path: string) {
+    try {
+      const metadata = await invoke<{ audioTracks?: AudioTrackInfo[] }>('get_audio_metadata', { payload: { path } })
+      const tracks = metadata?.audioTracks || []
+      if (tracks.length < 2 || !inputFiles.value.includes(path)) return
+      inputAudioTracks.value = { ...inputAudioTracks.value, [path]: tracks }
+      inputTrackSelection.value = { ...inputTrackSelection.value, [path]: tracks.map(track => track.index) }
+    } catch {
+      // Without track info the worker still separates every track.
+    }
   }
 
   function removeInputFile(path: string) {
@@ -2154,6 +2182,8 @@ export const useTaskStore = defineStore('task', () => {
       : modelStore.models.find((item) => item.name === model) || null
     const modelType = selectedEntry?.modelType || null
     const targets = [...inputFiles.value]
+    const noTracks = targets.find(path => inputAudioTracks.value[path] && !inputTrackSelection.value[path]?.length)
+    if (noTracks) throw new Error(i18n.global.t('separate.noAudioTrackSelected', { name: noTracks.split(/[\\/]/).pop() }))
     const jobId = createRunId('job')
     const outputLayout = normalizeOutputLayout(options.outputLayout)
     const jobOutput = resolveOutputDirectory(options.outputDir, separateOutputDir.value, windowsPaths.value)
@@ -2364,6 +2394,8 @@ export const useTaskStore = defineStore('task', () => {
     focusedResultTaskId,
     focusedTaskId,
     inputFiles,
+    inputAudioTracks,
+    inputTrackSelection,
     inputPath,
     separateRunMode,
     ensembleEnabled,

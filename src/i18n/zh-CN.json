@@ -140,6 +140,8 @@
     "noAudioAdded": "未发现可用的文件",
     "audioFile": "音频",
     "videoFile": "视频",
+    "audioTracks": "音轨",
+    "noAudioTrackSelected": "请为 {name} 至少选择一条音轨",
     "inputAudioStreamMissing": "音轨读取失败：文件中未找到可用音轨 ({path})",
     "inputMediaUnsupported": "音轨读取失败或格式不支持：{path}",
     "runtimeOutdated": "当前内核不支持此模型所需的功能。请在设置的运行环境页面同步依赖或更新内核后重试。",

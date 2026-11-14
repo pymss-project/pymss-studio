@@ -169,12 +169,19 @@ def _audio_metadata(path: Path) -> dict[str, Any]:
                 duration = float(container.duration / av.time_base)
             sample_rate = int(getattr(stream.codec_context, "sample_rate", 0) or 0)
             channels = int(getattr(stream.codec_context, "channels", 0) or 0)
+            audio_tracks = [{
+                "index": number,
+                "language": str(track.metadata.get("language") or ""),
+                "title": str(track.metadata.get("title") or ""),
+                "channels": int(getattr(track.codec_context, "channels", 0) or 0),
+            } for number, track in enumerate((s for s in container.streams if s.type == "audio"), start=1)]
             return {
                 "path": str(path),
                 "name": path.name,
                 "duration": max(0.0, duration),
                 "sampleRate": sample_rate,
                 "channels": channels,
+                "audioTracks": audio_tracks,
             }
     except Exception:
         try:

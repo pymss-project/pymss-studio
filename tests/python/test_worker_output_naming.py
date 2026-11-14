@@ -264,6 +264,24 @@ class StudioOutputNamingTests(unittest.TestCase):
                 ["movie [track 1 jpn]_vocals.wav", "movie [track 2 eng]_vocals.wav"],
             )
 
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
+    def test_selected_audio_tracks_limit_extraction_and_reject_missing_tracks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "movie.mkv"
+            subprocess.run([
+                "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=d=0.2", "-f", "lavfi", "-i", "sine=d=0.2:f=880",
+                "-map", "0", "-map", "1", "-metadata:s:a:1", "language=eng", "-c:a", "flac", str(source),
+            ], check=True)
+            tracks = root / "tracks"
+            tracks.mkdir()
+            self.assertTrue(worker_infer._split_audio_tracks(source, tracks, [2]))
+            self.assertEqual(os.listdir(tracks), ["movie [track 2 eng].flac"])
+            with self.assertRaisesRegex(ValueError, "Audio track 3 does not exist"):
+                worker_infer._split_audio_tracks(source, tracks, [3])
+        self.assertEqual(worker_infer._normalize_audio_tracks([2, 1, 2, 0, True, "3"]), [1, 2])
+        self.assertIsNone(worker_infer._normalize_audio_tracks([]))
+
     def test_upstream_failure_discards_only_outputs_created_in_this_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

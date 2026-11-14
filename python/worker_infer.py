@@ -230,10 +230,23 @@ def _claim_output_path(path: Path, reserved: set[Path] | None = None) -> Path:
     raise FileExistsError(f"Failed to reserve a unique output filename: {path}")
 
 
-def _split_audio_tracks(source: Path, target_dir: Path) -> bool:
-    """Extract every audio stream of a multi-track file, because pymss only decodes the first one."""
+def _normalize_audio_tracks(value: Any) -> list[int] | None:
+    if not isinstance(value, list):
+        return None
+    tracks = sorted({int(item) for item in value if isinstance(item, int) and not isinstance(item, bool) and item > 0})
+    return tracks or None
+
+
+def _split_audio_tracks(source: Path, target_dir: Path, selected: list[int] | None = None, logger: Any = None) -> bool:
+    """Extract the selected (default: all) audio streams of a multi-track file, because pymss only decodes the first one."""
+    if not source.is_file():
+        return False
     ffprobe, ffmpeg = shutil.which("ffprobe"), shutil.which("ffmpeg")
-    if not source.is_file() or not ffprobe or not ffmpeg:
+    if not ffprobe or not ffmpeg:
+        if selected:
+            raise RuntimeError("FFmpeg and ffprobe are required to separate selected audio tracks")
+        if logger is not None:
+            logger.warning("FFmpeg/ffprobe not found; only the first audio track of multi-track files will be separated")
         return False
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     probe = subprocess.run(
@@ -243,7 +256,12 @@ def _split_audio_tracks(source: Path, target_dir: Path) -> bool:
     streams = (json.loads(probe.stdout or "{}").get("streams") or []) if probe.returncode == 0 else []
     if len(streams) < 2:
         return False
+    missing = [number for number in selected or [] if number > len(streams)]
+    if missing:
+        raise ValueError(f"Audio track {missing[0]} does not exist in {source.name} ({len(streams)} tracks)")
     for number, stream in enumerate(streams, start=1):
+        if selected and number not in selected:
+            continue
         language = _safe_filename_part(str((stream.get("tags") or {}).get("language") or "")).lower()
         label = f"track {number}" + (f" {language}" if language not in {"", "und", "audio"} else "")
         result = subprocess.run(
@@ -450,10 +468,10 @@ def _studio_separator_type() -> type[Any]:
                     self._studio_output_sources = output_sources
                 output_sources[target] = str(context.get("source_name") or file_name)
 
-        def process_folder(self, input_folder: str, input_index: int = 1) -> list[str]:
-            """Separate each audio track of multi-track files (dual-audio videos) separately."""
+        def process_folder(self, input_folder: str, input_index: int = 1, audio_tracks: list[int] | None = None) -> list[str]:
+            """Separate each selected audio track of multi-track files (dual-audio videos) separately."""
             with tempfile.TemporaryDirectory(prefix="pymss-tracks-", ignore_cleanup_errors=True) as tracks:
-                if not _split_audio_tracks(Path(input_folder), Path(tracks)):
+                if not _split_audio_tracks(Path(input_folder), Path(tracks), audio_tracks, getattr(self, "logger", None)):
                     return self._process_input(input_folder, input_index)
                 track_count = len(os.listdir(tracks))
                 self._studio_track_folder = Path(input_folder).stem
@@ -997,6 +1015,7 @@ def cmd_infer_batch(payload: dict[str, Any]) -> int:
             "taskId": task_id,
             "input": str(source_path),
             "inputIndex": int(item.get("inputIndex") or index + 1),
+            "audioTracks": _normalize_audio_tracks(item.get("audioTracks")),
         })
 
     cleanup = ExitStack()
@@ -1045,7 +1064,7 @@ def cmd_infer_batch(payload: dict[str, Any]) -> int:
                 begin_rocm_operation()
                 emit("task_stage", {"stage": "separating", "message": "Separating"}, task_id=task_id)
                 try:
-                    success_files = separator.process_folder(item["input"], int(item.get("inputIndex") or 1))
+                    success_files = separator.process_folder(item["input"], int(item.get("inputIndex") or 1), item.get("audioTracks"))
                     assert_rocm_operation_succeeded()
                 except Exception:
                     # Continue only for a recorded HIP failure. Unrelated backend
@@ -1147,7 +1166,7 @@ def cmd_infer(payload: dict[str, Any]) -> int:
             logger=logger,
         )
         emit("task_stage", {"stage": "separating", "message": "Separating"}, task_id=task_id)
-        success_files = separator.process_folder(input_path, int(payload.get("inputIndex") or 1))
+        success_files = separator.process_folder(input_path, int(payload.get("inputIndex") or 1), _normalize_audio_tracks(payload.get("audioTracks")))
         assert_rocm_operation_succeeded()
         if Path(input_path).name not in {Path(name).name for name in success_files}:
             return emit_error("INFERENCE_FAILED", f"Separation did not produce outputs for {Path(input_path).name}", task_id=task_id)

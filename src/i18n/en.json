@@ -140,6 +140,8 @@
     "noAudioAdded": "No usable files found",
     "audioFile": "Audio",
     "videoFile": "Video",
+    "audioTracks": "Audio tracks",
+    "noAudioTrackSelected": "Select at least one audio track for {name}",
     "inputAudioStreamMissing": "Audio track read failed: no usable audio stream found ({path})",
     "inputMediaUnsupported": "Audio track read failed or media format is unsupported: {path}",
     "runtimeOutdated": "The active kernel does not support a feature required by this model. Synchronize dependencies or update the kernel in Settings > Runtime, then retry.",
