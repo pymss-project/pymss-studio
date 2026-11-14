@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -232,6 +235,34 @@ class StudioOutputNamingTests(unittest.TestCase):
                     self.assertIn({"stem": stem, "path": str(output)}, outputs)
             self.assertEqual(separator._studio_input_contexts, {})
             self.assertIsNone(separator._studio_active_context)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
+    def test_multi_track_input_separates_every_audio_track(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "movie.mka"
+            subprocess.run([
+                "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=d=0.2", "-f", "lavfi", "-i", "sine=d=0.2:f=880",
+                "-map", "0", "-map", "1", "-metadata:s:a:0", "language=jpn", "-metadata:s:a:1", "language=eng",
+                "-c:a", "flac", str(source),
+            ], check=True)
+            separator = self._new_separator()
+            seen: list[str] = []
+
+            def process(base, input_folder):
+                names = sorted(os.listdir(input_folder))
+                for name in names:
+                    seen.append(name)
+                    base._save_output("vocals", name.encode(), 44100, Path(name).stem, str(root))
+                return names
+
+            with mock.patch.object(_OutputSeparatorBase, "process_folder", autospec=True, side_effect=process):
+                self.assertEqual(separator.process_folder(str(source)), ["movie.mka"])
+            self.assertEqual(seen, ["movie [track 1 jpn].flac", "movie [track 2 eng].flac"])
+            self.assertEqual(
+                sorted(Path(output["path"]).name for output in separator.studio_outputs()),
+                ["movie [track 1 jpn]_vocals.wav", "movie [track 2 eng]_vocals.wav"],
+            )
 
     def test_upstream_failure_discards_only_outputs_created_in_this_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
