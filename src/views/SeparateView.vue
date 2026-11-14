@@ -84,6 +84,9 @@ const beginnerGuide = useBeginnerGuideStore()
 
 const {
   inputFiles,
+  inputAudioTracks,
+  inputTrackSelection,
+  audioTrackLanguages,
   separateRunMode: runMode,
   ensembleEnabled,
   ensembleModels,
@@ -2284,6 +2287,20 @@ async function retryCurrentTask() {
               </button>
             </div>
 
+            <div v-if="audioTrackLanguages.length && runMode === 'model' && !ensembleEnabled" class="track-batch">
+              <span class="track-batch__label">{{ t('separate.audioTracksAllFiles') }}</span>
+              <n-checkbox
+                v-for="item in audioTrackLanguages"
+                :key="item.language"
+                size="small"
+                :checked="item.checked"
+                :indeterminate="item.indeterminate"
+                :disabled="isRunModeLocked"
+                :label="item.language"
+                @update:checked="(value: boolean) => task.setAudioTrackLanguage(item.language, value)"
+              />
+            </div>
+
             <div
               class="dropzone"
               :class="{ 'dropzone--dragging': isDragging, 'dropzone--filled': inputFiles.length, 'dropzone--clickable': !inputFiles.length && !isRunModeLocked }"
@@ -2308,6 +2325,24 @@ async function retryCurrentTask() {
                       <span class="file-chip__kind">{{ getFileKindLabel(path) }}</span>
                       <code :title="path">{{ shortenMiddle(path, 60) }}</code>
                     </div>
+                    <n-checkbox-group
+                      v-if="inputAudioTracks[path] && runMode === 'model' && !ensembleEnabled"
+                      v-model:value="inputTrackSelection[path]"
+                      class="file-chip__tracks"
+                      :disabled="isRunModeLocked"
+                      @pointerdown.stop
+                      @click.stop
+                    >
+                      <span class="file-chip__tracks-label">{{ t('separate.audioTracks') }}</span>
+                      <n-checkbox
+                        v-for="track in inputAudioTracks[path]"
+                        :key="track.index"
+                        :value="track.index"
+                        size="small"
+                        :title="track.title || undefined"
+                        :label="[`#${track.index}`, track.language, track.channels ? `${track.channels}ch` : ''].filter(Boolean).join(' · ')"
+                      />
+                    </n-checkbox-group>
                   </div>
                   <n-button quaternary circle size="tiny" class="file-chip__remove" :title="t('separate.remove')" :disabled="isRunModeLocked" @click.stop="task.removeInputFile(path)">
                     <template #icon><n-icon :component="CloseOutline" /></template>
@@ -3730,6 +3765,29 @@ async function retryCurrentTask() {
 }
 
 .file-chip__remove { flex: 0 0 auto; color: var(--on-surface-muted); }
+
+.file-chip__tracks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  font-size: 11px;
+}
+
+.file-chip__tracks-label { color: var(--on-surface-muted); }
+
+.track-batch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  background: color-mix(in srgb, var(--primary-soft) 30%, var(--surface-2));
+}
+
+.track-batch__label { color: var(--on-surface-muted); }
 
 .dropzone__empty {
   height: 100%;
