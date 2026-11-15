@@ -153,31 +153,34 @@ def _publish_export_path(temporary: Path, path: Path) -> Path:
     raise FileExistsError(f"Failed to publish a unique export filename: {path}")
 
 
-def _container_audio_tracks(container: Any) -> list[dict[str, Any]]:
-    return [{
-        "index": number,
-        "language": str(track.metadata.get("language") or ""),
-        "title": str(track.metadata.get("title") or ""),
-        "channels": int(getattr(track.codec_context, "channels", 0) or 0),
-    } for number, track in enumerate((s for s in container.streams if s.type == "audio"), start=1)]
-
-
-def _audio_tracks_by_path(paths: list[Any]) -> dict[str, list[dict[str, Any]]]:
-    """List audio tracks for many files in one worker call; unreadable files get no tracks."""
-    import av  # type: ignore
-    tracks: dict[str, list[dict[str, Any]]] = {}
-    for value in paths:
+def _audio_tracks_by_path(paths: list[Any]) -> dict[str, Any]:
+    """Expose the active kernel's audio-track API without loading inference models."""
+    result: dict[str, Any] = {
+        "audioTrackSelectionSupported": False,
+        "audioTracksByPath": {},
+        "audioTrackErrorsByPath": {},
+    }
+    try:
+        from pymss import list_audio_tracks  # type: ignore
+    except ImportError:
+        return result
+    result["audioTrackSelectionSupported"] = True
+    for value in dict.fromkeys(str(path) for path in paths):
         try:
-            with av.open(str(value)) as container:
-                tracks[str(value)] = _container_audio_tracks(container)
-        except Exception:
-            tracks[str(value)] = []
-    return tracks
+            tracks = list_audio_tracks(value)
+            if not tracks:
+                raise ValueError("No audio stream found")
+            result["audioTracksByPath"][value] = tracks
+        except Exception as exc:
+            result["audioTracksByPath"][value] = []
+            result["audioTrackErrorsByPath"][value] = str(exc)
+    return result
 
 
 def _audio_metadata(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(str(path))
+    track_metadata = _audio_tracks_by_path([str(path)])
     try:
         import av  # type: ignore
         with av.open(str(path)) as container:
@@ -191,14 +194,14 @@ def _audio_metadata(path: Path) -> dict[str, Any]:
                 duration = float(container.duration / av.time_base)
             sample_rate = int(getattr(stream.codec_context, "sample_rate", 0) or 0)
             channels = int(getattr(stream.codec_context, "channels", 0) or 0)
-            audio_tracks = _container_audio_tracks(container)
             return {
                 "path": str(path),
                 "name": path.name,
                 "duration": max(0.0, duration),
                 "sampleRate": sample_rate,
                 "channels": channels,
-                "audioTracks": audio_tracks,
+                "audioTracks": track_metadata["audioTracksByPath"].get(str(path), []),
+                "audioTrackSelectionSupported": track_metadata["audioTrackSelectionSupported"],
             }
     except Exception:
         try:
@@ -213,6 +216,8 @@ def _audio_metadata(path: Path) -> dict[str, Any]:
                     "duration": max(0.0, duration),
                     "sampleRate": sample_rate,
                     "channels": int(audio_file.channels),
+                    "audioTracks": track_metadata["audioTracksByPath"].get(str(path), []),
+                    "audioTrackSelectionSupported": track_metadata["audioTrackSelectionSupported"],
                 }
         except Exception:
             raise
@@ -379,7 +384,7 @@ def _apply_stereo_pan(audio: Any, pan: float) -> Any:
 
 def cmd_audio_metadata(payload: dict[str, Any]) -> int:
     if isinstance(payload.get("paths"), list):
-        emit("audio_metadata", {"audioTracksByPath": _audio_tracks_by_path(payload["paths"])})
+        emit("audio_metadata", _audio_tracks_by_path(payload["paths"]))
         return 0
     path = payload.get("path")
     if not path:

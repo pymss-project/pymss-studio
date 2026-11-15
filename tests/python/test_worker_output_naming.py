@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import os
-import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 from threading import Barrier, Lock
 from types import SimpleNamespace
@@ -37,6 +35,9 @@ class _OutputSeparatorBase:
 
     def process_folder(self, input_folder):
         raise AssertionError("The upstream separation boundary must be stubbed")
+
+    def process_audio_tracks(self, input_path, *, audio_tracks="all"):
+        raise AssertionError("The upstream audio track boundary must be stubbed")
 
 
 class StudioOutputNamingTests(unittest.TestCase):
@@ -236,51 +237,123 @@ class StudioOutputNamingTests(unittest.TestCase):
             self.assertEqual(separator._studio_input_contexts, {})
             self.assertIsNone(separator._studio_active_context)
 
-    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
-    def test_multi_track_input_separates_every_audio_track(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source = root / "movie.mka"
-            subprocess.run([
-                "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=d=0.2", "-f", "lavfi", "-i", "sine=d=0.2:f=880",
-                "-map", "0", "-map", "1", "-metadata:s:a:0", "language=jpn", "-metadata:s:a:1", "language=eng",
-                "-c:a", "flac", str(source),
-            ], check=True)
-            separator = self._new_separator()
-            seen: list[str] = []
-
-            def process(base, input_folder):
-                names = sorted(os.listdir(input_folder))
-                for name in names:
-                    seen.append(name)
-                    base._save_output("vocals", name.encode(), 44100, Path(name).stem, str(root))
-                return names
-
-            with mock.patch.object(_OutputSeparatorBase, "process_folder", autospec=True, side_effect=process):
-                self.assertEqual(separator.process_folder(str(source)), ["movie.mka"])
-            self.assertEqual(seen, ["movie [track 1 jpn].flac", "movie [track 2 eng].flac"])
-            self.assertEqual(
-                sorted(Path(output["path"]).name for output in separator.studio_outputs()),
-                ["movie [track 1 jpn]_vocals.wav", "movie [track 2 eng]_vocals.wav"],
-            )
-
-    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
-    def test_selected_audio_tracks_limit_extraction_and_reject_missing_tracks(self) -> None:
+    def test_selected_tracks_delegate_to_kernel_and_preserve_input_number(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "movie.mkv"
-            subprocess.run([
-                "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=d=0.2", "-f", "lavfi", "-i", "sine=d=0.2:f=880",
-                "-map", "0", "-map", "1", "-metadata:s:a:1", "language=eng", "-c:a", "flac", str(source),
-            ], check=True)
-            tracks = root / "tracks"
-            tracks.mkdir()
-            self.assertTrue(worker_infer._split_audio_tracks(source, tracks, [2]))
-            self.assertEqual(os.listdir(tracks), ["movie [track 2 eng].flac"])
-            with self.assertRaisesRegex(ValueError, "Audio track 3 does not exist"):
-                worker_infer._split_audio_tracks(source, tracks, [3])
-        self.assertEqual(worker_infer._normalize_audio_tracks([2, 1, 2, 0, True, "3"]), [1, 2])
-        self.assertIsNone(worker_infer._normalize_audio_tracks([]))
+            source.touch()
+            separator = self._new_separator(naming={"enabled": True, "template": "%input_number%_%filename%_%stem%"})
+
+            def process(base, input_path, *, audio_tracks):
+                self.assertEqual(input_path, str(source))
+                self.assertEqual(audio_tracks, [2])
+                base._save_output("vocals", b"second", 44100, "movie [track 2 eng]", str(root))
+                return [{"index": 2, "name": "movie [track 2 eng]", "success": True}]
+
+            with mock.patch.object(_OutputSeparatorBase, "process_audio_tracks", autospec=True, side_effect=process) as tracks,                     mock.patch.object(_OutputSeparatorBase, "process_folder") as legacy:
+                self.assertEqual(separator.process_folder(str(source), 7, [2]), ["movie.mkv"])
+            tracks.assert_called_once_with(separator, str(source), audio_tracks=[2])
+            legacy.assert_not_called()
+            self.assertEqual(Path(separator.studio_outputs()[0]["path"]).name, "07_movie [track 2 eng]_vocals.wav")
+            self.assertIsNone(separator._studio_track_context)
+
+    def test_failed_track_discards_all_current_source_outputs_and_keeps_existing_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "movie.mkv"
+            source.touch()
+            existing = root / "movie [track 1 jpn]_vocals.wav"
+            existing.write_bytes(b"keep")
+            separator = self._new_separator()
+
+            def process(base, input_path, *, audio_tracks):
+                base._save_output("vocals", b"new", 44100, "movie [track 1 jpn]", str(root))
+                base._save_output("vocals", b"partial", 44100, "movie [track 2 eng]", str(root))
+                return [{"index": 1, "success": True}, {"index": 2, "success": False, "error": "decode failed"}]
+
+            with mock.patch.object(_OutputSeparatorBase, "process_audio_tracks", autospec=True, side_effect=process):
+                self.assertEqual(separator.process_folder(str(source), 1, [1, 2]), [])
+            self.assertEqual(separator._studio_track_failure, "Audio track 2 could not be processed: decode failed")
+            self.assertEqual(separator.studio_outputs(), [])
+            self.assertEqual(existing.read_bytes(), b"keep")
+            self.assertFalse((root / "movie [track 1 jpn]_vocals_2.wav").exists())
+            self.assertFalse((root / "movie [track 2 eng]_vocals.wav").exists())
+
+    def test_rocm_abort_discards_outputs_from_previously_completed_tracks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "movie.mkv"
+            source.touch()
+            separator = self._new_separator()
+
+            def process(base, input_path, *, audio_tracks):
+                base._save_output("vocals", b"new", 44100, "movie [track 1 jpn]", str(root))
+                raise worker_infer.RocmWorkerAbort(RuntimeError("HIP context lost"))
+
+            with mock.patch.object(_OutputSeparatorBase, "process_audio_tracks", autospec=True, side_effect=process):
+                with self.assertRaises(worker_infer.RocmWorkerAbort):
+                    separator.process_folder(str(source), 1, [1, 2])
+            self.assertEqual(separator.studio_outputs(), [])
+            self.assertFalse((root / "movie [track 1 jpn]_vocals.wav").exists())
+
+    def test_track_input_errors_return_a_failed_input_without_hiding_backend_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "movie.mkv"
+            source.touch()
+            separator = self._new_separator()
+            for error in (ValueError("Audio track 2 does not exist"), OSError("Cannot open input")):
+                with self.subTest(error=type(error).__name__), mock.patch.object(
+                    _OutputSeparatorBase, "process_audio_tracks", side_effect=error,
+                ):
+                    self.assertEqual(separator.process_folder(str(source), 1, [2]), [])
+                    self.assertEqual(separator._studio_track_failure, str(error))
+                    self.assertEqual(separator.studio_outputs(), [])
+            with mock.patch.object(_OutputSeparatorBase, "process_audio_tracks", side_effect=RuntimeError("CUDA failure")):
+                with self.assertRaisesRegex(RuntimeError, "CUDA failure"):
+                    separator.process_folder(str(source), 1, [2])
+
+    def test_track_validation_failure_does_not_fail_later_batch_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video, audio = root / "movie.mkv", root / "song.wav"
+            video.touch()
+            audio.touch()
+            separator = self._new_separator()
+            payload = {
+                "taskId": "video", "output": str(root / "outputs"),
+                "tasks": [
+                    {"taskId": "video", "input": str(video), "audioTracks": [2]},
+                    {"taskId": "audio", "input": str(audio)},
+                ],
+            }
+            with mock.patch.object(_OutputSeparatorBase, "process_audio_tracks", side_effect=ValueError("Audio track 2 does not exist")), \
+                    mock.patch.object(_OutputSeparatorBase, "process_folder", return_value=[audio.name]) as ordinary, \
+                    mock.patch.object(worker_infer, "_prepare_separator", return_value=separator), \
+                    mock.patch.object(worker_infer, "separation_logging", return_value=nullcontext(separator.logger)), \
+                    mock.patch.object(worker_infer, "emit") as emit, \
+                    mock.patch.object(worker_infer, "emit_error", return_value=1) as emit_error:
+                self.assertEqual(worker_infer.cmd_infer_batch(payload), 1)
+            ordinary.assert_called_once_with(str(audio))
+            self.assertEqual(emit_error.call_count, 1)
+            self.assertEqual(emit_error.call_args.kwargs["task_id"], "video")
+            self.assertEqual([call.kwargs["task_id"] for call in emit.call_args_list if call.args[0] == "task_done"], ["audio"])
+
+    def test_selected_track_requires_kernel_support_instead_of_falling_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "movie.mkv"
+            source.touch()
+            separator = self._new_separator()
+            with mock.patch.object(_OutputSeparatorBase, "process_audio_tracks", None),                     mock.patch.object(_OutputSeparatorBase, "process_folder") as legacy:
+                with self.assertRaisesRegex(worker_infer.RuntimeCompatibilityError, "Update the kernel"):
+                    separator.process_folder(str(source), 1, [2])
+            legacy.assert_not_called()
+
+    def test_explicit_audio_track_selection_is_strict(self) -> None:
+        self.assertEqual(worker_infer._normalize_audio_tracks([2, 1, 2]), [1, 2])
+        self.assertIsNone(worker_infer._normalize_audio_tracks(None))
+        for value in ([], [0], [-1], [True], ["2"], "all", [2, 0]):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                worker_infer._normalize_audio_tracks(value)
 
     def test_upstream_failure_discards_only_outputs_created_in_this_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

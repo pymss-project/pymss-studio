@@ -1,13 +1,9 @@
 from __future__ import annotations
 
 import inspect
-import json
 import math
 import os
 import re
-import shutil
-import subprocess
-import tempfile
 import traceback
 from collections import deque
 from contextlib import ExitStack, contextmanager
@@ -231,47 +227,13 @@ def _claim_output_path(path: Path, reserved: set[Path] | None = None) -> Path:
 
 
 def _normalize_audio_tracks(value: Any) -> list[int] | None:
-    if not isinstance(value, list):
+    if value is None:
         return None
-    tracks = sorted({int(item) for item in value if isinstance(item, int) and not isinstance(item, bool) and item > 0})
-    return tracks or None
-
-
-def _split_audio_tracks(source: Path, target_dir: Path, selected: list[int] | None = None, logger: Any = None) -> bool:
-    """Extract the selected (default: all) audio streams of a multi-track file, because pymss only decodes the first one."""
-    if not source.is_file():
-        return False
-    ffprobe, ffmpeg = shutil.which("ffprobe"), shutil.which("ffmpeg")
-    if not ffprobe or not ffmpeg:
-        if selected:
-            raise RuntimeError("FFmpeg and ffprobe are required to separate selected audio tracks")
-        if logger is not None:
-            logger.warning("FFmpeg/ffprobe not found; only the first audio track of multi-track files will be separated")
-        return False
-    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    probe = subprocess.run(
-        [ffprobe, "-v", "error", "-select_streams", "a", "-show_entries", "stream=index:stream_tags=language", "-of", "json", str(source)],
-        capture_output=True, text=True, check=False, creationflags=flags,
-    )
-    streams = (json.loads(probe.stdout or "{}").get("streams") or []) if probe.returncode == 0 else []
-    if len(streams) < 2:
-        return False
-    missing = [number for number in selected or [] if number > len(streams)]
-    if missing:
-        raise ValueError(f"Audio track {missing[0]} does not exist in {source.name} ({len(streams)} tracks)")
-    for number, stream in enumerate(streams, start=1):
-        if selected and number not in selected:
-            continue
-        language = _safe_filename_part(str((stream.get("tags") or {}).get("language") or "")).lower()
-        label = f"track {number}" + (f" {language}" if language not in {"", "und", "audio"} else "")
-        result = subprocess.run(
-            [ffmpeg, "-nostdin", "-v", "error", "-i", str(source), "-map", f"0:a:{number - 1}", "-vn", "-sn", "-dn",
-             "-c:a", "flac", "-sample_fmt", "s32", str(target_dir / f"{source.stem} [{label}].flac")],
-            capture_output=True, text=True, check=False, creationflags=flags,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Cannot extract audio track {number}: {result.stderr.strip()}")
-    return True
+    if not isinstance(value, list) or not value or any(
+        not isinstance(item, int) or isinstance(item, bool) or item <= 0 for item in value
+    ):
+        raise ValueError("audioTracks must be a non-empty list of positive audio track numbers")
+    return sorted(set(value))
 
 
 def _studio_separator_type() -> type[Any]:
@@ -324,6 +286,7 @@ def _studio_separator_type() -> type[Any]:
             self._studio_active_output_count = 0
             self._studio_expected_output_count = self._calculate_expected_output_count()
             self._studio_output_sources: dict[Path, str] = {}
+            self._studio_track_failure: str | None = None
             stems = self._stems_to_save() or list(self.config.training.instruments)
             ordered_stems = [stem for _, stem in sorted(
                 enumerate(stems),
@@ -402,12 +365,15 @@ def _studio_separator_type() -> type[Any]:
                 or active_output_count >= expected_output_count
             ):
                 pending = input_contexts.get(file_name)
+                track_context = getattr(self, "_studio_track_context", None)
                 active = pending.popleft() if pending else {
                     "file_name": file_name,
-                    "source_name": file_name,
-                    "input_path": file_name,
-                    "input_index": 1,
-                    "now": datetime.now(),
+                    "source_name": track_context["source_name"] if track_context else file_name,
+                    "input_path": str(Path(track_context["input_path"]).with_name(
+                        file_name + Path(track_context["input_path"]).suffix,
+                    )) if track_context else file_name,
+                    "input_index": track_context["input_index"] if track_context else 1,
+                    "now": track_context["now"] if track_context else datetime.now(),
                 }
                 self._studio_active_context = active
                 active_output_count = 0
@@ -469,36 +435,47 @@ def _studio_separator_type() -> type[Any]:
                 output_sources[target] = str(context.get("source_name") or file_name)
 
         def process_folder(self, input_folder: str, input_index: int = 1, audio_tracks: list[int] | None = None) -> list[str]:
-            """Separate each selected audio track of multi-track files (dual-audio videos) separately."""
-            with tempfile.TemporaryDirectory(prefix="pymss-tracks-", ignore_cleanup_errors=True) as tracks:
-                if not _split_audio_tracks(Path(input_folder), Path(tracks), audio_tracks, getattr(self, "logger", None)):
-                    return self._process_input(input_folder, input_index)
-                track_count = len(os.listdir(tracks))
-                self._studio_track_folder = Path(input_folder).stem
-                try:
-                    success_files = self._process_input(tracks, input_index)
-                finally:
-                    self._studio_track_folder = None
-                if len(success_files) < track_count:
-                    self._discard_outputs_for_failed_inputs(set())
-                    return []
-                # Callers match success against the original input name.
-                return [Path(input_folder).name]
-
-        def _resolve_output_dir(self, save_dir: str, file_name: str) -> str:
-            # Keep every track of one multi-track source in the source's own output folder.
-            return super()._resolve_output_dir(save_dir, getattr(self, "_studio_track_folder", None) or file_name)
-
-        def _process_input(self, input_folder: str, input_index: int) -> list[str]:
-            """Delegate separation to pymss and retain Studio output metadata."""
+            """Delegate media processing to pymss while retaining Studio task output policy."""
             self._studio_last_outputs = []
             self._studio_output_sources = {}
+            self._studio_track_failure = None
             self._prepare_output_contexts(input_folder, input_index)
             previous_folder_progress = getattr(self, "_studio_folder_progress", False)
             self._studio_folder_progress = True
+            source = Path(input_folder)
             try:
-                success_files = super().process_folder(input_folder)
-            except Exception:
+                if audio_tracks is None:
+                    success_files = super().process_folder(input_folder)
+                else:
+                    process_tracks = getattr(super(), "process_audio_tracks", None)
+                    if not callable(process_tracks):
+                        raise RuntimeCompatibilityError(
+                            "The active pymss kernel does not support audio track selection. "
+                            "Update the kernel in Settings before retrying."
+                        )
+                    selected = _normalize_audio_tracks(audio_tracks)
+                    self._studio_track_context = {
+                        "source_name": source.name,
+                        "input_path": str(source),
+                        "input_index": max(1, input_index),
+                        "now": datetime.now(),
+                    }
+                    try:
+                        results = process_tracks(input_folder, audio_tracks=selected)
+                    except (ValueError, OSError) as exc:
+                        # The kernel validates and opens the source before its
+                        # per-track loop. Treat those failures as this input's
+                        # result so later batch inputs can still be processed.
+                        self._studio_track_failure = str(exc)
+                        success_files = []
+                    else:
+                        failed_track = next((item for item in results if not item.get("success")), None)
+                        if failed_track and failed_track.get("error"):
+                            self._studio_track_failure = (
+                                f"Audio track {failed_track.get('index')} could not be processed: {failed_track['error']}"
+                            )
+                        success_files = [source.name] if results and all(item.get("success") for item in results) else []
+            except (Exception, RocmWorkerAbort):
                 self._discard_outputs_for_failed_inputs(set())
                 raise
             finally:
@@ -506,6 +483,7 @@ def _studio_separator_type() -> type[Any]:
                 self._studio_input_contexts = {}
                 self._studio_active_context = None
                 self._studio_active_output_count = 0
+                self._studio_track_context = None
             self._discard_outputs_for_failed_inputs(set(success_files))
             return success_files
 
@@ -1011,11 +989,15 @@ def cmd_infer_batch(payload: dict[str, Any]) -> int:
         source_path = Path(input_path)
         if not source_path.exists():
             return emit_error("INPUT_NOT_FOUND", f"Input path does not exist: {input_path}", task_id=task_id)
+        try:
+            audio_tracks = _normalize_audio_tracks(item.get("audioTracks"))
+        except ValueError as exc:
+            return emit_error("INFERENCE_FAILED", str(exc), task_id=task_id)
         batch_tasks.append({
             "taskId": task_id,
             "input": str(source_path),
             "inputIndex": int(item.get("inputIndex") or index + 1),
-            "audioTracks": _normalize_audio_tracks(item.get("audioTracks")),
+            "audioTracks": audio_tracks,
         })
 
     cleanup = ExitStack()
@@ -1078,7 +1060,8 @@ def cmd_infer_batch(payload: dict[str, Any]) -> int:
                         continue
                     raise
                 if Path(item["input"]).name not in {Path(name).name for name in success_files}:
-                    emit_error("INFERENCE_FAILED", f"Batch separation did not produce outputs for {Path(item['input']).name}", task_id=task_id)
+                    emit_error("INFERENCE_FAILED", getattr(separator, "_studio_track_failure", None) or
+                               f"Batch separation did not produce outputs for {Path(item['input']).name}", task_id=task_id)
                     terminal_task_ids.add(task_id)
                     failed = True
                     continue
@@ -1169,7 +1152,8 @@ def cmd_infer(payload: dict[str, Any]) -> int:
         success_files = separator.process_folder(input_path, int(payload.get("inputIndex") or 1), _normalize_audio_tracks(payload.get("audioTracks")))
         assert_rocm_operation_succeeded()
         if Path(input_path).name not in {Path(name).name for name in success_files}:
-            return emit_error("INFERENCE_FAILED", f"Separation did not produce outputs for {Path(input_path).name}", task_id=task_id)
+            return emit_error("INFERENCE_FAILED", getattr(separator, "_studio_track_failure", None) or
+                              f"Separation did not produce outputs for {Path(input_path).name}", task_id=task_id)
         emit("task_stage", {"stage": "writing_output", "message": "Collecting outputs"}, task_id=task_id)
         task_output = resolve_pymss_output_dir(output_dir, success_files, input_path, save_as_folder)
         outputs = separator.studio_outputs()

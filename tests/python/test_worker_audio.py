@@ -8,6 +8,7 @@ import sys
 import unittest
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -584,29 +585,38 @@ class EditorEffectTests(unittest.TestCase):
             self.assertFalse(cancel_path.exists())
 
 
+class AudioTrackProbeTests(unittest.TestCase):
+    def test_batch_probe_uses_kernel_api_and_keeps_per_file_errors(self) -> None:
+        from worker_audio import cmd_audio_metadata
+        tracks = [{"index": 1, "language": "jpn", "title": "", "channels": 1, "sampleRate": 44100},
+                  {"index": 2, "language": "eng", "title": "Dub", "channels": 2, "sampleRate": 48000}]
+        probe = mock.Mock(side_effect=[tracks, FileNotFoundError("media is unavailable")])
+        with mock.patch.dict(sys.modules, {"pymss": SimpleNamespace(list_audio_tracks=probe)}),                 mock.patch("worker_audio.emit") as emit:
+            self.assertEqual(cmd_audio_metadata({"paths": ["movie.mkv", "missing.mkv", "movie.mkv"]}), 0)
+        result = emit.call_args.args[1]
+        self.assertTrue(result["audioTrackSelectionSupported"])
+        self.assertEqual(result["audioTracksByPath"], {"movie.mkv": tracks, "missing.mkv": []})
+        self.assertEqual(result["audioTrackErrorsByPath"], {"missing.mkv": "media is unavailable"})
+        self.assertEqual(probe.call_args_list, [mock.call("movie.mkv"), mock.call("missing.mkv")])
+
+    def test_old_kernel_disables_audio_track_selection(self) -> None:
+        from worker_audio import _audio_tracks_by_path
+        with mock.patch.dict(sys.modules, {"pymss": SimpleNamespace()}):
+            result = _audio_tracks_by_path(["movie.mkv"])
+        self.assertEqual(result, {"audioTrackSelectionSupported": False, "audioTracksByPath": {}, "audioTrackErrorsByPath": {}})
+
+    def test_metadata_keeps_ordinary_audio_available_with_an_old_kernel(self) -> None:
+        from worker_audio import _audio_metadata
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "mono.wav"
+            sf.write(source, np.zeros(1000, dtype=np.float32), 8000)
+            with mock.patch.dict(sys.modules, {"pymss": SimpleNamespace()}):
+                metadata = _audio_metadata(source)
+        self.assertEqual(metadata["sampleRate"], 8000)
+        self.assertEqual(metadata["channels"], 1)
+        self.assertFalse(metadata["audioTrackSelectionSupported"])
+        self.assertEqual(metadata["audioTracks"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
-
-
-class AudioTrackProbeTests(unittest.TestCase):
-    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is required")
-    def test_batch_probe_lists_tracks_per_file_and_tolerates_unreadable_files(self) -> None:
-        try:
-            import av  # noqa: F401
-        except ImportError:
-            self.skipTest("PyAV is required")
-        from worker_audio import _audio_tracks_by_path
-        with tempfile.TemporaryDirectory() as tmp:
-            movie = Path(tmp) / "movie.mkv"
-            subprocess.run([
-                "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=d=0.2", "-f", "lavfi", "-i", "sine=d=0.2",
-                "-map", "0", "-map", "1", "-ac:a:1", "2", "-metadata:s:a:0", "language=jpn",
-                "-metadata:s:a:1", "language=eng", "-metadata:s:a:1", "title=Dub", "-c:a", "flac", str(movie),
-            ], check=True)
-            missing = str(Path(tmp) / "missing.mkv")
-            tracks = _audio_tracks_by_path([str(movie), missing])
-        self.assertEqual(tracks[missing], [])
-        self.assertEqual(tracks[str(movie)], [
-            {"index": 1, "language": "jpn", "title": "", "channels": 1},
-            {"index": 2, "language": "eng", "title": "Dub", "channels": 2},
-        ])

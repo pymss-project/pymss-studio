@@ -33,6 +33,7 @@ import { normalizeConcurrentSeparations } from '@/features/tasks/concurrency'
 import { isMainTaskOwner } from '@/utils/taskOwner'
 import { getSeparateWorkflowInputIssue } from '@/utils/workflowInputs'
 import { runtimeErrorSummary } from '@/utils/runtimeErrors'
+import { activeRuntimeEnvironment } from '@/utils/runtime'
 import { cloneWorkflow, prepareWorkbenchRun, workflowInputNodes, type WorkflowRuntimeBindings, type WorkflowWorkbenchSnapshot, type WorkflowNodeState } from '@/workflows/workbench'
 import { SEPARATE_MODEL_PAGE_SIZES, normalizePageSize } from '@/utils/pagination'
 import { createInferenceSnapshot, normalizeCustomParameterIntent, resolveParameters, type CustomParameterIntent, type ParameterMode, type ParameterResolutionMetadata, type ResolvedInferenceSnapshot } from '@/features/inference/parameters'
@@ -624,6 +625,14 @@ export const useTaskStore = defineStore('task', () => {
   // Audio tracks of multi-track inputs (dual-audio videos) and the 1-based tracks chosen for separation.
   const inputAudioTracks = ref<Record<string, AudioTrackInfo[]>>({})
   const inputTrackSelection = ref<Record<string, number[]>>({})
+  const audioTrackProbeState = ref<Record<string, 'loading' | 'failed'>>({})
+  const audioTrackProbeErrors = ref<Record<string, string>>({})
+  const audioTrackSelectionSupported = ref<boolean | null>(null)
+  const audioTrackProbeCurrentGeneration = ref<Record<string, number>>({})
+  let audioTrackProbeGeneration = 0
+  let audioTrackRuntimeGeneration = 0
+  let audioTrackProbeDrain: Promise<void> | null = null
+  let audioTrackProbeQueue: Array<{ path: string; generation: number }> = []
   const separateRunMode = ref<'model' | 'workflow'>('model')
   const ensembleEnabled = ref(false)
   const ensembleModels = ref<string[]>([])
@@ -674,6 +683,7 @@ export const useTaskStore = defineStore('task', () => {
   const persistedSeparateModelState = ref<Record<string, PersistedSeparateModelState>>({})
 
   const inputPath = computed(() => inputFiles.value[0] || '')
+  const hasVideoInput = computed(() => inputFiles.value.some(path => VIDEO_EXTENSIONS.includes(path.split('.').pop()?.toLowerCase() || '')))
   const activeTask = computed(() => tasks.value.find((task) => task.id === activeTaskId.value) || null)
   const completedTasks = computed(() => tasks.value.filter((task) => task.status === 'done'))
   const runningTasks = computed(() => tasks.value.filter((task) => !TERMINAL_STATUSES.includes(task.status)))
@@ -1243,7 +1253,7 @@ export const useTaskStore = defineStore('task', () => {
       : joinOutputPath(jobOutput, inputStemSegment(input, resultId, windowsPaths.value), windowsPaths.value)
   }
 
-  function createQueuedTask(input: string, model: string, inferenceParams: Record<string, unknown>, modelType?: string | null, jobId?: string, jobOutput?: string, outputLayout: OutputLayout = 'folders', outputNaming?: OutputNamingConfig, batchIndex?: number, preparedConfig?: SeparationRunConfig) {
+  function createQueuedTask(input: string, model: string, inferenceParams: Record<string, unknown>, modelType?: string | null, jobId?: string, jobOutput?: string, outputLayout: OutputLayout = 'folders', outputNaming?: OutputNamingConfig, batchIndex?: number, preparedConfig?: SeparationRunConfig, audioTracks?: number[]) {
     const settings = useSettingsStore()
     const id = createRunId('sep')
     const resultId = createRunId('result')
@@ -1255,7 +1265,7 @@ export const useTaskStore = defineStore('task', () => {
       ...(typeof batchIndex === 'number' && Number.isSafeInteger(batchIndex) && batchIndex >= 0 ? { batchIndex } : {}),
       model,
       input,
-      ...(inputAudioTracks.value[input] && inputTrackSelection.value[input] ? { audioTracks: [...inputTrackSelection.value[input]] } : {}),
+      ...(audioTracks ? { audioTracks: [...audioTracks] } : {}),
       jobOutput: resolvedJobOutput,
       output: resolveTaskOutputPath(resolvedJobOutput, input, resultId, outputLayout),
       status: 'queued',
@@ -1820,25 +1830,104 @@ export const useTaskStore = defineStore('task', () => {
     const additions = valid.filter((p) => !existing.has(p))
     if (additions.length) inputFiles.value = [...inputFiles.value, ...additions]
     const videos = additions.filter(path => VIDEO_EXTENSIONS.includes(path.split('.').pop()?.toLowerCase() || ''))
-    if (videos.length) void probeAudioTracks(videos)
+    for (const path of videos) enqueueAudioTrackProbe(path)
     return additions.length
   }
 
-  async function probeAudioTracks(paths: string[]) {
-    try {
-      const metadata = await invoke<{ audioTracksByPath?: Record<string, AudioTrackInfo[]> }>('get_audio_metadata', { payload: { paths } })
-      const found = Object.entries(metadata?.audioTracksByPath || {})
-        .filter(([path, tracks]) => tracks.length > 1 && inputFiles.value.includes(path))
-      if (!found.length) return
-      inputAudioTracks.value = { ...inputAudioTracks.value, ...Object.fromEntries(found) }
-      inputTrackSelection.value = {
-        ...inputTrackSelection.value,
-        ...Object.fromEntries(found.map(([path, tracks]) => [path, tracks.map(track => track.index)])),
+  function enqueueAudioTrackProbe(path: string) {
+    const generation = ++audioTrackProbeGeneration
+    audioTrackProbeCurrentGeneration.value = { ...audioTrackProbeCurrentGeneration.value, [path]: generation }
+    audioTrackProbeState.value = { ...audioTrackProbeState.value, [path]: 'loading' }
+    audioTrackProbeQueue.push({ path, generation })
+    void drainAudioTrackProbeQueue()
+  }
+
+  function drainAudioTrackProbeQueue() {
+    if (audioTrackProbeDrain) return audioTrackProbeDrain
+    audioTrackProbeDrain = (async () => {
+      while (audioTrackProbeQueue.length) {
+        const runtimeGeneration = audioTrackRuntimeGeneration
+        const batch = audioTrackProbeQueue.splice(0, 8)
+        const paths = batch.map(item => item.path)
+        try {
+          const metadata = await invoke<{ audioTracksByPath?: Record<string, AudioTrackInfo[]>; audioTrackErrorsByPath?: Record<string, string>; audioTrackSelectionSupported?: boolean }>('get_audio_metadata', { payload: { paths } })
+          if (runtimeGeneration !== audioTrackRuntimeGeneration) continue
+          const supported = metadata?.audioTrackSelectionSupported === true
+          audioTrackSelectionSupported.value = supported
+          for (const { path, generation } of batch) {
+            const current = inputFiles.value.includes(path) && audioTrackProbeCurrentGeneration.value[path] === generation && audioTrackProbeState.value[path] === 'loading'
+            if (!current) continue
+            const tracks = metadata?.audioTracksByPath?.[path] || []
+            const error = metadata?.audioTrackErrorsByPath?.[path]
+            if (error) {
+              audioTrackProbeState.value = { ...audioTrackProbeState.value, [path]: 'failed' }
+              audioTrackProbeErrors.value = { ...audioTrackProbeErrors.value, [path]: error }
+              continue
+            }
+            const previousSelection = inputTrackSelection.value[path]
+            if (supported && (tracks.length > 1 || previousSelection !== undefined && tracks.length > 0)) {
+              inputAudioTracks.value = { ...inputAudioTracks.value, [path]: tracks }
+              inputTrackSelection.value = { ...inputTrackSelection.value, [path]: tracks
+                .filter(track => previousSelection === undefined || previousSelection.includes(track.index))
+                .map(track => track.index) }
+            }
+            const nextState = { ...audioTrackProbeState.value }
+            delete nextState[path]
+            audioTrackProbeState.value = nextState
+          }
+        } catch {
+          if (runtimeGeneration !== audioTrackRuntimeGeneration) continue
+          for (const { path, generation } of batch) {
+            if (inputFiles.value.includes(path) && audioTrackProbeCurrentGeneration.value[path] === generation && audioTrackProbeState.value[path] === 'loading') {
+              audioTrackProbeState.value = { ...audioTrackProbeState.value, [path]: 'failed' }
+              audioTrackProbeErrors.value = { ...audioTrackProbeErrors.value, [path]: i18n.global.t('separate.audioTrackProbeFailed') }
+            }
+          }
+        }
       }
-    } catch {
-      // Without track info the worker still separates every track.
+    })().finally(() => {
+      audioTrackProbeDrain = null
+      if (audioTrackProbeQueue.length) void drainAudioTrackProbeQueue()
+    })
+    return audioTrackProbeDrain
+  }
+
+  async function waitForAudioTrackProbes(paths: string[]) {
+    // A queued probe can be superseded by remove/re-add; await the real drain
+    // promise instead of polling the UI state on every event-loop turn.
+    while (paths.some(path => audioTrackProbeState.value[path] === 'loading')) {
+      const drain = audioTrackProbeDrain
+      if (!drain) return
+      await drain
     }
   }
+
+  watch(() => {
+    const app = useAppStore()
+    const info = app.runtimeInfo
+    const active = activeRuntimeEnvironment(info)
+    return JSON.stringify([
+      app.envInfo?.pymssPath, app.envInfo?.pymssVersion,
+      info?.installedBackend || info?.installState?.backend,
+      info?.bootstrapPython, info?.installState?.pythonPath,
+      info?.pymssVersion, info?.pymssCoreVersion,
+      info?.installState?.pymssVersion, info?.installState?.pymssCoreVersion, info?.installState?.installedAt,
+      active?.pythonPath, active?.pymssVersion, active?.pymssCoreVersion, active?.installedAt,
+    ])
+  }, () => {
+    audioTrackRuntimeGeneration++
+    audioTrackSelectionSupported.value = null
+    audioTrackProbeQueue = []
+    inputAudioTracks.value = {}
+    audioTrackProbeState.value = {}
+    audioTrackProbeErrors.value = {}
+    audioTrackProbeCurrentGeneration.value = {}
+    // Keep explicit choices while new metadata is loading. Reconcile them
+    // against the new tracks instead of silently selecting every track again.
+    for (const path of inputFiles.value) {
+      if (VIDEO_EXTENSIONS.includes(path.split('.').pop()?.toLowerCase() || '')) enqueueAudioTrackProbe(path)
+    }
+  }, { flush: 'sync' })
 
   const audioTrackLanguages = computed(() => trackLanguageStates(inputFiles.value, inputAudioTracks.value, inputTrackSelection.value))
 
@@ -1848,11 +1937,25 @@ export const useTaskStore = defineStore('task', () => {
 
   function removeInputFile(path: string) {
     inputFiles.value = inputFiles.value.filter((p) => p !== path)
+    clearAudioTrackInputState([path])
   }
 
   function clearInputFiles(paths?: string[]) {
     const submitted = paths ? new Set(paths) : null
+    const removed = submitted ? inputFiles.value.filter(path => submitted.has(path)) : [...inputFiles.value]
     inputFiles.value = submitted ? inputFiles.value.filter(path => !submitted.has(path)) : []
+    clearAudioTrackInputState(removed)
+  }
+
+  function clearAudioTrackInputState(paths: string[]) {
+    if (!paths.length) return
+    const removed = new Set(paths)
+    audioTrackProbeQueue = audioTrackProbeQueue.filter(item => !removed.has(item.path))
+    inputAudioTracks.value = Object.fromEntries(Object.entries(inputAudioTracks.value).filter(([path]) => !removed.has(path)))
+    inputTrackSelection.value = Object.fromEntries(Object.entries(inputTrackSelection.value).filter(([path]) => !removed.has(path)))
+    audioTrackProbeState.value = Object.fromEntries(Object.entries(audioTrackProbeState.value).filter(([path]) => !removed.has(path))) as Record<string, 'loading' | 'failed'>
+    audioTrackProbeErrors.value = Object.fromEntries(Object.entries(audioTrackProbeErrors.value).filter(([path]) => !removed.has(path)))
+    audioTrackProbeCurrentGeneration.value = Object.fromEntries(Object.entries(audioTrackProbeCurrentGeneration.value).filter(([path]) => !removed.has(path)))
   }
 
   function moveInputFile(fromIndex: number, toIndex: number) {
@@ -2194,14 +2297,44 @@ export const useTaskStore = defineStore('task', () => {
       : modelStore.models.find((item) => item.name === model) || null
     const modelType = selectedEntry?.modelType || null
     const targets = [...inputFiles.value]
-    const noTracks = targets.find(path => inputAudioTracks.value[path] && !inputTrackSelection.value[path]?.length)
-    if (noTracks) throw new Error(i18n.global.t('separate.noAudioTrackSelected', { name: noTracks.split(/[\\/]/).pop() }))
+    const submittedRuntimeGeneration = audioTrackRuntimeGeneration
+    const submittedTrackSelection = new Map<string, number[] | undefined>(targets.map(path => [
+      path,
+      inputTrackSelection.value[path] ? [...inputTrackSelection.value[path]] : undefined,
+    ]))
+    await waitForAudioTrackProbes(targets)
+    if (submittedRuntimeGeneration !== audioTrackRuntimeGeneration) {
+      throw new Error(i18n.global.t('separate.audioTrackRuntimeChanged'))
+    }
+    const probeFailed = targets.find(path => audioTrackProbeState.value[path] === 'failed')
+    if (probeFailed) throw new Error(i18n.global.t('separate.audioTrackProbeFailedForFile', { name: probeFailed.split(/[\\/]/).pop() }))
+    // Files whose metadata was unavailable at submission use the discovered
+    // default selection; existing choices remain frozen before any awaits.
+    const audioTracksByInput = new Map<string, number[] | undefined>(targets.map(path => [
+      path,
+      submittedTrackSelection.get(path) ?? inputAudioTracks.value[path]?.map(track => track.index),
+    ]))
+    for (const [path, selection] of audioTracksByInput) {
+      if (selection === undefined) continue
+      if (audioTrackSelectionSupported.value !== true) {
+        throw new Error(i18n.global.t('separate.audioTrackSelectionUnavailable'))
+      }
+      const name = path.split(/[\\/]/).pop()
+      if (!selection.length) throw new Error(i18n.global.t('separate.noAudioTrackSelected', { name }))
+      const available = new Set(inputAudioTracks.value[path]?.map(track => track.index))
+      if (selection.some(index => !available.has(index))) {
+        throw new Error(i18n.global.t('separate.audioTrackSelectionInvalidForFile', { name }))
+      }
+    }
     const jobId = createRunId('job')
     const outputLayout = normalizeOutputLayout(options.outputLayout)
     const jobOutput = resolveOutputDirectory(options.outputDir, separateOutputDir.value, windowsPaths.value)
     const outputNaming = normalizeOutputNaming(options.outputNaming)
     const preparedConfig = buildRunConfig({}, modelType, outputLayout, outputNaming)
     const snapshot = await prepareInferenceSnapshot(model)
+    if (submittedRuntimeGeneration !== audioTrackRuntimeGeneration) {
+      throw new Error(i18n.global.t('separate.audioTrackRuntimeChanged'))
+    }
     preparedConfig.inferenceParams = { ...snapshot.parameters }
     preparedConfig.inferenceParamsVersion = RESOLVED_INFERENCE_PARAMS_VERSION
     preparedConfig.resolvedInference = snapshot
@@ -2217,6 +2350,7 @@ export const useTaskStore = defineStore('task', () => {
       outputNaming,
       batchIndex,
       preparedConfig,
+      audioTracksByInput.get(input),
     ))
     modelStore.recordModelUse(model)
     scheduleQueue()
@@ -2365,7 +2499,7 @@ export const useTaskStore = defineStore('task', () => {
     const persistedModelType = existing.runConfig?.modelType ?? null
     const modelEntry = modelStore.models.find((item) => item.name === existing.model) || null
     const modelType = modelEntry?.modelType || persistedModelType || null
-    const task = createQueuedTask(existing.input, existing.model, retryParams, modelType, undefined, jobOutput, outputLayout, existing.runConfig?.outputNaming)
+    const task = createQueuedTask(existing.input, existing.model, retryParams, modelType, undefined, jobOutput, outputLayout, existing.runConfig?.outputNaming, undefined, undefined, existing.audioTracks)
     if (existing.runConfig) task.runConfig = JSON.parse(JSON.stringify(existing.runConfig))
     scheduleQueue()
     return task
@@ -2381,7 +2515,7 @@ export const useTaskStore = defineStore('task', () => {
     const entry = useModelStore().models.find(item => item.name === previous.model)
     const config = buildRunConfig(snapshot.parameters, entry?.modelType || previous.runConfig?.modelType, outputLayout, undefined, snapshot)
     config.selectedStems = oldStems
-    const created = createQueuedTask(previous.input, previous.model, snapshot.parameters, config.modelType, undefined, outputRoot, outputLayout, undefined, undefined, config)
+    const created = createQueuedTask(previous.input, previous.model, snapshot.parameters, config.modelType, undefined, outputRoot, outputLayout, undefined, undefined, config, previous.audioTracks)
     scheduleQueue()
     return created
   }
@@ -2406,8 +2540,12 @@ export const useTaskStore = defineStore('task', () => {
     focusedResultTaskId,
     focusedTaskId,
     inputFiles,
+    hasVideoInput,
     inputAudioTracks,
     inputTrackSelection,
+    audioTrackProbeState,
+    audioTrackProbeErrors,
+    audioTrackSelectionSupported,
     audioTrackLanguages,
     setAudioTrackLanguage,
     inputPath,
