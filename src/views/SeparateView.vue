@@ -2345,9 +2345,12 @@ async function retryCurrentTask() {
                       @update:model-value="inputTrackSelection[path] = $event"
                     />
                     <small v-if="audioTrackProbeState[path] === 'loading'" class="file-chip__tracks-label">{{ t('separate.audioTracksLoading') }}</small>
-                    <small v-else-if="audioTrackProbeState[path] === 'failed'" class="file-chip__tracks-label file-chip__tracks-error" :title="audioTrackProbeErrors[path]">
-                      {{ t('separate.audioTrackProbeFailed') }}
-                    </small>
+                    <div v-else-if="audioTrackProbeState[path] === 'failed'" class="file-chip__track-issue" @pointerdown.stop @click.stop>
+                      <small class="file-chip__tracks-label file-chip__tracks-error" :title="audioTrackProbeErrors[path]">{{ t('separate.audioTrackProbeFailed') }}</small>
+                      <n-button text type="primary" size="tiny" :disabled="isRunModeLocked" :aria-label="t('separate.retryAudioTrackProbe', { name: getFileName(path) })" @click="task.retryAudioTrackProbe(path)">
+                        {{ t('common.retry') }}
+                      </n-button>
+                    </div>
                   </div>
                   <n-button quaternary circle size="tiny" class="file-chip__remove" :title="t('separate.remove')" :disabled="isRunModeLocked" @click.stop="task.removeInputFile(path)">
                     <template #icon><n-icon :component="CloseOutline" /></template>
@@ -3775,6 +3778,7 @@ async function retryCurrentTask() {
 
 .file-chip__tracks-label { color: var(--on-surface-muted); }
 .file-chip__tracks-error { color: var(--danger); }
+.file-chip__track-issue { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .track-probe-note { margin: 0; font-size: 11px; color: var(--on-surface-muted); }
 
 .track-batch {

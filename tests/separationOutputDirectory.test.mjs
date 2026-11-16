@@ -965,6 +965,128 @@ for (const choice of [[2], [1, 3]]) {
   })
 }
 
+test('submission retries a transient metadata failure once and clears its error', async () => {
+  storage()
+  const task = await newStore()
+  task.clearInputFiles()
+  const path = 'D:/Audio/busy.mkv'
+  let busy = true
+  let calls = 0
+  window.__TAURI_INTERNALS__ = {
+    metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+    async invoke(command) {
+      if (command !== 'get_audio_metadata') return { started: true }
+      calls++
+      if (busy) throw new Error('RUNTIME_BUSY: The runtime is in use')
+      return { audioTrackSelectionSupported: true, audioTracksByPath: { [path]: [
+        { index: 1, language: 'jpn', title: '', channels: 2 }, { index: 2, language: 'eng', title: '', channels: 2 },
+      ] }, audioTrackErrorsByPath: {} }
+    },
+  }
+  task.addInputFiles([path])
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(task.audioTrackProbeState[path], 'failed')
+  assert.match(task.audioTrackProbeErrors[path], /RUNTIME_BUSY/)
+  await assert.rejects(task.startSeparation(), /separate.audioTrackProbeFailedForFile/)
+  assert.equal(calls, 2)
+  assert.equal(task.tasks.length, 0)
+  busy = false
+  const created = await task.startSeparation()
+  assert.equal(calls, 3)
+  assert.deepEqual(created.tasks[0].audioTracks, [1, 2])
+  assert.equal(task.audioTrackProbeState[path], undefined)
+  assert.equal(task.audioTrackProbeErrors[path], undefined)
+})
+
+test('file metadata errors require an explicit retry and duplicate retry clicks do not enqueue extra work', async () => {
+  storage()
+  const task = await newStore()
+  task.clearInputFiles()
+  const path = 'D:/Audio/repaired.mkv'
+  let calls = 0
+  let finishRetry
+  window.__TAURI_INTERNALS__ = {
+    metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+    invoke(command) {
+      if (command !== 'get_audio_metadata') return Promise.resolve({ started: true })
+      calls++
+      if (calls === 1) return Promise.resolve({ audioTrackSelectionSupported: true, audioTracksByPath: {}, audioTrackErrorsByPath: { [path]: 'Invalid media' } })
+      return new Promise(resolve => { finishRetry = resolve })
+    },
+  }
+  task.addInputFiles([path])
+  await new Promise(resolve => setTimeout(resolve, 0))
+  await assert.rejects(task.startSeparation(), /separate.audioTrackProbeFailedForFile/)
+  assert.equal(calls, 1)
+  assert.equal(task.retryAudioTrackProbe(path), true)
+  assert.equal(task.audioTrackProbeErrors[path], undefined)
+  assert.equal(task.retryAudioTrackProbe(path), false)
+  assert.equal(calls, 2)
+  finishRetry({ audioTrackSelectionSupported: true, audioTracksByPath: { [path]: [
+    { index: 1, language: 'jpn', title: '', channels: 2 }, { index: 2, language: 'eng', title: '', channels: 2 },
+  ] }, audioTrackErrorsByPath: {} })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.deepEqual((await task.startSeparation()).tasks[0].audioTracks, [1, 2])
+  assert.equal(task.retryAudioTrackProbe(path), false)
+})
+
+test('retrying after a runtime probe failure retains explicit track choices', async () => {
+  storage()
+  const task = await newStore()
+  task.clearInputFiles()
+  const path = 'D:/Audio/choice.mkv'
+  const app = useAppStore()
+  app.envInfo = { platform: 'win32', pymssVersion: '2.4.0' }
+  let busy = false
+  window.__TAURI_INTERNALS__ = {
+    metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+    async invoke(command) {
+      if (command !== 'get_audio_metadata') return { started: true }
+      if (busy) throw 'RUNTIME_BUSY: Updating the runtime'
+      return { audioTrackSelectionSupported: true, audioTracksByPath: { [path]: [
+        { index: 1, language: 'jpn', title: '', channels: 2 }, { index: 2, language: 'eng', title: '', channels: 2 },
+      ] }, audioTrackErrorsByPath: {} }
+    },
+  }
+  task.addInputFiles([path])
+  await new Promise(resolve => setTimeout(resolve, 0))
+  task.inputTrackSelection[path] = [2]
+  busy = true
+  app.runtimeInfo = { installedBackend: 'cpu', installState: { pythonPath: 'D:/Runtime/refreshed/python.exe' } }
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(task.audioTrackProbeState[path], 'failed')
+  busy = false
+  assert.equal(task.retryAudioTrackProbe(path), true)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.deepEqual(task.inputTrackSelection[path], [2])
+  assert.deepEqual((await task.startSeparation()).tasks[0].audioTracks, [2])
+})
+
+test('removing failed inputs clears retry classification before the same path is added again', async () => {
+  storage()
+  const task = await newStore()
+  task.clearInputFiles()
+  const path = 'D:/Audio/readded-failure.mkv'
+  let calls = 0
+  window.__TAURI_INTERNALS__ = {
+    metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+    async invoke(command) {
+      if (command !== 'get_audio_metadata') return { started: true }
+      calls++
+      if (calls === 1) throw new Error('RUNTIME_BUSY')
+      return { audioTrackSelectionSupported: true, audioTracksByPath: {}, audioTrackErrorsByPath: { [path]: 'Invalid media' } }
+    },
+  }
+  task.addInputFiles([path])
+  await new Promise(resolve => setTimeout(resolve, 0))
+  task.removeInputFile(path)
+  assert.equal(task.retryAudioTrackProbe(path), false)
+  task.addInputFiles([path])
+  await new Promise(resolve => setTimeout(resolve, 0))
+  await assert.rejects(task.startSeparation(), /separate.audioTrackProbeFailedForFile/)
+  assert.equal(calls, 2)
+})
+
 test('shared ensemble parameters validate participating models without previous single-model metadata', async () => {
   const values = storage()
   const task = await newStore()

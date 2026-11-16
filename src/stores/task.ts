@@ -629,6 +629,7 @@ export const useTaskStore = defineStore('task', () => {
   const audioTrackProbeErrors = ref<Record<string, string>>({})
   const audioTrackSelectionSupported = ref<boolean | null>(null)
   const audioTrackProbeCurrentGeneration = ref<Record<string, number>>({})
+  const retryableAudioTrackProbes = new Set<string>()
   let audioTrackProbeGeneration = 0
   let audioTrackRuntimeGeneration = 0
   let audioTrackProbeDrain: Promise<void> | null = null
@@ -1835,6 +1836,10 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   function enqueueAudioTrackProbe(path: string) {
+    retryableAudioTrackProbes.delete(path)
+    const errors = { ...audioTrackProbeErrors.value }
+    delete errors[path]
+    audioTrackProbeErrors.value = errors
     const generation = ++audioTrackProbeGeneration
     audioTrackProbeCurrentGeneration.value = { ...audioTrackProbeCurrentGeneration.value, [path]: generation }
     audioTrackProbeState.value = { ...audioTrackProbeState.value, [path]: 'loading' }
@@ -1859,6 +1864,7 @@ export const useTaskStore = defineStore('task', () => {
             if (!current) continue
             const tracks = metadata?.audioTracksByPath?.[path] || []
             const error = metadata?.audioTrackErrorsByPath?.[path]
+            retryableAudioTrackProbes.delete(path)
             if (error) {
               audioTrackProbeState.value = { ...audioTrackProbeState.value, [path]: 'failed' }
               audioTrackProbeErrors.value = { ...audioTrackProbeErrors.value, [path]: error }
@@ -1875,12 +1881,14 @@ export const useTaskStore = defineStore('task', () => {
             delete nextState[path]
             audioTrackProbeState.value = nextState
           }
-        } catch {
+        } catch (error) {
           if (runtimeGeneration !== audioTrackRuntimeGeneration) continue
+          const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : ''
           for (const { path, generation } of batch) {
             if (inputFiles.value.includes(path) && audioTrackProbeCurrentGeneration.value[path] === generation && audioTrackProbeState.value[path] === 'loading') {
+              retryableAudioTrackProbes.add(path)
               audioTrackProbeState.value = { ...audioTrackProbeState.value, [path]: 'failed' }
-              audioTrackProbeErrors.value = { ...audioTrackProbeErrors.value, [path]: i18n.global.t('separate.audioTrackProbeFailed') }
+              audioTrackProbeErrors.value = { ...audioTrackProbeErrors.value, [path]: detail || i18n.global.t('separate.audioTrackProbeFailed') }
             }
           }
         }
@@ -1902,6 +1910,12 @@ export const useTaskStore = defineStore('task', () => {
     }
   }
 
+  function retryAudioTrackProbe(path: string) {
+    if (!inputFiles.value.includes(path) || audioTrackProbeState.value[path] !== 'failed') return false
+    enqueueAudioTrackProbe(path)
+    return true
+  }
+
   watch(() => {
     const app = useAppStore()
     const info = app.runtimeInfo
@@ -1918,6 +1932,7 @@ export const useTaskStore = defineStore('task', () => {
     audioTrackRuntimeGeneration++
     audioTrackSelectionSupported.value = null
     audioTrackProbeQueue = []
+    retryableAudioTrackProbes.clear()
     inputAudioTracks.value = {}
     audioTrackProbeState.value = {}
     audioTrackProbeErrors.value = {}
@@ -1950,6 +1965,7 @@ export const useTaskStore = defineStore('task', () => {
   function clearAudioTrackInputState(paths: string[]) {
     if (!paths.length) return
     const removed = new Set(paths)
+    for (const path of removed) retryableAudioTrackProbes.delete(path)
     audioTrackProbeQueue = audioTrackProbeQueue.filter(item => !removed.has(item.path))
     inputAudioTracks.value = Object.fromEntries(Object.entries(inputAudioTracks.value).filter(([path]) => !removed.has(path)))
     inputTrackSelection.value = Object.fromEntries(Object.entries(inputTrackSelection.value).filter(([path]) => !removed.has(path)))
@@ -2302,6 +2318,11 @@ export const useTaskStore = defineStore('task', () => {
       path,
       inputTrackSelection.value[path] ? [...inputTrackSelection.value[path]] : undefined,
     ]))
+    // Retry failed worker requests once per submission; file-level read errors
+    // remain explicit retries so unreadable media cannot cause a retry loop.
+    for (const path of targets) {
+      if (retryableAudioTrackProbes.has(path)) retryAudioTrackProbe(path)
+    }
     await waitForAudioTrackProbes(targets)
     if (submittedRuntimeGeneration !== audioTrackRuntimeGeneration) {
       throw new Error(i18n.global.t('separate.audioTrackRuntimeChanged'))
@@ -2548,6 +2569,7 @@ export const useTaskStore = defineStore('task', () => {
     audioTrackSelectionSupported,
     audioTrackLanguages,
     setAudioTrackLanguage,
+    retryAudioTrackProbe,
     inputPath,
     separateRunMode,
     ensembleEnabled,
