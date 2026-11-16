@@ -4,7 +4,7 @@
 librosa>=0.10.2,<0.11
 audioread>=3.0,<4
 numpy>=1.26,<3
-# Use an immutable source snapshot for the reviewed plugin update API.
-pymss[proxy] @ git+https://github.com/pymss-project/pymss.git@ab87f620503a3c3046291146bf090143701f855d
+# Pin the released pymss 2.4.0 source, including audio-track and plugin APIs.
+pymss[proxy] @ git+https://github.com/pymss-project/pymss.git@c78bc27265d1d2bad20e429f615c063239837be2
 requests[socks]>=2.32,<3
 pyyaml>=6.0.1,<7

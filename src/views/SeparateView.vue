@@ -50,7 +50,9 @@ import { getSeparateWorkflowInputIssue } from '@/utils/workflowInputs'
 import { sortStemOutputsByOrder } from '@/utils/stemOrder'
 import { retainAvailableModelNames } from '@/utils/modelSource'
 import { SEPARATE_MODEL_PAGE_SIZES } from '@/utils/pagination'
+import { audioTrackLanguageLabel } from '@/utils/audioTracks'
 import AppBrandMark from '@/components/AppBrandMark.vue'
+import AudioTrackPicker from '@/components/AudioTrackPicker.vue'
 import ModelCategorySelect from '@/components/ModelCategorySelect.vue'
 import TaskLogConsole from '@/components/TaskLogConsole.vue'
 import InferenceParameterLesson from '@/components/InferenceParameterLesson.vue'
@@ -84,6 +86,13 @@ const beginnerGuide = useBeginnerGuideStore()
 
 const {
   inputFiles,
+  hasVideoInput,
+  inputAudioTracks,
+  inputTrackSelection,
+  audioTrackProbeState,
+  audioTrackProbeErrors,
+  audioTrackSelectionSupported,
+  audioTrackLanguages,
   separateRunMode: runMode,
   ensembleEnabled,
   ensembleModels,
@@ -1001,7 +1010,7 @@ const taskPanelState = computed<'ready' | 'running' | 'done' | 'failed' | 'cance
 })
 const isConfigCompact = computed(() => taskPanelState.value !== 'ready')
 const isTerminalState = computed(() => ['done', 'failed', 'cancelled'].includes(taskPanelState.value))
-const isRunModeLocked = computed(() => taskPanelState.value === 'running')
+const isRunModeLocked = computed(() => submittingJob.value || taskPanelState.value === 'running')
 const inputCompactLine = computed(() => {
   if (currentBatchIsMulti.value && currentBatchTotal.value) return t('separate.batchInputCompact', { count: currentBatchTotal.value })
   if (currentTask.value) return getFileName(currentTask.value.input)
@@ -2284,6 +2293,24 @@ async function retryCurrentTask() {
               </button>
             </div>
 
+            <div v-if="audioTrackLanguages.length && runMode === 'model' && !ensembleEnabled" class="track-batch">
+              <span class="track-batch__label">{{ t('separate.audioTracksAllFiles') }}</span>
+              <n-checkbox
+                v-for="item in audioTrackLanguages"
+                :key="item.language"
+                size="small"
+                :checked="item.checked"
+                :indeterminate="item.indeterminate"
+                :disabled="isRunModeLocked"
+                :label="audioTrackLanguageLabel(item.language, locale, t('separate.audioTrackLanguageUntagged'))"
+                :title="item.language"
+                @update:checked="(value: boolean) => task.setAudioTrackLanguage(item.language, value)"
+              />
+            </div>
+            <p v-if="hasVideoInput && audioTrackSelectionSupported === false && runMode === 'model' && !ensembleEnabled" class="track-probe-note">
+              {{ t('separate.audioTrackSelectionUnavailable') }}
+            </p>
+
             <div
               class="dropzone"
               :class="{ 'dropzone--dragging': isDragging, 'dropzone--filled': inputFiles.length, 'dropzone--clickable': !inputFiles.length && !isRunModeLocked }"
@@ -2307,6 +2334,22 @@ async function retryCurrentTask() {
                     <div class="file-chip__sub">
                       <span class="file-chip__kind">{{ getFileKindLabel(path) }}</span>
                       <code :title="path">{{ shortenMiddle(path, 60) }}</code>
+                    </div>
+                    <AudioTrackPicker
+                      v-if="inputAudioTracks[path] && runMode === 'model' && !ensembleEnabled"
+                      :model-value="inputTrackSelection[path] || []"
+                      :tracks="inputAudioTracks[path]"
+                      :file-name="getFileName(path)"
+                      :batch="inputFiles.length > 1"
+                      :disabled="isRunModeLocked"
+                      @update:model-value="inputTrackSelection[path] = $event"
+                    />
+                    <small v-if="audioTrackProbeState[path] === 'loading'" class="file-chip__tracks-label">{{ t('separate.audioTracksLoading') }}</small>
+                    <div v-else-if="audioTrackProbeState[path] === 'failed'" class="file-chip__track-issue" @pointerdown.stop @click.stop>
+                      <small class="file-chip__tracks-label file-chip__tracks-error" :title="audioTrackProbeErrors[path]">{{ t('separate.audioTrackProbeFailed') }}</small>
+                      <n-button text type="primary" size="tiny" :disabled="isRunModeLocked" :aria-label="t('separate.retryAudioTrackProbe', { name: getFileName(path) })" @click="task.retryAudioTrackProbe(path)">
+                        {{ t('common.retry') }}
+                      </n-button>
                     </div>
                   </div>
                   <n-button quaternary circle size="tiny" class="file-chip__remove" :title="t('separate.remove')" :disabled="isRunModeLocked" @click.stop="task.removeInputFile(path)">
@@ -3607,7 +3650,7 @@ async function retryCurrentTask() {
   flex: 1 1 auto;
   min-height: 0;
   border-radius: 13px;
-  border: 1px dashed color-mix(in srgb, var(--outline) 130%, transparent);
+  border: 1px dashed var(--outline-strong);
   background: color-mix(in srgb, var(--surface) 40%, transparent);
   transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
   overflow: hidden;
@@ -3615,7 +3658,7 @@ async function retryCurrentTask() {
 
 .dropzone--filled {
   border-style: solid;
-  border-color: color-mix(in srgb, var(--outline) 90%, transparent);
+  border-color: color-mix(in srgb, var(--outline) 45%, transparent);
 }
 
 .dropzone--dragging {
@@ -3651,7 +3694,8 @@ async function retryCurrentTask() {
 
 .file-chip {
   display: flex;
-  align-items: center;
+  flex-shrink: 0;
+  align-items: flex-start;
   gap: 9px;
   padding: 7px 8px 7px 9px;
   border-radius: 10px;
@@ -3671,6 +3715,7 @@ async function retryCurrentTask() {
   display: grid;
   place-items: center;
   width: 16px;
+  margin-top: 7px;
   color: var(--on-surface-muted);
 }
 
@@ -3730,6 +3775,24 @@ async function retryCurrentTask() {
 }
 
 .file-chip__remove { flex: 0 0 auto; color: var(--on-surface-muted); }
+
+.file-chip__tracks-label { color: var(--on-surface-muted); }
+.file-chip__tracks-error { color: var(--danger); }
+.file-chip__track-issue { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.track-probe-note { margin: 0; font-size: 11px; color: var(--on-surface-muted); }
+
+.track-batch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  background: color-mix(in srgb, var(--primary-soft) 30%, var(--surface-2));
+}
+
+.track-batch__label { color: var(--on-surface-muted); }
 
 .dropzone__empty {
   height: 100%;

@@ -376,6 +376,7 @@ fn query_timeout(command: &str) -> Option<std::time::Duration> {
         "runtime_info" => 180,
         "runtime_env_sizes" => 180,
         "runtime_install_plan" => 90,
+        "audio_metadata" => 90,
         "runtime_hardware_inventory" => 90,
         "runtime_gpu_probe_report" => 15,
         "recover_runtime" => 120,

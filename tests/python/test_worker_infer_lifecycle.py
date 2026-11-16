@@ -55,7 +55,7 @@ class InferenceLifecycleTests(unittest.TestCase):
 
     def test_success_preserves_outputs_and_releases_separator_and_handler(self) -> None:
         self.assertEqual(self.run_command(), 0)
-        self.separator.process_folder.assert_called_once_with(str(self.source), 1)
+        self.separator.process_folder.assert_called_once_with(str(self.source), 1, None)
         self.separator.close.assert_called_once_with()
         self.separator.del_cache.assert_not_called()
         self.assert_handler_released()
@@ -264,7 +264,7 @@ class BatchInferenceLifecycleTests(unittest.TestCase):
             second.touch()
 
             class Separator:
-                def process_folder(self, path: str, _input_index: int = 1) -> list[str]:
+                def process_folder(self, path: str, _input_index: int = 1, _audio_tracks: object = None) -> list[str]:
                     return [] if Path(path) == first else [path]
 
                 def studio_outputs(self) -> list[dict[str, str]]:
@@ -307,7 +307,7 @@ class BatchInferenceLifecycleTests(unittest.TestCase):
             second.touch()
 
             class Separator:
-                def process_folder(self, path: str, _input_index: int = 1) -> list[str]:
+                def process_folder(self, path: str, _input_index: int = 1, _audio_tracks: object = None) -> list[str]:
                     if Path(path) == second:
                         raise RuntimeError("second failed")
                     return [path]

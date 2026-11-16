@@ -44,10 +44,10 @@ class ReleaseCoreResolutionTests(unittest.TestCase):
         )
 
     def test_default_core_requirements_preserve_the_shared_plugin_api_floor(self):
-        self.assertEqual(MANIFEST["common"]["pymss"], "pymss[proxy]>=2.3.4")
+        self.assertEqual(MANIFEST["common"]["pymss"], "pymss[proxy]>=2.4.0")
         self.assertEqual(MANIFEST["common"]["pymss-core"], "pymss-core")
         lines = (ROOT / "python/requirements.txt").read_text(encoding="utf-8").splitlines()
-        self.assertIn("pymss[proxy]>=2.3.4", lines)
+        self.assertIn("pymss[proxy]>=2.4.0", lines)
         self.assertFalse(any(line.startswith("pymss-core") for line in lines))
 
     def test_ci_uses_an_immutable_official_core_snapshot(self):

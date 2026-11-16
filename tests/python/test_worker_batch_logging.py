@@ -89,7 +89,7 @@ class BatchLogAttributionTests(unittest.TestCase):
 
     def test_separation_batch_binds_root_logs_and_warnings_to_each_file(self):
         def prepare(**_kwargs):
-            def process(input_path, _index):
+            def process(input_path, _index, _audio_tracks=None):
                 task_id = Path(input_path).stem
                 self.log_file(task_id)
                 if task_id == "second":

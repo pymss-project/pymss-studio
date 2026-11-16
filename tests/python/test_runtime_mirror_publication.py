@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -34,7 +35,14 @@ class RuntimeMirrorPublicationTests(unittest.TestCase):
         runtime = self.step("Download Windows ROCm runtime assets")
         self.assertEqual(runtime["with"]["path"], "runtime-artifacts")
         publication = next(step for step in self.steps if step.get("id") == "publish_release")
-        self.assertEqual(publication["with"]["files"], "artifacts/*")
+        self.assertEqual(publication["with"]["files"], "release-public/*")
+        selectors = [step for step in self.steps if "scripts/release-assets.py public " in step.get("run", "")]
+        self.assertEqual(len(selectors), 1)
+        selector = selectors[0]
+        arguments = shlex.split(selector["run"])
+        self.assertEqual(arguments[2:5], ["public", "artifacts", "release-public"])
+        self.assertIn("--merge-published", arguments)
+        self.assertLess(self.steps.index(selector), self.steps.index(publication))
         for step in self.steps:
             if step.get("uses", "").startswith("actions/download-artifact") and step is not runtime:
                 self.assertEqual(step["with"]["path"], "artifacts")
@@ -54,11 +62,14 @@ class RuntimeMirrorPublicationTests(unittest.TestCase):
         setup = next(step for step in self.steps if step.get("id") == "setup_mirror_uploads")
         self.assertIn("steps.verify_release_tag.outcome == 'success'", setup["if"])
 
-    def test_windows_publication_requires_both_tokens_without_logging_them(self):
-        guard = next(step for step in self.preflight if step.get("name") == "Require both runtime mirror credentials")
-        self.assertIn("steps.plan.outputs.publish == 'true'", guard["if"])
-        self.assertIn("steps.plan.outputs.target == 'windows'", guard["if"])
-        self.assertIn("steps.plan.outputs.target == 'all'", guard["if"])
+    def test_publication_requires_both_tokens_without_logging_them(self):
+        guards = [step for step in self.preflight
+                  if {"HF_TOKEN", "MODELSCOPE_API_TOKEN"}.issubset(step.get("env", {}))]
+        self.assertEqual(len(guards), 1)
+        guard = guards[0]
+        self.assertEqual(guard["if"], "steps.plan.outputs.publish == 'true'")
+        self.assertEqual(guard["env"]["HF_TOKEN"], "${{ secrets.HF_TOKEN }}")
+        self.assertEqual(guard["env"]["MODELSCOPE_API_TOKEN"], "${{ secrets.MODELSCOPE_API_TOKEN }}")
         with tempfile.TemporaryDirectory() as directory:
             for hf, ms, expected in (("", "", False), ("private-hf", "", False),
                                      ("", "private-ms", False), ("private-hf", "private-ms", True)):
