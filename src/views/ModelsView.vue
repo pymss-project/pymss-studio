@@ -164,8 +164,12 @@ type BatchPreviewRow = {
 type BatchPreview = { kind: 'edit' | 'reset'; revision: number; intent: CustomParameterIntent; rows: BatchPreviewRow[] }
 const BATCH_METADATA_CONCURRENCY = 4
 const batchSelectMode = ref(false)
+const batchScopeMenuOpen = ref(false)
 const batchSelection = ref<string[]>([])
 const batchSelectionSet = computed(() => new Set(batchSelection.value))
+const batchRangeAnchor = ref<string | null>(null)
+const batchRangeBase = ref<string[]>([])
+const batchRangeChecked = ref(true)
 const modelGrid = ref<HTMLElement | null>(null)
 type BatchDragSelection = {
   pointerId: number
@@ -175,10 +179,13 @@ type BatchDragSelection = {
   targetSelected: boolean
   active: boolean
   visited: Set<string>
+  scrollTop: number
 }
 let batchDragSelection: BatchDragSelection | null = null
 let suppressBatchClick = false
 let batchListenersAttached = false
+let batchScrollFrame: number | null = null
+let batchScrollTime = 0
 let modelPageActive = true
 const showBatchEditor = ref(false)
 const batchEditorSelection = ref<string[]>([])
@@ -937,10 +944,11 @@ const batchOutsideFilter = computed(() => {
 })
 const allBatchPageSelected = computed(() => batchSelectableOnPage.value.length > 0 && batchSelectableOnPage.value.every(model => isBatchSelected(model.name)))
 const someBatchPageSelected = computed(() => batchSelectedOnPage.value > 0 && !allBatchPageSelected.value)
-const batchSelectionOptions = computed<DropdownOption[]>(() => [{ key: 'filtered',
-  label: t('models.batchSelectFiltered', { count: sortedModels.value.filter(canSelectBatchModel).length }),
-  disabled: !sortedModels.value.some(canSelectBatchModel),
-}])
+const batchSelectionOptions = computed<DropdownOption[]>(() => [
+  { key: 'filtered', label: t('models.batchSelectFiltered', { count: sortedModels.value.filter(canSelectBatchModel).length }),
+    disabled: !sortedModels.value.some(canSelectBatchModel) },
+  { key: 'invert-page', label: t('models.batchInvertPage'), disabled: !batchSelectableOnPage.value.length },
+])
 
 function canSelectBatchModel(model: ModelEntry | null | undefined) {
   return Boolean(model && (isDownloadSelectable(model) || canEditModelParameters(model)))
@@ -958,8 +966,35 @@ function setBatchSelected(name: string, checked: boolean) {
   batchSelection.value = next
 }
 
+function resetBatchRange() {
+  batchRangeAnchor.value = null
+  batchRangeBase.value = []
+}
+
+function selectBatchModel(model: ModelEntry, checked: boolean, extend = false) {
+  if (checked && !canSelectBatchModel(model)) return
+  const anchor = pagedModels.value.findIndex(item => item.name === batchRangeAnchor.value)
+  const end = pagedModels.value.findIndex(item => item.name === model.name)
+  if (extend && anchor >= 0 && end >= 0) {
+    const known = new Set(modelStore.models.map(item => item.name))
+    const next = new Set(batchRangeBase.value.filter(name => known.has(name)))
+    for (const item of pagedModels.value.slice(Math.min(anchor, end), Math.max(anchor, end) + 1)) {
+      if (!batchRangeChecked.value) next.delete(item.name)
+      else if (canSelectBatchModel(item) || isBatchSelected(item.name)) next.add(item.name)
+    }
+    batchSelection.value = [...next]
+    return
+  }
+  batchRangeAnchor.value = model.name
+  batchRangeBase.value = [...batchSelection.value]
+  batchRangeChecked.value = checked
+  setBatchSelected(model.name, checked)
+}
+
 function toggleBatchSelectMode() {
   finishBatchDragSelection()
+  resetBatchRange()
+  batchScopeMenuOpen.value = false
   batchSelectMode.value = !batchSelectMode.value
   if (batchSelectMode.value) showDetail.value = false
   if (!batchSelectMode.value) batchSelection.value = []
@@ -967,6 +1002,7 @@ function toggleBatchSelectMode() {
 
 function selectBatchPage(checked: boolean) {
   finishBatchDragSelection()
+  resetBatchRange()
   const next = new Set(batchSelection.value)
   for (const model of pagedModels.value) {
     if (!checked) next.delete(model.name)
@@ -977,19 +1013,61 @@ function selectBatchPage(checked: boolean) {
 
 function selectBatchFiltered() {
   finishBatchDragSelection()
+  resetBatchRange()
   batchSelection.value = [...new Set([...batchSelection.value, ...sortedModels.value.filter(canSelectBatchModel).map(model => model.name)])]
+}
+
+function invertBatchPage() {
+  finishBatchDragSelection()
+  resetBatchRange()
+  const next = new Set(batchSelection.value)
+  for (const model of pagedModels.value) {
+    if (next.has(model.name)) next.delete(model.name)
+    else if (canSelectBatchModel(model)) next.add(model.name)
+  }
+  batchSelection.value = [...next]
+}
+
+function handleBatchSelectionScope(key: string | number) {
+  if (key === 'filtered') selectBatchFiltered()
+  else if (key === 'invert-page') invertBatchPage()
 }
 
 function clearBatchSelection() {
   finishBatchDragSelection()
+  resetBatchRange()
   batchSelection.value = []
 }
 
 function handleModelCardClick(model: ModelEntry, event: MouseEvent | KeyboardEvent) {
   if (event.type === 'keydown') suppressBatchClick = false
   if (!batchSelectMode.value) { selectModel(model); return }
-  if (event.type === 'click' && window.getSelection()?.toString()) return
-  setBatchSelected(model.name, !isBatchSelected(model.name))
+  if (event.type === 'click' && !event.shiftKey && window.getSelection()?.toString()) return
+  selectBatchModel(model, !isBatchSelected(model.name), event.shiftKey)
+  if (event.type === 'click' && event.shiftKey) (event.currentTarget as HTMLElement)?.focus?.({ preventScroll: true })
+}
+
+function handleBatchRangeMouseDown(event: MouseEvent) {
+  if (batchSelectMode.value && event.shiftKey && event.button === 0) {
+    event.preventDefault()
+    window.getSelection()?.removeAllRanges()
+  }
+}
+
+function handleBatchCheckboxClick(event: MouseEvent, model: ModelEntry) {
+  event.preventDefault()
+  event.stopPropagation()
+  selectBatchModel(model, !isBatchSelected(model.name), event.shiftKey)
+  const checkbox = (event.currentTarget as HTMLElement).querySelector<HTMLElement>('[role="checkbox"]')
+  checkbox?.focus({ preventScroll: true })
+}
+
+function handleBatchCheckboxKey(event: KeyboardEvent, model: ModelEntry) {
+  if (event.key !== ' ' && event.key !== 'Enter') return
+  event.preventDefault()
+  event.stopPropagation()
+  // Naive toggles on keyup; consume both phases so a range does not toggle twice.
+  if (event.type === 'keyup') selectBatchModel(model, !isBatchSelected(model.name), event.shiftKey)
 }
 
 function resetBatchClickSuppression() { suppressBatchClick = false }
@@ -1002,13 +1080,59 @@ function consumeBatchClick(event: MouseEvent) {
 }
 
 function startBatchDragSelection(event: PointerEvent, model: ModelEntry) {
-  if (!batchSelectMode.value || event.pointerType !== 'mouse' || event.button !== 0) return
+  if (!batchSelectMode.value || event.pointerType !== 'mouse' || event.button !== 0 || event.shiftKey) return
   if (!canSelectBatchModel(model) && !isBatchSelected(model.name)) return
   finishBatchDragSelection()
   suppressBatchClick = false
   const origin = { x: event.clientX, y: event.clientY }
   batchDragSelection = { pointerId: event.pointerId, startName: model.name, origin, previous: origin,
-    targetSelected: !isBatchSelected(model.name), active: false, visited: new Set() }
+    targetSelected: !isBatchSelected(model.name), active: false, visited: new Set(), scrollTop: batchScrollContainer()?.scrollTop || 0 }
+}
+
+function batchScrollContainer() { return modelGrid.value?.closest<HTMLElement>('.app-content') || null }
+
+function paintBatchSelection(point: SelectionPoint) {
+  const state = batchDragSelection
+  if (!state?.active || !modelGrid.value) return
+  const container = batchScrollContainer()
+  const previous = { x: state.previous.x, y: state.previous.y - ((container?.scrollTop || 0) - state.scrollTop) }
+  const next = new Set(batchSelection.value)
+  const entries = new Map(pagedModels.value.map(model => [model.name, model]))
+  const apply = (name: string) => {
+    if (state.visited.has(name)) return
+    state.visited.add(name)
+    const model = entries.get(name)
+    if (state.targetSelected) { if (model && canSelectBatchModel(model)) next.add(name) }
+    else next.delete(name)
+  }
+  apply(state.startName)
+  const viewport = container?.getBoundingClientRect()
+  for (const element of modelGrid.value?.querySelectorAll<HTMLElement>('[data-batch-model]') ?? []) {
+    const name = element.dataset.batchModel!
+    if (state.visited.has(name)) continue
+    const bounds = element.getBoundingClientRect()
+    const rect = { left: Math.max(bounds.left, viewport?.left ?? 0), top: Math.max(bounds.top, viewport?.top ?? 0),
+      right: Math.min(bounds.right, viewport?.right ?? window.innerWidth), bottom: Math.min(bounds.bottom, viewport?.bottom ?? window.innerHeight) }
+    if (rect.right > rect.left && rect.bottom > rect.top && segmentIntersectsRect(previous, point, rect)) apply(name)
+  }
+  if (next.size !== batchSelectionSet.value.size || [...next].some(name => !batchSelectionSet.value.has(name))) batchSelection.value = [...next]
+  state.previous = point
+  state.scrollTop = container?.scrollTop || 0
+}
+
+function scrollBatchDrag(time: number) {
+  batchScrollFrame = null
+  const state = batchDragSelection, container = batchScrollContainer()
+  if (!state?.active || !container) return
+  if (!batchSelectMode.value || document.querySelector('[role="dialog"], .n-modal-mask')) { finishBatchDragSelection(); return }
+  const speed = edgeScrollVelocity(state.previous, container.getBoundingClientRect())
+  if (!speed) return
+  const elapsed = batchScrollTime ? Math.min(32, time - batchScrollTime) : 16
+  batchScrollTime = time
+  const before = container.scrollTop
+  container.scrollTop += speed * elapsed / 1000
+  paintBatchSelection(state.previous)
+  if (container.scrollTop !== before) batchScrollFrame = requestAnimationFrame(scrollBatchDrag)
 }
 
 function handleBatchPointerMove(event: PointerEvent) {
@@ -1020,44 +1144,40 @@ function handleBatchPointerMove(event: PointerEvent) {
   }
   const point = { x: event.clientX, y: event.clientY }
   if (!state.active && Math.hypot(point.x - state.origin.x, point.y - state.origin.y) < 5) return
+  if (!state.active) resetBatchRange()
   state.active = true
   event.preventDefault()
   window.getSelection()?.removeAllRanges()
   document.documentElement.classList.add('models-drag-selecting')
-  const next = new Set(batchSelection.value)
-  const entries = new Map(pagedModels.value.map(model => [model.name, model]))
-  const apply = (name: string) => {
-    if (state.visited.has(name)) return
-    state.visited.add(name)
-    const model = entries.get(name)
-    if (state.targetSelected) { if (model && canSelectBatchModel(model)) next.add(name) }
-    else next.delete(name)
-  }
-  apply(state.startName)
-  const viewport = modelGrid.value?.closest('.app-content')?.getBoundingClientRect()
-  for (const element of modelGrid.value?.querySelectorAll<HTMLElement>('[data-batch-model]') ?? []) {
-    const name = element.dataset.batchModel!
-    if (state.visited.has(name)) continue
-    const bounds = element.getBoundingClientRect()
-    const rect = { left: Math.max(bounds.left, viewport?.left ?? 0), top: Math.max(bounds.top, viewport?.top ?? 0),
-      right: Math.min(bounds.right, viewport?.right ?? window.innerWidth), bottom: Math.min(bounds.bottom, viewport?.bottom ?? window.innerHeight) }
-    if (rect.right > rect.left && rect.bottom > rect.top && segmentIntersectsRect(state.previous, point, rect)) apply(name)
-  }
-  if (next.size !== batchSelectionSet.value.size || [...next].some(name => !batchSelectionSet.value.has(name))) batchSelection.value = [...next]
-  state.previous = point
+  paintBatchSelection(point)
+  if (batchScrollFrame === null) { batchScrollTime = 0; batchScrollFrame = requestAnimationFrame(scrollBatchDrag) }
 }
+
+function handleBatchScroll() { if (batchDragSelection?.active) paintBatchSelection(batchDragSelection.previous) }
+function handleBatchPointerOut(event: PointerEvent) { if (!event.relatedTarget) finishBatchDragSelection(event) }
 
 function finishBatchDragSelection(event?: PointerEvent) {
   const state = batchDragSelection
   if (event && state && event.pointerId !== state.pointerId) return
   if (state && (state.active || event?.type !== 'pointerup')) suppressBatchClick = true
   batchDragSelection = null
+  if (batchScrollFrame !== null) cancelAnimationFrame(batchScrollFrame)
+  batchScrollFrame = null
+  batchScrollTime = 0
   document.documentElement.classList.remove('models-drag-selecting')
 }
 
 function handleBatchWindowChange() { finishBatchDragSelection() }
 function handleBatchKeydown(event: KeyboardEvent) {
-  if (event.defaultPrevented || event.key !== 'Escape' || !batchSelectMode.value || document.querySelector('[role="dialog"], .n-modal-mask')) return
+  if (event.defaultPrevented || !batchSelectMode.value || batchScopeMenuOpen.value || document.querySelector('[role="dialog"], .n-modal-mask')) return
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'a') {
+    const target = event.target as HTMLElement | null
+    if (target?.closest?.('input, textarea, [contenteditable]:not([contenteditable="false"]), [role="textbox"], [role="combobox"], [role="listbox"], .n-dropdown-menu')) return
+    event.preventDefault()
+    selectBatchPage(true)
+    return
+  }
+  if (event.key !== 'Escape') return
   event.preventDefault()
   toggleBatchSelectMode()
 }
@@ -1068,23 +1188,29 @@ function attachBatchListeners() {
   window.addEventListener('pointermove', handleBatchPointerMove, { passive: false })
   window.addEventListener('pointerup', finishBatchDragSelection)
   window.addEventListener('pointercancel', finishBatchDragSelection)
+  window.addEventListener('pointerout', handleBatchPointerOut)
+  window.addEventListener('scroll', handleBatchScroll, true)
   window.addEventListener('blur', handleBatchWindowChange)
   window.addEventListener('resize', handleBatchWindowChange)
   window.addEventListener('keydown', handleBatchKeydown)
 }
 function detachBatchListeners() {
   finishBatchDragSelection()
+  batchScopeMenuOpen.value = false
   if (!batchListenersAttached) return
   batchListenersAttached = false
   window.removeEventListener('pointermove', handleBatchPointerMove)
   window.removeEventListener('pointerup', finishBatchDragSelection)
   window.removeEventListener('pointercancel', finishBatchDragSelection)
+  window.removeEventListener('pointerout', handleBatchPointerOut)
+  window.removeEventListener('scroll', handleBatchScroll, true)
   window.removeEventListener('blur', handleBatchWindowChange)
   window.removeEventListener('resize', handleBatchWindowChange)
   window.removeEventListener('keydown', handleBatchKeydown)
 }
 watch(batchSelectMode, enabled => { if (enabled && modelPageActive) attachBatchListeners(); else detachBatchListeners() })
 watch([pagedModels, modelViewMode], () => finishBatchDragSelection())
+watch(() => pagedModels.value.map(model => model.name).join('\0'), resetBatchRange)
 onActivated(() => { modelPageActive = true; if (batchSelectMode.value) attachBatchListeners() })
 onDeactivated(() => { modelPageActive = false; detachBatchListeners() })
 onBeforeUnmount(detachBatchListeners)
@@ -1852,7 +1978,7 @@ watch(() => route.query.parameters, async value => {
 
 <template>
   <div class="page page--models">
-    <div class="page-header-compact">
+    <div class="page-header-compact" :class="{ 'page-header-compact--batch': batchSelectMode }">
       <div>
         <div class="models-title-row">
           <h1>{{ t('models.title') }}</h1>
@@ -1863,36 +1989,42 @@ watch(() => route.query.parameters, async value => {
             {{ debugStatusText }}
           </n-tag>
         </div>
-        <p>{{ t('models.subtitle') }}</p>
+        <p>{{ t(batchSelectMode ? 'models.batchSelectionHint' : 'models.subtitle') }}</p>
       </div>
       <div v-if="batchSelectMode" class="header-actions batch-select-bar" data-guide="model-batch" role="region" :aria-label="t('models.batchSelect')">
-        <div class="batch-select-bar__scope">
-          <n-checkbox :checked="allBatchPageSelected" :indeterminate="someBatchPageSelected" :disabled="!batchSelectableOnPage.length"
-            @update:checked="selectBatchPage">{{ t('models.batchSelectPage') }}</n-checkbox>
-          <n-dropdown trigger="click" :options="batchSelectionOptions" @select="selectBatchFiltered">
-            <n-button quaternary size="small" :title="t('models.batchSelectionScope')" :aria-label="t('models.batchSelectionScope')">
-              <template #icon><n-icon :component="ChevronDownOutline" /></template>
-            </n-button>
-          </n-dropdown>
+        <div class="batch-select-bar__selection">
+          <div class="batch-select-bar__scope">
+            <n-checkbox :checked="allBatchPageSelected" :indeterminate="someBatchPageSelected" :disabled="!batchSelectableOnPage.length"
+              @update:checked="selectBatchPage">{{ t('models.batchSelectPage') }}</n-checkbox>
+            <n-dropdown v-model:show="batchScopeMenuOpen" trigger="click" :options="batchSelectionOptions" @select="handleBatchSelectionScope">
+              <n-button quaternary class="batch-select-bar__scope-toggle" :title="t('models.batchSelectionScope')" :aria-label="t('models.batchSelectionScope')">
+                <template #icon><n-icon :component="ChevronDownOutline" /></template>
+              </n-button>
+            </n-dropdown>
+          </div>
+          <span class="batch-select-bar__count" aria-live="polite" aria-atomic="true">
+            {{ t('models.batchSelectedCount', { count: batchSelection.length }) }}
+            <span v-if="batchOutsidePage">{{ t('models.batchOutsidePage', { count: batchOutsidePage }) }}</span>
+            <span v-if="batchOutsideFilter">{{ t('models.batchOutsideFilter', { count: batchOutsideFilter }) }}</span>
+          </span>
+          <n-button quaternary class="batch-select-bar__clear" :disabled="!batchSelection.length" @click="clearBatchSelection">{{ t('parameterEditor.batch.clearSelection') }}</n-button>
         </div>
-        <span class="batch-select-bar__count" aria-live="polite" aria-atomic="true">
-          {{ t('models.batchSelectedCount', { count: batchSelection.length }) }}
-          <span v-if="batchOutsidePage">{{ t('models.batchOutsidePage', { count: batchOutsidePage }) }}</span>
-          <span v-if="batchOutsideFilter">{{ t('models.batchOutsideFilter', { count: batchOutsideFilter }) }}</span>
-        </span>
-        <span :title="downloadSelectedModels.length ? undefined : t('models.batchNoDownloadSelection')">
-          <n-button secondary :disabled="!downloadSelectedModels.length" @click="confirmBatchDownload">
-            <template #icon><n-icon :component="CloudDownloadOutline" /></template>
-            {{ t('models.batchDownloadCount', { count: downloadSelectedModels.length }) }}
-          </n-button>
-        </span>
-        <span :title="editableBatchSelection.length ? undefined : t('models.batchNoEditSelection')">
-          <n-button type="primary" :disabled="!editableBatchSelection.length" @click="openBatchEditor">
-            {{ t('models.batchEditCount', { count: editableBatchSelection.length }) }}
-          </n-button>
-        </span>
-        <n-button text size="small" :disabled="!batchSelection.length" @click="clearBatchSelection">{{ t('parameterEditor.batch.clearSelection') }}</n-button>
-        <n-button secondary data-guide-action="batch-exit" @click="toggleBatchSelectMode">{{ t('parameterEditor.batch.exitSelect') }}</n-button>
+        <div class="batch-select-bar__actions">
+          <span :title="downloadSelectedModels.length ? undefined : t('models.batchNoDownloadSelection')">
+            <n-button secondary :disabled="!downloadSelectedModels.length" @click="confirmBatchDownload">
+              <template #icon><n-icon :component="CloudDownloadOutline" /></template>
+              {{ t('models.batchDownloadCount', { count: downloadSelectedModels.length }) }}
+            </n-button>
+          </span>
+          <span :title="editableBatchSelection.length ? undefined : t('models.batchNoEditSelection')">
+            <n-button secondary :disabled="!editableBatchSelection.length" @click="openBatchEditor">
+              {{ t('models.batchEditCount', { count: editableBatchSelection.length }) }}
+            </n-button>
+          </span>
+        </div>
+        <div class="batch-select-bar__finish">
+          <n-button quaternary data-guide-action="batch-exit" @click="toggleBatchSelectMode">{{ t('parameterEditor.batch.exitSelect') }}</n-button>
+        </div>
       </div>
       <div v-else class="header-actions" data-guide="model-management">
         <n-tooltip v-if="!customModelsSupported" trigger="hover">
@@ -2047,15 +2179,16 @@ watch(() => route.query.parameters, async value => {
             :aria-disabled="(batchSelectMode && !canSelectBatchModel(model) && !isBatchSelected(model.name)) ? true : undefined"
             :title="batchSelectMode && !canSelectBatchModel(model) && !isBatchSelected(model.name) ? t('models.batchNotSelectable') : undefined"
             @click="handleModelCardClick(model, $event)"
+            @mousedown="handleBatchRangeMouseDown"
             @contextmenu.stop.prevent="!batchSelectMode && openModelContextMenu($event, model)"
             @keydown.enter.self.prevent="handleModelCardClick(model, $event)"
             @keydown.space.self.prevent="handleModelCardClick(model, $event)"
           >
-          <div v-if="batchSelectMode" class="mc-batch-select" @pointerdown.stop="startBatchDragSelection($event, model)" @click.stop>
+          <div v-if="batchSelectMode" class="mc-batch-select" @pointerdown.stop="startBatchDragSelection($event, model)" @click.capture="handleBatchCheckboxClick($event, model)" @keydown.capture="handleBatchCheckboxKey($event, model)" @keyup.capture="handleBatchCheckboxKey($event, model)">
             <n-checkbox class="mc-batch-check" :checked="isBatchSelected(model.name)"
               :disabled="!canSelectBatchModel(model) && !isBatchSelected(model.name)"
               :aria-label="t('models.batchSelectModelAria', { name: model.name })"
-              @update:checked="(value: boolean) => setBatchSelected(model.name, value)" />
+              @update:checked="(value: boolean) => selectBatchModel(model, value)" />
           </div>
           <!-- Card Header -->
           <div class="mc-header">
@@ -2850,6 +2983,10 @@ watch(() => route.query.parameters, async value => {
   margin: 0;
 }
 
+.page-header-compact--batch {
+  flex-wrap: wrap;
+}
+
 /* ===== Toolbar ===== */
 .toolbar {
   margin-bottom: 14px;
@@ -3527,7 +3664,7 @@ watch(() => route.query.parameters, async value => {
 .model-grid--card .model-card--selecting .mc-header { padding-left: 36px; }
 .model-grid--list .model-card--selecting { padding-left: 52px; grid-template-columns: minmax(0, 1fr) minmax(112px, 160px) minmax(230px, 280px); grid-template-areas: "header tags bottom" "meta tags bottom"; }
 .model-grid--list .mc-batch-select { top: 50%; transform: translateY(-50%); }
-.model-card.model-card--batch-selected, .model-card.model-card--batch-selected:hover { border-color: var(--primary-border); background: color-mix(in srgb, var(--primary-soft) 55%, var(--surface-1)); box-shadow: inset 3px 0 var(--primary); }
+.model-card.model-card--batch-selected, .model-card.model-card--batch-selected:hover { border-color: var(--primary-border); background: color-mix(in srgb, var(--primary-soft) 55%, var(--surface-1)); box-shadow: none; }
 .model-card--batch-ineligible { cursor: not-allowed; }
 .model-card--batch-ineligible .mc-name { color: var(--on-surface-muted); }
 @container model-library (max-width: 760px) {
@@ -3552,6 +3689,40 @@ watch(() => route.query.parameters, async value => {
   display: flex;
   align-items: center;
   gap: 2px;
+  flex-shrink: 0;
+}
+
+.header-actions.batch-select-bar {
+  margin-left: auto;
+  gap: 8px 16px;
+}
+
+.batch-select-bar__selection,
+.batch-select-bar__actions,
+.batch-select-bar__finish {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.batch-select-bar__selection {
+  min-width: 0;
+  gap: 12px;
+}
+
+.batch-select-bar__actions,
+.batch-select-bar__finish,
+.batch-select-bar__clear {
+  flex-shrink: 0;
+}
+
+.batch-select-bar__finish {
+  margin-left: auto;
+}
+
+.batch-select-bar__scope-toggle {
+  width: 34px;
+  padding: 0;
 }
 
 :global(.model-batch-confirm__details) { margin-top: 8px; }

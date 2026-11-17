@@ -430,6 +430,8 @@
     "batchParameterScope": "本次编辑 {count} 个模型；另外 {skipped} 个所选模型未纳入本次编辑。",
     "batchDirectoryChanged": "模型目录已变化，请重新选择并确认下载。",
     "batchSelectPage": "全选本页",
+    "batchInvertPage": "反选本页",
+    "batchSelectionHint": "Shift 连选 · Ctrl/⌘+A 全选本页 · 拖动勾选区连续选择",
     "batchDownloadConfirmTitle": "批量下载模型",
     "batchDownloadConfirmContent": "将下载 {count} 个模型，共约 {size}。下载会排队进行，同时最多 {concurrency} 个。",
     "batchDownloadQueued": "已加入下载队列：{count} 个模型",
@@ -2977,9 +2979,9 @@
       "off": "关"
     },
     "batch": {
-      "exitSelect": "完成",
+      "exitSelect": "退出多选",
       "title": "批量修改模型参数",
-      "clearSelection": "清空",
+      "clearSelection": "清除选择",
       "hint": "为所选 {count} 个模型设置共享参数。只应用你修改的项目，未修改的项目保持各模型原值。应用前会逐个预览实际值。",
       "referenceModel": "预览模型",
       "referencePlaceholder": "选择用于编辑预览的模型",

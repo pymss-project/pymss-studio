@@ -430,6 +430,8 @@
     "batchParameterScope": "Editing {count} models; another {skipped} selected models are excluded from this edit.",
     "batchDirectoryChanged": "The model directory changed. Select the models and confirm the download again.",
     "batchSelectPage": "Select page",
+    "batchInvertPage": "Invert page selection",
+    "batchSelectionHint": "Shift for ranges · Ctrl/⌘+A selects this page · Drag checkboxes to select",
     "batchDownloadConfirmTitle": "Batch download models",
     "batchDownloadConfirmContent": "{count} models, about {size} in total, will be downloaded. Downloads are queued, with at most {concurrency} running at once.",
     "batchDownloadQueued": "Added {count} models to the download queue",
@@ -2977,9 +2979,9 @@
       "off": "Off"
     },
     "batch": {
-      "exitSelect": "Done",
+      "exitSelect": "Exit selection",
       "title": "Batch edit model parameters",
-      "clearSelection": "Clear",
+      "clearSelection": "Clear selection",
       "hint": "Set shared parameters for the {count} selected models. Only the fields you change are applied; everything else keeps each model's value. Each model's actual values are previewed before applying.",
       "referenceModel": "Preview model",
       "referencePlaceholder": "Choose a model to preview while editing",

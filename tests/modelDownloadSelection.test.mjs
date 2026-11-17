@@ -10,9 +10,12 @@ import { BATCH_DOWNLOAD_CONCURRENCY, isActiveDownloadStatus } from '../src/utils
 const source = ts.createSourceFile('models.ts', parse(readFileSync(new URL('../src/views/ModelsView.vue', import.meta.url), 'utf8')).descriptor.scriptSetup.content, ts.ScriptTarget.Latest, true)
 const functions = new Set(['isDeletingModel', 'isDownloadSelectable', 'isQueuedDownload', 'canSelectBatchModel', 'canEditModelParameters',
   'toggleBatchSelectMode', 'isBatchSelected', 'setBatchSelected', 'selectBatchPage', 'selectBatchFiltered', 'clearBatchSelection',
+  'resetBatchRange', 'selectBatchModel',
   'handleModelCardClick', 'confirmBatchDownload', 'openBatchEditor', 'closeBatchEditor', 'buildBatchPreview', 'applyBatch',
   'mapWithConcurrency', 'toLibraryOverrides', 'errorText', 'isRevisionConflict'])
 const variables = new Set(['batchSelectMode', 'batchSelection', 'batchSelectionSet', 'downloadQueueSet', 'downloadSelectedModels',
+  'batchScopeMenuOpen',
+  'batchRangeAnchor', 'batchRangeBase', 'batchRangeChecked',
   'editableBatchSelection', 'batchSelectableOnPage', 'batchSelectedOnPage', 'batchOutsidePage', 'batchOutsideFilter',
   'allBatchPageSelected', 'someBatchPageSelected', 'batchSelectionOptions', 'batchEditorSelection', 'batchEditorSkipped',
   'batchSession', 'showBatchEditor', 'batchApplying', 'batchIntent', 'batchPreview', 'batchExcluded', 'batchStaleNames',
@@ -22,8 +25,9 @@ const statements = source.statements.filter(statement => ts.isFunctionDeclaratio
   : ts.isVariableStatement(statement) && statement.declarationList.declarations.some(item => variables.has(item.name.getText(source))))
 assert.equal(statements.length, functions.size + variables.size)
 const watchers = source.statements.filter(statement => ts.isExpressionStatement(statement) && statement.getText(source).startsWith('watch(')
-  && (statement.getText(source).includes('const known = new Set(names)') || statement.getText(source).startsWith('watch(modelDir,')))
-assert.equal(watchers.length, 2)
+  && (statement.getText(source).includes('const known = new Set(names)') || statement.getText(source).startsWith('watch(modelDir,')
+    || statement.getText(source).startsWith('watch(() => pagedModels.value.map(')))
+assert.equal(watchers.length, 3)
 const code = ts.transpileModule([...statements, ...watchers].map(statement => statement.getText(source)).join('\n'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText
