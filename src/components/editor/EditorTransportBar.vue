@@ -249,7 +249,7 @@ function clearTransportPressed() {
                   {{ t('common.refresh') }}
                 </button>
               </div>
-              <n-select
+              <AppSelect :aria-label="t('editor.recordingInputDevice')"
                 class="recording-device-select"
                 :value="recordingDeviceId || ''"
                 :options="recordingDeviceOptions"
@@ -868,9 +868,9 @@ function clearTransportPressed() {
   min-width: 0;
 }
 
-.recording-popover :deep(.n-base-selection),
-.recording-popover :deep(.n-base-selection-label),
-.recording-popover :deep(.n-base-selection-input) {
+.recording-popover :deep(.app-select),
+.recording-popover :deep(.app-select__value),
+.recording-popover :deep(.app-select__input) {
   min-width: 0;
   max-width: 100%;
 }

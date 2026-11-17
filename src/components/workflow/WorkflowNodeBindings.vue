@@ -119,7 +119,7 @@ watch(() => [props.nodeId, props.action], () => {
     </div>
     <label v-if="outputs.length && !nativeGraph" class="binding-layout">
       <span>{{ t('separate.saveMode') }}</span>
-      <n-select size="small" v-model:value="session.bindings.outputLayout" :options="[{ label: t('separate.saveModeFlatName'), value: 'flat' }, { label: t('separate.saveModeFolderName'), value: 'folders' }]" />
+      <AppSelect :aria-label="t('separate.saveMode')" size="small" v-model:value="session.bindings.outputLayout" :options="[{ label: t('separate.saveModeFlatName'), value: 'flat' }, { label: t('separate.saveModeFolderName'), value: 'folders' }]" />
     </label>
   </section>
 </template>

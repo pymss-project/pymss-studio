@@ -28,6 +28,9 @@
     "plugins": "Plugins"
   },
   "common": {
+    "pleaseSelect": "Select an option",
+    "clear": "Clear selection",
+    "noData": "No options available",
     "cancel": "Cancel",
     "pause": "Pause",
     "resume": "Resume",
@@ -352,6 +355,9 @@
     "statusCancelled": "Cancelled"
   },
   "models": {
+    "sourceFilter": "Model source",
+    "sortLabel": "Model sorting",
+    "storageSortLabel": "Storage sorting",
     "title": "Model Library",
     "subtitle": "Source separation models and download management",
     "search": "Search by model name, architecture, type, or note...",
@@ -577,6 +583,7 @@
     "customNamePathUnsafe": "Model names cannot contain paths, reserved characters, or device names."
   },
   "results": {
+    "sortLabel": "Result sorting",
     "title": "Processing Results",
     "subtitle": "Task history and audio outputs",
     "empty": "No processing results",
@@ -657,6 +664,7 @@
     "createSuccess": "Blank project created"
   },
   "editor": {
+    "recordingInputDevice": "Recording input device",
     "fallbackTitle": "Audio Editor",
     "loading": "Loading editor project…",
     "notFound": "Editor project not found.",
@@ -1398,6 +1406,10 @@
     "updateCloseApplication": "Close application"
   },
   "debug": {
+    "logLevelFilter": "Log level",
+    "logCategoryFilter": "Log category",
+    "logTaskFilter": "Log task",
+    "logSourceFilter": "Log source",
     "title": "Runtime Diagnostics",
     "subtitle": "Runtime environment, task status, and event logs",
     "disabledTitle": "Developer mode is off",

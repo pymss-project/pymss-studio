@@ -592,8 +592,8 @@ async function requestCancel(id?: string) {
         <n-input v-model:value="search" clearable :placeholder="t('plugins.search')" class="plugins-search">
           <template #prefix><n-icon :component="SearchOutline" /></template>
         </n-input>
-        <n-select v-model:value="category" :options="categoryOptions" :aria-label="t('plugins.categoryFilter')" class="plugins-category-filter" />
-        <n-select v-model:value="statusFilter" :options="statusOptions" :aria-label="t('plugins.statusFilter')" class="plugins-status-filter" />
+        <AppSelect v-model:value="category" :options="categoryOptions" :aria-label="t('plugins.categoryFilter')" class="plugins-category-filter" />
+        <AppSelect v-model:value="statusFilter" :options="statusOptions" :aria-label="t('plugins.statusFilter')" class="plugins-status-filter" />
         <div class="plugins-view-toggle" role="group" :aria-label="t('plugins.viewMode')">
           <button type="button" :class="{ active: !cardView }" :aria-pressed="!cardView" :aria-label="t('plugins.viewList')" :title="t('plugins.viewList')" @click="settings.pluginViewMode = 'list'"><n-icon :component="ListOutline" /></button>
           <button type="button" :class="{ active: cardView }" :aria-pressed="cardView" :aria-label="t('plugins.viewCard')" :title="t('plugins.viewCard')" @click="settings.pluginViewMode = 'card'"><n-icon :component="GridOutline" /></button>
@@ -610,7 +610,7 @@ async function requestCancel(id?: string) {
           <div class="plugins-runtime-details">
             <strong class="plugins-effective-source">{{ sourceStatus }}</strong>
             <strong>{{ t('plugins.sourceLabel') }}</strong>
-            <n-select :value="settings.pluginSource || 'auto'" :options="sourceOptions" :aria-label="t('plugins.sourceLabel')"
+            <AppSelect :value="settings.pluginSource || 'auto'" :options="sourceOptions" :aria-label="t('plugins.sourceLabel')"
               :disabled="busy || loading || catalogLoading || switchingSource || snapshot.catalogSource?.supported === false" @update:value="changePluginSource" />
             <span v-if="customSource" class="plugins-source-status">{{ t('plugins.sourceCustom') }}</span>
             <span v-else-if="!settings.pluginSource || settings.pluginSource === 'auto'" class="plugins-source-status">{{ t('plugins.sourceAutoHint') }}</span>
@@ -684,7 +684,7 @@ async function requestCancel(id?: string) {
             <p v-if="plugin.removalPending" class="plugins-help">{{ t('plugins.removalPendingHint') }}</p>
             <template v-else-if="plugin.prepared === false">
               <p class="plugins-help">{{ t(plugin.enabled === false ? 'plugins.prepareDisabledHint' : 'plugins.prepareRuntimeHint') }}</p>
-              <n-select v-if="plugin.sourceSelectionRequired" v-model:value="preparationSources[plugin.name]" :disabled="disabled"
+              <AppSelect :aria-label="t('plugins.chooseSourceVersion')" v-if="plugin.sourceSelectionRequired" v-model:value="preparationSources[plugin.name]" :disabled="disabled"
                 :placeholder="t('plugins.chooseSourceVersion')"
                 :options="(plugin.availableBindings || []).map(item => ({ value: item.runtime, label: `${item.runtime} · ${item.version || '—'}` }))" />
               <p class="plugins-help">{{ t(plugin.availableBindings?.length ? 'plugins.prepareDependenciesHint' : 'plugins.prepareSourceMissing') }}</p>
@@ -908,7 +908,7 @@ async function requestCancel(id?: string) {
 .plugin-primary-state { color: var(--on-surface-muted); font-size: 12px; }
 .plugin-open-chevron { margin-left: 7px; }
 .plugin-library-entry > .plugins-help, .plugin-library-entry > .plugin-error, .plugin-library-entry > .plugin-load-error { margin: 8px 0 0 48px; }
-.plugin-installed-card > .n-select { max-width: 400px; margin: 8px 0 0 48px; }
+.plugin-installed-card > .app-select { max-width: 400px; margin: 8px 0 0 48px; }
 .plugins-installed:not(.plugins-installed--card) { gap: 8px; }
 .plugins-installed:not(.plugins-installed--card) > .plugin-library-entry { min-height: 78px; padding: 12px 18px; }
 @media (min-width: 901px) {
@@ -928,7 +928,7 @@ async function requestCancel(id?: string) {
 .plugins-installed--card .plugin-installed-description { grid-column: 1 / -1; margin-top: 4px; }
 .plugins-installed--card .plugin-installed-actions { order: 2; justify-content: flex-end; margin: auto 0 0; padding-top: 16px; }
 .plugins-installed--card .plugin-library-entry > .plugins-help, .plugins-installed--card .plugin-library-entry > .plugin-error, .plugins-installed--card .plugin-library-entry > .plugin-load-error { margin-left: 0; }
-.plugins-installed--card .plugin-installed-card > .n-select { max-width: 100%; margin-left: 0; }
+.plugins-installed--card .plugin-installed-card > .app-select { max-width: 100%; margin-left: 0; }
 :global(.plugin-detail-modal .n-card-content), :global(.plugin-detail-modal .n-card__content) { scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--on-surface-muted) 35%, transparent) transparent; }
 @supports selector(::-webkit-scrollbar) {
   :global(.plugin-detail-modal .n-card-content), :global(.plugin-detail-modal .n-card__content) { scrollbar-width: auto; scrollbar-color: auto; }
@@ -990,7 +990,7 @@ async function requestCancel(id?: string) {
   .plugin-installed-toggle { grid-template-columns: 32px minmax(0, 1fr); gap: 10px; }
   .plugin-installed-icon { width: 32px; height: 32px; }
   .plugin-installed-actions { flex-wrap: wrap; margin-left: 42px; }
-  .plugin-library-entry > .plugins-help, .plugin-library-entry > .plugin-error, .plugin-library-entry > .plugin-load-error, .plugin-installed-card > .n-select { margin-left: 42px; }
-  .plugin-installed-card > .n-select { max-width: calc(100% - 42px); }
+  .plugin-library-entry > .plugins-help, .plugin-library-entry > .plugin-error, .plugin-library-entry > .plugin-load-error, .plugin-installed-card > .app-select { margin-left: 42px; }
+  .plugin-installed-card > .app-select { max-width: calc(100% - 42px); }
 }
 </style>

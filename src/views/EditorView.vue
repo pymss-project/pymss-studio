@@ -754,7 +754,7 @@ watch(
 .editor-shell :deep(textarea),
 .editor-shell :deep([contenteditable='true']),
 .editor-shell :deep(.n-input__input-el),
-.editor-shell :deep(.n-base-selection-input) {
+.editor-shell :deep(.app-select__input) {
   user-select: text;
   -webkit-user-select: text;
 }
@@ -926,6 +926,8 @@ watch(
 
 .editor-shell__inspector-panel {
   position: relative;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   overflow: hidden;

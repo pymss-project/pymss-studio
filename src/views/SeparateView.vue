@@ -2392,7 +2392,7 @@ async function retryCurrentTask() {
             <div class="ofield-row" data-guide="output-format">
               <label class="ofield">
                 <span class="ofield__label">{{ runMode === 'workflow' ? t('separate.currentFormat') : t('settings.defaultFormat') }}</span>
-                <n-select v-if="runMode === 'model'" v-model:value="settings.defaultFormat" size="small" :options="formatOptions" :disabled="isRunModeLocked" />
+                <AppSelect :aria-label="t('settings.defaultFormat')" v-if="runMode === 'model'" v-model:value="settings.defaultFormat" size="small" :options="formatOptions" :disabled="isRunModeLocked" />
                 <div v-else class="ofield__static">{{ formatLabel }}</div>
               </label>
               <div class="ofield">
@@ -2653,7 +2653,7 @@ async function retryCurrentTask() {
               </div>
               <div class="stage-head__controls">
                 <div v-if="runMode === 'model'" class="stage-head__extra" data-guide="model-mode">
-                  <n-select
+                  <AppSelect
                     :value="ensembleEnabled ? 'ensemble' : 'single'"
                     size="small"
                     :options="[
@@ -2689,7 +2689,7 @@ async function retryCurrentTask() {
                       v-model:value="modelCategoryFilter"
                       :options="modelCategoryOptions"
                     />
-                    <n-select
+                    <AppSelect
                       v-model:value="modelListSortMode"
                       class="target-toolbar__sort"
                       :options="modelSortOptions"
@@ -2986,14 +2986,14 @@ async function retryCurrentTask() {
           </label>
           <label>
             <span>{{ t('separate.ensembleType') }}</span>
-            <n-select v-model:value="ensembleType" :options="ensembleTypeOptions" />
+            <AppSelect :aria-label="t('separate.ensembleType')" v-model:value="ensembleType" :options="ensembleTypeOptions" />
           </label>
         </div>
         <n-divider title-placement="left">{{ t('separate.ensembleWeights') }}</n-divider>
         <div class="ensemble-modal__weights">
           <div v-for="name in ensembleModels" :key="name" class="ensemble-modal__weight">
             <span class="ensemble-modal__model-name" :title="name">{{ name }}</span>
-            <n-select
+            <AppSelect :aria-label="`${name} · ${t('separate.ensembleModelStemPlaceholder')}`"
               v-model:value="ensembleModelStems[name]"
               size="small"
               :options="ensembleStemOptionsByModel[name] || []"
@@ -3087,24 +3087,24 @@ async function retryCurrentTask() {
                 <n-switch v-model:value="parameterDraftTta" size="small" :aria-label="t('separate.tta')" :disabled="applyingParameters" />
               </div>
               <div v-if="runMode === 'model' && effectiveFormat === 'wav'" class="settings-row field-block" data-parameter-guide="wavBitDepth" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'wavBitDepth' }">
-                <label>{{ t('audio.wavBitDepth') }}</label>
-                <n-select v-model:value="audioDraft.wavBitDepth" size="small" :to="true" :options="wavBitDepthOptions" />
+                <label for="separate-wav-bit-depth">{{ t('audio.wavBitDepth') }}</label>
+                <AppSelect id="separate-wav-bit-depth" v-model:value="audioDraft.wavBitDepth" size="small" :label="t('audio.wavBitDepth')" :options="wavBitDepthOptions" :disabled="applyingParameters" />
               </div>
               <div v-if="runMode === 'model' && effectiveFormat === 'flac'" class="settings-row field-block" data-parameter-guide="flacBitDepth" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'flacBitDepth' }">
-                <label>{{ t('audio.flacBitDepth') }}</label>
-                <n-select v-model:value="audioDraft.flacBitDepth" size="small" :to="true" :options="flacBitDepthOptions" />
+                <label for="separate-flac-bit-depth">{{ t('audio.flacBitDepth') }}</label>
+                <AppSelect id="separate-flac-bit-depth" v-model:value="audioDraft.flacBitDepth" size="small" :label="t('audio.flacBitDepth')" :options="flacBitDepthOptions" :disabled="applyingParameters" />
               </div>
               <div v-if="runMode === 'model' && effectiveFormat === 'mp3'" class="settings-row field-block" data-parameter-guide="mp3BitRate" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'mp3BitRate' }">
-                <label>{{ t('audio.mp3BitRate') }}</label>
-                <n-select v-model:value="audioDraft.mp3BitRate" size="small" :to="true" :options="mp3BitRateOptions" />
+                <label for="separate-mp3-bit-rate">{{ t('audio.mp3BitRate') }}</label>
+                <AppSelect id="separate-mp3-bit-rate" v-model:value="audioDraft.mp3BitRate" size="small" :label="t('audio.mp3BitRate')" :options="mp3BitRateOptions" :disabled="applyingParameters" />
               </div>
               <div v-if="effectiveFormat === 'm4a'" class="settings-row field-block" data-parameter-guide="m4aBitRate" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'm4aBitRate' }">
-                <label>{{ t('audio.m4aBitRate') }}</label>
-                <n-select v-model:value="audioDraft.m4aBitRate" size="small" :to="true" :options="bitRateOptions" />
+                <label for="separate-m4a-bit-rate">{{ t('audio.m4aBitRate') }}</label>
+                <AppSelect id="separate-m4a-bit-rate" v-model:value="audioDraft.m4aBitRate" size="small" :label="t('audio.m4aBitRate')" :options="bitRateOptions" :disabled="applyingParameters" />
               </div>
               <div v-if="effectiveFormat === 'm4a'" class="settings-row field-block" data-parameter-guide="m4aCodec" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'm4aCodec' }">
-                <label>{{ t('audio.m4aCodec') }}</label>
-                <n-select v-model:value="audioDraft.m4aCodec" size="small" :to="true" :options="m4aCodecOptions" />
+                <label for="separate-m4a-codec">{{ t('audio.m4aCodec') }}</label>
+                <AppSelect id="separate-m4a-codec" v-model:value="audioDraft.m4aCodec" size="small" :label="t('audio.m4aCodec')" :options="m4aCodecOptions" :disabled="applyingParameters" />
               </div>
             </div>
           </section>
@@ -4210,7 +4210,7 @@ async function retryCurrentTask() {
 }
 .stage-head__extra { flex: 0 0 auto; }
 .model-mode-select { width: 156px; }
-.model-mode-select :deep(.n-base-selection-label) { white-space: nowrap; }
+.model-mode-select :deep(.app-select__value) { white-space: nowrap; }
 
 .view-toggle {
   display: inline-flex;
@@ -5442,7 +5442,7 @@ async function retryCurrentTask() {
 .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; }
 .settings-row + .settings-row { border-top: 1px solid color-mix(in srgb, var(--outline) 80%, transparent); }
 .settings-row > label { font-size: 13px; font-weight: 500; color: var(--on-surface); white-space: nowrap; }
-.settings-row :deep(.n-select) { width: 150px; }
+.settings-row :deep(.app-select) { width: 150px; }
 .parameter-model-link { font-size: 11px; }
 .parameter-modal-footer { align-items: center; flex-wrap: wrap; }
 .settings-scroll-hint { position: absolute; inset: auto 0 100%; height: 27px; display: flex; align-items: end; justify-content: center; gap: 4px; padding-bottom: 3px; pointer-events: none; background: linear-gradient(transparent, var(--surface-1) 85%); color: var(--on-surface-muted); font-size: 10px; }
@@ -5590,7 +5590,7 @@ async function retryCurrentTask() {
   .ensemble-summary-bar { grid-template-columns: minmax(0, 1fr); }
   .model-pagination { align-items: flex-start; flex-direction: column; }
   .ensemble-modal__weight { grid-template-columns: minmax(0, 1fr) 96px; }
-  .ensemble-modal__weight .n-select { grid-column: 1 / -1; }
+  .ensemble-modal__weight .app-select { grid-column: 1 / -1; }
   .ensemble-modal__weight .n-slider { grid-column: 1 / -1; }
   .stage-actions { justify-content: stretch; }
   .stage-actions .n-button { flex: 1 1 160px; }

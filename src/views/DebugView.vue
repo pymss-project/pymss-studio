@@ -1771,7 +1771,7 @@ onBeforeUnmount(() => {
           <div v-if="app.runtimeDebugSupported" class="runtime-override-form">
             <label>
               <span>{{ t('debug.runtimeOverrideBackend') }}</span>
-              <n-select v-model:value="runtimeOverrideBackend" size="small" :options="runtimeBackendOptions" @update:value="markRuntimeOverrideDirty" />
+              <AppSelect :aria-label="t('debug.runtimeOverrideBackend')" v-model:value="runtimeOverrideBackend" size="small" :options="runtimeBackendOptions" @update:value="markRuntimeOverrideDirty" />
             </label>
             <label>
               <span>{{ t('debug.runtimeOverridePythonPath') }}</span>
@@ -2020,7 +2020,7 @@ onBeforeUnmount(() => {
           </div>
         </template>
         <div class="debug-config-controls">
-          <n-select
+          <AppSelect :aria-label="t('debug.pickModel')"
             v-model:value="selectedDebugModel"
             :options="debugModelOptions"
             filterable
@@ -2294,10 +2294,10 @@ onBeforeUnmount(() => {
       <section v-if="parsedDebugLogLines.length" class="debug-log-viewer">
         <div class="debug-log-filters">
           <n-input v-model:value="debugLogQuery" size="small" clearable :placeholder="t('debug.logSearchPlaceholder')" />
-          <n-select v-model:value="debugLogLevel" size="small" :options="debugLogLevelOptions" />
-          <n-select v-model:value="debugLogCategory" size="small" :options="debugLogCategoryOptions" />
-          <n-select v-model:value="debugLogTask" size="small" filterable :options="debugLogTaskOptions" />
-          <n-select v-model:value="debugLogSource" size="small" :options="debugLogSourceOptions" />
+          <AppSelect :aria-label="t('debug.logLevelFilter')" v-model:value="debugLogLevel" size="small" :options="debugLogLevelOptions" />
+          <AppSelect :aria-label="t('debug.logCategoryFilter')" v-model:value="debugLogCategory" size="small" :options="debugLogCategoryOptions" />
+          <AppSelect :aria-label="t('debug.logTaskFilter')" v-model:value="debugLogTask" size="small" filterable :options="debugLogTaskOptions" />
+          <AppSelect :aria-label="t('debug.logSourceFilter')" v-model:value="debugLogSource" size="small" :options="debugLogSourceOptions" />
           <n-button size="small" secondary @click="clearDebugLogFilters">
             {{ t('debug.logClearFilters') }}
           </n-button>

@@ -110,8 +110,9 @@ const exportSummaryRows = computed(() => [
           <div class="export-dialog__form">
             <label class="export-dialog__field">
               <span>{{ t('editor.exportFormat') }}</span>
-              <n-select
+              <AppSelect
                 :value="format"
+                :label="t('editor.exportFormat')"
                 :options="exportFormatOptions"
                 size="small"
                 :disabled="exporting"
@@ -121,8 +122,9 @@ const exportSummaryRows = computed(() => [
 
             <label class="export-dialog__field" v-if="format === 'wav'">
               <span>{{ t('audio.wavBitDepth') }}</span>
-              <n-select
+              <AppSelect
                 :value="wavBitDepth"
+                :label="t('audio.wavBitDepth')"
                 :options="wavBitDepthOptions"
                 size="small"
                 :disabled="exporting"
@@ -132,8 +134,9 @@ const exportSummaryRows = computed(() => [
 
             <label class="export-dialog__field" v-if="format === 'flac'">
               <span>{{ t('audio.flacBitDepth') }}</span>
-              <n-select
+              <AppSelect
                 :value="flacBitDepth"
+                :label="t('audio.flacBitDepth')"
                 :options="flacBitDepthOptions"
                 size="small"
                 :disabled="exporting"
@@ -143,8 +146,9 @@ const exportSummaryRows = computed(() => [
 
             <label class="export-dialog__field">
               <span>{{ t('editor.exportSampleRate') }}</span>
-              <n-select
+              <AppSelect
                 :value="sampleRate"
+                :label="t('editor.exportSampleRate')"
                 :options="sampleRateOptions"
                 size="small"
                 :disabled="exporting"
@@ -378,11 +382,11 @@ const exportSummaryRows = computed(() => [
   gap: 8px;
 }
 
-.editor-export-modal :deep(.n-base-selection) {
-  --n-color: color-mix(in srgb, var(--surface-1) 92%, transparent) !important;
-  --n-border: 1px solid color-mix(in srgb, var(--outline) 60%, transparent) !important;
-  --n-border-hover: 1px solid color-mix(in srgb, var(--outline) 78%, transparent) !important;
-  --n-border-focus: 1px solid color-mix(in srgb, var(--primary) 50%, transparent) !important;
-  --n-box-shadow-focus: 0 0 0 2px color-mix(in srgb, var(--primary-soft) 30%, transparent) !important;
+.editor-export-modal :deep(.app-select) {
+  --app-select-color: color-mix(in srgb, var(--surface-1) 92%, transparent);
+  --app-select-border: color-mix(in srgb, var(--outline) 60%, transparent);
+  --app-select-border-hover: color-mix(in srgb, var(--outline) 78%, transparent);
+  --app-select-border-focus: color-mix(in srgb, var(--primary) 50%, transparent);
+  --app-select-focus-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-soft) 30%, transparent);
 }
 </style>

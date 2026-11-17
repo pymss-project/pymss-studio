@@ -710,7 +710,7 @@ async function toggleEditor(slotId: string) {
             <strong>{{ t('editor.plugins.managerTitle') }}</strong>
             <div class="plugin-manager__target" @pointerdown.stop @mousedown.stop>
               <label>{{ t('editor.plugins.destination') }}</label>
-              <n-select v-model:value="target" v-model:show="targetMenuOpen" size="small" :options="targetOptions" :disabled="busy" :to="managerCard?.$el" :aria-label="t('editor.plugins.target')" />
+              <AppSelect v-model:value="target" v-model:show="targetMenuOpen" size="small" :options="targetOptions" :disabled="busy" :to="managerCard?.$el" :aria-label="t('editor.plugins.target')" />
             </div>
             <span class="plugin-manager__chain-count">{{ t('editor.plugins.chainCount', { count: chain.length }) }}</span>
           </div>
@@ -823,7 +823,7 @@ async function toggleEditor(slotId: string) {
               <div class="plugin-manager__selection" :title="selectedDescriptor?.path"><strong>{{ selectedDescriptor?.name || t('editor.plugins.selectPlugin') }}</strong><span>{{ selectedDescriptor?.path || t('editor.plugins.selectionHint') }}</span></div>
               <div v-if="selectedFormatOptions.length > 1" class="plugin-manager__format-choice">
                 <span>{{ t('editor.plugins.loadFormat') }}</span>
-                <n-select size="small" :value="selectedPluginId" :options="selectedFormatOptions" :disabled="busy" :aria-label="t('editor.plugins.loadFormat')" :to="managerCard?.$el" @update:value="selectPluginFormat" />
+                <AppSelect size="small" :value="selectedPluginId" :options="selectedFormatOptions" :disabled="busy" :aria-label="t('editor.plugins.loadFormat')" :to="managerCard?.$el" @update:value="selectPluginFormat" />
               </div>
               <n-button v-if="relocatingSlot" type="primary" block :disabled="busy || !selectedPluginId" @click="relocatePlugin">{{ t('editor.plugins.applyLocation') }}</n-button>
               <n-button v-else class="plugin-manager__add-button" type="primary" block :aria-label="t('editor.plugins.addPlugin', { name: targetLabel })" :disabled="busy || !selectedPluginId" @click="addPlugin"><template #icon><n-icon :component="AddOutline" /></template>{{ t('editor.plugins.addSelected') }}</n-button>
@@ -963,7 +963,7 @@ async function toggleEditor(slotId: string) {
 .plugin-manager__heading > strong { flex-shrink: 0; font-size: 16px; font-weight: 600; }
 .plugin-manager__target { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .plugin-manager__target > label { flex-shrink: 0; font-size: 11px; color: var(--on-surface-muted); }
-.plugin-manager__target > .n-select { width: clamp(140px, 18vw, 240px); max-width: 32vw; }
+.plugin-manager__target > .app-select { width: clamp(140px, 18vw, 240px); max-width: 32vw; }
 .plugin-manager__library-actions { display: flex; align-items: center; gap: 2px; }
 .plugin-manager__source-count { margin-left: 5px; color: var(--on-surface-muted); font-variant-numeric: tabular-nums; }
 /* Leave enough room for the popover to fit above or below its trigger. */
@@ -1097,7 +1097,7 @@ async function toggleEditor(slotId: string) {
 .plugin-manager__selection > span { font-size: 11px; color: var(--on-surface-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .plugin-manager__format-choice { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .plugin-manager__format-choice > span { flex-shrink: 0; color: var(--on-surface-muted); font-size: 11px; }
-.plugin-manager__format-choice :deep(.n-select) { flex: 1; min-width: 0; }
+.plugin-manager__format-choice :deep(.app-select) { flex: 1; min-width: 0; }
 @container plugin-inserts (max-width: 145px) {
   .plugin-panel__header { gap: 4px; }
   .plugin-insert__tools { padding-left: 0; }

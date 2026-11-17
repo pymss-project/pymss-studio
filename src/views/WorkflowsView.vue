@@ -1274,17 +1274,17 @@ watch([() => selectedWorkflow.value?.id, () => selectedWorkflow.value?.name], ()
             <div class="wf-param-grid">
               <div class="wf-param">
                 <label>{{ t('workflows.defaultDevice') }}</label>
-                <n-select :value="selectedDraft.defaultDevice" :options="deviceOptions" :to="true" :disabled="isNodeEditorOpen || updatingWorkflowDefaults"
+                <AppSelect :value="selectedDraft.defaultDevice" :options="deviceOptions" :to="true" :disabled="isNodeEditorOpen || updatingWorkflowDefaults"
                   :loading="updatingWorkflowDefaults" :aria-label="t('workflows.defaultDevice')" @update:value="updateSelectedDefaultDevice" />
               </div>
               <div class="wf-param">
                 <label>{{ t('workflows.defaultFormat') }}</label>
-                <n-select :value="selectedDraft.defaultFormat" :options="formatOptions" :to="true" :disabled="isNodeEditorOpen || updatingWorkflowDefaults"
+                <AppSelect :value="selectedDraft.defaultFormat" :options="formatOptions" :to="true" :disabled="isNodeEditorOpen || updatingWorkflowDefaults"
                   :loading="updatingWorkflowDefaults" :aria-label="t('workflows.defaultFormat')" @update:value="updateSelectedDefaultFormat" />
               </div>
               <div class="wf-param">
                 <label>{{ t('workflows.defaultNormalize') }}</label>
-                <n-select :value="normalizeMode(selectedDraft.defaultNormalize)" :options="normalizeOptions" :to="true" :disabled="isNodeEditorOpen || updatingWorkflowDefaults"
+                <AppSelect :value="normalizeMode(selectedDraft.defaultNormalize)" :options="normalizeOptions" :to="true" :disabled="isNodeEditorOpen || updatingWorkflowDefaults"
                   :loading="updatingWorkflowDefaults" :aria-label="t('workflows.defaultNormalize')" @update:value="updateSelectedDefaultNormalize" />
               </div>
             </div>

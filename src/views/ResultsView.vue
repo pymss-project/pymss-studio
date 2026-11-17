@@ -797,15 +797,15 @@ function formatDurationMs(value: number | undefined) {
         <template #prefix><n-icon :component="SearchOutline" /></template>
       </n-input>
 
-      <n-select v-model:value="typeFilter" class="results-toolbar__type" size="small" :options="typeOptions" :aria-label="t('results.typeFilter')" />
-      <n-select
+      <AppSelect v-model:value="typeFilter" class="results-toolbar__type" size="small" :options="typeOptions" :aria-label="t('results.typeFilter')" />
+      <AppSelect :aria-label="t('results.sortLabel')"
         v-model:value="sortBy"
         class="results-toolbar__sort"
         size="small"
         :options="sortOptions"
       >
         <template #arrow><n-icon :component="SwapVerticalOutline" /></template>
-      </n-select>
+      </AppSelect>
 
       <span class="results-toolbar__count">{{ filteredResults.length }} / {{ resultGroups.length }}</span>
     </div>

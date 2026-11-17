@@ -487,7 +487,7 @@ defineExpose({
             <div class="track-row__body">
               <div class="track-row__title">
                 <span class="track-dot" :style="{ background: track.color || '#7aa2ff' }" />
-                <strong>{{ track.name }}</strong>
+                <strong :title="track.name">{{ track.name }}</strong>
               </div>
               <div class="track-row__subline">
                 <div class="track-row__buttons">

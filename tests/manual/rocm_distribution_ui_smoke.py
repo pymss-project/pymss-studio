@@ -73,7 +73,7 @@ with sync_playwright() as playwright:
             modal.get_by_text('AMD unknown GPU', exact=True).click()
             expect(page.get_by_role('button', name=use, exact=True)).to_be_disabled()
             # An explicit manual target completes the selection; then inspect the exact plan.
-            modal.locator('.n-base-selection').last.click()
+            modal.get_by_role('combobox').last.click()
             page.get_by_text('gfx1030', exact=True).last.click()
             page.keyboard.press('Escape')
             review = '查看安装计划' if locale == 'zh-CN' else 'Review installation plan'

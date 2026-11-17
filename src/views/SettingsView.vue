@@ -1531,7 +1531,7 @@ onMounted(async () => {
                         </template>
                         {{ updateChannel === 'prerelease' ? t('settings.updateChannelPrereleaseHint') : t('settings.updateChannelStableHint') }}
                       </n-tooltip>
-                      <n-select
+                      <AppSelect :aria-label="t('settings.updateChannelLabel')"
                         :value="updateChannel"
                         :options="updateChannelOptions"
                         :disabled="updates.isBusy"
@@ -1549,7 +1549,7 @@ onMounted(async () => {
                         </template>
                         {{ t('settings.updateSourceAutoHint') }}
                       </n-tooltip>
-                      <n-select
+                      <AppSelect :aria-label="t('settings.updateSourceLabel')"
                         :value="updateSource"
                         :options="updateSourceOptions"
                         :disabled="updates.isBusy"
@@ -1777,7 +1777,7 @@ onMounted(async () => {
               </div>
               <div class="setting-row__control">
                 <div ref="languageSelectWrap" class="language-select-wrap">
-                  <n-select
+                  <AppSelect :aria-label="t('settings.language')"
                     :value="locale"
                     :options="languageOptions"
                     :consistent-menu-width="false"
@@ -2146,7 +2146,7 @@ onMounted(async () => {
 
             <div class="runtime-mirror-row">
               <label class="text-muted text-sm">{{ t('settings.runtimeMirrorLabel') }}</label>
-              <n-select v-model:value="runtimeMirror" size="small" class="runtime-mirror-row__select" :options="[
+              <AppSelect :aria-label="t('settings.runtimeMirrorLabel')" v-model:value="runtimeMirror" size="small" class="runtime-mirror-row__select" :options="[
                 { label: t('onboarding.runtimeMirrorAuto'), value: 'auto' },
                 { label: t('onboarding.runtimeMirrorUstc'), value: 'ustc' },
                 { label: t('onboarding.runtimeMirrorTsinghua'), value: 'tsinghua' },
@@ -2298,7 +2298,7 @@ onMounted(async () => {
             <section class="settings-group">
               <div class="setting-field" data-guide="settings-device">
                 <label class="text-muted text-sm">{{ t('settings.defaultDevice') }}</label>
-                <n-select
+                <AppSelect :aria-label="t('settings.defaultDevice')"
                   v-model:value="defaultDevice"
                   :options="deviceOptions"
                 />
@@ -2308,7 +2308,7 @@ onMounted(async () => {
             <section class="settings-group" data-guide="settings-downloads">
               <div class="setting-field">
                 <label class="text-muted text-sm">{{ t('settings.downloadSource') }}</label>
-                <n-select
+                <AppSelect :aria-label="t('settings.downloadSource')"
                   v-model:value="downloadSource"
                   :options="[
                     { label: 'ModelScope', value: 'modelscope' },
@@ -2319,7 +2319,7 @@ onMounted(async () => {
               </div>
               <div class="setting-field">
                 <label class="text-muted text-sm">{{ t('settings.downloadMethod') }}</label>
-                <n-select
+                <AppSelect :aria-label="t('settings.downloadMethod')"
                   v-model:value="downloadMethod"
                   :options="downloadMethodOptions"
                 />
@@ -2330,7 +2330,7 @@ onMounted(async () => {
             <section class="settings-group">
               <div class="setting-field">
                 <label class="text-muted text-sm">{{ t('settings.proxyMode') }}</label>
-                <n-select
+                <AppSelect :aria-label="t('settings.proxyMode')"
                   v-model:value="proxyMode"
                   :options="proxyModeOptions"
                   @update:value="resetProxyTest"
@@ -2458,10 +2458,10 @@ onMounted(async () => {
         <n-alert v-if="rocmIdentityUnconfirmed" type="warning">{{ t('settings.runtimeRocmDeviceIdentityUnknown') }}</n-alert>
         <p v-if="!app.runtimeHardwareInventoryLoading && !rocmDevices.length" class="text-muted text-sm">{{ t('settings.runtimeRocmNoDevices') }}</p>
         <label>{{ t('settings.runtimeRocmProfile') }}</label>
-        <n-select v-model:value="rocmProfileId" :options="rocmProfileOptions" :placeholder="t('settings.runtimeRocmProfile')" :disabled="rocmPlanLoading || runtimeInstalling" />
+        <AppSelect :aria-label="t('settings.runtimeRocmProfile')" v-model:value="rocmProfileId" :to="true" :options="rocmProfileOptions" :placeholder="t('settings.runtimeRocmProfile')" :disabled="rocmPlanLoading || runtimeInstalling" />
         <template v-if="rocmProfile?.availableTargets.length && rocmAction !== 'prepareSeed'">
           <label>{{ t('settings.runtimeRocmManualTargets') }}</label>
-          <n-select v-model:value="rocmManualTargets" multiple clearable :options="rocmTargetOptions" :placeholder="t('common.notSet')" :disabled="rocmPlanLoading || runtimeInstalling" />
+          <AppSelect :aria-label="t('settings.runtimeRocmManualTargets')" v-model:value="rocmManualTargets" :to="true" multiple clearable :options="rocmTargetOptions" :placeholder="t('common.notSet')" :disabled="rocmPlanLoading || runtimeInstalling" />
           <p class="text-muted text-sm">{{ t('settings.runtimeRocmSelectedTargets', { targets: rocmTargets.join(', ') || t('common.unknown') }) }}</p>
           <n-alert v-if="rocmUnconfirmed && !rocmManualTargets.length" type="warning">{{ t('settings.runtimeRocmUnknownHint') }}</n-alert>
         </template>
@@ -3217,7 +3217,7 @@ onMounted(async () => {
   font-weight: 600;
 }
 
-.update-panel__channel .n-select {
+.update-panel__channel .app-select {
   width: 100%;
 }
 
@@ -3310,7 +3310,7 @@ onMounted(async () => {
 
   .update-panel__preferences { display: grid; gap: 10px; }
 
-  .update-panel__channel .n-select {
+  .update-panel__channel .app-select {
     width: 100%;
   }
 

@@ -28,6 +28,9 @@
     "plugins": "插件"
   },
   "common": {
+    "pleaseSelect": "请选择",
+    "clear": "清空选择",
+    "noData": "没有可选项",
     "cancel": "取消",
     "pause": "暂停",
     "resume": "继续",
@@ -352,6 +355,9 @@
     "statusCancelled": "已取消"
   },
   "models": {
+    "sourceFilter": "模型来源",
+    "sortLabel": "模型排序",
+    "storageSortLabel": "存储排序",
     "title": "模型库",
     "subtitle": "音源分离模型与下载管理",
     "search": "搜索模型名称、架构、类型或备注...",
@@ -577,6 +583,7 @@
     "customNamePathUnsafe": "模型名称不能包含路径、保留字符或设备名称。"
   },
   "results": {
+    "sortLabel": "结果排序",
     "title": "处理结果",
     "subtitle": "任务记录与音频输出",
     "empty": "暂无处理结果",
@@ -657,6 +664,7 @@
     "createSuccess": "空工程已创建"
   },
   "editor": {
+    "recordingInputDevice": "录音输入设备",
     "fallbackTitle": "音频编辑器",
     "loading": "正在加载编辑工程…",
     "notFound": "未找到编辑工程。",
@@ -1398,6 +1406,10 @@
     "updateCloseApplication": "关闭应用"
   },
   "debug": {
+    "logLevelFilter": "日志级别",
+    "logCategoryFilter": "日志分类",
+    "logTaskFilter": "日志任务",
+    "logSourceFilter": "日志来源",
     "title": "运行诊断",
     "subtitle": "运行环境、任务状态与事件日志",
     "disabledTitle": "开发者模式已关闭",

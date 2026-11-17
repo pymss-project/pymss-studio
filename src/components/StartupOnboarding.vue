@@ -409,7 +409,7 @@ onMounted(() => {
             <span class="onboarding-content__counter">{{ t('onboarding.stepCounter', { current: step + 1, total: totalSteps }) }}</span>
             <h1 id="onboarding-title">{{ currentStep === 'welcome' ? t('onboarding.welcomeHeadline') : stepMeta.title }}</h1>
           </div>
-          <n-select class="onboarding-language" :value="locale" :options="languageOptions" :disabled="finishing" :aria-label="t('onboarding.languageTitle')" :to="overlayRef || undefined" @update:value="selectLocaleOption" />
+          <AppSelect class="onboarding-language" :value="locale" :options="languageOptions" :disabled="finishing" :aria-label="t('onboarding.languageTitle')" :to="overlayRef || undefined" @update:value="selectLocaleOption" />
           <p>{{ stepMeta.description }}</p>
         </header>
 

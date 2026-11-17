@@ -102,7 +102,7 @@ async function commit(param: PluginParameter, raw: number | null) {
     <div v-for="param in visible" :key="param.id" class="plugin-parameters__row">
       <span :title="`${param.name} (${param.id})`">{{ param.name }}<small v-if="unitLabel(param)"> · {{ unitLabel(param) }}</small></span>
       <n-switch v-if="param.unit === 'Toggle'" size="small" :value="values[param.id] >= param.min + (param.max - param.min) / 2" :disabled="saving || disabled || param.min === param.max" :aria-label="param.name" @update:value="(on: boolean) => commit(param, on ? param.max : param.min)" />
-      <n-select v-else-if="hasChoices(param)" size="small" :value="values[param.id]" :options="choiceOptions(param)" :disabled="saving || disabled || param.min === param.max" :aria-label="param.name" @update:value="(value: number) => commit(param, value)" />
+      <AppSelect v-else-if="hasChoices(param)" size="small" :value="values[param.id]" :options="choiceOptions(param)" :disabled="saving || disabled || param.min === param.max" :aria-label="param.name" @update:value="(value: number) => commit(param, value)" />
       <n-input-number v-else v-model:value="drafts[param.id]" size="small" :min="param.min" :max="param.max" :format="formatValue" :parse="(input: string) => parseValue(param, input)" :step="param.unit === 'Choice' ? 1 : undefined" :disabled="saving || disabled || param.min === param.max" :input-props="{ 'aria-label': param.name }" @blur="commit(param, drafts[param.id])" @keydown.enter="commit(param, drafts[param.id])" />
     </div>
     </div>

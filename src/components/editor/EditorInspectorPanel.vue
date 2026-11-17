@@ -257,7 +257,7 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
       <div class="editor-inspector__eyebrow" :title="selectedTrack ? t('editor.trackParams') : t('editor.plugins.masterOutput')">{{ t('editor.channelInspector') }}</div>
       <div class="editor-inspector__channel-select">
         <n-input v-if="selectedTrack && editingTrackId === selectedTrack.id" ref="renameInput" v-model:value="renameDraft" class="editor-inspector__name-input" size="small" :input-props="{ 'aria-label': t('editor.inspectorFieldName') }" @blur="commitRename()" @keydown.stop="onRenameKeydown" />
-        <n-select v-else class="editor-inspector__channel-picker" size="small" :value="channelValue" :options="channelOptions" :aria-label="t('editor.selectChannel')" @update:value="selectChannel" />
+        <AppSelect v-else class="editor-inspector__channel-picker" size="small" :value="channelValue" :options="channelOptions" :aria-label="t('editor.selectChannel')" @update:value="selectChannel" />
         <button v-if="selectedTrack && editingTrackId !== selectedTrack.id" ref="nameButton" type="button" class="editor-inspector__name" :title="t('editor.renameTrack', { name: selectedTrack.name })" :aria-label="t('editor.renameTrack', { name: selectedTrack.name })" @click="beginRename" @keydown.stop><n-icon :component="PencilOutline" :size="14" /></button>
         <n-button class="editor-inspector__master-button" size="tiny" secondary :type="selectedTrack ? 'default' : 'primary'" :disabled="!selectedTrack" @keydown.space.stop @click="selectChannel('master')">{{ t('editor.plugins.masterOutput') }}</n-button>
       </div>
@@ -844,9 +844,12 @@ details.inspector-group[open] > summary.inspector-group__header::after {
 
 .editor-inspector :deep(.n-input),
 .editor-inspector :deep(.n-input-number),
-.editor-inspector :deep(.n-base-selection),
 .editor-inspector :deep(.n-slider) {
   --n-color: color-mix(in srgb, var(--surface-1) 82%, var(--surface-2)) !important;
+}
+
+.editor-inspector :deep(.app-select) {
+  --app-select-color: color-mix(in srgb, var(--surface-1) 82%, var(--surface-2));
 }
 
 .editor-inspector :deep(.n-input),

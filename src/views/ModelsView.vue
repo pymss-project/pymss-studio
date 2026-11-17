@@ -1906,14 +1906,14 @@ watch(() => route.query.parameters, async value => {
           size="small"
           class="category-select"
         />
-        <n-select
+        <AppSelect :aria-label="t('models.sourceFilter')"
           v-model:value="modelSource"
           :options="modelSourceOptions"
           size="small"
           class="source-select"
           :consistent-menu-width="false"
         />
-        <n-select
+        <AppSelect :aria-label="t('models.sortLabel')"
           v-model:value="modelSort"
           :options="modelSortOptions"
           size="small"
@@ -2346,7 +2346,7 @@ watch(() => route.query.parameters, async value => {
           <template v-if="!batchPreview">
             <div class="batch-reference-row">
               <span class="text-sm">{{ t('parameterEditor.batch.referenceModel') }}</span>
-              <n-select
+              <AppSelect :aria-label="t('parameterEditor.batch.referenceModel')"
                 v-model:value="batchReferenceName"
                 size="small"
                 :options="batchReferenceOptions"
@@ -2696,7 +2696,7 @@ watch(() => route.query.parameters, async value => {
             <n-input v-model:value="storageSearch" :placeholder="t('models.storageSearch')" clearable>
               <template #prefix><n-icon :component="SearchOutline" /></template>
             </n-input>
-            <n-select
+            <AppSelect :aria-label="t('models.storageSortLabel')"
               v-model:value="storageSort"
               :options="[
                 { label: t('models.storageSortSizeDesc'), value: 'size-desc' },

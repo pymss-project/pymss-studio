@@ -146,7 +146,7 @@ onBeforeUnmount(() => { disposed = true; sequence++; stopRequested = true; acqui
       <n-alert v-if="error || info?.error" type="error" :bordered="false">{{ error || info?.error }}</n-alert>
       <n-alert v-if="info?.effective.origin === 'registry-environment'" type="warning" :bordered="false">{{ t('debugPlugins.environmentOverride') }}</n-alert>
       <div class="source-form">
-        <div class="source-field"><label>{{ t('debugPlugins.mode') }}</label><n-select v-model:value="draft.mode" :options="modes" :disabled="busy" /></div>
+        <div class="source-field"><label>{{ t('debugPlugins.mode') }}</label><AppSelect :aria-label="t('debugPlugins.mode')" v-model:value="draft.mode" :options="modes" :disabled="busy" /></div>
         <div v-if="draft.mode === 'local'" class="source-field source-field--wide">
           <label>{{ t('debugPlugins.localPath') }}</label>
           <div class="source-path"><n-input v-model:value="draft.localPath" :disabled="busy" :placeholder="t('debugPlugins.localPlaceholder')" /><n-button :disabled="busy" @click="chooseDirectory"><template #icon><n-icon :component="FolderOpenOutline" /></template>{{ t('common.browse') }}</n-button></div>

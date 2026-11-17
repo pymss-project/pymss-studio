@@ -250,7 +250,7 @@ onMounted(async () => {
       </n-empty>
     </div>
     <template v-else>
-    <n-select
+    <AppSelect :aria-label="t('tools.toolNavigation')"
       :value="mobileSelectedValue"
       :disabled="switchingDisabled"
       :options="mobileToolOptions"
@@ -318,7 +318,7 @@ onMounted(async () => {
                 <p>{{ t(activePluginHost.entry.availability === 'not_prepared' ? 'plugins.prepareRuntimeHint' : 'plugins.unavailableRuntimeHint') }}</p>
                 <p v-if="activePluginHost.entry.error">{{ activePluginHost.entry.error }}</p>
                 <template v-if="activePluginHost.entry.availability === 'not_prepared' && activePluginHost.entry.availableBindings?.length">
-                  <n-select v-if="activePluginHost.entry.sourceSelectionRequired" v-model:value="selectedPreparationSource"
+                  <AppSelect :aria-label="t('plugins.chooseSourceVersion')" v-if="activePluginHost.entry.sourceSelectionRequired" v-model:value="selectedPreparationSource"
                     :placeholder="t('plugins.chooseSourceVersion')" :disabled="preparingTool"
                     :options="activePluginHost.entry.availableBindings.map(item => ({ value: item.runtime, label: `${item.runtime} · ${item.version || '—'}` }))" />
                   <p>{{ t('plugins.prepareDependenciesHint') }}</p>

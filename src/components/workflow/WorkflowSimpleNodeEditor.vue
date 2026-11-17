@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useDialog, useMessage, type DropdownOption, type InputInst, type SelectInst } from 'naive-ui'
+import { useDialog, useMessage, type DropdownOption, type InputInst } from 'naive-ui'
 import {
   ArrowRedoOutline,
   ArrowUndoOutline,
@@ -153,7 +153,7 @@ const pan = ref<{ x: number; y: number } | null>(null)
 const zoom = computed(() => draft.value.ui.viewport.zoom)
 const layoutVersion = ref(0)
 const portElements = new Map<string, HTMLElement>()
-const selectInstances = new Map<string, SelectInst>()
+const selectInstances = new Map<string, { focus: () => void; blur: () => void }>()
 let layoutFrame = 0
 let portResizeObserver: ResizeObserver | null = null
 let executionResizeObserver: ResizeObserver | null = null
@@ -519,7 +519,7 @@ function setPortElement(key: string, element: unknown) {
 
 function setSelectInstance(key: string, instance: unknown) {
   if (instance && typeof instance === 'object' && 'blur' in instance) {
-    selectInstances.set(key, instance as SelectInst)
+    selectInstances.set(key, instance as { focus: () => void; blur: () => void })
   } else {
     selectInstances.delete(key)
   }
@@ -1497,8 +1497,8 @@ onBeforeUnmount(() => {
             <button :ref="el => setPortElement(`input:${step.id}`, el)" class="simple-port simple-port--input" :class="{ 'simple-port--target': pendingConnection?.direction === 'input' && hoverTarget === `step:${step.id}` }" type="button" :data-simple-target="`step:${step.id}`" @pointerdown.stop="beginInputConnection(step, $event)" @pointerup.stop="finishConnection(`step:${step.id}`, $event)"><i /><span>{{ step.input || t('workflows.stepInputPlaceholder') }}</span></button>
           </div>
           <div class="simple-node__body" @pointerdown.stop>
-            <label><span>{{ t('workflows.stepModel') }}</span><n-select :ref="(instance: unknown) => setSelectInstance(`step-model:${step.id}`, instance)" :value="step.model" size="small" filterable :options="modelOptions" :placeholder="t('workflows.stepModelPlaceholder')" @update:value="updateModel(step, $event)" /></label>
-            <label><span>{{ t('workflows.stepInput') }}</span><n-select :ref="(instance: unknown) => setSelectInstance(`step-input:${step.id}`, instance)" :value="step.input" size="small" :options="stepInputOptions(step, index)" @update:value="updateStepInput(step, String($event || ''))" /></label>
+            <label><span>{{ t('workflows.stepModel') }}</span><AppSelect :aria-label="t('workflows.stepModel')" :ref="(instance: unknown) => setSelectInstance(`step-model:${step.id}`, instance)" :value="step.model" size="small" filterable :options="modelOptions" :placeholder="t('workflows.stepModelPlaceholder')" @update:value="updateModel(step, $event)" /></label>
+            <label><span>{{ t('workflows.stepInput') }}</span><AppSelect :aria-label="t('workflows.stepInput')" :ref="(instance: unknown) => setSelectInstance(`step-input:${step.id}`, instance)" :value="step.input" size="small" :options="stepInputOptions(step, index)" @update:value="updateStepInput(step, String($event || ''))" /></label>
           </div>
           <div class="simple-node__outputs">
             <div v-for="stem in step.stems" :key="stem" class="simple-output-row">
@@ -1515,7 +1515,7 @@ onBeforeUnmount(() => {
           <span v-if="nodeStates?.[ensemble.id]" class="simple-execution-state" :data-node-status="nodeStates[ensemble.id].status" :title="t(WORKFLOW_NODE_STATUS_KEYS[nodeStates[ensemble.id].status]) + ' · ' + Math.round(nodeStates[ensemble.id].progress) + '%'"><template v-if="nodeStates[ensemble.id].status === 'running'">{{ t('workbench.running') }}</template></span>
           <div class="simple-node__body" @pointerdown.stop>
             <p v-if="isSimpleAudioOperation(ensemble.algorithm)" class="simple-audio-operation-hint">{{ audioOperationCopy[ensemble.algorithm].hint }}</p>
-            <label v-else><span>{{ t('workflows.ensembleType') }}</span><n-select :ref="(instance: unknown) => setSelectInstance(`ensemble-algorithm:${ensemble.id}`, instance)" :value="ensemble.algorithm" size="small" :options="ensembleAlgorithmOptions" @update:value="updateEnsembleAlgorithm(ensemble, String($event || ''))" /></label>
+            <label v-else><span>{{ t('workflows.ensembleType') }}</span><AppSelect :aria-label="t('workflows.ensembleType')" :ref="(instance: unknown) => setSelectInstance(`ensemble-algorithm:${ensemble.id}`, instance)" :value="ensemble.algorithm" size="small" :options="ensembleAlgorithmOptions" @update:value="updateEnsembleAlgorithm(ensemble, String($event || ''))" /></label>
             <label><span>{{ t('workflows.ensembleStem') }}</span><n-input :value="ensemble.outputStem" size="small" :placeholder="t('workflows.ensembleStemPlaceholder')" @update:value="updateEnsembleStem(ensemble, $event)" /></label>
           </div>
           <div class="simple-ensemble-inputs" @pointerdown.stop>
@@ -1563,9 +1563,9 @@ onBeforeUnmount(() => {
 
     <n-modal v-model:show="showWorkflowSettings" preset="card" :title="t('workflows.settingsAction')" class="simple-workflow-settings-modal" style="width: min(440px, calc(100vw - 32px))">
       <div class="simple-node-editor__defaults">
-        <label><span>{{ t('workflows.defaultDevice') }}</span><n-select :ref="(instance: unknown) => setSelectInstance('default-device', instance)" v-model:value="draft.defaultDevice" :disabled="readonly" size="small" :options="[{ label: 'Auto', value: 'auto' }, { label: 'CPU', value: 'cpu' }, { label: 'CUDA', value: 'cuda' }, { label: 'MPS', value: 'mps' }, { label: 'MLX', value: 'mlx' }]" /></label>
-        <label><span>{{ t('workflows.defaultFormat') }}</span><n-select :ref="(instance: unknown) => setSelectInstance('default-format', instance)" v-model:value="draft.defaultFormat" :disabled="readonly" size="small" :options="[{ label: 'WAV', value: 'wav' }, { label: 'FLAC', value: 'flac' }, { label: 'MP3', value: 'mp3' }, { label: 'M4A', value: 'm4a' }]" /></label>
-        <label><span>{{ t('workflows.defaultNormalize') }}</span><n-select v-model:value="defaultNormalizeMode" :disabled="readonly" size="small" :options="defaultNormalizeOptions" /></label>
+        <label><span>{{ t('workflows.defaultDevice') }}</span><AppSelect :aria-label="t('workflows.defaultDevice')" :ref="(instance: unknown) => setSelectInstance('default-device', instance)" v-model:value="draft.defaultDevice" :disabled="readonly" size="small" :options="[{ label: 'Auto', value: 'auto' }, { label: 'CPU', value: 'cpu' }, { label: 'CUDA', value: 'cuda' }, { label: 'MPS', value: 'mps' }, { label: 'MLX', value: 'mlx' }]" /></label>
+        <label><span>{{ t('workflows.defaultFormat') }}</span><AppSelect :aria-label="t('workflows.defaultFormat')" :ref="(instance: unknown) => setSelectInstance('default-format', instance)" v-model:value="draft.defaultFormat" :disabled="readonly" size="small" :options="[{ label: 'WAV', value: 'wav' }, { label: 'FLAC', value: 'flac' }, { label: 'MP3', value: 'mp3' }, { label: 'M4A', value: 'm4a' }]" /></label>
+        <label><span>{{ t('workflows.defaultNormalize') }}</span><AppSelect :aria-label="t('workflows.defaultNormalize')" v-model:value="defaultNormalizeMode" :disabled="readonly" size="small" :options="defaultNormalizeOptions" /></label>
       </div>
       <template #footer><div class="simple-workflow-settings-actions"><n-button v-if="!readonly" size="small" secondary @click="autoLayout(); showWorkflowSettings = false"><template #icon><n-icon :component="LocateOutline" /></template>{{ t('workflows.autoLayout') }}</n-button><n-button size="small" secondary @click="showWorkflowSettings = false">{{ t('common.close') }}</n-button></div></template>
     </n-modal>
@@ -1801,7 +1801,7 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.simple-node-editor__defaults label :deep(.n-select) { width: 220px; }
+.simple-node-editor__defaults label :deep(.app-select) { width: 220px; }
 .simple-workflow-settings-actions { display: flex; justify-content: space-between; gap: 12px; }
 
 .simple-node-editor__canvas {
@@ -2013,7 +2013,7 @@ onBeforeUnmount(() => {
   font-size: 11px;
 }
 
-.simple-node__body :deep(.n-select) { min-width: 0; }
+.simple-node__body :deep(.app-select) { min-width: 0; }
 
 .simple-inference-settings { position: relative; }
 .simple-inference-settings:hover { background: color-mix(in srgb, var(--primary) 12%, transparent) !important; color: var(--primary-strong) !important; }

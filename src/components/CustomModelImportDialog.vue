@@ -303,7 +303,7 @@ const nextDisabled = computed(() => {
           </n-alert>
           <div class="cmi-field">
             <label>{{ t('models.customTypeLabel') }}</label>
-            <n-select
+            <AppSelect :aria-label="t('models.customTypeLabel')"
               v-model:value="modelType"
               :options="modelTypeOptions"
               to="body"

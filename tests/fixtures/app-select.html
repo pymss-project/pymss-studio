@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Select interaction checks</title></head>
+<body><div id="app"></div><script type="module">
+import { createApp, h, reactive } from 'vue'
+import { createPinia } from 'pinia'
+import { createI18n } from 'vue-i18n'
+import { NConfigProvider, NMessageProvider, NDialogProvider, NModal, darkTheme } from 'naive-ui'
+import AppSelect from '/src/components/AppSelect.vue'
+import EditorExportDialog from '/src/components/editor/EditorExportDialog.vue'
+import { initTheme, applyTheme, getThemeOverrides } from '/src/utils/theme.ts'
+import { useEditorShortcuts } from '/src/composables/useEditorShortcuts.ts'
+import { useSettingsStore } from '/src/stores/settings.ts'
+import en from '/src/i18n/en.json'
+import '/src/styles/global.scss'
+
+const options = [{ label: 'Alpha', value: 'a' }, { label: 'Beta', value: 'b' }, { label: 'Unavailable', value: 'x', disabled: true }, { label: 'Gamma', value: 'c' }]
+const state = reactive({ theme: 'light', simple: 'a', search: 'a', multiple: [], multiReadOnly: [], controlledOpen: false, typed: 0, large: 0, largeSearch: 0, reject: null, rejectSearch: null, disabled: false, loading: false, exportOpen: false, searchModal: false, format: 'wav', wav: 'PCM_16', flac: 'PCM_16', rate: 'auto', options })
+let instance
+const shortcuts = reactive({})
+const pinia = createPinia()
+const settings = useSettingsStore(pinia)
+const ShortcutHost = { setup() {
+  useEditorShortcuts(Object.fromEntries(['togglePlay', 'stop', 'undo', 'redo', 'zoomIn', 'zoomOut', 'save', 'toHome', 'seek', 'toggleMute', 'toggleSolo', 'removeTrack'].map(name => [name, () => shortcuts[name] = (shortcuts[name] || 0) + 1])))
+  return () => null
+} }
+window.selectFixture = { state, shortcuts, settings, blur: () => instance.blur(), focus: () => instance.focus(), theme(value) { state.theme = value; applyTheme(value, 'blue') } }
+initTheme('light', 'blue')
+const field = (key, name, extra = {}) => h('label', { style: 'display:grid;gap:8px' }, [name, h(AppSelect, {
+  id: key, value: state[key], options: state.options, label: name, clearable: true,
+  'onUpdate:value': value => { if (!key.startsWith('reject')) state[key] = value }, ...extra,
+})])
+const app = createApp({ render: () => h(NConfigProvider, { theme: state.theme === 'dark' ? darkTheme : null, themeOverrides: getThemeOverrides(state.theme, 'blue') }, { default: () => h(NMessageProvider, null, { default: () => h(NDialogProvider, null, { default: () => h('main', { style: 'padding:32px;display:grid;gap:20px;max-width:680px' }, [
+  h(ShortcutHost),
+  field('simple', 'Plain selection', { ref: value => instance = value, disabled: state.disabled, loading: state.loading }),
+  field('search', 'Search selection', { filterable: true }),
+  field('multiple', 'Multiple selection', { multiple: true, filterable: true }),
+  field('multiReadOnly', 'Multiple readonly input', { multiple: true, show: state.controlledOpen, 'onUpdate:show': value => state.controlledOpen = value }),
+  field('typed', 'Typed values', { options: [{ type: 'group', label: 'Values', children: [{ label: 'Numeric zero', value: 0 }, { label: 'String zero', value: '0' }, { label: 'Empty string', value: '' }] }, { type: 'group', label: 'Disabled group', disabled: true, children: [{ label: 'Blocked', value: 5 }] }] }),
+  field('large', 'Long selection', { options: Array.from({ length: 1200 }, (_, value) => ({ label: `Item ${String(value).padStart(4, '0')}`, value })) }),
+  field('largeSearch', 'Long searchable selection', { filterable: true, options: Array.from({ length: 1200 }, (_, value) => ({ label: `Item ${String(value).padStart(4, '0')}`, value })) }),
+  field('reject', 'Controlled empty selection'),
+  field('rejectSearch', 'Controlled empty search', { filterable: true }),
+  h('button', { id: 'open-search-modal', onClick: () => state.searchModal = true }, 'Search modal'),
+  h(NModal, { show: state.searchModal, preset: 'card', title: 'Search modal', 'aria-label': 'Search modal', style: 'width:500px', 'onUpdate:show': value => state.searchModal = value }, { default: () => field('search', 'Modal search', { id: 'modal-search', filterable: true }) }),
+  h('button', { id: 'open-export', onClick: () => state.exportOpen = true }, 'Export settings'),
+  h(EditorExportDialog, { show: state.exportOpen, sessionName: 'Session', duration: 12, trackCount: 3, exporting: state.disabled, exportCancelling: false, exportProgress: 0, exportProgressText: '', format: state.format, wavBitDepth: state.wav, flacBitDepth: state.flac, sampleRate: state.rate, peakProtection: true, fileName: 'mix', exportDir: 'C:/Output', exportDirResolving: false,
+    'onUpdate:show': value => state.exportOpen = value, 'onUpdate:format': value => state.format = value, 'onUpdate:wav-bit-depth': value => state.wav = value, 'onUpdate:flac-bit-depth': value => state.flac = value, 'onUpdate:sample-rate': value => state.rate = value }),
+]) }) }) }) })
+app.use(pinia)
+app.use(createI18n({ legacy: false, locale: 'en', messages: { en } }))
+app.mount('#app')
+</script></body></html>

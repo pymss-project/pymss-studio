@@ -22,6 +22,7 @@ function isEditableTarget(target: EventTarget | null): boolean {
     tag === 'INPUT' ||
     tag === 'TEXTAREA' ||
     tag === 'SELECT' ||
+    Boolean(target.closest('[role="combobox"], [role="listbox"], [role="option"]')) ||
     target.isContentEditable
   )
 }
@@ -31,6 +32,7 @@ function isEditableTarget(target: EventTarget | null): boolean {
  */
 export function useEditorShortcuts(handlers: EditorShortcutHandlers) {
   function onKeydown(event: KeyboardEvent) {
+    if (event.defaultPrevented || event.isComposing) return
     const mod = event.ctrlKey || event.metaKey
     const editable = isEditableTarget(event.target)
 
