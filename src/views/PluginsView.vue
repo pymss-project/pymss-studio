@@ -736,7 +736,7 @@ async function requestCancel(id?: string) {
       @clickoutside="closePluginMenu()"
       @select="selectPluginMenu" @update:show="(value: boolean) => { if (!value) closePluginMenu(true) }" />
 
-    <n-modal v-model:show="showDetails" preset="card" id="plugin-detail-dialog" role="dialog" aria-modal="true"
+    <n-modal :aria-label="detailPlugin ? pluginTitle(detailPlugin) : detailOffer ? catalogTitle(detailOffer) : t('plugins.detail')" v-model:show="showDetails" preset="card" id="plugin-detail-dialog" role="dialog" aria-modal="true"
       :title="detailPlugin ? pluginTitle(detailPlugin) : detailOffer ? catalogTitle(detailOffer) : t('plugins.detail')"
       class="plugin-detail-modal" style="width: min(620px, calc(100vw - 32px))" @after-leave="closeEntryDetails">
       <div v-if="detailEntry" class="plugin-modal-body">
@@ -778,7 +778,7 @@ async function requestCancel(id?: string) {
 
     <PluginLogDialog v-model:show="showLogs" :records="logRecords" :task="activity" :tasks="activities" :initial-task-id="logTaskId" @cancel="requestCancel" />
 
-    <n-modal v-model:show="showUpdate" preset="card" :title="t(updateMode === 'refetch' ? 'plugins.refetchTitle' : 'plugins.updateTitle', { name: updatePlugin ? pluginTitle(updatePlugin) : updateName })" class="plugin-source-modal plugin-update-modal" style="width: min(520px, calc(100vw - 32px))">
+    <n-modal :aria-label="t(updateMode === 'refetch' ? 'plugins.refetchTitle' : 'plugins.updateTitle', { name: updatePlugin ? pluginTitle(updatePlugin) : updateName })" v-model:show="showUpdate" preset="card" :title="t(updateMode === 'refetch' ? 'plugins.refetchTitle' : 'plugins.updateTitle', { name: updatePlugin ? pluginTitle(updatePlugin) : updateName })" class="plugin-source-modal plugin-update-modal" style="width: min(520px, calc(100vw - 32px))">
       <p class="plugin-update-description">{{ t(updateMode === 'refetch' ? 'plugins.refetchDescription' : 'plugins.updateDescription') }}</p>
       <div v-if="reviewedUpdate" class="plugins-update-versions">
         <div><span>{{ t('plugins.currentVersion') }}</span><strong>{{ updatePlugin?.version || t('plugins.unknownVersion') }}</strong></div>
@@ -800,7 +800,7 @@ async function requestCancel(id?: string) {
       <template #footer><div class="plugin-update-footer"><n-button @click="showUpdate = false">{{ t('common.cancel') }}</n-button><n-button type="primary" :disabled="disabled" @click="confirmUpdate">{{ t(updateMode === 'refetch' ? 'plugins.refetch' : reviewedUpdate?.status === 'content' ? 'plugins.syncSourceContent' : 'plugins.update') }}</n-button></div></template>
     </n-modal>
 
-    <n-modal v-model:show="showBatchUpdate" preset="card" :title="t('plugins.updateAll')" class="plugin-source-modal plugin-update-modal" style="width: min(560px, calc(100vw - 32px))">
+    <n-modal :aria-label="t('plugins.updateAll')" v-model:show="showBatchUpdate" preset="card" :title="t('plugins.updateAll')" class="plugin-source-modal plugin-update-modal" style="width: min(560px, calc(100vw - 32px))">
       <p class="plugin-update-description">{{ t('plugins.batchConfirm', { count: batchSelection.length }) }}</p>
       <ul class="plugin-batch-list">
         <li v-for="item in batchSelection" :key="item.name">
@@ -819,7 +819,7 @@ async function requestCancel(id?: string) {
       <template #footer><div class="plugin-update-footer"><n-button @click="showBatchUpdate = false">{{ t('common.cancel') }}</n-button><n-button type="primary" :disabled="disabled || !batchSelection.length" @click="confirmBatchUpdate">{{ t('plugins.updateAll') }}</n-button></div></template>
     </n-modal>
 
-    <n-modal v-model:show="showBatchResults" preset="card" :title="t('plugins.batchResults')" class="plugin-source-modal" style="width: min(680px, calc(100vw - 32px))">
+    <n-modal :aria-label="t('plugins.batchResults')" v-model:show="showBatchResults" preset="card" :title="t('plugins.batchResults')" class="plugin-source-modal" style="width: min(680px, calc(100vw - 32px))">
       <p class="plugin-update-description">{{ t('plugins.batchSummary', batchStats) }}</p>
       <ul class="plugin-batch-list plugin-batch-results">
         <li v-for="item in displayBatch?.items || []" :key="item.name">
@@ -830,7 +830,7 @@ async function requestCancel(id?: string) {
       <template #footer><div class="plugin-update-footer"><n-button @click="showBatchResults = false">{{ t('common.close') }}</n-button></div></template>
     </n-modal>
 
-    <n-modal v-model:show="showSource" preset="card" :title="t('plugins.installSource')" class="plugin-source-modal" style="width: min(560px, calc(100vw - 32px))">
+    <n-modal :aria-label="t('plugins.installSource')" v-model:show="showSource" preset="card" :title="t('plugins.installSource')" class="plugin-source-modal" style="width: min(560px, calc(100vw - 32px))">
       <p class="plugins-help">{{ t('plugins.sourceHint') }}</p>
       <n-input v-model:value="source" :placeholder="t('plugins.sourcePlaceholder')" :disabled="installDisabled()" />
       <template #footer><div class="plugins-actions">

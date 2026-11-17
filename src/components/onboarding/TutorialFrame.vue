@@ -56,7 +56,7 @@ onBeforeUnmount(() => { stopRouteTracking(); props.runtime.dispose() })
             <router-view v-slot="{ Component }"><keep-alive include="ToolsView"><component :is="Component" /></keep-alive></router-view>
           </main>
         </div>
-        <n-modal :show="popup" preset="card" :mask-closable="false" :close-on-esc="false" :title="t(route.path === '/editor' ? 'demo.editorTitle' : 'demo.workflowEditorTitle')"
+        <n-modal :aria-label="t(route.path === '/editor' ? 'demo.editorTitle' : 'demo.workflowEditorTitle')" :show="popup" preset="card" :mask-closable="false" :close-on-esc="false" :title="t(route.path === '/editor' ? 'demo.editorTitle' : 'demo.workflowEditorTitle')"
           class="tutorial-native-window" :z-index="2000" @close="closePopup">
           <router-view name="popup" />
         </n-modal>

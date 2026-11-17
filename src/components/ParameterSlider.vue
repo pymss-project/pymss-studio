@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '@/stores/settings'
+import { vSliderA11y } from '@/directives/sliderAccessibility'
 
-const props = defineProps<{ value: number; min: number; max: number; step: number; label: string; disabled?: boolean }>()
+const props = defineProps<{ value: number; min: number; max: number; step: number; label: string; valueText?: string; disabled?: boolean }>()
 const emit = defineEmits<{ 'update:value': [value: number] }>()
 const settings = useSettingsStore()
 const { t } = useI18n()
-const slider = ref<{ $el: HTMLElement } | null>(null)
 const dragging = ref(false)
 const rebounding = ref(false)
 const direction = ref(0)
@@ -37,16 +37,11 @@ function endDrag() {
   dragging.value = false
 }
 watch(moving, () => { rebounding.value = false })
-// Naive's slider labels its root rather than the focusable thumb; name the native handle.
-watchEffect(() => {
-  const label = t('parameterEditor.sliderLabel', { parameter: props.label })
-  slider.value?.$el.querySelector('[role="slider"]')?.setAttribute('aria-label', label)
-}, { flush: 'post' })
 </script>
 
 <template>
   <n-slider
-    ref="slider"
+    v-slider-a11y="{ label: t('parameterEditor.sliderLabel', { parameter: label }), valueText: valueText ?? String(value) }"
     class="parameter-slider" :class="{ 'is-dragging': dragging && moving, 'is-rebounding': rebounding && moving, 'is-still': !moving }"
     :style="{ '--jelly-lean': `${direction * -7}deg` }"
     :value="value" :min="min" :max="max" :step="step" :disabled="disabled" :tooltip="false"

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Control accessibility checks</title></head>
+<body><div id="app"></div><script type="module">
+import { createApp, h, reactive, withDirectives } from 'vue'
+import { createPinia } from 'pinia'
+import { createI18n } from 'vue-i18n'
+import { NConfigProvider, NInputNumber } from 'naive-ui'
+import EditorParameterSlider from '/src/components/editor/EditorParameterSlider.vue'
+import EditorMasterLimiter from '/src/components/editor/EditorMasterLimiter.vue'
+import ParameterSlider from '/src/components/ParameterSlider.vue'
+import AlignedInferenceInputNumber from '/src/components/AlignedInferenceInputNumber.vue'
+import WorkflowResultPreview from '/src/components/workflow/WorkflowResultPreview.vue'
+import { useNumberInputAccessibility } from '/src/composables/useNumberInputAccessibility.ts'
+import en from '/src/i18n/en.json'
+import zh from '/src/i18n/zh-CN.json'
+import '/src/styles/global.scss'
+
+const i18n = createI18n({ legacy: false, locale: 'en', messages: { en, 'zh-CN': zh } })
+const state = reactive({ number: 1, volume: 0.8, seconds: 4, aligned: 1000, disabled: false, buttons: true, visible: true,
+  limiter: { enabled: true, gainDb: 3, ceilingDb: -1, attackMs: 5, releaseMs: 100 } })
+window.controlFixture = { state, locale: i18n.global.locale }
+const app = createApp({ setup() {
+  const vNumberA11y = useNumberInputAccessibility()
+  const t = i18n.global.t
+  return () => h(NConfigProvider, null, { default: () => h('main', { style: 'padding:32px;display:grid;gap:24px;max-width:680px' }, [
+    state.visible ? withDirectives(h(NInputNumber, { id: 'number', value: state.number, min: 1, max: 3, disabled: state.disabled, showButton: state.buttons,
+      'onUpdate:value': value => state.number = value }), [[vNumberA11y, t('settings.maxConcurrentSeparations')]]) : null,
+    h(EditorParameterSlider, { value: state.volume, valueText: Math.round(state.volume * 100) + '%', min: 0, max: 2, step: 0.01,
+      resetValue: 1, resetLabel: t('editor.sliderDefaultVolume'), label: t('editor.masterVolume'), disabled: state.disabled,
+      'onUpdate:value': value => state.volume = value }),
+    h(ParameterSlider, { value: state.seconds, valueText: state.seconds + ' ' + t('parameterEditor.seconds'), min: 1, max: 30, step: 0.5,
+      label: t('parameterEditor.chunkSeconds'), disabled: state.disabled, 'onUpdate:value': value => state.seconds = value }),
+    h(AlignedInferenceInputNumber, { label: t('inference.chunkSize'), value: state.aligned, step: 512, alignmentStep: 512,
+      disabled: state.disabled, 'onUpdate:value': value => state.aligned = value }),
+    h(EditorMasterLimiter, { value: state.limiter, onUpdate: patch => Object.assign(state.limiter, patch) }),
+    h(WorkflowResultPreview, { outputs: [{ stem: 'vocals', path: 'C:/vocals.wav' }] }),
+  ]) })
+} })
+app.use(createPinia())
+app.use(i18n)
+app.mount('#app')
+</script></body></html>

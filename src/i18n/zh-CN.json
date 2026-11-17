@@ -1,4 +1,15 @@
 {
+  "accessibility": {
+    "announcementSeparator": "；",
+    "inputSource": "{node} · {input}来源",
+    "advancedCanvasHelpTitle": "键盘与读屏说明",
+    "advancedCanvasHelp": "高级画布暂不支持通过读屏软件编辑节点和连线。需要键盘编辑时，请在工作流库新建简易工作流。",
+    "processing": "开始处理",
+    "taskStatus": "任务{status}：{name}",
+    "tasksStatus": "{count} 个任务{status}",
+    "downloadStatus": "模型{status}：{name}",
+    "downloadsStatus": "{count} 个模型{status}"
+  },
   "app": {
     "name": "Pymss Studio",
     "bootPreparing": "正在初始化工作环境…",
@@ -28,6 +39,8 @@
     "plugins": "插件"
   },
   "common": {
+    "decreaseValue": "减少{parameter}",
+    "increaseValue": "增加{parameter}",
     "pleaseSelect": "请选择",
     "clear": "清空选择",
     "noData": "没有可选项",

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useNumberInputAccessibility } from '@/composables/useNumberInputAccessibility'
 import type { EditorMasterLimiter } from '@/types/editor'
 import { normalizeMasterLimiter } from '@/utils/masterLimiter'
 import EditorParameterSlider from './EditorParameterSlider.vue'
@@ -12,6 +13,7 @@ const emit = defineEmits<{
   commit: []
 }>()
 const { t } = useI18n()
+const vNumberA11y = useNumberInputAccessibility()
 const limiter = computed(() => normalizeMasterLimiter(props.value))
 function updateTime(key: 'attackMs' | 'releaseMs', value: number | null) {
   if (value !== null && Number.isFinite(value)) emit('update', { [key]: value })
@@ -28,15 +30,15 @@ function updateTime(key: 'attackMs' | 'releaseMs', value: number | null) {
     <div class="master-limiter__times">
       <label>
         <span>{{ t('editor.limiter.attack') }} <small>ms</small></span>
-        <n-input-number :value="limiter.attackMs" :min="0.1" :max="100" :step="0.1" :precision="1"
+        <n-input-number v-number-a11y="t('editor.limiter.attack') + ' (ms)'" :value="limiter.attackMs" :min="0.1" :max="100" :step="0.1" :precision="1"
           :disabled="!limiter.enabled" :update-value-on-input="false" size="small"
-          :aria-label="t('editor.limiter.attack')" @update:value="updateTime('attackMs', $event)" />
+          @update:value="updateTime('attackMs', $event)" />
       </label>
       <label>
         <span>{{ t('editor.limiter.release') }} <small>ms</small></span>
-        <n-input-number :value="limiter.releaseMs" :min="5" :max="2000" :step="5" :precision="0"
+        <n-input-number v-number-a11y="t('editor.limiter.release') + ' (ms)'" :value="limiter.releaseMs" :min="5" :max="2000" :step="5" :precision="0"
           :disabled="!limiter.enabled" :update-value-on-input="false" size="small"
-          :aria-label="t('editor.limiter.release')" @update:value="updateTime('releaseMs', $event)" />
+          @update:value="updateTime('releaseMs', $event)" />
       </label>
     </div>
     <div v-for="field in (['gainDb', 'ceilingDb'] as const)" :key="field" class="master-limiter__parameter">
@@ -44,7 +46,7 @@ function updateTime(key: 'attackMs' | 'releaseMs', value: number | null) {
         <span>{{ t(field === 'gainDb' ? 'editor.limiter.gain' : 'editor.limiter.ceiling') }}</span>
         <output>{{ limiter[field].toFixed(1) }} dB</output>
       </div>
-      <EditorParameterSlider :value="limiter[field]" :reset-value="0" reset-label="0 dB"
+      <EditorParameterSlider :value="limiter[field]" :value-text="limiter[field].toFixed(1) + ' dB'" :reset-value="0" reset-label="0 dB"
         :label="t(field === 'gainDb' ? 'editor.limiter.gain' : 'editor.limiter.ceiling')"
         :min="field === 'gainDb' ? 0 : -30" :max="field === 'gainDb' ? 30 : 0" :step="0.1"
         :disabled="!limiter.enabled" :tooltip="false"

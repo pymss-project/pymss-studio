@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>Activity accessibility checks</title></head>
+<body><div id="app"></div><script type="module">
+import { createApp, h, reactive } from 'vue'
+import { createPinia } from 'pinia'
+import { createI18n } from 'vue-i18n'
+import { NConfigProvider, NMessageProvider, useMessage } from 'naive-ui'
+import AppAnnouncements from '/src/components/AppAnnouncements.vue'
+import ModelProgressBlock from '/src/components/ModelProgressBlock.vue'
+import WorkflowExecutionProgress from '/src/components/workflow/WorkflowExecutionProgress.vue'
+import { useTaskStore } from '/src/stores/task.ts'
+import { useModelStore } from '/src/stores/model.ts'
+import { useToastStore } from '/src/stores/toast.ts'
+import en from '/src/i18n/en.json'
+import zh from '/src/i18n/zh-CN.json'
+import '/src/styles/global.scss'
+
+const state = reactive({ progress: 24, filesText: '1 / 4', modelMessage: '下载中',
+  job: { id: 'job', status: 'separating', progress: 50, tasks: [
+    { id: 'a', input: 'C:/a.wav', status: 'done' }, { id: 'b', input: 'C:/b.wav', status: 'separating' },
+  ] } })
+const controls = { setup() {
+  const message = useMessage()
+  window.activityFixture = { state, message, task: useTaskStore(), model: useModelStore(), toast: useToastStore() }
+  return () => h('main', { style: 'padding:32px;display:grid;gap:24px;max-width:680px' }, [
+    h('button', { id: 'notify', onClick: () => message.success('已保存') }, '保存'),
+    h('button', { id: 'error', onClick: () => message.error('无法保存文件') }, '错误'),
+    h(ModelProgressBlock, { label: 'Model A', status: 'downloading', message: state.modelMessage, progress: state.progress, filesText: state.filesText }),
+    h(WorkflowExecutionProgress, { job: state.job }),
+  ])
+} }
+const app = createApp({ render: () => h(NConfigProvider, null, { default: () => h(NMessageProvider, { to: '#app-message-target' }, { default: () => [h(AppAnnouncements), h(controls)] }) }) })
+app.use(createPinia())
+app.use(createI18n({ legacy: false, locale: 'zh-CN', messages: { en, 'zh-CN': zh } }))
+app.mount('#app')
+</script></body></html>

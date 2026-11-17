@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch, type Directive } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { vSliderA11y } from '@/directives/sliderAccessibility'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { FolderOutline, OpenOutline, PauseOutline, PlayOutline } from '@vicons/ionicons5'
 import { isTauriRuntime } from '@/utils/appStore'
@@ -13,10 +14,6 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ reveal: [path: string] }>()
 const { t } = useI18n()
-// Naive UI applies component attributes to the wrapper; label its focusable handle.
-const vSliderLabel: Directive<HTMLElement, string> = (element, { value }) => {
-  element.querySelector('[role="slider"]')?.setAttribute('aria-label', value)
-}
 type Playback = { currentTime: number; duration: number; loading: boolean; failed: boolean }
 const playback = ref<Record<string, Playback>>({})
 const playingPath = ref('')
@@ -161,7 +158,7 @@ onBeforeUnmount(releaseAudio)
         <n-button v-if="isAudioOutput(output)" class="result-track__play" circle secondary size="small" :type="playingPath === output.path ? 'primary' : 'default'" :loading="state(output.path).loading" :title="t(playingPath === output.path ? 'common.pause' : 'workbench.playAudio')" :aria-label="t(playingPath === output.path ? 'common.pause' : 'workbench.playAudio') + ' · ' + fileName(output.path)" @click="toggle(output.path)">
           <template #icon><n-icon :component="playingPath === output.path ? PauseOutline : PlayOutline" /></template>
         </n-button>
-        <n-slider v-if="isAudioOutput(output)" v-slider-label="t('workbench.playbackPosition') + ' · ' + fileName(output.path)" class="result-track__slider" :value="state(output.path).currentTime" :min="0" :max="Math.max(state(output.path).duration, 1)" :step="0.1" :tooltip="false" :disabled="!state(output.path).duration || state(output.path).failed" @update:value="(value: number) => seek(output.path, value)" />
+        <n-slider v-if="isAudioOutput(output)" v-slider-a11y="{ label: t('workbench.playbackPosition') + ' · ' + fileName(output.path), valueText: time(state(output.path).currentTime) + ' / ' + (state(output.path).duration ? time(state(output.path).duration) : '--:--') }" class="result-track__slider" :value="state(output.path).currentTime" :min="0" :max="Math.max(state(output.path).duration, 1)" :step="0.1" :tooltip="false" :disabled="!state(output.path).duration || state(output.path).failed" @update:value="(value: number) => seek(output.path, value)" />
         <span v-if="isAudioOutput(output)" class="result-track__time">{{ time(state(output.path).currentTime) }} / {{ state(output.path).duration ? time(state(output.path).duration) : '--:--' }}</span>
         <n-button class="result-track__open" circle quaternary size="small" :title="t('common.open') + ' · ' + fileName(output.path)" :aria-label="t('common.open') + ' · ' + fileName(output.path)" @click="emit('reveal', output.path)"><template #icon><n-icon :component="OpenOutline" /></template></n-button>
       </article>

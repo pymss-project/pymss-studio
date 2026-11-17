@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { vSliderA11y } from '@/directives/sliderAccessibility'
 
 defineOptions({ inheritAttrs: false })
 const props = withDefaults(defineProps<{
   value: number
   resetValue: number
   label: string
+  valueText?: string
   resetLabel: string
   disabled?: boolean
 }>(), { disabled: false })
@@ -143,6 +145,7 @@ onBeforeUnmount(endDrag)
     >
       <n-slider
         v-bind="$attrs"
+        v-slider-a11y="{ label, valueText: valueText ?? String(value) }"
         :value="value"
         :disabled="disabled"
         @update:value="updateValue"

@@ -248,7 +248,7 @@ function handleClose() {
             <span class="ddm-progress-msg" :title="progressMessage">{{ progressMessage || t('models.downloadProgressLabel') }}</span>
             <div class="ddm-progress-pct">{{ displayProgress }}<span>%</span></div>
           </div>
-          <n-progress
+          <n-progress :aria-label="modelName + ' · ' + t('models.downloadProgressLabel')" :aria-valuetext="`${displayProgress}% · ${progressMessage || t('models.downloadProgressLabel')}${filesText ? ' · ' + filesText : ''}`"
             :percentage="displayProgress"
             :show-indicator="false"
             :height="6"

@@ -528,7 +528,7 @@ onMounted(() => {
     </div>
 
 
-    <n-modal
+    <n-modal :aria-label="t('settings.modelDirCheckingTitle')"
       :show="checkingModelDir"
       style="width:min(420px, 88vw)"
       preset="card"
@@ -542,7 +542,7 @@ onMounted(() => {
       </div>
     </n-modal>
 
-    <n-modal
+    <n-modal :aria-label="t('settings.modelDirMigrationConfirmTitle')"
       :show="modelDirMigrationState.status === 'confirm'"
       style="width:min(720px, 92vw)"
       preset="card"
@@ -590,7 +590,7 @@ onMounted(() => {
       </template>
     </n-modal>
 
-    <n-modal
+    <n-modal :aria-label="t('settings.modelDirMigrationTitle')"
       :show="modelDirMigrationVisible"
       style="width:min(760px, 92vw)"
       preset="card"
@@ -610,7 +610,7 @@ onMounted(() => {
           </n-tag>
         </div>
 
-        <n-progress
+        <n-progress :aria-label="t('settings.modelDirMigrationTitle')" :aria-valuetext="`${modelDirMigrationProgress}% · ${t('settings.modelDirMigrationProgressText', { completed: modelDirMigrationState.completedFiles, total: modelDirMigrationState.totalFiles })}`"
           type="line"
           :percentage="modelDirMigrationProgress"
           :show-indicator="true"

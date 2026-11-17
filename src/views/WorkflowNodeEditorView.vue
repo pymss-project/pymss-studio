@@ -612,11 +612,11 @@ useDiagnosticWindowState('workflow', () => ({
         </WorkflowRunPanel>
       </template>
     </WorkflowNodeEditor>
-    <n-modal v-model:show="showOutputSettings" preset="card" :title="t('separate.output')" class="advanced-output-settings-modal" style="width: min(480px, calc(100vw - 32px))">
+    <n-modal :aria-label="t('separate.output')" v-model:show="showOutputSettings" preset="card" :title="t('separate.output')" class="advanced-output-settings-modal" style="width: min(480px, calc(100vw - 32px))">
       <WorkflowNodeBindings :workflow-key="workflowKey" :definition="definition" mode="outputs" :aggregate-output="true" />
       <template #footer><div class="workflow-node-editor-page__prompt-actions"><n-button size="small" secondary @click="showOutputSettings = false">{{ t('common.close') }}</n-button></div></template>
     </n-modal>
-    <n-modal v-model:show="showClosePrompt" preset="card" :title="t('workflows.simpleUnsavedTitle')" style="width: min(440px, calc(100vw - 32px))">
+    <n-modal :aria-label="t('workflows.simpleUnsavedTitle')" v-model:show="showClosePrompt" preset="card" :title="t('workflows.simpleUnsavedTitle')" style="width: min(440px, calc(100vw - 32px))">
       <p>{{ t('workflows.simpleUnsavedHint') }}</p>
       <template #footer>
         <div class="workflow-node-editor-page__prompt-actions">

@@ -332,7 +332,7 @@ defineExpose({ focus, blur })
             <ComboboxGroup v-else v-for="section in sections" :key="section.key">
               <ComboboxLabel v-if="section.label" class="app-select__group-label">{{ section.label }}</ComboboxLabel>
               <ComboboxItem v-for="entry in section.entries" :key="entry.key" :value="entry.key" :disabled="entry.disabled" :text-value="entry.label" class="app-select__option">
-                <span>{{ entry.label }}</span><span v-if="selected.includes(entry.value)" aria-hidden="true">✓</span>
+                <span :title="entry.label">{{ entry.label }}</span><span v-if="selected.includes(entry.value)" aria-hidden="true">✓</span>
               </ComboboxItem>
             </ComboboxGroup>
           </div>
@@ -357,7 +357,7 @@ defineExpose({ focus, blur })
             <SelectGroup v-for="section in sections" :key="section.key">
               <SelectLabel v-if="section.label" class="app-select__group-label">{{ section.label }}</SelectLabel>
               <SelectItem v-for="entry in section.entries" :key="entry.key" :value="entry.key" :disabled="entry.disabled" :text-value="entry.label" class="app-select__option">
-                <SelectItemText>{{ entry.label }}</SelectItemText><span v-if="selected.includes(entry.value)" aria-hidden="true">✓</span>
+                <SelectItemText :title="entry.label">{{ entry.label }}</SelectItemText><span v-if="selected.includes(entry.value)" aria-hidden="true">✓</span>
               </SelectItem>
             </SelectGroup>
           </SelectViewport>
@@ -415,11 +415,13 @@ defineExpose({ focus, blur })
 }
 .app-select__viewport { min-height: 0; max-height: min(300px, var(--reka-select-content-available-height, var(--reka-combobox-content-available-height, 300px))); overflow: auto; width: 100%; }
 .app-select__option { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 32px; padding: 6px 9px; border-radius: 7px; outline: none; cursor: pointer; overflow-wrap: anywhere; }
+.app-select__option > span:first-child { flex: 1; min-width: 0; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.app-select__option > span[aria-hidden] { flex: 0 0 auto; }
 .app-select__option[data-state='checked'] { color: var(--primary-strong); background: var(--primary-softer); }
 .app-select__option[data-highlighted], .app-select__option:focus { background: var(--primary-soft); }
 .app-select__option[data-disabled] { opacity: .45; cursor: not-allowed; }
 .app-select__option[data-index] { height: 32px; width: 100%; }
-.app-select__option[data-index] > span:first-child { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.app-select__option[data-index] > span:first-child { display: block; white-space: nowrap; text-overflow: ellipsis; }
 .app-select__group-label { padding: 7px 9px 4px; color: var(--on-surface-muted); font-size: 12px; }
 .app-select__empty { padding: 16px 9px; text-align: center; color: var(--on-surface-muted); }
 .app-select__tags { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-width: 0; padding-block: 3px; }

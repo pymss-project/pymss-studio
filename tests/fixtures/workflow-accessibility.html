@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>Workflow accessibility checks</title><style>html, body, #app, #app > .n-config-provider { height: 100%; margin: 0; }</style></head>
+<body><div id="app"></div><script type="module">
+import { createApp, h, reactive } from 'vue'
+import { createPinia } from 'pinia'
+import { createI18n } from 'vue-i18n'
+import { NConfigProvider, NMessageProvider, NDialogProvider } from 'naive-ui'
+import WorkflowSimpleNodeEditor from '/src/components/workflow/WorkflowSimpleNodeEditor.vue'
+import WorkflowNodeBindings from '/src/components/workflow/WorkflowNodeBindings.vue'
+import WorkflowNodeEditorLite from '/src/components/workflow/WorkflowNodeEditorLite.vue'
+import { createStepDraft, createEnsembleDraft, createDefaultSimpleEditorUi } from '/src/utils/workflowSimple.ts'
+import { useWorkbenchStore } from '/src/stores/workbench.ts'
+import en from '/src/i18n/en.json'
+import zh from '/src/i18n/zh-CN.json'
+import { initTheme, getThemeOverrides } from '/src/utils/theme.ts'
+import '/src/styles/global.scss'
+initTheme('light', 'blue')
+
+const steps = [0, 1].map(index => ({ ...createStepDraft(index), model: 'Model ' + (index + 1),
+  input: index === 0 ? 'input' : 'step1.vocals', stems: ['vocals','instrumental'],
+  outputNames: {vocals:'%filename%_%stem%',instrumental:'%filename%_%stem%'}, save: index === 0 ? {vocals:'a',instrumental:'b'} : {} }))
+const ensemble = {...createEnsembleDraft(0), inputs:[{source:'step1.vocals',weight:1},{source:'step2.vocals',weight:1}]}
+const state = reactive({ mode: 'simple', readonly: false, name: 'Workflow',
+  draft: { defaultDevice:'cpu', defaultFormat:'wav', defaultNormalize:null, steps, ensembles:[ensemble], ui:createDefaultSimpleEditorUi(steps,[ensemble]) },
+  definition: {steps:[{id:'step1',model:'Model 1',input:'input',save:{vocals:'v'}}]} })
+const models = reactive([1,2].map(index => ({name:'Model '+index, downloaded:true, stems:['vocals','instrumental']})))
+const pinia=createPinia(), workbench=useWorkbenchStore(pinia)
+workbench.session('a11y').bindings.inputs.input = {files:[['C:','音频','one.wav'].join(String.fromCharCode(92)),'C:/two.wav','C:/three.wav'],folder:'C:/Folder'}
+window.workflowA11y = {state,workbench,models}
+const app=createApp({render:()=>h(NConfigProvider,{themeOverrides:getThemeOverrides('light','blue')},{default:()=>h(NMessageProvider,null,{default:()=>h(NDialogProvider,null,{default:()=>[
+  state.mode==='simple' ? h(WorkflowSimpleNodeEditor, { draft:state.draft, name:state.name, models, readonly:state.readonly,
+    'onUpdate:draft':value=>state.draft=value,'onUpdate:name':value=>state.name=value }) : null,
+  state.mode==='bindings' ? h('main',{style:'padding:32px;max-width:600px'},[h(WorkflowNodeBindings,{workflowKey:'a11y',definition:state.definition,mode:'inputs'})]) : null,
+  state.mode==='advanced' ? h(WorkflowNodeEditorLite,{definition:{},models,modelOptions:[],createStarter:false}) : null,
+]})})})})
+app.use(pinia)
+app.use(createI18n({legacy:false,locale:'zh-CN',messages:{en,'zh-CN':zh}}))
+app.mount('#app')
+</script></body></html>

@@ -75,7 +75,7 @@ const exportSummaryRows = computed(() => [
 </script>
 
 <template>
-  <n-modal
+  <n-modal :aria-label="t('editor.exportDialogTitle')"
     :show="show"
     preset="card"
     class="editor-export-modal"
@@ -100,8 +100,8 @@ const exportSummaryRows = computed(() => [
           <strong v-if="!exportProgressIndeterminate">{{ exportProgress }}%</strong>
           <n-spin v-else :size="14" :aria-label="t('editor.exporting')" />
         </div>
-        <n-progress v-if="!exportProgressIndeterminate" type="line" :percentage="exportProgress" :show-indicator="false" status="info" />
-        <n-skeleton v-else :height="8" :sharp="false" />
+        <n-progress :aria-label="t('editor.exporting')" :aria-valuetext="`${exportProgress}%${exportProgressText ? ' · ' + exportProgressText : ''}`" v-if="!exportProgressIndeterminate" type="line" :percentage="exportProgress" :show-indicator="false" status="info" />
+        <n-skeleton v-else role="progressbar" :aria-label="t('editor.exporting')" :aria-valuetext="exportProgressText || t('editor.exporting')" :height="8" :sharp="false" />
       </div>
 
       <div class="export-dialog__grid">
@@ -160,7 +160,7 @@ const exportSummaryRows = computed(() => [
               <span :title="t('editor.exportPeakProtectionHint')">
                 {{ t('editor.exportPeakProtection') }}
               </span>
-              <n-switch
+              <n-switch :aria-label="t('editor.exportPeakProtection')"
                 :value="peakProtection"
                 :disabled="exporting"
                 @update:value="(value: boolean) => emit('update:peak-protection', value)"
@@ -175,7 +175,7 @@ const exportSummaryRows = computed(() => [
             <label class="export-dialog__field">
               <span>{{ t('editor.exportFileName') }}</span>
               <n-input
-                :value="fileName"
+                :value="fileName" :input-props="{ 'aria-label': t('editor.exportFileName') }"
                 size="small"
                 :disabled="exporting"
                 :placeholder="t('editor.exportFileNamePlaceholder')"
@@ -184,7 +184,7 @@ const exportSummaryRows = computed(() => [
             </label>
             <div class="export-dir__actions">
               <n-input
-                :value="exportDir"
+                :value="exportDir" :input-props="{ 'aria-label': t('editor.exportDirSection') }"
                 size="small"
                 clearable
                 :disabled="exporting"

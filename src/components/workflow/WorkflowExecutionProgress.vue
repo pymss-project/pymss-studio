@@ -23,7 +23,7 @@ const cancelled = computed(() => props.job?.tasks.filter(item => item.status ===
       <span v-if="cancelled">{{ t('workbench.cancelledFiles', { count: cancelled }) }}</span>
       <b>{{ percentage }}%</b>
     </div>
-    <n-progress type="line" :percentage="percentage" :show-indicator="false" :height="4" :status="failed ? 'error' : job.status === 'done' ? 'success' : 'default'" />
+    <n-progress :aria-label="t('workbench.flowProgress')" :aria-valuetext="`${percentage}% · ${t('workbench.completedFiles', { done: completed, total: job.tasks.length })}${failed ? ' · ' + t('workbench.failedFiles', { count: failed }) : ''}${cancelled ? ' · ' + t('workbench.cancelledFiles', { count: cancelled }) : ''}`" type="line" :percentage="percentage" :show-indicator="false" :height="4" :status="failed ? 'error' : job.status === 'done' ? 'success' : 'default'" />
   </section>
 </template>
 

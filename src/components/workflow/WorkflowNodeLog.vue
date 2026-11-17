@@ -38,14 +38,14 @@ function guardLogKeys(event: KeyboardEvent) {
       </span>
       <span class="workflow-node-log__label"><span>{{ t('tasks.logs') }}</span><small v-if="logs?.length">{{ logs.length }}</small><ChevronDownOutline class="workflow-node-log__chevron" aria-hidden="true" /></span>
     </summary>
-    <div v-if="state" class="workflow-node-log__progress" role="progressbar" :aria-label="t('workbench.nodeProgress')" :aria-valuenow="Math.round(state.progress)" :aria-valuemin="0" :aria-valuemax="100"><i :style="{ width: Math.min(100, Math.max(0, state.progress)) + '%' }" /></div>
+    <div v-if="state" class="workflow-node-log__progress" role="progressbar" :aria-label="t('workbench.nodeProgress') + ' · ' + (nodeLabel || nodeId)" :aria-valuetext="`${Math.round(state.progress)}% · ${t(WORKFLOW_NODE_STATUS_KEYS[state.status])}`" :aria-valuenow="Math.round(state.progress)" :aria-valuemin="0" :aria-valuemax="100"><i :style="{ width: Math.min(100, Math.max(0, state.progress)) + '%' }" /></div>
     <div class="workflow-node-log__actions">
       <n-button size="tiny" quaternary :disabled="!logs?.length" :loading="copying" @click="copyLogs"><template #icon><n-icon :component="CopyOutline" /></template>{{ t('workbench.copyLogs') }}</n-button>
       <n-button size="tiny" quaternary :disabled="!logs?.length" aria-haspopup="dialog" :aria-expanded="expanded" @click="expanded = true"><template #icon><n-icon :component="ExpandOutline" /></template>{{ t('workbench.expandLogs') }}</n-button>
     </div>
     <TaskLogConsole :lines="logs || []" :compact="compact" />
   </details>
-  <n-modal v-model:show="expanded" preset="card" :title="t('workbench.nodeLogsTitle', { node: nodeLabel || nodeId })" class="workflow-node-log-modal" style="width: min(1040px, calc(100vw - 48px))" @pointerdown.stop @click.stop @dblclick.stop @contextmenu.stop @keydown="guardLogKeys" @wheel.stop>
+  <n-modal :aria-label="t('workbench.nodeLogsTitle', { node: nodeLabel || nodeId })" v-model:show="expanded" preset="card" :title="t('workbench.nodeLogsTitle', { node: nodeLabel || nodeId })" class="workflow-node-log-modal" style="width: min(1040px, calc(100vw - 48px))" @pointerdown.stop @click.stop @dblclick.stop @contextmenu.stop @keydown="guardLogKeys" @wheel.stop>
     <div class="workflow-node-log__actions">
       <n-button size="small" secondary :disabled="!logs?.length" :loading="copying" @click="copyLogs"><template #icon><n-icon :component="CopyOutline" /></template>{{ t('workbench.copyLogs') }}</n-button>
     </div>

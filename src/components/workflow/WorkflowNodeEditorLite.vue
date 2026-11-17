@@ -8,7 +8,7 @@ import { createLogger } from '@/utils/logger'
  * directly as native comfy-mss JSON; serialize() output is handed to the parent
  * via v-model:definition, and pymss.graph.load_comfy_file consumes it verbatim.
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
+import { computed, useId, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useMessage } from 'naive-ui'
 import { AddOutline, ArrowRedoOutline, ArrowUndoOutline, ExpandOutline, SearchOutline } from '@vicons/ionicons5'
@@ -153,6 +153,7 @@ const emit = defineEmits<{
 defineExpose({ snapshotDefinition })
 
 const { t, locale } = useI18n()
+const canvasHelpId = useId()
 const message = useMessage()
 const nodeTranslator = t as unknown as NodeTranslator
 const canvasEl = ref<HTMLCanvasElement | null>(null)
@@ -779,11 +780,15 @@ function configureGraphNode(node: LGraphNode) {
       </div>
       <span v-if="formError && !loadError" class="toolbar__notice err" role="alert">{{ formError }}</span>
       <span v-else-if="advisory && !loadError" class="toolbar__notice warn">{{ advisory }}</span>
+      <details class="canvas-accessibility-help">
+        <summary>{{ t('accessibility.advancedCanvasHelpTitle') }}</summary>
+        <p :id="canvasHelpId">{{ t('accessibility.advancedCanvasHelp') }}</p>
+      </details>
       <slot name="execution-progress" />
     </header>
     <slot v-else name="execution-progress" />
     <div class="canvas-wrap">
-      <canvas ref="canvasEl" class="lg-canvas" tabindex="0" :aria-label="t('workflows.nodeEditor')" />
+      <canvas ref="canvasEl" class="lg-canvas" tabindex="0" :aria-describedby="readonly ? undefined : canvasHelpId" :aria-label="t('workflows.nodeEditor')" />
       <div v-if="!ready && !loadError" class="canvas-loading" role="status">
         <n-spin size="small" /><span>{{ t('workflows.advancedEditor.loadingNodes') }}</span>
       </div>
@@ -797,6 +802,10 @@ function configureGraphNode(node: LGraphNode) {
 </template>
 
 <style scoped>
+.canvas-accessibility-help { flex-basis: 100%; color: var(--on-surface-muted); font-size: 12px; }
+.canvas-accessibility-help summary { width: fit-content; cursor: pointer; }
+.canvas-accessibility-help p { margin: 8px 0 0; line-height: 1.6; }
+
 .canvas-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--on-surface-muted); }
 .litegraph-editor { display: flex; flex-direction: column; height: 100%; min-height: 0; gap: 10px; color: var(--on-surface); }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; padding: 10px 16px; border: 1px solid var(--outline); border-radius: 16px; background: var(--surface-1); }

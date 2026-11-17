@@ -1,4 +1,15 @@
 {
+  "accessibility": {
+    "announcementSeparator": ". ",
+    "inputSource": "{node} · {input} source",
+    "advancedCanvasHelpTitle": "Keyboard and screen reader support",
+    "advancedCanvasHelp": "Editing nodes and connections on the advanced canvas is not yet supported with screen readers. For keyboard editing, create a simple workflow in the workflow library.",
+    "processing": "started",
+    "taskStatus": "Task {status}: {name}",
+    "tasksStatus": "{count} tasks: {status}",
+    "downloadStatus": "Model {status}: {name}",
+    "downloadsStatus": "{count} models: {status}"
+  },
   "app": {
     "name": "Pymss Studio",
     "bootPreparing": "Initializing workspace...",
@@ -28,6 +39,8 @@
     "plugins": "Plugins"
   },
   "common": {
+    "decreaseValue": "Decrease {parameter}",
+    "increaseValue": "Increase {parameter}",
     "pleaseSelect": "Select an option",
     "clear": "Clear selection",
     "noData": "No options available",

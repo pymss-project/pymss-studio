@@ -44,7 +44,7 @@ async function copy() {
 </script>
 
 <template>
-  <n-modal :show="show" preset="card" :title="t('plugins.operationLog')" style="width: min(920px, calc(100vw - 32px)); max-height: calc(100dvh - 48px)" @update:show="emit('update:show', $event)">
+  <n-modal :aria-label="t('plugins.operationLog')" :show="show" preset="card" :title="t('plugins.operationLog')" style="width: min(920px, calc(100vw - 32px)); max-height: calc(100dvh - 48px)" @update:show="emit('update:show', $event)">
     <div class="plugin-log-body">
       <AppSelect v-if="tasks && tasks.length > 1" :value="selectedTask?.id" :options="taskOptions" :aria-label="t('plugins.logTask')" @update:value="selectedId = $event" />
       <PluginTaskStatus v-if="selectedTask" :task="selectedTask" @cancel="emit('cancel', selectedTask?.id)" />

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, useId } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useNumberInputAccessibility } from '@/composables/useNumberInputAccessibility'
 import { resolveParameters, type CustomParameterIntent, type ParameterMode, type ParameterResolutionMetadata } from '@/features/inference/parameters'
 import ParameterSlider from '@/components/ParameterSlider.vue'
 import InferenceChunkPreview from '@/components/InferenceChunkPreview.vue'
@@ -15,6 +16,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ 'update:intent': [value: CustomParameterIntent] }>()
 const { t } = useI18n()
+const vNumberA11y = useNumberInputAccessibility()
 const fieldId = useId()
 const resolved = computed(() => resolveParameters(props.metadata, props.library, props.mode, props.intent))
 const parameters = computed(() => resolved.value.parameters)
@@ -84,13 +86,13 @@ const inputWidth = (value: number | null) => ({ width: `${Math.max(2.2, Math.min
           </div>
           <div class="parameter-value-row">
             <div class="parameter-number">
-              <n-input-number v-if="!readonly && supported('chunk_size') && sr" class="parameter-value-input" :style="inputWidth(chunkSeconds)" :value="chunkSeconds" :input-props="{ id: `${fieldId}-chunk` }" :show-button="false" :bordered="false" :disabled="disabled" :min="0.001" :max="metadata.capabilities.chunk_size?.max && sr ? metadata.capabilities.chunk_size.max / sr : undefined" :step="0.5" @update:value="(v: number | null) => updateSize('chunkMilliseconds', v)" />
+              <n-input-number v-number-a11y="t('parameterEditor.chunkSeconds') + ' (' + t('parameterEditor.seconds') + ')'" v-if="!readonly && supported('chunk_size') && sr" class="parameter-value-input" :style="inputWidth(chunkSeconds)" :value="chunkSeconds" :input-props="{ id: `${fieldId}-chunk` }" :show-button="false" :bordered="false" :disabled="disabled" :min="0.001" :max="metadata.capabilities.chunk_size?.max && sr ? metadata.capabilities.chunk_size.max / sr : undefined" :step="0.5" @update:value="(v: number | null) => updateSize('chunkMilliseconds', v)" />
               <output v-else :id="`${fieldId}-chunk`" class="parameter-value">{{ compact(chunkSeconds) }}</output>
               <span class="parameter-unit">{{ t('parameterEditor.seconds') }}</span>
             </div>
             <span class="parameter-samples" :title="t('parameterEditor.actualChunk', { samples: format(number('chunk_size')), seconds: sr ? format(number('chunk_size') / sr) : '—' })">{{ format(number('chunk_size')) }} {{ t('parameterEditor.samplesUnit') }}</span>
           </div>
-          <ParameterSlider v-if="!readonly && supported('chunk_size') && sr" :label="t('parameterEditor.chunkSeconds')" :value="chunkSeconds || 0" :min="chunkRange.min" :max="chunkRange.max" :step="0.5" :disabled="disabled" @update:value="v => updateSize('chunkMilliseconds', v)" />
+          <ParameterSlider v-if="!readonly && supported('chunk_size') && sr" :label="t('parameterEditor.chunkSeconds')" :value-text="compact(chunkSeconds) + ' ' + t('parameterEditor.seconds')" :value="chunkSeconds || 0" :min="chunkRange.min" :max="chunkRange.max" :step="0.5" :disabled="disabled" @update:value="v => updateSize('chunkMilliseconds', v)" />
           <p v-if="resolved.adjustments.chunk_size" class="parameter-warning" :title="t('parameterEditor.snappedChunk', { seconds: chunkSeconds })">{{ t('parameterEditor.actualChunk', { samples: format(number('chunk_size')), seconds: sr ? format(number('chunk_size') / sr) : '—' }) }}</p>
           <small v-if="!supported('chunk_size') || !sr" class="parameter-note">{{ !sr ? t('parameterEditor.sampleRateMissing') : unavailable('chunk_size') }}</small>
         </section>
@@ -101,13 +103,13 @@ const inputWidth = (value: number | null) => ({ width: `${Math.max(2.2, Math.min
           </div>
           <div class="parameter-value-row">
             <div class="parameter-number">
-              <n-input-number v-if="!readonly && supported('overlap_size') && (overlapPercent || intent.overlapBasisPoints !== undefined)" class="parameter-value-input" :style="inputWidth(overlapPercent)" :value="overlapPercent" :input-props="{ id: `${fieldId}-overlap` }" :show-button="false" :bordered="false" :disabled="disabled" :min="0.01" :max="99" :step="1" @update:value="(v: number | null) => updateSize('overlapBasisPoints', v)" />
+              <n-input-number v-number-a11y="t('parameterEditor.overlapPercent') + ' (%)'" v-if="!readonly && supported('overlap_size') && (overlapPercent || intent.overlapBasisPoints !== undefined)" class="parameter-value-input" :style="inputWidth(overlapPercent)" :value="overlapPercent" :input-props="{ id: `${fieldId}-overlap` }" :show-button="false" :bordered="false" :disabled="disabled" :min="0.01" :max="99" :step="1" @update:value="(v: number | null) => updateSize('overlapBasisPoints', v)" />
               <output v-else :id="`${fieldId}-overlap`" class="parameter-value">{{ compact(overlapPercent) }}</output>
               <span class="parameter-unit">%</span>
             </div>
             <span class="parameter-samples" :title="t('parameterEditor.actualOverlap', { samples: format(number('overlap_size')), percent: overlapPercent === null ? '—' : format(number('overlap_size') / number('chunk_size') * 100) })">{{ format(number('overlap_size')) }} {{ t('parameterEditor.samplesUnit') }}</span>
           </div>
-          <ParameterSlider v-if="!readonly && supported('overlap_size') && (overlapPercent || intent.overlapBasisPoints !== undefined)" :label="t('parameterEditor.overlapPercent')" :value="overlapPercent || 0" :min="overlapRange.min" :max="overlapRange.max" :step="1" :disabled="disabled" @update:value="v => updateSize('overlapBasisPoints', v)" />
+          <ParameterSlider v-if="!readonly && supported('overlap_size') && (overlapPercent || intent.overlapBasisPoints !== undefined)" :label="t('parameterEditor.overlapPercent')" :value-text="compact(overlapPercent) + '%'" :value="overlapPercent || 0" :min="overlapRange.min" :max="overlapRange.max" :step="1" :disabled="disabled" @update:value="v => updateSize('overlapBasisPoints', v)" />
           <n-button v-if="!readonly && supported('overlap_size') && overlapPercent === 0 && intent.overlapBasisPoints === undefined" text size="tiny" :disabled="disabled" @click="change('overlapBasisPoints', 5000)">{{ t('parameterEditor.customizeOverlap') }}</n-button>
           <small v-if="!supported('overlap_size')" class="parameter-note">{{ unavailable('overlap_size') }}</small>
           <p v-if="(overlapPercent || 0) > 95" class="parameter-warning">{{ t('parameterEditor.highOverlap', { coverage: format(number('chunk_size') / Math.max(1, number('chunk_size') - number('overlap_size'))) }) }}</p>
@@ -125,7 +127,7 @@ const inputWidth = (value: number | null) => ({ width: `${Math.max(2.2, Math.min
             <small v-if="!supported(field.key)" class="parameter-note">{{ unavailable(field.key) }}</small>
             <output v-if="readonly || !supported(field.key)" :id="`${fieldId}-${field.key}`" class="parameter-tile__value" :class="{ 'parameter-tile__value--on': field.kind === 'boolean' && parameters[field.key] }">{{ field.kind === 'boolean' ? t(parameters[field.key] ? 'parameterEditor.modelLibrary.on' : 'parameterEditor.modelLibrary.off') : format(number(field.key)) }}</output>
             <n-switch v-else-if="field.kind === 'boolean'" :id="`${fieldId}-${field.key}`" size="small" :aria-label="t(field.label)" :value="parameters[field.key] === true" :disabled="disabled" @update:value="(v: boolean) => updateField(field, v)" />
-            <n-input-number v-else size="small" class="parameter-tile__input" :value="number(field.key)" :input-props="{ id: `${fieldId}-${field.key}` }" :min="metadata.capabilities[field.key]?.min" :max="metadata.capabilities[field.key]?.max" :precision="field.key === 'post_process_threshold' ? undefined : 0" :step="metadata.capabilities[field.key]?.step || (field.key === 'post_process_threshold' ? 0.01 : 1)" :disabled="disabled" @update:value="(v: number | null) => updateField(field, v)" />
+            <n-input-number v-number-a11y="t(field.label)" v-else size="small" class="parameter-tile__input" :value="number(field.key)" :input-props="{ id: `${fieldId}-${field.key}` }" :min="metadata.capabilities[field.key]?.min" :max="metadata.capabilities[field.key]?.max" :precision="field.key === 'post_process_threshold' ? undefined : 0" :step="metadata.capabilities[field.key]?.step || (field.key === 'post_process_threshold' ? 0.01 : 1)" :disabled="disabled" @update:value="(v: number | null) => updateField(field, v)" />
           </section>
         </template>
       </div>

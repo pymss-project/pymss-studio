@@ -34,7 +34,7 @@ const rows = computed(() => [
     <dl class="update-diagnostics-rows">
       <div v-for="row in rows" :key="row.label"><dt>{{ row.label }}</dt><dd>{{ row.value || t('debugUpdates.notChecked') }}</dd></div>
     </dl>
-    <n-progress v-if="snapshot.status === 'downloading' && snapshot.downloadTotalBytes > 0 && snapshot.downloadProgressPercent !== null" type="line" :percentage="snapshot.downloadProgressPercent" />
+    <n-progress :aria-label="t('debugUpdates.title')" :aria-valuetext="`${snapshot.downloadProgressPercent}%`" v-if="snapshot.status === 'downloading' && snapshot.downloadTotalBytes > 0 && snapshot.downloadProgressPercent !== null" type="line" :percentage="snapshot.downloadProgressPercent" />
     <details v-if="snapshot.downloadLogs.length" class="update-diagnostics-logs">
       <summary>{{ t('debugUpdates.recentLogs') }}</summary>
       <p v-for="(entry, index) in snapshot.downloadLogs" :key="index"><time>{{ entry.at }}</time> {{ entry.message }}</p>

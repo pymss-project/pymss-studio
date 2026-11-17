@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { storeToRefs } from 'pinia'
 import { useI18n } from 'vue-i18n'
+import { useNumberInputAccessibility } from '@/composables/useNumberInputAccessibility'
 import { useMessage } from 'naive-ui'
 import { useRouter } from 'vue-router'
 import {
@@ -48,6 +49,7 @@ import { formatBytes } from '@/utils/format'
 import { normalizeLogRecord, formatLogRecord, logContextPreview, logMessagePreview, locationLabel, logClock, sourceLabel, type LogRecord } from '@/utils/logRecord'
 
 const { t, te, locale } = useI18n()
+const vNumberA11y = useNumberInputAccessibility()
 const message = useMessage()
 const router = useRouter()
 const app = useAppStore()
@@ -1822,7 +1824,7 @@ onBeforeUnmount(() => {
       </div>
     </n-card>
 
-    <n-modal v-model:show="runtimeDebugEditorVisible" preset="card" style="width: min(760px, 92vw)" :mask-closable="true" @after-leave="runtimeDebugEditingPath = ''; runtimeDebugEditingContent = ''">
+    <n-modal v-model:show="runtimeDebugEditorVisible" preset="card" :aria-label="t('debug.runtimeDebugEditorTitle')" style="width: min(760px, 92vw)" :mask-closable="true" @after-leave="runtimeDebugEditingPath = ''; runtimeDebugEditingContent = ''">
       <template #header>
         <div class="debug-section-title">
           <n-icon :component="TerminalOutline" />
@@ -1922,7 +1924,7 @@ onBeforeUnmount(() => {
           :autosize="{ minRows: 14, maxRows: 24 }"
           spellcheck="false"
         />
-        <n-modal
+        <n-modal :aria-label="t('debug.catalogModelDialogTitle')"
           v-model:show="catalogModelDialogVisible"
           preset="card"
           :title="t('debug.catalogModelDialogTitle')"
@@ -1976,7 +1978,7 @@ onBeforeUnmount(() => {
               </label>
               <label>
                 <span>{{ t('debug.catalogFieldSize') }}</span>
-                <n-input-number v-model:value="catalogModelDraft.size_bytes" size="small" :min="0" class="catalog-number" />
+                <n-input-number v-number-a11y="t('debug.catalogFieldSize')" v-model:value="catalogModelDraft.size_bytes" size="small" :min="0" class="catalog-number" />
               </label>
               <label class="catalog-checkbox-row">
                 <n-checkbox v-model:checked="catalogModelDraft.supported">
@@ -2159,7 +2161,7 @@ onBeforeUnmount(() => {
       </n-card>
     </section>
 
-    <n-modal v-model:show="executionLogVisible" preset="card" :title="t('debug.taskDetails')" class="debug-execution-log-modal" :style="{ width: 'min(960px, calc(100vw - 48px))' }">
+    <n-modal :aria-label="t('debug.taskDetails')" v-model:show="executionLogVisible" preset="card" :title="t('debug.taskDetails')" class="debug-execution-log-modal" :style="{ width: 'min(960px, calc(100vw - 48px))' }">
       <div class="worker-event-modal-meta">
         <strong :title="executionLogName">{{ executionLogName }}</strong>
         <span>{{ executionLogStatus }}</span>
@@ -2218,7 +2220,7 @@ onBeforeUnmount(() => {
         </button>
         <n-empty v-if="!recentWorkerEventGroups.length" :description="t('settings.developerNoWorkerEvents')" />
       </div>
-      <n-modal
+      <n-modal :aria-label="workerEventGroupTitle(selectedWorkerEvent)"
         v-model:show="workerEventDialogVisible"
         preset="card"
         :title="workerEventGroupTitle(selectedWorkerEvent)"

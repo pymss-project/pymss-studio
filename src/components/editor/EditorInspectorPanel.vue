@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import type { InputInst } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
+import { useNumberInputAccessibility } from '@/composables/useNumberInputAccessibility'
 import { PencilOutline } from '@vicons/ionicons5'
 import { useEditorPlaybackStore } from '@/stores/editorPlayback'
 import type { EditorClip, EditorMasterLimiter as MasterLimiterSettings, EditorSession, EditorSource } from '@/types/editor'
@@ -57,6 +58,7 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+const vNumberA11y = useNumberInputAccessibility()
 const playback = useEditorPlaybackStore()
 
 const selectedTrack = computed(() => props.session.tracks.find((track) => track.id === props.selectedTrackId) || null)
@@ -271,10 +273,9 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
             <div class="inspector-strip__caption"><span>{{ t('editor.balance') }}</span><strong>{{ formatPanShort(channelPan) }}</strong></div>
             <EditorParameterSlider
               :key="channelValue"
-              :value="channelPan"
+              :value="channelPan" :value-text="formatTrackPan(channelPan)"
               :reset-value="0"
               :label="t('editor.balance')"
-              :aria-label="t('editor.balance')"
               :reset-label="t('editor.sliderDefaultCenter')"
               :min="-1"
               :max="1"
@@ -296,10 +297,9 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
             <EditorParameterSlider
               :key="channelValue"
               vertical
-              :value="channelVolume"
+              :value="channelVolume" :value-text="Math.round(channelVolume * 100) + '%'"
               :reset-value="1"
               :label="channelVolumeLabel"
-              :aria-label="channelVolumeLabel"
               :reset-label="t('editor.sliderDefaultVolume')"
               :min="0"
               :max="2"
@@ -340,7 +340,7 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
           <div class="dual-fields">
             <label class="panel-field panel-field--compact">
               <span class="panel-field__label">{{ t('editor.clipStart') }}</span>
-              <n-input-number
+              <n-input-number v-number-a11y="t('editor.clipStart') + ' (s)'"
                 :value="selectedClip.start"
                 :min="0"
                 :step="0.01"
@@ -352,7 +352,7 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
             </label>
             <label class="panel-field panel-field--compact">
               <span class="panel-field__label">{{ t('editor.clipDuration') }}</span>
-              <n-input-number
+              <n-input-number v-number-a11y="t('editor.clipDuration') + ' (s)'"
                 :value="selectedClip.duration"
                 :min="0.01"
                 :max="clipDurationMax"
@@ -366,7 +366,7 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
           </div>
           <label class="panel-field panel-field--compact">
             <span class="panel-field__label">{{ t('editor.clipSourceOffset') }}</span>
-            <n-input-number
+            <n-input-number v-number-a11y="t('editor.clipSourceOffset') + ' (s)'"
               :value="selectedClip.offset"
               :min="0"
               :max="clipOffsetMax"
@@ -390,7 +390,7 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
           <div class="dual-fields">
             <label class="panel-field panel-field--compact">
               <span class="panel-field__label">{{ t('editor.fieldFadeIn') }}</span>
-              <n-input-number
+              <n-input-number v-number-a11y="t('editor.fieldFadeIn') + ' (s)'"
                 :value="fadeInValue"
                 :min="0"
                 :max="fadeMax"
@@ -401,7 +401,7 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
             </label>
             <label class="panel-field panel-field--compact">
               <span class="panel-field__label">{{ t('editor.fieldFadeOut') }}</span>
-              <n-input-number
+              <n-input-number v-number-a11y="t('editor.fieldFadeOut') + ' (s)'"
                 :value="fadeOutValue"
                 :min="0"
                 :max="fadeMax"

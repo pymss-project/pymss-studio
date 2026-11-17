@@ -4,6 +4,7 @@ import { useSlots } from 'vue'
 defineProps<{
   /** 状态，用于圆点样式修饰符（downloading / paused / error / interrupted / done ...） */
   status: string
+  label?: string
   /** 状态文案 */
   message: string
   /** 进度百分比 0-100 */
@@ -27,6 +28,8 @@ const slots = useSlots()
       <span class="mc-dl-pct">{{ progress }}%</span>
     </div>
     <n-progress
+      :aria-label="label || message"
+      :aria-valuetext="`${progress}% · ${message}${filesText ? ' · ' + filesText : ''}`"
       :percentage="progress"
       :show-indicator="false"
       :height="10"

@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, onScopeDispose, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useNumberInputAccessibility } from '@/composables/useNumberInputAccessibility'
 import type { EditorSession } from '@/types/editor'
 import { getPluginParameters, observePluginSession, PluginHostDialogPendingError, setPluginParameter, type PluginParameter } from '@/utils/pluginHost'
 
 const props = defineProps<{ session: EditorSession; slotId: string; disabled?: boolean }>()
 const { t } = useI18n()
+const vNumberA11y = useNumberInputAccessibility()
 const loading = ref(false)
 const saving = ref(false)
 const error = ref('')
@@ -103,7 +105,7 @@ async function commit(param: PluginParameter, raw: number | null) {
       <span :title="`${param.name} (${param.id})`">{{ param.name }}<small v-if="unitLabel(param)"> · {{ unitLabel(param) }}</small></span>
       <n-switch v-if="param.unit === 'Toggle'" size="small" :value="values[param.id] >= param.min + (param.max - param.min) / 2" :disabled="saving || disabled || param.min === param.max" :aria-label="param.name" @update:value="(on: boolean) => commit(param, on ? param.max : param.min)" />
       <AppSelect v-else-if="hasChoices(param)" size="small" :value="values[param.id]" :options="choiceOptions(param)" :disabled="saving || disabled || param.min === param.max" :aria-label="param.name" @update:value="(value: number) => commit(param, value)" />
-      <n-input-number v-else v-model:value="drafts[param.id]" size="small" :min="param.min" :max="param.max" :format="formatValue" :parse="(input: string) => parseValue(param, input)" :step="param.unit === 'Choice' ? 1 : undefined" :disabled="saving || disabled || param.min === param.max" :input-props="{ 'aria-label': param.name }" @blur="commit(param, drafts[param.id])" @keydown.enter="commit(param, drafts[param.id])" />
+      <n-input-number v-number-a11y="param.name + (unitLabel(param) ? ' (' + unitLabel(param) + ')' : '')" v-else v-model:value="drafts[param.id]" size="small" :min="param.min" :max="param.max" :format="formatValue" :parse="(input: string) => parseValue(param, input)" :step="param.unit === 'Choice' ? 1 : undefined" :disabled="saving || disabled || param.min === param.max" @blur="commit(param, drafts[param.id])" @keydown.enter="commit(param, drafts[param.id])" />
     </div>
     </div>
     <n-pagination v-if="filtered.length > pageSize" v-model:page="page" size="small" :page-size="pageSize" :item-count="filtered.length" :page-slot="5" />

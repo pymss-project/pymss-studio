@@ -228,7 +228,7 @@ const nextDisabled = computed(() => {
       class="cmi-modal"
       :bordered="false"
       :closable="!importing"
-      role="dialog"
+      role="dialog" :aria-label="t('models.customImportTitle')"
       aria-modal="true"
       @close="emit('update:show', false)"
     >
@@ -347,14 +347,14 @@ const nextDisabled = computed(() => {
           </n-radio-group>
         </div>
         <div class="cmi-toggle-row">
-          <n-switch v-model:value="verify" size="small" />
+          <n-switch :aria-label="t('models.customVerifyLabel')" v-model:value="verify" size="small" />
           <div>
             <span class="cmi-radio-title">{{ t('models.customVerifyLabel') }}</span>
             <span class="cmi-radio-desc">{{ t('models.customVerifyDesc') }}</span>
           </div>
         </div>
         <div class="cmi-toggle-row">
-          <n-switch v-model:value="force" size="small" />
+          <n-switch :aria-label="t('models.customForceLabel')" v-model:value="force" size="small" />
           <div>
             <span class="cmi-radio-title">{{ t('models.customForceLabel') }}</span>
             <span class="cmi-radio-desc">{{ t('models.customForceDesc') }}</span>
@@ -364,7 +364,7 @@ const nextDisabled = computed(() => {
 
       <!-- Step 4: progress -->
       <section v-else class="cmi-section">
-        <n-progress
+        <n-progress :aria-label="t('models.customImportTitle')" :aria-valuetext="`${importState.progress}%${importState.message ? ' · ' + importState.message : ''}`"
           type="line"
           :percentage="importState.progress"
           :status="importState.status === 'error' ? 'error' : 'default'"

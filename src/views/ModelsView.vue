@@ -119,8 +119,11 @@ let storageScrollFrame: number | null = null
 let storageScrollTime = 0
 const contextMenuX = ref(0)
 const contextMenuY = ref(0)
+const contextMenuPlacement = ref<'bottom-start' | 'bottom-end'>('bottom-start')
 const contextMenuVisible = ref(false)
 const contextModel = ref<ModelEntry | null>(null)
+let contextMenuFrame: number | null = null
+let contextMenuTrigger: HTMLElement | null = null
 const showNoteEditor = ref(false)
 const noteEditorModel = ref<ModelEntry | null>(null)
 const noteDraft = ref('')
@@ -1361,19 +1364,50 @@ function selectModel(model: ModelEntry) {
 }
 
 function openModelContextMenu(event: MouseEvent, model: ModelEntry) {
+  if (event.type === 'click' && contextModel.value?.name === model.name && (contextMenuVisible.value || contextMenuFrame !== null)) {
+    closeModelContextMenu()
+    return
+  }
+  closeModelContextMenu()
   contextModel.value = model
-  contextMenuVisible.value = false
-  contextMenuX.value = event.clientX
-  contextMenuY.value = event.clientY
-  window.requestAnimationFrame(() => {
+  const fromButton = event.type === 'click'
+  const element = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+  const anchor = element?.getBoundingClientRect()
+  contextMenuTrigger = fromButton ? element : null
+  const fromKeyboard = event.clientX === 0 && event.clientY === 0
+  contextMenuPlacement.value = fromButton ? 'bottom-end' : 'bottom-start'
+  contextMenuX.value = anchor && (fromButton || fromKeyboard) ? (fromButton ? anchor.right : anchor.left) : event.clientX
+  contextMenuY.value = anchor && (fromButton || fromKeyboard) ? anchor.bottom + 4 : event.clientY
+  contextMenuFrame = window.requestAnimationFrame(() => {
+    contextMenuFrame = null
     contextMenuVisible.value = true
+    window.addEventListener('scroll', onContextMenuViewportChange, true)
+    window.addEventListener('resize', closeModelContextMenu)
   })
 }
 
 function closeModelContextMenu() {
+  if (contextMenuFrame !== null) window.cancelAnimationFrame(contextMenuFrame)
+  contextMenuFrame = null
   contextMenuVisible.value = false
   contextModel.value = null
+  contextMenuTrigger = null
+  window.removeEventListener('scroll', onContextMenuViewportChange, true)
+  window.removeEventListener('resize', closeModelContextMenu)
 }
+
+function onModelMenuClickOutside(event: Event) {
+  if (event.target instanceof Node && contextMenuTrigger?.contains(event.target)) return
+  closeModelContextMenu()
+}
+
+function onContextMenuViewportChange(event: Event) {
+  if (event.target instanceof Element && event.target.closest('.n-dropdown-menu')) return
+  closeModelContextMenu()
+}
+
+onBeforeUnmount(closeModelContextMenu)
+onDeactivated(closeModelContextMenu)
 
 function openModelNoteEditor(model: ModelEntry) {
   noteEditorModel.value = model
@@ -1921,7 +1955,7 @@ watch(() => route.query.parameters, async value => {
           :consistent-menu-width="false"
         />
         <div class="toolbar-actions">
-          <n-switch v-model:value="downloadedOnly" size="small" />
+          <n-switch :aria-label="t('models.downloadedOnly')" v-model:value="downloadedOnly" size="small" />
           <span class="text-sm text-muted">{{ t('models.downloadedOnly') }}</span>
           <div class="view-toggle" role="group" :aria-label="t('models.viewMode')">
             <button
@@ -2060,6 +2094,7 @@ watch(() => route.query.parameters, async value => {
                 class="mc-more"
                 :title="t('models.moreActions')"
                 :aria-label="t('models.moreActions')"
+                :aria-expanded="contextMenuVisible && contextModel?.name === model.name"
                 @click.stop="openModelContextMenu($event, model)"
               >
                 <template #icon><n-icon :component="EllipsisHorizontalOutline" /></template>
@@ -2208,13 +2243,14 @@ watch(() => route.query.parameters, async value => {
     </div>
 
     <n-dropdown
-      placement="bottom-start"
+      :placement="contextMenuPlacement"
       trigger="manual"
       :x="contextMenuX"
       :y="contextMenuY"
       :options="modelMenuOptions"
       :show="contextMenuVisible"
-      @clickoutside="closeModelContextMenu"
+      @update:show="(show: boolean) => { if (!show) closeModelContextMenu() }"
+      @clickoutside="onModelMenuClickOutside"
       @select="handleModelContextMenuSelect"
     />
 
@@ -2222,7 +2258,7 @@ watch(() => route.query.parameters, async value => {
       :show="showNoteEditor"
       @update:show="handleNoteEditorUpdate"
     >
-      <n-card
+      <n-card :aria-label="t('models.editNote')"
         class="model-note-modal"
         :title="t('models.editNote')"
         :bordered="false"
@@ -2256,7 +2292,7 @@ watch(() => route.query.parameters, async value => {
       :show="showInferenceEditor"
       @update:show="handleInferenceEditorUpdate"
     >
-      <n-card
+      <n-card :aria-label="t('models.editInferenceDefaults')"
         class="model-inference-modal"
         :title="t('models.editInferenceDefaults')"
         :bordered="false"
@@ -2457,7 +2493,7 @@ watch(() => route.query.parameters, async value => {
 
     <!-- Detail Modal -->
     <n-modal :show="showDetail" @update:show="handleDetailDrawerUpdate" @after-leave="handleDetailModalAfterLeave">
-      <n-card
+      <n-card :aria-label="t('models.detail')"
         class="model-detail-modal"
         :title="t('models.detail')"
         :bordered="false"
@@ -2552,7 +2588,7 @@ watch(() => route.query.parameters, async value => {
         <template #footer>
           <div class="drawer-footer" v-if="selectedInfo">
             <!-- 删除中：进度块 -->
-            <ModelProgressBlock
+            <ModelProgressBlock :label="selectedInfo.name"
               v-if="isDeletingModel(selectedInfo.name)"
               status="downloading"
               :message="deleteStatusMessage(selectedInfo.name) || t('models.deleting')"
@@ -2561,7 +2597,7 @@ watch(() => route.query.parameters, async value => {
             />
 
             <!-- 下载中：进度块 + 取消 -->
-            <ModelProgressBlock
+            <ModelProgressBlock :label="selectedInfo.name"
               v-else-if="['preparing', 'downloading'].includes(downloadTasks[selectedInfo.name]?.status || '')"
               :status="downloadTasks[selectedInfo.name]!.status"
               :message="downloadStatusMessage(selectedInfo.name)"
@@ -2578,7 +2614,7 @@ watch(() => route.query.parameters, async value => {
 
             <!-- 暂停/取消/错误/中断：进度块 + 继续 + 删除 -->
             <template v-else-if="!selectedInfo.downloaded && downloadTasks[selectedInfo.name] && ['paused','cancelled','error','interrupted'].includes(downloadTasks[selectedInfo.name]!.status)">
-              <ModelProgressBlock
+              <ModelProgressBlock :label="selectedInfo.name"
                 :status="downloadTasks[selectedInfo.name]!.status"
                 :message="downloadStatusMessage(selectedInfo.name)"
                 :progress="downloadTasks[selectedInfo.name]!.progress"
@@ -2721,7 +2757,7 @@ watch(() => route.query.parameters, async value => {
             <div v-if="batchDeleteState.currentModel && deleteTasks[batchDeleteState.currentModel]" class="mc-dl-files">
               {{ t('models.deleteProgress', { completed: deleteTasks[batchDeleteState.currentModel]?.completedFiles || 0, total: deleteTasks[batchDeleteState.currentModel]?.totalFiles || 0 }) }}
             </div>
-            <n-progress
+            <n-progress :aria-label="t('models.batchDeleting', { count: batchDeleteState.totalModels })" :aria-valuetext="`${batchDeleteProgress}% · ${batchDeleteState.completedModels} / ${batchDeleteState.totalModels}`"
               :percentage="batchDeleteProgress"
               :show-indicator="false"
               :height="8"
@@ -2734,7 +2770,7 @@ watch(() => route.query.parameters, async value => {
           <div v-if="residualCleanupState.active" class="storage-progress-card">
             <strong>{{ t('models.cleanupInProgress') }}</strong>
             <span class="text-muted">{{ t('models.deleteProgress', { completed: residualCleanupState.completedFiles, total: residualCleanupState.totalFiles }) }}</span>
-            <n-progress
+            <n-progress :aria-label="t('models.cleanupInProgress')" :aria-valuetext="`${residualCleanupState.progress}% · ${t('models.deleteProgress', { completed: residualCleanupState.completedFiles, total: residualCleanupState.totalFiles })}`"
               :percentage="residualCleanupState.progress"
               :show-indicator="false"
               :height="8"

@@ -1,9 +1,11 @@
 <script setup lang="ts">
+import { vSliderA11y } from '@/directives/sliderAccessibility'
 import { createLogger } from '@/utils/logger'
 
 import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useI18n } from 'vue-i18n'
+import { useNumberInputAccessibility } from '@/composables/useNumberInputAccessibility'
 import { useRoute, useRouter } from 'vue-router'
 import { useDialog, useMessage, type DropdownOption } from 'naive-ui'
 import { convertFileSrc } from '@tauri-apps/api/core'
@@ -71,6 +73,7 @@ import { INFERENCE_PRESETS, matchingInferencePreset, supportsInferencePresets, t
 const studioLog = createLogger('ui.views.SeparateView')
 
 const { t, locale } = useI18n()
+const vNumberA11y = useNumberInputAccessibility()
 const message = useMessage()
 const dialog = useDialog()
 const router = useRouter()
@@ -268,6 +271,10 @@ const showNamingModal = ref(false)
 const showLogModal = ref(false)
 const modelSearch = ref('')
 const modelCategoryFilter = ref('')
+const modelListRef = ref<HTMLElement | null>(null)
+const modelPaneHeading = ref<HTMLElement | null>(null)
+const modelSearchInput = ref<{ focus: () => void } | null>(null)
+const focusedModelName = ref('')
 const modelPage = ref(1)
 const workflowSearch = ref('')
 const contextMenuX = ref(0)
@@ -862,6 +869,38 @@ const pagedDownloadedModels = computed(() => {
   return filteredDownloadedModels.value.slice(start, start + modelPageSize.value)
 })
 const modelPageSizeOptions = [...SEPARATE_MODEL_PAGE_SIZES]
+const modelTabStop = computed(() => {
+  const names = pagedDownloadedModels.value.map(item => item.name)
+  return names.includes(focusedModelName.value) ? focusedModelName.value
+    : names.includes(selectedModelName.value) ? selectedModelName.value : names[0]
+})
+function focusModelOption(index: number) {
+  const item = pagedDownloadedModels.value[index]
+  if (!item) return
+  focusedModelName.value = item.name
+  void nextTick(() => modelListRef.value?.querySelectorAll<HTMLButtonElement>('[role="option"]')[index]?.focus())
+}
+function onModelOptionKeydown(event: KeyboardEvent, index: number) {
+  if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return
+  const last = pagedDownloadedModels.value.length - 1
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? last
+    : event.key === 'ArrowDown' || event.key === 'ArrowRight' ? Math.min(last, index + 1)
+      : event.key === 'ArrowUp' || event.key === 'ArrowLeft' ? Math.max(0, index - 1) : undefined
+  if (next === undefined) return
+  event.preventDefault()
+  event.stopPropagation()
+  focusModelOption(next)
+}
+watch(pagedDownloadedModels, (items, previous) => {
+  if (!modelListRef.value?.contains(document.activeElement) || items.some(item => item.name === focusedModelName.value)) return
+  const index = Math.max(0, previous.findIndex(item => item.name === focusedModelName.value))
+  if (items.length) focusModelOption(Math.min(index, items.length - 1))
+  else void nextTick(() => {
+    if (modelSearchInput.value) modelSearchInput.value.focus()
+    else modelPaneHeading.value?.focus()
+  })
+})
+
 const filteredWorkflows = computed(() => {
   const query = workflowSearch.value.trim().toLowerCase()
   return [...workflows.value]
@@ -2267,7 +2306,7 @@ async function retryCurrentTask() {
             <div class="rail-card__actions rail-card__actions--input">
               <label class="input-retention-toggle input-retention-toggle--head">
                 <span>{{ t('separate.clearInputAfterSubmit') }}</span>
-                <n-switch v-model:value="settings.clearInputAfterSubmit" size="small" :disabled="isRunModeLocked" />
+                <n-switch :aria-label="t('separate.clearInputAfterSubmit')" v-model:value="settings.clearInputAfterSubmit" size="small" :disabled="isRunModeLocked" />
               </label>
               <n-button
                 v-if="inputFiles.length"
@@ -2316,11 +2355,11 @@ async function retryCurrentTask() {
               :class="{ 'dropzone--dragging': isDragging, 'dropzone--filled': inputFiles.length, 'dropzone--clickable': !inputFiles.length && !isRunModeLocked }"
               @click="(!inputFiles.length && !isRunModeLocked) ? handlePickFiles() : undefined"
             >
-              <div v-if="inputFiles.length" class="file-list">
+              <div v-if="inputFiles.length" class="file-list" role="list" :aria-label="t('workbench.selectedFiles')">
                 <div
                   v-for="(path, index) in inputFiles"
                   :key="path"
-                  class="file-chip"
+                  class="file-chip" role="listitem" :aria-posinset="index + 1" :aria-setsize="inputFiles.length"
                   :class="{ 'file-chip--dragging': draggedInputIndex === index }"
                   @pointerdown="onInputPointerDown($event, index)"
                   @pointermove="onInputPointerMove"
@@ -2352,7 +2391,7 @@ async function retryCurrentTask() {
                       </n-button>
                     </div>
                   </div>
-                  <n-button quaternary circle size="tiny" class="file-chip__remove" :title="t('separate.remove')" :disabled="isRunModeLocked" @click.stop="task.removeInputFile(path)">
+                  <n-button :aria-label="t('separate.remove') + ' ' + getFileName(path)" quaternary circle size="tiny" class="file-chip__remove" :title="t('separate.remove')" :disabled="isRunModeLocked" @click.stop="task.removeInputFile(path)">
                     <template #icon><n-icon :component="CloseOutline" /></template>
                   </n-button>
                 </div>
@@ -2589,6 +2628,7 @@ async function retryCurrentTask() {
                         </n-button>
                         <n-slider
                           class="preview-track__slider"
+                          v-slider-a11y="{ label: t('workbench.playbackPosition') + ' · ' + getFileName(output.path), valueText: formatPlaybackTime(getOutputPlayback(output.path).currentTime) + ' / ' + formatPlaybackTime(getOutputPlayback(output.path).duration) }"
                           :value="getOutputPlayback(output.path).currentTime"
                           :min="0"
                           :max="Math.max(getOutputPlayback(output.path).duration, 1)"
@@ -2647,7 +2687,7 @@ async function retryCurrentTask() {
               <div class="stage-head__label">
                 <n-icon :component="runMode === 'workflow' ? GitNetworkOutline : CubeOutline" />
                 <div>
-                  <h2>{{ t('separate.runTarget') }}</h2>
+                  <h2 ref="modelPaneHeading" tabindex="-1" data-model-list-fallback>{{ t('separate.runTarget') }}</h2>
                   <p>{{ runMode === 'workflow' ? t('separate.workflowPanelHint') : t('separate.modelPanelHint') }}</p>
                 </div>
               </div>
@@ -2678,6 +2718,8 @@ async function retryCurrentTask() {
                 <template v-if="modelPanelHasModels">
                   <div class="target-toolbar" data-guide="separation-models">
                     <n-input
+                      ref="modelSearchInput"
+                      :input-props="{ 'aria-label': t('separate.modelSearchPlaceholder') }"
                       v-model:value="modelSearch"
                       clearable
                       :placeholder="t('separate.modelSearchPlaceholder')"
@@ -2730,16 +2772,21 @@ async function retryCurrentTask() {
                   </div>
                   <div
                     v-if="pagedDownloadedModels.length"
+                    ref="modelListRef"
                     class="target-list target-list--models"
                     :class="`target-list--${modelListViewMode}`"
                     role="listbox"
+                    :aria-multiselectable="ensembleEnabled"
                     :aria-label="t('separate.model')"
                   >
                     <button
-                      v-for="item in pagedDownloadedModels"
+                      v-for="(item, modelIndex) in pagedDownloadedModels"
                       :key="item.name"
                       type="button"
                       role="option"
+                      :tabindex="modelTabStop === item.name ? 0 : -1"
+                      @focus="focusedModelName = item.name"
+                      @keydown="onModelOptionKeydown($event, modelIndex)"
                       :aria-selected="ensembleEnabled ? ensembleModels.includes(item.name) : selectedModelName === item.name"
                       class="target-row"
                       :class="{ 'target-row--active': ensembleEnabled ? ensembleModels.includes(item.name) : selectedModelName === item.name }"
@@ -2892,7 +2939,7 @@ async function retryCurrentTask() {
       :show="showModelNoteEditor"
       @update:show="handleModelNoteEditorUpdate"
     >
-      <n-card
+      <n-card :aria-label="t('models.editNote')"
         class="separate-note-modal"
         :title="t('models.editNote')"
         :bordered="false"
@@ -2966,7 +3013,7 @@ async function retryCurrentTask() {
     <WorkflowDescriptionDialog v-model:show="workflowDescriptionOpen" :workflow-id="workflowDescriptionId" @edit="editWorkflowDescriptionFromReader" @after-leave="afterWorkflowDescriptionReaderLeave" />
 
     <n-modal v-model:show="showEnsembleModal" :mask-closable="true">
-      <n-card
+      <n-card :aria-label="t('separate.ensembleConfigureTitle')"
         class="ensemble-modal"
         :title="t('separate.ensembleConfigureTitle')"
         :bordered="false"
@@ -3000,8 +3047,8 @@ async function retryCurrentTask() {
               :placeholder="t('separate.ensembleModelStemPlaceholder')"
               :disabled="!(ensembleStemOptionsByModel[name] || []).length"
             />
-            <n-slider v-model:value="ensembleWeights[name]" :min="0" :max="1" :step="0.05" />
-            <n-input-number v-model:value="ensembleWeights[name]" class="ensemble-modal__weight-input" size="small" :min="0" :max="1" :step="0.05" />
+            <n-slider v-slider-a11y="{ label: name + ' · ' + t('separate.ensembleWeights'), valueText: (ensembleWeights[name] ?? 0).toLocaleString(locale, { maximumFractionDigits: 6 }) }" v-model:value="ensembleWeights[name]" :min="0" :max="1" :step="0.05" />
+            <n-input-number v-number-a11y="name + ' · ' + t('separate.ensembleWeights')" v-model:value="ensembleWeights[name]" class="ensemble-modal__weight-input" size="small" :min="0" :max="1" :step="0.05" />
           </div>
         </div>
         <template #footer>
@@ -3018,7 +3065,7 @@ async function retryCurrentTask() {
         @close="parameterHelpPage = null" @previous="parameterHelpPage > 0 ? parameterHelpPage-- : parameterHelpPage = null"
         @next="parameterHelpPage < helpTopics.length - 1 ? parameterHelpPage++ : parameterHelpPage = null"
       />
-      <n-card
+      <n-card :aria-label="t('separate.settingsDrawerTitle')"
         v-else
         ref="settingsCardRef"
         class="settings-modal"
@@ -3123,7 +3170,7 @@ async function retryCurrentTask() {
       </n-card>
     </n-modal>
     <n-modal v-model:show="showNamingModal" style="width:var(--modal-width-sm)">
-      <n-card
+      <n-card :aria-label="t('separate.namingModalTitle')"
         class="naming-modal"
         :title="t('separate.namingModalTitle')"
         :bordered="false"
@@ -3221,7 +3268,7 @@ async function retryCurrentTask() {
       </n-card>
     </n-modal>
     <n-modal v-model:show="showQueueModal" style="width:var(--modal-width-md)">
-      <n-card
+      <n-card :aria-label="t('separate.batchQueue')"
         class="batch-queue-modal"
         :title="t('separate.batchQueue')"
         :bordered="false"
@@ -3262,7 +3309,7 @@ async function retryCurrentTask() {
               </span>
               <strong>{{ job.model }}</strong>
               <span class="batch-queue-row__input" :title="job.primary.input">{{ queueJobInputSummary(job) }}</span>
-              <n-progress
+              <n-progress :aria-label="job.model + ' · ' + queueJobInputSummary(job)" :aria-valuetext="`${Math.round(job.progress)}% · ${statusLabel(job.status)}`"
                 type="line"
                 :percentage="job.progress"
                 :show-indicator="false"
@@ -3304,7 +3351,7 @@ async function retryCurrentTask() {
       </n-card>
     </n-modal>
     <n-modal v-model:show="showLogModal" style="width:var(--modal-width-lg)">
-      <n-card
+      <n-card :aria-label="currentTask ? `${currentTaskFileName} - ${t('tasks.logs')}` : t('tasks.logs')"
         class="task-log-modal"
         :title="currentTask ? `${currentTaskFileName} - ${t('tasks.logs')}` : t('tasks.logs')"
         :bordered="false"
@@ -3321,7 +3368,8 @@ async function retryCurrentTask() {
                 :class="{ 'task-log-progress__rail--indeterminate': logProgressIndeterminate }"
                 role="progressbar"
                 :aria-label="statusLabel(currentTask.status)"
-                :aria-valuenow="logProgressPercent"
+                :aria-valuenow="logProgressIndeterminate ? undefined : logProgressPercent"
+                :aria-valuetext="[logProgressPercent === undefined ? '' : logProgressPercent + '%', statusLabel(currentTask.status), progressDetail(currentTask)].filter(Boolean).join(' · ')"
                 :aria-valuemin="0"
                 :aria-valuemax="100"
               >

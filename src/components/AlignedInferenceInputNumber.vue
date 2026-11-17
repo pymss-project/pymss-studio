@@ -1,9 +1,13 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted } from 'vue'
 import { alignInferenceStepChange } from '@/features/inference/sampleStep'
+import { useNumberInputAccessibility } from '@/composables/useNumberInputAccessibility'
+
+const vNumberA11y = useNumberInputAccessibility()
 
 const props = withDefaults(defineProps<{
   value: number | null
+  label: string
   step: number
   alignmentStep?: number
   alignmentOffset?: number
@@ -101,6 +105,7 @@ onBeforeUnmount(() => {
     @keyup.capture="resetDirection"
   >
     <n-input-number
+      v-number-a11y="label"
       :value="value"
       :min="min"
       :max="max"

@@ -1,10 +1,12 @@
 <script setup lang="ts">
+import { vSliderA11y } from '@/directives/sliderAccessibility'
 import TaskLogConsole from '@/components/TaskLogConsole.vue'
 import InferenceParameterHelp from '@/components/InferenceParameterHelp.vue'
 import { useBeginnerGuideStore } from '@/stores/beginnerGuide'
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useI18n } from 'vue-i18n'
+import { useNumberInputAccessibility } from '@/composables/useNumberInputAccessibility'
 import { useRoute, useRouter } from 'vue-router'
 import { useDialog, useMessage } from 'naive-ui'
 import { invoke } from '@tauri-apps/api/core'
@@ -74,6 +76,7 @@ import {
 } from '@vicons/ionicons5'
 
 const { t, locale: currentLocale } = useI18n()
+const vNumberA11y = useNumberInputAccessibility()
 const message = useMessage()
 const dialog = useDialog()
 const route = useRoute()
@@ -1412,6 +1415,7 @@ onMounted(async () => {
           type="button"
           class="settings-nav-item"
           :class="{ active: activeSection === section.key }"
+          :aria-current="activeSection === section.key ? 'true' : undefined"
           @click="selectSettingsSection(section.key)"
         >
           <span class="settings-nav-item__icon"><n-icon :component="section.icon" size="18" /></span>
@@ -1720,6 +1724,7 @@ onMounted(async () => {
                   <button
                     type="button"
                     :class="{ active: themeMode === 'system' }"
+                    :aria-pressed="themeMode === 'system'"
                     @click="selectThemeMode('system', $event)"
                   >
                     {{ t('settings.themeSystem') }}
@@ -1727,6 +1732,7 @@ onMounted(async () => {
                   <button
                     type="button"
                     :class="{ active: themeMode === 'dark' }"
+                    :aria-pressed="themeMode === 'dark'"
                     @click="selectThemeMode('dark', $event)"
                   >
                     {{ t('settings.themeDark') }}
@@ -1734,6 +1740,7 @@ onMounted(async () => {
                   <button
                     type="button"
                     :class="{ active: themeMode === 'light' }"
+                    :aria-pressed="themeMode === 'light'"
                     @click="selectThemeMode('light', $event)"
                   >
                     {{ t('settings.themeLight') }}
@@ -1754,6 +1761,7 @@ onMounted(async () => {
                     type="button"
                     class="accent-dot"
                     :class="{ active: themeAccent === accent.value }"
+                    :aria-pressed="themeAccent === accent.value"
                     :title="accent.label"
                     :aria-label="accent.label"
                     @click="selectThemeAccent(accent.value, $event)"
@@ -1803,6 +1811,7 @@ onMounted(async () => {
                 <div class="scale-control">
                   <n-slider
                     v-model:value="scaleSliderIndex"
+                    v-slider-a11y="{ label: t('settings.scaleFactor'), valueText: scaleFactorPercent }"
                     :min="0"
                     :max="5"
                     :step="1"
@@ -1820,7 +1829,7 @@ onMounted(async () => {
                 <p class="setting-row__hint">{{ t('settings.animationsHint') }}</p>
               </div>
               <div class="setting-row__control">
-                <n-switch v-model:value="animationsEnabled" />
+                <n-switch :aria-label="t('settings.animations')" v-model:value="animationsEnabled" />
               </div>
             </div>
           </div>
@@ -2405,7 +2414,7 @@ onMounted(async () => {
               </div>
               <div class="setting-field">
                 <label class="text-muted text-sm">{{ t('settings.maxConcurrentSeparations') }}</label>
-                <n-input-number
+                <n-input-number v-number-a11y="t('settings.maxConcurrentSeparations')"
                   v-model:value="maxConcurrentSeparationsInput"
                   :min="1"
                   :max="settings.MAX_CONCURRENT_SEPARATIONS"
@@ -2435,7 +2444,7 @@ onMounted(async () => {
                       {{ t('settings.developerModeHint') }}
                     </p>
                   </div>
-                  <n-switch v-model:value="developerMode" />
+                  <n-switch :aria-label="t('settings.developerModeTitle')" v-model:value="developerMode" />
                 </div>
               </div>
             </section>
@@ -2445,7 +2454,7 @@ onMounted(async () => {
       </main>
     </div>
 
-    <n-modal v-model:show="rocmDialogVisible" preset="card" style="width:min(720px, 94vw)" :title="t('settings.runtimeRocmManage')" :mask-closable="!rocmPlanLoading" :closable="!rocmPlanLoading">
+    <n-modal :aria-label="t('settings.runtimeRocmManage')" v-model:show="rocmDialogVisible" preset="card" style="width:min(720px, 94vw)" :title="t('settings.runtimeRocmManage')" :mask-closable="!rocmPlanLoading" :closable="!rocmPlanLoading">
       <div class="rocm-environment-selection">
         <p class="text-muted text-sm">{{ t('settings.runtimeRocmSelectionHint') }}</p>
         <n-spin v-if="app.runtimeHardwareInventoryLoading" size="small" />
@@ -2479,7 +2488,7 @@ onMounted(async () => {
       <template #footer><n-space justify="end"><n-button :disabled="rocmPlanLoading" @click="rocmDialogVisible = false">{{ t('common.cancel') }}</n-button><n-button v-if="!rocmPlan" type="primary" :loading="rocmPlanLoading" :disabled="!rocmSelectionValid || runtimeBusy" @click="prepareRocmPlan">{{ t(rocmAction === 'useInstalled' ? 'settings.runtimeRocmUseInstalled' : 'settings.runtimeRocmReviewPlan') }}</n-button><n-button v-else type="primary" :disabled="!rocmPlanReady || runtimeBusy" @click="confirmRocmInstall">{{ t(rocmAction === 'prepareSeed' ? 'settings.runtimePrepareSeed' : 'common.confirm') }}</n-button></n-space></template>
     </n-modal>
 
-    <n-modal
+    <n-modal :aria-label="t('settings.modelDirCheckingTitle')"
       :show="isCheckingModelDir"
       style="width:min(420px, 88vw)"
       preset="card"
@@ -2493,7 +2502,7 @@ onMounted(async () => {
       </div>
     </n-modal>
 
-    <n-modal
+    <n-modal :aria-label="t('settings.modelDirMigrationConfirmTitle')"
       :show="modelDirMigrationState.status === 'confirm'"
       style="width:min(720px, 92vw)"
       preset="card"
@@ -2541,7 +2550,7 @@ onMounted(async () => {
       </template>
     </n-modal>
 
-    <n-modal
+    <n-modal :aria-label="t('settings.modelDirMigrationTitle')"
       :show="modelDirMigrationVisible"
       style="width:min(760px, 92vw)"
       preset="card"
@@ -2561,7 +2570,7 @@ onMounted(async () => {
           </n-tag>
         </div>
 
-        <n-progress
+        <n-progress :aria-label="t('settings.modelDirMigrationTitle')" :aria-valuetext="`${modelDirMigrationProgress}% · ${t('settings.modelDirMigrationProgressText', { completed: modelDirMigrationState.completedFiles, total: modelDirMigrationState.totalFiles })}`"
           type="line"
           :percentage="modelDirMigrationProgress"
           :show-indicator="true"
@@ -2635,7 +2644,7 @@ onMounted(async () => {
       </template>
     </n-modal>
 
-    <n-modal v-model:show="runtimeGpuDialogVisible" style="width:min(760px, 92vw)" preset="card" :title="t('settings.runtimeGpuResults')">
+    <n-modal :aria-label="t('settings.runtimeGpuResults')" v-model:show="runtimeGpuDialogVisible" style="width:min(760px, 92vw)" preset="card" :title="t('settings.runtimeGpuResults')">
       <div class="runtime-gpu-report" :aria-busy="runtimeGpuRunning">
         <p class="setting-row__hint">{{ t('settings.runtimeGpuScope') }}</p>
         <n-checkbox v-model:checked="runtimeGpuIncludeFp16" :disabled="runtimeGpuRunning" :aria-disabled="runtimeGpuRunning">{{ t('settings.runtimeGpuIncludeFp16') }}</n-checkbox>
@@ -2681,7 +2690,7 @@ onMounted(async () => {
       </template>
     </n-modal>
 
-    <n-modal
+    <n-modal :aria-label="t('settings.runtimeInstallLogTitle')"
       v-model:show="runtimeLogDialogVisible"
       style="width:min(760px, 92vw)"
       preset="card"

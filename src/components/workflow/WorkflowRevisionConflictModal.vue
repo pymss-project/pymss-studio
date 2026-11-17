@@ -25,7 +25,7 @@ function resolve(action: 'reload' | 'save-copy' | 'overwrite') {
 
 <template>
   <n-modal :show="show" :mask-closable="false" @update:show="emit('update:show', $event)">
-    <n-card
+    <n-card :aria-label="t('workflows.revisionConflictTitle')"
       class="workflow-conflict-modal"
       :title="t('workflows.revisionConflictTitle')"
       :bordered="false"

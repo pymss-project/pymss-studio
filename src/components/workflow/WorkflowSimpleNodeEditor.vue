@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useNumberInputAccessibility } from '@/composables/useNumberInputAccessibility'
 import { useDialog, useMessage, type DropdownOption, type InputInst } from 'naive-ui'
 import {
   ArrowRedoOutline,
@@ -59,6 +60,11 @@ import {
 const draft = defineModel<SimpleDraft>('draft', { required: true })
 const name = defineModel<string>('name', { required: true })
 
+// Keep long model/source names readable independently of the canvas zoom.
+const sourceMenuProps = {
+  style: { minWidth: 'min(320px, calc(100vw - 24px))', maxWidth: 'min(560px, calc(100vw - 24px))' },
+}
+
 const props = withDefaults(defineProps<{
   models: ModelEntry[]
   readonly?: boolean
@@ -88,6 +94,7 @@ const emit = defineEmits<{
 }>()
 
 const { t, locale } = useI18n()
+const vNumberA11y = useNumberInputAccessibility()
 const editingName = ref(false)
 const showWorkflowSettings = ref(false)
 const nameBeforeEdit = ref('')
@@ -393,6 +400,32 @@ function ensembleSourceOptionsFor(ensemble: SimpleEnsembleDraft) {
   ]
 }
 
+// Canvas layout updates must not rebuild every source list and revalidate the graph.
+const ensembleInputOptionsByTarget = computed(() => Object.fromEntries(draft.value.ensembles.flatMap(ensemble => {
+  const sources = ensembleSourceOptionsFor(ensemble)
+  return ensemble.inputs.map((_, index) => {
+    const target = simpleEnsembleInputTarget(ensemble.id, index)
+    return [target, sources.filter(option => canConnectSimple(draft.value, option.value, target).ok)] as const
+  })
+})))
+
+function ensembleInputOptions(ensemble: SimpleEnsembleDraft, index: number) {
+  return ensembleInputOptionsByTarget.value[simpleEnsembleInputTarget(ensemble.id, index)] || []
+}
+
+function updateEnsembleInput(ensemble: SimpleEnsembleDraft, index: number, value: string | number | null) {
+  if (props.readonly) return
+  const source = String(value ?? '')
+  const target = simpleEnsembleInputTarget(ensemble.id, index)
+  if (!source) { disconnectTarget(target); return }
+  if (ensemble.inputs[index]?.source === source) return
+  const check = canConnectSimple(draft.value, source, target)
+  if (!check.ok) { message.warning(t(connectionMessageKeys[check.reason] || 'workflows.invalidConnection')); return }
+  connectSimple(draft.value, source, target)
+  cleanupSimpleDraft(draft.value)
+  recordHistory()
+}
+
 function stepInputOptions(step: SimpleStepDraft, index: number) {
   const options = [
     { label: t('workflows.originalInput'), value: 'input' },
@@ -506,9 +539,16 @@ function scheduleLayoutRefresh() {
   })
 }
 
+watch(() => [draft.value.ui.nodes, draft.value.ui.viewport.zoom, draft.value.steps.map(step => step.stems)], scheduleLayoutRefresh, { deep: true, flush: 'post' })
+
 function setPortElement(key: string, element: unknown) {
-  if (element && typeof element === 'object' && 'getBoundingClientRect' in element) {
-    const node = element as HTMLElement
+  const node = element && typeof element === 'object' && 'getBoundingClientRect' in element ? element as HTMLElement : undefined
+  const previous = portElements.get(key)
+  // Vue invokes function refs again on updates. Scheduling an unchanged port
+  // here would cause layoutVersion -> render -> ref -> layoutVersion forever.
+  if (previous === node) return
+  if (previous) portResizeObserver?.unobserve(previous)
+  if (node) {
     portElements.set(key, node)
     portResizeObserver?.observe(node)
   } else {
@@ -732,6 +772,13 @@ const connections = computed(() => {
   return items
 })
 
+function nodeTitle(id: string) {
+  const stepIndex = draft.value.steps.findIndex(step => step.id.toLowerCase() === id.toLowerCase())
+  if (stepIndex >= 0) return `${t('workflows.separationNode')} ${stepIndex + 1} · ${draft.value.steps[stepIndex].model || id}`
+  const ensembleIndex = draft.value.ensembles.findIndex(item => item.id.toLowerCase() === id.toLowerCase())
+  if (ensembleIndex >= 0) return `${processingNodeLabel(draft.value.ensembles[ensembleIndex])} ${ensembleIndex + 1}`
+  return id
+}
 const pendingPath = computed(() => {
   const pending = pendingConnection.value
   if (!pending) return null
@@ -935,6 +982,7 @@ function finishOutputConnection(source: string, event: PointerEvent) {
 }
 
 function disconnectTarget(target: Exclude<SimpleConnectionTarget, 'save'>) {
+  if (props.readonly) return
   if (disconnectSimple(draft.value, target)) {
     recordHistory()
   }
@@ -1084,6 +1132,7 @@ function closeNodeContextMenu() {
 }
 
 function openNodeTypeChooser(at?: SimpleEditorPoint) {
+  if (props.readonly) return
   closeNodeContextMenu()
   pendingNodePoint.value = at || null
   showNodeTypeChooser.value = true
@@ -1099,6 +1148,7 @@ function addNodeOfType(type: SimpleNodeType) {
 }
 
 function openCanvasContextMenu(event: MouseEvent) {
+  if (props.readonly) { event.preventDefault(); return }
   const target = event.target instanceof Element ? event.target : null
   if (target?.closest('[data-simple-node], .simple-node-editor__edge-group')) return
   event.preventDefault()
@@ -1112,6 +1162,7 @@ function openCanvasContextMenu(event: MouseEvent) {
 }
 
 function handleNodeContextMenuSelect(key: string | number) {
+  if (props.readonly) { closeNodeContextMenu(); return }
   const point = contextMenuPoint.value || undefined
   if (key === 'ensemble') addEnsemble(point)
   else if (key === 'separation') addStep(point)
@@ -1419,6 +1470,7 @@ onBeforeUnmount(() => {
   portResizeObserver?.disconnect()
   executionResizeObserver?.disconnect()
   portResizeObserver = null
+  portElements.clear()
   selectInstances.clear()
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('pointerup', cancelPendingConnection)
@@ -1466,7 +1518,7 @@ onBeforeUnmount(() => {
         <article class="simple-node simple-node--input" data-simple-node="input" :data-node-status="nodeStates?.input?.status" :style="{ ...nodeStyle('input'), width: `${INPUT_WIDTH}px` }" @pointerdown.stop="beginNodeDrag('input', $event)">
           <header><span>{{ t('workflows.inputNode') }}</span><strong>{{ t('workflows.originalInput') }}</strong></header>
           <span v-if="nodeStates?.['input']" class="simple-execution-state" :data-node-status="nodeStates['input'].status" :title="t(WORKFLOW_NODE_STATUS_KEYS[nodeStates['input'].status]) + ' · ' + Math.round(nodeStates['input'].progress) + '%'"><template v-if="nodeStates['input'].status === 'running'">{{ t('workbench.running') }}</template></span>
-          <button :ref="el => setPortElement('input:output', el)" class="simple-port simple-port--output" :class="{ 'simple-port--source-target': pendingConnection?.direction === 'output' && hoverTarget === 'output:input' }" data-simple-source="input" type="button" @pointerdown.stop="beginConnection('input', $event)" @pointerup.stop="finishOutputConnection('input', $event)"><span>{{ t('workflows.audioOutput') }}</span><i /></button>
+          <button @mousedown.prevent tabindex="-1" aria-hidden="true" :ref="el => setPortElement('input:output', el)" class="simple-port simple-port--output" :class="{ 'simple-port--source-target': pendingConnection?.direction === 'output' && hoverTarget === 'output:input' }" data-simple-source="input" type="button" @pointerdown.stop="beginConnection('input', $event)" @pointerup.stop="finishOutputConnection('input', $event)"><span>{{ t('workflows.audioOutput') }}</span><i /></button>
           <div v-if="readonly && nodeSummaries?.input" class="simple-execution-summary" :title="nodeSummaries.input">{{ nodeSummaries.input }}</div>
           <slot v-if="!readonly" name="runtime-input" />
           <WorkflowNodeLog node-id="input" :node-label="t('workflows.originalInput')" :state="nodeStates?.input" :logs="nodeLogs?.input" :pending="executionVisible" />
@@ -1476,9 +1528,9 @@ onBeforeUnmount(() => {
           <header>
             <div><span>{{ t('workflows.separationNode') }} {{ index + 1 }}</span><strong>{{ step.model || t('workflows.stepModelPlaceholder') }}</strong></div>
             <span class="simple-node__header-actions">
-              <button type="button" class="simple-icon-button" :title="t('workflows.moveStepEarlier')" :disabled="!canMoveSimpleStep(draft, step.id, -1)" @pointerdown.stop @click.stop="moveStep(step, -1)">↑</button>
-              <button type="button" class="simple-icon-button" :title="t('workflows.moveStepLater')" :disabled="!canMoveSimpleStep(draft, step.id, 1)" @pointerdown.stop @click.stop="moveStep(step, 1)">↓</button>
-              <button
+              <button type="button" class="simple-icon-button" :title="t('workflows.moveStepEarlier')" :disabled="readonly || (!canMoveSimpleStep(draft, step.id, -1))" @pointerdown.stop @click.stop="moveStep(step, -1)">↑</button>
+              <button type="button" class="simple-icon-button" :title="t('workflows.moveStepLater')" :disabled="readonly || (!canMoveSimpleStep(draft, step.id, 1))" @pointerdown.stop @click.stop="moveStep(step, 1)">↓</button>
+              <button :disabled="readonly"
                 type="button"
                 class="simple-icon-button simple-inference-settings"
                 :class="{ 'simple-inference-settings--custom': Boolean(step.inferenceParams) }"
@@ -1489,21 +1541,21 @@ onBeforeUnmount(() => {
                 <n-icon :component="SettingsOutline" />
                 <span v-if="step.inferenceParams" class="simple-inference-settings__dot" aria-hidden="true" />
               </button>
-              <button type="button" class="simple-icon-button" :title="t('workflows.removeStep')" :disabled="draft.steps.length <= 1" @pointerdown.stop @click.stop="removeStep(step)"><n-icon :component="CloseOutline" /></button>
+              <button type="button" class="simple-icon-button" :title="t('workflows.removeStep')" :disabled="readonly || (draft.steps.length <= 1)" @pointerdown.stop @click.stop="removeStep(step)"><n-icon :component="CloseOutline" /></button>
             </span>
           </header>
           <span v-if="nodeStates?.[step.id]" class="simple-execution-state" :data-node-status="nodeStates[step.id].status" :title="t(WORKFLOW_NODE_STATUS_KEYS[nodeStates[step.id].status]) + ' · ' + Math.round(nodeStates[step.id].progress) + '%'"><template v-if="nodeStates[step.id].status === 'running'">{{ t('workbench.running') }}</template></span>
           <div class="simple-node__input-wrap" @pointerdown.stop>
-            <button :ref="el => setPortElement(`input:${step.id}`, el)" class="simple-port simple-port--input" :class="{ 'simple-port--target': pendingConnection?.direction === 'input' && hoverTarget === `step:${step.id}` }" type="button" :data-simple-target="`step:${step.id}`" @pointerdown.stop="beginInputConnection(step, $event)" @pointerup.stop="finishConnection(`step:${step.id}`, $event)"><i /><span>{{ step.input || t('workflows.stepInputPlaceholder') }}</span></button>
+            <button @mousedown.prevent tabindex="-1" aria-hidden="true" :ref="el => setPortElement(`input:${step.id}`, el)" class="simple-port simple-port--input" :class="{ 'simple-port--target': pendingConnection?.direction === 'input' && hoverTarget === `step:${step.id}` }" type="button" :data-simple-target="`step:${step.id}`" @pointerdown.stop="beginInputConnection(step, $event)" @pointerup.stop="finishConnection(`step:${step.id}`, $event)"><i /><span>{{ step.input || t('workflows.stepInputPlaceholder') }}</span></button>
           </div>
           <div class="simple-node__body" @pointerdown.stop>
-            <label><span>{{ t('workflows.stepModel') }}</span><AppSelect :aria-label="t('workflows.stepModel')" :ref="(instance: unknown) => setSelectInstance(`step-model:${step.id}`, instance)" :value="step.model" size="small" filterable :options="modelOptions" :placeholder="t('workflows.stepModelPlaceholder')" @update:value="updateModel(step, $event)" /></label>
-            <label><span>{{ t('workflows.stepInput') }}</span><AppSelect :aria-label="t('workflows.stepInput')" :ref="(instance: unknown) => setSelectInstance(`step-input:${step.id}`, instance)" :value="step.input" size="small" :options="stepInputOptions(step, index)" @update:value="updateStepInput(step, String($event || ''))" /></label>
+            <label><span>{{ t('workflows.stepModel') }}</span><AppSelect :disabled="readonly" :aria-label="t('workflows.stepModel')" :ref="(instance: unknown) => setSelectInstance(`step-model:${step.id}`, instance)" :value="step.model" size="small" filterable :consistent-menu-width="false" :menu-props="sourceMenuProps" :options="modelOptions" :placeholder="t('workflows.stepModelPlaceholder')" @update:value="updateModel(step, $event)" /></label>
+            <label><span>{{ t('workflows.stepInput') }}</span><AppSelect :disabled="readonly" :aria-label="t('workflows.stepInput')" :ref="(instance: unknown) => setSelectInstance(`step-input:${step.id}`, instance)" :value="step.input" size="small" :consistent-menu-width="false" :menu-props="sourceMenuProps" :options="stepInputOptions(step, index)" @update:value="updateStepInput(step, String($event || ''))" /></label>
           </div>
           <div class="simple-node__outputs">
             <div v-for="stem in step.stems" :key="stem" class="simple-output-row">
-              <button :ref="el => setPortElement(outputPortKey(step.id, stem), el)" class="simple-port simple-port--output" :class="{ 'simple-port--source-target': pendingConnection?.direction === 'output' && hoverTarget === `output:${simpleOutputRef(step.id, stem)}` }" :data-simple-source="simpleOutputRef(step.id, stem)" type="button" @pointerdown.stop="beginConnection(simpleOutputRef(step.id, stem), $event)" @pointerup.stop="finishOutputConnection(simpleOutputRef(step.id, stem), $event)"><span>{{ stem }}</span><i /></button>
-              <n-button size="tiny" :type="step.save[stem] ? 'primary' : 'default'" secondary @pointerdown.stop @click.stop="toggleSave(step, stem)">{{ step.save[stem] ? t('workflows.savedOutput') : t('workflows.saveStems') }}</n-button>
+              <button @mousedown.prevent tabindex="-1" aria-hidden="true" :ref="el => setPortElement(outputPortKey(step.id, stem), el)" class="simple-port simple-port--output" :class="{ 'simple-port--source-target': pendingConnection?.direction === 'output' && hoverTarget === `output:${simpleOutputRef(step.id, stem)}` }" :data-simple-source="simpleOutputRef(step.id, stem)" type="button" @pointerdown.stop="beginConnection(simpleOutputRef(step.id, stem), $event)" @pointerup.stop="finishOutputConnection(simpleOutputRef(step.id, stem), $event)"><span>{{ stem }}</span><i /></button>
+              <n-button :disabled="readonly" :aria-label="nodeTitle(step.id) + ' · ' + stem + ' · ' + t(step.save[stem] ? 'workflows.savedOutput' : 'workflows.saveStems')" :aria-pressed="Boolean(step.save[stem])" size="tiny" :type="step.save[stem] ? 'primary' : 'default'" secondary @pointerdown.stop @click.stop="toggleSave(step, stem)">{{ step.save[stem] ? t('workflows.savedOutput') : t('workflows.saveStems') }}</n-button>
             </div>
             <span v-if="!step.stems.length" class="simple-node__empty">{{ t('workflows.noStemPorts') }}</span>
           </div>
@@ -1511,34 +1563,34 @@ onBeforeUnmount(() => {
         </article>
 
         <article v-for="(ensemble, index) in draft.ensembles" :key="ensemble.id" class="simple-node simple-node--ensemble" :class="{ 'simple-node--selected': selectedNodeId === ensemble.id, 'simple-node--audio-operation': isSimpleAudioOperation(ensemble.algorithm) }" :style="{ ...nodeStyle(ensemble.id), width: `${ENSEMBLE_WIDTH}px`, minHeight: `${ensembleHeight(ensemble)}px` }" :data-simple-node="ensemble.id" :data-node-status="nodeStates?.[ensemble.id]?.status" :data-audio-operation="isSimpleAudioOperation(ensemble.algorithm) ? ensemble.algorithm : undefined" @pointerdown.stop="beginNodeDrag(ensemble.id, $event)">
-          <header><div><span>{{ processingNodeLabel(ensemble) }} {{ index + 1 }}</span><strong>{{ ensemble.outputStem || t('workflows.ensembleStemPlaceholder') }}</strong></div><button type="button" class="simple-icon-button" :title="isSimpleAudioOperation(ensemble.algorithm) ? t('workflows.removeAudioOperation') : t('workflows.removeEnsemble')" @pointerdown.stop @click.stop="removeEnsemble(ensemble)"><n-icon :component="CloseOutline" /></button></header>
+          <header><div><span>{{ processingNodeLabel(ensemble) }} {{ index + 1 }}</span><strong>{{ ensemble.outputStem || t('workflows.ensembleStemPlaceholder') }}</strong></div><button :disabled="readonly" type="button" class="simple-icon-button" :title="isSimpleAudioOperation(ensemble.algorithm) ? t('workflows.removeAudioOperation') : t('workflows.removeEnsemble')" @pointerdown.stop @click.stop="removeEnsemble(ensemble)"><n-icon :component="CloseOutline" /></button></header>
           <span v-if="nodeStates?.[ensemble.id]" class="simple-execution-state" :data-node-status="nodeStates[ensemble.id].status" :title="t(WORKFLOW_NODE_STATUS_KEYS[nodeStates[ensemble.id].status]) + ' · ' + Math.round(nodeStates[ensemble.id].progress) + '%'"><template v-if="nodeStates[ensemble.id].status === 'running'">{{ t('workbench.running') }}</template></span>
           <div class="simple-node__body" @pointerdown.stop>
             <p v-if="isSimpleAudioOperation(ensemble.algorithm)" class="simple-audio-operation-hint">{{ audioOperationCopy[ensemble.algorithm].hint }}</p>
-            <label v-else><span>{{ t('workflows.ensembleType') }}</span><AppSelect :aria-label="t('workflows.ensembleType')" :ref="(instance: unknown) => setSelectInstance(`ensemble-algorithm:${ensemble.id}`, instance)" :value="ensemble.algorithm" size="small" :options="ensembleAlgorithmOptions" @update:value="updateEnsembleAlgorithm(ensemble, String($event || ''))" /></label>
-            <label><span>{{ t('workflows.ensembleStem') }}</span><n-input :value="ensemble.outputStem" size="small" :placeholder="t('workflows.ensembleStemPlaceholder')" @update:value="updateEnsembleStem(ensemble, $event)" /></label>
+            <label v-else><span>{{ t('workflows.ensembleType') }}</span><AppSelect :disabled="readonly" :aria-label="t('workflows.ensembleType')" :ref="(instance: unknown) => setSelectInstance(`ensemble-algorithm:${ensemble.id}`, instance)" :value="ensemble.algorithm" size="small" :options="ensembleAlgorithmOptions" @update:value="updateEnsembleAlgorithm(ensemble, String($event || ''))" /></label>
+            <label><span>{{ t('workflows.ensembleStem') }}</span><n-input :disabled="readonly" :value="ensemble.outputStem" size="small" :placeholder="t('workflows.ensembleStemPlaceholder')" @update:value="updateEnsembleStem(ensemble, $event)" /></label>
           </div>
           <div class="simple-ensemble-inputs" @pointerdown.stop>
             <div v-for="(input, inputIndex) in ensemble.inputs" :key="inputIndex" class="simple-ensemble-input-row" :class="{ 'simple-ensemble-input-row--audio-operation': isSimpleAudioOperation(ensemble.algorithm) }">
-              <button :ref="el => setPortElement(ensembleInputPortKey(ensemble.id, inputIndex), el)" class="simple-port simple-port--input simple-ensemble-input-row__port" :class="{ 'simple-port--target': pendingConnection?.direction === 'input' && hoverTarget === simpleEnsembleInputTarget(ensemble.id, inputIndex) }" type="button" :data-simple-target="simpleEnsembleInputTarget(ensemble.id, inputIndex)" @pointerdown.stop="beginEnsembleInputConnection(ensemble, inputIndex, $event)" @pointerup.stop="finishConnection(simpleEnsembleInputTarget(ensemble.id, inputIndex), $event)"><i /><span>{{ processingInputLabel(ensemble, inputIndex) }}</span></button>
-              <span class="simple-ensemble-input-row__source" :title="ensembleSourceLabel(input.source)">{{ ensembleSourceLabel(input.source) }}</span>
-              <n-input-number v-if="!isSimpleAudioOperation(ensemble.algorithm)" :value="input.weight" size="tiny" :min="0.01" :step="0.1" :show-button="false" :placeholder="t('workflows.ensembleWeight')" @update:value="updateEnsembleWeight(ensemble, inputIndex, $event)" />
-              <button v-if="simpleProcessingInputLimits(ensemble.algorithm).max > simpleProcessingInputLimits(ensemble.algorithm).min" type="button" class="simple-icon-button" :title="t('workflows.removeEnsembleInput')" :disabled="ensemble.inputs.length <= simpleProcessingInputLimits(ensemble.algorithm).min" @pointerdown.stop @click.stop="removeEnsembleInput(ensemble, inputIndex)"><n-icon :component="CloseOutline" /></button>
+              <button @mousedown.prevent tabindex="-1" aria-hidden="true" :ref="el => setPortElement(ensembleInputPortKey(ensemble.id, inputIndex), el)" class="simple-port simple-port--input simple-ensemble-input-row__port" :class="{ 'simple-port--target': pendingConnection?.direction === 'input' && hoverTarget === simpleEnsembleInputTarget(ensemble.id, inputIndex) }" type="button" :data-simple-target="simpleEnsembleInputTarget(ensemble.id, inputIndex)" @pointerdown.stop="beginEnsembleInputConnection(ensemble, inputIndex, $event)" @pointerup.stop="finishConnection(simpleEnsembleInputTarget(ensemble.id, inputIndex), $event)"><i /><span>{{ processingInputLabel(ensemble, inputIndex) }}</span></button>
+              <AppSelect class="simple-ensemble-source-select" :ref="(instance: unknown) => setSelectInstance(`ensemble-source:${ensemble.id}:${inputIndex}`, instance)" size="small" clearable :consistent-menu-width="false" :menu-props="sourceMenuProps" :aria-label="t('accessibility.inputSource', { node: nodeTitle(ensemble.id), input: processingInputLabel(ensemble, inputIndex) })" :value="input.source || null" :options="ensembleInputOptions(ensemble, inputIndex)" :disabled="readonly" :placeholder="t('workflows.ensembleInputPlaceholder')" @update:value="updateEnsembleInput(ensemble, inputIndex, $event)" />
+              <n-input-number :disabled="readonly" v-number-a11y="nodeTitle(ensemble.id) + ' · ' + processingInputLabel(ensemble, inputIndex) + ' · ' + ensembleSourceLabel(input.source) + ' · ' + t('workflows.ensembleWeight')" v-if="!isSimpleAudioOperation(ensemble.algorithm)" :value="input.weight" size="tiny" :min="0.01" :step="0.1" :show-button="false" :placeholder="t('workflows.ensembleWeight')" @update:value="updateEnsembleWeight(ensemble, inputIndex, $event)" />
+              <button v-if="simpleProcessingInputLimits(ensemble.algorithm).max > simpleProcessingInputLimits(ensemble.algorithm).min" type="button" class="simple-icon-button" :title="t('workflows.removeEnsembleInput')" :disabled="readonly || (ensemble.inputs.length <= simpleProcessingInputLimits(ensemble.algorithm).min)" @pointerdown.stop @click.stop="removeEnsembleInput(ensemble, inputIndex)"><n-icon :component="CloseOutline" /></button>
             </div>
-            <n-button v-if="simpleProcessingInputLimits(ensemble.algorithm).max > simpleProcessingInputLimits(ensemble.algorithm).min" size="tiny" secondary :disabled="ensemble.inputs.length >= simpleProcessingInputLimits(ensemble.algorithm).max" @click.stop="addEnsembleInput(ensemble)">{{ t('workflows.addEnsembleInput') }}</n-button>
+            <n-button v-if="simpleProcessingInputLimits(ensemble.algorithm).max > simpleProcessingInputLimits(ensemble.algorithm).min" size="tiny" secondary :disabled="readonly || (ensemble.inputs.length >= simpleProcessingInputLimits(ensemble.algorithm).max)" @click.stop="addEnsembleInput(ensemble)">{{ t('workflows.addEnsembleInput') }}</n-button>
           </div>
           <div class="simple-ensemble-output-row">
             <span class="simple-ensemble-output-row__label">{{ ensemble.outputStem || t('workflows.ensembleOutput') }}</span>
-            <n-button size="tiny" :type="ensemble.save ? 'primary' : 'default'" secondary @pointerdown.stop @click.stop="toggleEnsembleSave(ensemble)">{{ ensemble.save ? t('workflows.savedOutput') : t('workflows.saveStems') }}</n-button>
-            <button :ref="el => setPortElement(outputPortKey(ensemble.id, ensemble.outputStem.trim()), el)" class="simple-ensemble-output-port" :class="{ 'simple-ensemble-output-port--target': pendingConnection?.direction === 'output' && hoverTarget === `output:${simpleOutputRef(ensemble.id, ensemble.outputStem.trim())}` }" :aria-label="ensemble.outputStem || t('workflows.ensembleOutput')" :data-simple-source="simpleOutputRef(ensemble.id, ensemble.outputStem.trim())" type="button" @pointerdown.stop="beginConnection(simpleOutputRef(ensemble.id, ensemble.outputStem.trim()), $event)" @pointerup.stop="finishOutputConnection(simpleOutputRef(ensemble.id, ensemble.outputStem.trim()), $event)"><i /></button>
+            <n-button :disabled="readonly" :aria-label="nodeTitle(ensemble.id) + ' · ' + (ensemble.outputStem || t('workflows.ensembleOutput')) + ' · ' + t(ensemble.save ? 'workflows.savedOutput' : 'workflows.saveStems')" :aria-pressed="Boolean(ensemble.save)" size="tiny" :type="ensemble.save ? 'primary' : 'default'" secondary @pointerdown.stop @click.stop="toggleEnsembleSave(ensemble)">{{ ensemble.save ? t('workflows.savedOutput') : t('workflows.saveStems') }}</n-button>
+            <button @mousedown.prevent tabindex="-1" aria-hidden="true" :ref="el => setPortElement(outputPortKey(ensemble.id, ensemble.outputStem.trim()), el)" class="simple-ensemble-output-port" :class="{ 'simple-ensemble-output-port--target': pendingConnection?.direction === 'output' && hoverTarget === `output:${simpleOutputRef(ensemble.id, ensemble.outputStem.trim())}` }" :aria-label="ensemble.outputStem || t('workflows.ensembleOutput')" :data-simple-source="simpleOutputRef(ensemble.id, ensemble.outputStem.trim())" type="button" @pointerdown.stop="beginConnection(simpleOutputRef(ensemble.id, ensemble.outputStem.trim()), $event)" @pointerup.stop="finishOutputConnection(simpleOutputRef(ensemble.id, ensemble.outputStem.trim()), $event)"><i /></button>
           </div>
           <WorkflowNodeLog :node-id="ensemble.id" :node-label="processingNodeLabel(ensemble) + ' ' + (index + 1)" :state="nodeStates?.[ensemble.id]" :logs="nodeLogs?.[ensemble.id]" :pending="executionVisible" />
         </article>
 
         <article class="simple-node simple-node--save" data-simple-node="save" :data-node-status="nodeStates?.save?.status" :style="{ ...nodeStyle('save'), width: `${SAVE_WIDTH}px`, minHeight: `${saveHeight()}px` }" @pointerdown.stop="beginNodeDrag('save', $event)">
-          <header><div><span>{{ t('workflows.saveNode') }}</span><strong>{{ t('workflows.generatedOutputs') }}</strong></div><span class="simple-node__header-actions"><span class="simple-node__count">{{ saveEntries().length }}</span><button v-if="!readonly && runtimeControls" type="button" class="simple-icon-button simple-save-settings" :title="t('separate.output')" :aria-label="t('separate.output')" @pointerdown.stop @click.stop="emit('output-settings')"><n-icon :component="SettingsOutline" /></button></span></header>
+          <header><div><span>{{ t('workflows.saveNode') }}</span><strong>{{ t('workflows.generatedOutputs') }}</strong></div><span class="simple-node__header-actions"><span class="simple-node__count">{{ saveEntries().length }}</span><button :disabled="readonly" v-if="!readonly && runtimeControls" type="button" class="simple-icon-button simple-save-settings" :title="t('separate.output')" :aria-label="t('separate.output')" @pointerdown.stop @click.stop="emit('output-settings')"><n-icon :component="SettingsOutline" /></button></span></header>
           <span v-if="nodeStates?.['save']" class="simple-execution-state" :data-node-status="nodeStates['save'].status" :title="t(WORKFLOW_NODE_STATUS_KEYS[nodeStates['save'].status]) + ' · ' + Math.round(nodeStates['save'].progress) + '%'"><template v-if="nodeStates['save'].status === 'running'">{{ t('workbench.running') }}</template></span>
-          <button class="simple-save-drop-target" :class="{ 'simple-save-drop-target--active': pendingConnection && hoverTarget === 'save' }" type="button" data-simple-target="save" @pointerdown.stop @pointerup="finishConnection('save', $event)">{{ t('workflows.dropStemToSave') }}</button>
+          <button @mousedown.prevent tabindex="-1" aria-hidden="true" class="simple-save-drop-target" :class="{ 'simple-save-drop-target--active': pendingConnection && hoverTarget === 'save' }" type="button" data-simple-target="save" @pointerdown.stop @pointerup="finishConnection('save', $event)">{{ t('workflows.dropStemToSave') }}</button>
           <div v-for="(entry, index) in saveEntries()" :key="entry.source" class="simple-save-row">
             <i :ref="el => setPortElement(savePortKey(simpleSourceStepId(entry.source), entry.stem), el)" class="simple-save-row__port" :class="{ 'simple-save-row__port--active': pendingConnection?.direction === 'output' && pendingConnection.target === simpleSaveTarget(simpleSourceStepId(entry.source), entry.stem), 'simple-save-row__port--target': pendingConnection?.direction === 'input' && hoverTarget === simpleSaveTarget(simpleSourceStepId(entry.source), entry.stem) }" :data-simple-target="simpleSaveTarget(simpleSourceStepId(entry.source), entry.stem)" @pointerdown.stop="beginSaveConnection(entry.source, `${entry.sourceLabel} · ${entry.stem}`, $event)" @pointerup.stop="finishConnection(simpleSaveTarget(simpleSourceStepId(entry.source), entry.stem), $event)" />
             <div class="simple-save-row__details">
@@ -1551,7 +1603,7 @@ onBeforeUnmount(() => {
                 <span class="simple-save-row__preview-label">{{ t('workflows.saveFilenamePreview') }}</span>
                 <code>{{ saveFilenamePreview(entry, index) }}</code>
               </div>
-              <n-input size="tiny" :value="entry.outputName" :placeholder="'%filename%_%stem%_%model%'" @pointerdown.stop @update:value="updateSaveOutputName(entry, $event)" />
+              <n-input :disabled="readonly" size="tiny" :value="entry.outputName" :placeholder="'%filename%_%stem%_%model%'" @pointerdown.stop @update:value="updateSaveOutputName(entry, $event)" />
             </div>
           </div>
           <span v-if="!saveEntries().length" class="simple-node__empty">{{ t('workflows.saveStemsPlaceholder') }}</span>
@@ -1561,7 +1613,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <n-modal v-model:show="showWorkflowSettings" preset="card" :title="t('workflows.settingsAction')" class="simple-workflow-settings-modal" style="width: min(440px, calc(100vw - 32px))">
+    <n-modal :aria-label="t('workflows.settingsAction')" v-model:show="showWorkflowSettings" preset="card" :title="t('workflows.settingsAction')" class="simple-workflow-settings-modal" style="width: min(440px, calc(100vw - 32px))">
       <div class="simple-node-editor__defaults">
         <label><span>{{ t('workflows.defaultDevice') }}</span><AppSelect :aria-label="t('workflows.defaultDevice')" :ref="(instance: unknown) => setSelectInstance('default-device', instance)" v-model:value="draft.defaultDevice" :disabled="readonly" size="small" :options="[{ label: 'Auto', value: 'auto' }, { label: 'CPU', value: 'cpu' }, { label: 'CUDA', value: 'cuda' }, { label: 'MPS', value: 'mps' }, { label: 'MLX', value: 'mlx' }]" /></label>
         <label><span>{{ t('workflows.defaultFormat') }}</span><AppSelect :aria-label="t('workflows.defaultFormat')" :ref="(instance: unknown) => setSelectInstance('default-format', instance)" v-model:value="draft.defaultFormat" :disabled="readonly" size="small" :options="[{ label: 'WAV', value: 'wav' }, { label: 'FLAC', value: 'flac' }, { label: 'MP3', value: 'mp3' }, { label: 'M4A', value: 'm4a' }]" /></label>
@@ -1569,7 +1621,7 @@ onBeforeUnmount(() => {
       </div>
       <template #footer><div class="simple-workflow-settings-actions"><n-button v-if="!readonly" size="small" secondary @click="autoLayout(); showWorkflowSettings = false"><template #icon><n-icon :component="LocateOutline" /></template>{{ t('workflows.autoLayout') }}</n-button><n-button size="small" secondary @click="showWorkflowSettings = false">{{ t('common.close') }}</n-button></div></template>
     </n-modal>
-    <n-modal v-model:show="showNodeTypeChooser" preset="card" :title="t('workflows.chooseNodeTypeTitle')" class="simple-node-type-modal" style="width: min(640px, calc(100vw - 32px))" :z-index="5000">
+    <n-modal :aria-label="t('workflows.chooseNodeTypeTitle')" v-model:show="showNodeTypeChooser" preset="card" :title="t('workflows.chooseNodeTypeTitle')" class="simple-node-type-modal" style="width: min(640px, calc(100vw - 32px))" :z-index="5000">
       <p class="simple-node-type-modal__hint">{{ t('workflows.chooseNodeTypeHint') }}</p>
       <div class="simple-node-type-modal__choices">
         <button type="button" @click="addNodeOfType('separation')">
@@ -1591,7 +1643,7 @@ onBeforeUnmount(() => {
     </n-modal>
 
     <n-modal :show="showInferenceEditor" @update:show="(value: boolean) => !value && closeInferenceEditor()">
-      <n-card
+      <n-card :aria-label="t('workflows.stepInferenceTitle')"
         class="simple-inference-modal"
         :title="t('workflows.stepInferenceTitle')"
         :bordered="false"
@@ -1609,7 +1661,7 @@ onBeforeUnmount(() => {
             </p>
             <label class="simple-inference-follow">
               <span>{{ t('workflows.inferenceFollowGlobalShort') }}</span>
-              <n-switch
+              <n-switch :aria-label="t('workflows.inferenceFollowGlobalShort')"
                 :value="inferenceMode === 'global'"
                 size="small"
                 @update:value="updateInferenceFollowGlobal"
@@ -1621,41 +1673,41 @@ onBeforeUnmount(() => {
             <div class="simple-inference-grid">
               <label>
                 <span>{{ t('inference.batchSize') }}</span>
-                <n-input-number :value="inferenceNumber('batch_size', 1)" :min="1" :max="32" :precision="0" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('batch_size', $event)" />
+                <n-input-number v-number-a11y="t('inference.batchSize')" :value="inferenceNumber('batch_size', 1)" :min="1" :max="32" :precision="0" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('batch_size', $event)" />
               </label>
               <template v-if="inferenceEditorIsVr">
                 <label>
                   <span>{{ t('inference.vrWindowSize') }}</span>
-                  <n-input-number :value="inferenceNumber('window_size', 512)" :min="1" :precision="0" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('window_size', $event)" />
+                  <n-input-number v-number-a11y="t('inference.vrWindowSize')" :value="inferenceNumber('window_size', 512)" :min="1" :precision="0" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('window_size', $event)" />
                 </label>
                 <label>
                   <span>{{ t('inference.vrAggression') }}</span>
-                  <n-input-number :value="inferenceNumber('aggression', 5)" :min="0" :precision="0" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('aggression', $event)" />
+                  <n-input-number v-number-a11y="t('inference.vrAggression')" :value="inferenceNumber('aggression', 5)" :min="0" :precision="0" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('aggression', $event)" />
                 </label>
                 <label>
                   <span>{{ t('inference.vrPostProcessThreshold') }}</span>
-                  <n-input-number :value="inferenceNumber('post_process_threshold', 0.2)" :min="0" :max="1" :step="0.01" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('post_process_threshold', $event)" />
+                  <n-input-number v-number-a11y="t('inference.vrPostProcessThreshold')" :value="inferenceNumber('post_process_threshold', 0.2)" :min="0" :max="1" :step="0.01" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('post_process_threshold', $event)" />
                 </label>
               </template>
               <template v-else>
                 <label>
                   <span>{{ t('inference.overlapSize') }}</span>
-                  <AlignedInferenceInputNumber :value="inferenceNumber('overlap_size', 0)" :step="inferenceEditorOverlapStep" :alignment-step="inferenceEditorSampleStep" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('overlap_size', $event)" />
+                  <AlignedInferenceInputNumber :label="t('inference.overlapSize')" :value="inferenceNumber('overlap_size', 0)" :step="inferenceEditorOverlapStep" :alignment-step="inferenceEditorSampleStep" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('overlap_size', $event)" />
                 </label>
                 <label>
                   <span>{{ t('inference.chunkSize') }}</span>
-                  <AlignedInferenceInputNumber :value="inferenceNumber('chunk_size', 0)" :step="inferenceEditorChunkStep" :alignment-step="inferenceEditorChunkConstraint?.step || inferenceEditorSampleStep" :alignment-offset="inferenceEditorChunkConstraint?.offset" :alignment-min="inferenceEditorChunkConstraint?.min" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('chunk_size', $event)" />
+                  <AlignedInferenceInputNumber :label="t('inference.chunkSize')" :value="inferenceNumber('chunk_size', 0)" :step="inferenceEditorChunkStep" :alignment-step="inferenceEditorChunkConstraint?.step || inferenceEditorSampleStep" :alignment-offset="inferenceEditorChunkConstraint?.offset" :alignment-min="inferenceEditorChunkConstraint?.min" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('chunk_size', $event)" />
                   <n-text v-if="inferenceEditorChunkIssue" type="warning">{{ t('inference.invalidChunkSize', inferenceEditorChunkIssue) }}</n-text>
                 </label>
               </template>
             </div>
 
             <div class="simple-inference-switches">
-              <label v-if="!inferenceEditorIsVr"><n-switch :value="inferenceBoolean('standardize')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('standardize', $event)" /><span>{{ t('inference.standardize') }}</span></label>
-              <label><n-switch :value="inferenceBoolean('normalize')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('normalize', $event)" /><span>{{ t('inference.normalize') }}</span></label>
-              <label><n-switch :value="inferenceBoolean('enable_tta')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('enable_tta', $event)" /><span>{{ t('workflows.inferenceEnableTta') }}</span></label>
-              <label v-if="inferenceEditorIsVr"><n-switch :value="inferenceBoolean('high_end_process')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('high_end_process', $event)" /><span>{{ t('inference.vrHighEndProcess') }}</span></label>
-              <label v-if="inferenceEditorIsVr"><n-switch :value="inferenceBoolean('enable_post_process')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('enable_post_process', $event)" /><span>{{ t('inference.vrEnablePostProcess') }}</span></label>
+              <label v-if="!inferenceEditorIsVr"><n-switch :aria-label="t('inference.standardize')" :value="inferenceBoolean('standardize')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('standardize', $event)" /><span>{{ t('inference.standardize') }}</span></label>
+              <label><n-switch :aria-label="t('inference.normalize')" :value="inferenceBoolean('normalize')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('normalize', $event)" /><span>{{ t('inference.normalize') }}</span></label>
+              <label><n-switch :aria-label="t('workflows.inferenceEnableTta')" :value="inferenceBoolean('enable_tta')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('enable_tta', $event)" /><span>{{ t('workflows.inferenceEnableTta') }}</span></label>
+              <label v-if="inferenceEditorIsVr"><n-switch :aria-label="t('inference.vrHighEndProcess')" :value="inferenceBoolean('high_end_process')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('high_end_process', $event)" /><span>{{ t('inference.vrHighEndProcess') }}</span></label>
+              <label v-if="inferenceEditorIsVr"><n-switch :aria-label="t('inference.vrEnablePostProcess')" :value="inferenceBoolean('enable_post_process')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('enable_post_process', $event)" /><span>{{ t('inference.vrEnablePostProcess') }}</span></label>
             </div>
             <div v-if="inferenceMode === 'global'" class="simple-inference-fields__mask" aria-hidden="true" />
           </div>
@@ -1683,6 +1735,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+
 .simple-node-editor--readonly .simple-node { pointer-events: none; }
 .simple-execution-state { position: absolute; left: 3px; top: 12px; width: 6px; height: 6px; border-radius: 50%; background: var(--primary); }
 .simple-execution-state[data-node-status="done"] { background: var(--success); }
@@ -2079,7 +2132,7 @@ onBeforeUnmount(() => {
 .simple-ensemble-input-row { display: grid; grid-template-columns: 76px minmax(0, 1fr) 54px 24px; gap: 5px; align-items: center; }
 .simple-ensemble-input-row--audio-operation { grid-template-columns: 76px minmax(0, 1fr) auto; }
 .simple-ensemble-input-row__port { left: -13px; width: 89px; font-size: 10px; }
-.simple-ensemble-input-row__source { min-width: 0; overflow: hidden; padding: 3px 6px; border-radius: 6px; background: color-mix(in srgb, var(--surface-2) 56%, transparent); color: var(--on-surface-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.simple-ensemble-source-select { min-width: 0; }
 .simple-ensemble-input-row :deep(.n-input-number) { width: 54px; }
 .simple-ensemble-input-row :deep(.n-input__input-el) { text-align: center; }
 .simple-ensemble-output-row { position: relative; min-height: 26px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; margin-top: 2px; padding-right: 8px; }

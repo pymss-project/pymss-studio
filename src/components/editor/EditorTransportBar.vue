@@ -313,7 +313,7 @@ function clearTransportPressed() {
               <span>{{ masterVolumePercent }}</span>
             </div>
             <EditorParameterSlider
-              :value="masterVolume"
+              :value="masterVolume" :value-text="masterVolumePercent"
               :reset-value="1"
               :label="t('editor.masterVolume')"
               :reset-label="t('editor.sliderDefaultVolume')"
@@ -331,7 +331,7 @@ function clearTransportPressed() {
               <span>{{ formatTrackPan(masterPan) }}</span>
             </div>
             <EditorParameterSlider
-              :value="masterPan"
+              :value="masterPan" :value-text="formatTrackPan(masterPan)"
               :reset-value="0"
               :label="t('editor.balanceShort')"
               :reset-label="t('editor.sliderDefaultCenter')"

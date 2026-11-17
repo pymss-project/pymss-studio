@@ -110,7 +110,7 @@ function removeCurrentRun() {
       <n-button v-if="active" secondary type="error" :size="size" @click="emit('cancel')">{{ t('tasks.cancelAction') }}</n-button>
       <n-button :size="size" :type="runPrimary ? 'primary' : 'default'" :disabled="!canRun || submitting" :loading="submitting" @click="emit('run')">{{ t('workflows.runWorkflowAction') }}</n-button>
     </span>
-    <n-modal v-model:show="showDetails" preset="card" :title="t('workbench.details')" class="workflow-run-details-modal" style="width: min(960px, calc(100vw - 48px))">
+    <n-modal :aria-label="t('workbench.details')" v-model:show="showDetails" preset="card" :title="t('workbench.details')" class="workflow-run-details-modal" style="width: min(960px, calc(100vw - 48px))">
       <div class="run-details" data-workbench-details>
         <div v-if="jobs.length > 1 || canRemoveRun" class="run-detail-selection">
           <label v-if="jobs.length > 1"><span>{{ t('workbench.chooseRun') }}</span><AppSelect :aria-label="t('workbench.chooseRun')" :value="currentJob?.id" :options="jobOptions" size="small" @update:value="jobId = $event; session.selectedTaskId = ''" /></label>

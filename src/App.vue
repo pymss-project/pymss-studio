@@ -5,6 +5,7 @@ import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } fr
 import { useRoute, useRouter } from 'vue-router'
 import { darkTheme, zhCN, enUS } from 'naive-ui'
 import TitleBar from '@/components/TitleBar.vue'
+import AppAnnouncements from '@/components/AppAnnouncements.vue'
 import SideNav from '@/components/SideNav.vue'
 import { isMainTaskOwner } from '@/utils/taskOwner'
 import AppBrandMark from '@/components/AppBrandMark.vue'
@@ -47,6 +48,7 @@ watch(() => route.name, name => {
   if (name === 'tools') toolsOpened.value = true
 }, { immediate: true })
 const { t, locale } = useI18n()
+const updateInstallTitle = computed(() => updates.repairing ? t(updates.status === 'failed' ? 'settings.applicationRepairFailed' : 'settings.applicationRepairProgress') : updates.status === 'restart-required' ? t('settings.updateRestartRequiredTitle') : updates.status === 'failed' ? t('settings.updateInstallFailed') : updates.status === 'installing' ? t('settings.updateInstalling') : t('settings.updateDownloading'))
 useRenderDiagnosticState(() => ({
   theme: settings.themeMode, resolvedTheme: themeIsDark.value ? 'dark' : 'light', animations: settings.animationsEnabled, scale: settings.scaleFactor,
   locale: settings.locale, resolvedLocale: locale.value, routePath: route.path,
@@ -354,8 +356,9 @@ const themeOverrides = computed(() => {
 <template>
   <n-config-provider :theme="isDark ? darkTheme : null" :theme-overrides="themeOverrides" :locale="componentLocale">
     <n-notification-provider>
-      <n-message-provider>
+      <n-message-provider to="#app-message-target">
         <n-dialog-provider>
+        <AppAnnouncements />
         <WorkflowRecoveryNotice />
         <div class="app-shell" :inert="beginnerGuide.demoActive || undefined" :class="{ 'app-shell--editor': isStandaloneRoute, 'app-shell--workflow-node-editor': isStandaloneRoute && isWorkflowEditorRoute, 'app-shell--native-titlebar': isMacOS, 'no-animations': !settings.animationsEnabled }">
           <div class="app-backdrop" />
@@ -456,6 +459,7 @@ const themeOverrides = computed(() => {
         <n-modal
           :show="updates.isInstallOverlayVisible"
           preset="card"
+          :aria-label="updateInstallTitle"
           :mask-closable="false"
           :closable="false"
           class="update-install-modal"
@@ -464,11 +468,11 @@ const themeOverrides = computed(() => {
           <div class="update-install-panel">
             <div class="update-install-panel__head">
               <strong>
-                {{ updates.repairing ? t(updates.status === 'failed' ? 'settings.applicationRepairFailed' : 'settings.applicationRepairProgress') : updates.status === 'restart-required' ? t('settings.updateRestartRequiredTitle') : updates.status === 'failed' ? t('settings.updateInstallFailed') : updates.status === 'installing' ? t('settings.updateInstalling') : t('settings.updateDownloading') }}
+                {{ updateInstallTitle }}
               </strong>
               <span>{{ updates.repairing ? t('settings.applicationRepairHint') : updates.status === 'restart-required' ? t('settings.updateRestartRequiredHint') : updates.status === 'failed' ? t('settings.updateInstallFailedHint') : t('settings.updateInstallOverlayHint') }}</span>
             </div>
-            <n-progress
+            <n-progress :aria-label="updateInstallTitle" :aria-valuetext="`${updates.downloadProgressPercent}% · ${updateInstallTitle}`"
               v-if="updates.status !== 'failed' && updates.status !== 'restart-required'"
               type="line"
               :percentage="updates.downloadProgressPercent"
