@@ -20,6 +20,19 @@ import { isTutorialFrame } from './features/onboarding/demoContext'
 
 const studioLog = createLogger('ui.main')
 
+if (import.meta.env.PROD && isTauriRuntime()) {
+  window.addEventListener('contextmenu', (event) => {
+    const target = event.composedPath().find(node => node instanceof HTMLElement)
+    if (target?.isContentEditable) return
+    if (target instanceof HTMLTextAreaElement && !target.matches(':disabled')) return
+    if (target instanceof HTMLInputElement && !target.matches(':disabled')
+      && /^(text|search|url|tel|email|password|number)$/.test(target.type)) return
+
+    // Cancel the WebView menu without stopping application context menu handlers.
+    event.preventDefault()
+  }, { capture: true })
+}
+
 async function bootstrap() {
   const pinia = createPinia()
   const app = createApp(App)
