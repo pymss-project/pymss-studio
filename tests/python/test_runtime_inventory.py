@@ -43,6 +43,13 @@ class RuntimeInventoryTests(unittest.TestCase):
         self.assertIsNone(devices[0]["gfx"])
         self.assertEqual(devices[0]["architectureConfidence"], "unknown")
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows DWORD exit status")
+    def test_child_preserves_windows_native_failure_code(self):
+        command = [sys.executable, "-I", "-c", "import os; os._exit(-1073741819)"]
+        with self.assertRaises(inventory.InventoryProcessError) as raised:
+            inventory._child(command)
+        self.assertEqual(raised.exception.exit_code, 0xC0000005)
+
     def test_manifest_digest_is_checked_before_launch(self):
         root = self.bundle()
         (root / "hip.dll").write_bytes(b"tampered")
@@ -86,6 +93,19 @@ class RuntimeInventoryTests(unittest.TestCase):
         self.assertEqual(result, {"ok": True})
         with self.assertRaises(subprocess.TimeoutExpired):
             inventory._child([sys.executable, "-I", "-c", "import time; time.sleep(60)"], timeout=0.2)
+
+    def test_child_keeps_last_stderr_line_when_stderr_overflows(self):
+        command = [
+            sys.executable, "-I", "-c",
+            "import sys; print('startup' * 20000, file=sys.stderr); "
+            "print('GPU initialization failed', file=sys.stderr); sys.exit(9)",
+        ]
+        with self.assertRaises(inventory.InventoryProcessError) as raised:
+            inventory._child(command)
+        error = raised.exception
+        self.assertEqual(error.exit_code, 9)
+        self.assertLessEqual(len(error.stderr), 128 * 1024)
+        self.assertEqual(error.stderr.splitlines()[-1], b"GPU initialization failed")
 
     def test_inventory_exposes_the_configured_default_even_without_a_native_detector(self):
         self.manifest["backends"]["rocm"]["defaultProfile"] = "next"

@@ -1273,8 +1273,13 @@ mod tests {
 
     #[test]
     fn rendered_report_retains_structured_context_and_redacts_decoded_log_values() {
+        let activation = json!({"status": "failed", "stderrLines": [
+            "Authorization: Bearer report-private-fixture",
+            "RuntimeError: device kernel image is invalid",
+        ]});
         let old_log = json!({"message": "token=\"private multiword value\"", "context": {
             "password": "old-password",
+            "activationValidation": activation,
             "mirrors": "[\"https://first:credential@a.example/file\",\"https://second:credential@b.example/file?X-Amz-Signature=second-private-signature\"]"
         }}).to_string();
         let content = render_diagnostic_report(DiagnosticReportData {
@@ -1282,7 +1287,8 @@ mod tests {
             sections: vec![
                 ("Recent Operations and Running Parameters", json!({"feature":"workflow","taskId":"task-1","nodeId":"step-7","inferenceParams":{"batch_size":1}})),
                 ("Persisted Separation and Workflow Tasks", json!({"status":"invalid","reason":"damaged task store"})),
-                ("Cached Runtime and Capability Probes", json!({"backend":"cuda","torchVersion":"2.9.1"})),
+                ("Cached Runtime and Capability Probes", json!({"backend":"rocm","torchVersion":"2.9.1",
+                    "activationValidation": diagnostic_report::summarize_activation_validation(&activation)})),
             ],
             torch: "- Torch available: true".into(),
             trigger: "Allocation failed\n```\n## embedded heading\n~~~\nRuntimeError: OOM".into(),
@@ -1291,7 +1297,8 @@ mod tests {
         for value in ["Recent Operations and Running Parameters", "task-1", "step-7", "batch_size", "damaged task store", "torchVersion", "Allocation failed", "RuntimeError: OOM", "Recent Persistent Log"] {
             assert!(content.contains(value), "report omitted {value}");
         }
-        for secret in ["private multiword value", "multiword", "old-password", "private-signature", "user:password", "second-private-signature", "second:credential"] {
+        assert_eq!(content.matches("RuntimeError: device kernel image is invalid").count(), 2);
+        for secret in ["private multiword value", "multiword", "old-password", "private-signature", "user:password", "second-private-signature", "second:credential", "report-private-fixture"] {
             assert!(!content.contains(secret), "report leaked {secret}");
         }
         let mut fence: Option<String> = None;

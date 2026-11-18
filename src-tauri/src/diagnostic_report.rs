@@ -1708,13 +1708,19 @@ pub(crate) fn summarize_diagnostic_page(payload: &Value) -> Value {
 
 pub(crate) fn summarize_activation_validation(payload: &Value) -> Value {
     let mut summary = Summary::default();
-    let mut result = summary.pick(payload, &["status", "reason"]);
-    if let Some(message) = payload.get("message").and_then(Value::as_str) {
-        result["message"] = summary.text(message, MAX_ERROR);
+    let mut result = summary.pick(payload, &["status", "reason", "stage", "exitCode", "torchVersion", "hipVersion", "deviceCount"]);
+    for key in ["message", "stderrTail"] {
+        if let Some(message) = payload.get(key).and_then(Value::as_str) {
+            result[key] = summary.text(message, MAX_ERROR);
+        }
+    }
+    if let Some(lines) = payload.get("stderrLines").and_then(Value::as_array) {
+        result["stderrLines"] = Value::Array(lines.iter().take(2).filter_map(Value::as_str)
+            .map(|line| summary.text(line, MAX_ERROR)).collect());
     }
     let devices = payload.get("devices").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
     let items = devices.iter().take(8).map(|device| {
-        let mut item = summary.pick(device, &["index", "name", "gfx", "status"]);
+        let mut item = summary.pick(device, &["index", "name", "gfx", "status", "stage"]);
         if let Some(message) = device.get("message").and_then(Value::as_str) {
             item["message"] = summary.text(message, MAX_ERROR);
         }
@@ -1733,6 +1739,33 @@ pub(crate) fn summarize_activation_validation(payload: &Value) -> Value {
     summary.redacted_strings = summary.redacted_strings.max(previous_count("redactedStrings"));
     summary.truncated_strings = summary.truncated_strings.max(previous_count("truncatedStrings"));
     summary.finish(result)
+}
+
+pub(crate) fn summarize_runtime_diagnostics(payload: &Value) -> Value {
+    let mut summary = Summary::default();
+    let mut result = summary.pick(payload, &[
+        "stage", "recovery", "profileId", "profileRevision", "resolutionStatus", "pythonVersion",
+        "torchVersion", "driverInventory", "packageInventory", "collectionStatus", "pipExitCode",
+    ]);
+    for key in ["resolvedTargets", "installedTargets"] {
+        if let Some(values) = payload.get(key).and_then(Value::as_array) {
+            result[key] = Value::Array(values.iter().take(32).filter_map(Value::as_str)
+                .map(|value| summary.text(value, 24)).collect());
+        }
+    }
+    if let Some(packages) = payload.get("packages").and_then(Value::as_array) {
+        result["packages"] = Value::Array(packages.iter().take(32)
+            .map(|package| summary.pick(package, &["name", "version"])).collect());
+    }
+    if let Some(adapters) = payload.get("displayAdapters").and_then(Value::as_array) {
+        result["displayAdapters"] = Value::Array(adapters.iter().take(8)
+            .map(|adapter| summary.pick(adapter, &["name", "vendor", "driverVersion"])).collect());
+    }
+    if let Some(messages) = payload.get("pipMessages").and_then(Value::as_array) {
+        result["pipMessages"] = Value::Array(messages.iter().take(6).filter_map(Value::as_str)
+            .map(|value| summary.text(value, MAX_ERROR)).collect());
+    }
+    result
 }
 
 pub(crate) fn summarize_probe(command: &str, payload: &Value) -> Value {

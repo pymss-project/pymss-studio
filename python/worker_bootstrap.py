@@ -14,6 +14,7 @@ import tempfile
 import time
 import urllib.request
 import uuid
+from collections import deque
 from functools import partial, wraps
 from pathlib import Path
 from typing import Any, Callable
@@ -1648,6 +1649,15 @@ def _verify_rocm_activation(python_path: Path, targets: list[str], device_ids: A
                              environment=_probe_environment(python_path=python_path))
 
 
+def _rocm_failure_context(python_path: Path | None, state: dict[str, Any], stage: str) -> dict[str, Any]:
+    try:
+        from worker_runtime_activation import failure_context
+        return failure_context(python_path, state, stage)
+    except Exception:
+        # Diagnostic providers must not mask the original error or interrupt recovery.
+        return {"stage": stage, "collectionStatus": "unavailable"}
+
+
 def _cleanup_runtime_overlays(backend: str, keep: set[Path]) -> None:
     root = _runtime_overlay_root() / backend
     if not root.is_dir():
@@ -2114,8 +2124,10 @@ def _runtime_info_payload(payload: dict[str, Any], *, repair: bool = True) -> di
             selected = (install_state or {}).get("selectedDeviceIds")
             activation_validation = _verify_rocm_activation(gpu_check_python, (install_state or {}).get("installedTargets") or [], None,
                 **({"selected_device_ids": selected} if selected else {}))
-        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
-            activation_validation = {"status": "failed", "reason": "processFailed", "devices": []}
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            from worker_protocol import _redact_sensitive_text
+            activation_validation = {"status": "failed", "reason": "processFailed", "stage": "prepare-gpu-check", "devices": [],
+                                     "message": _redact_sensitive_text(f"{type(error).__name__}: {error}")[:500]}
         if activation_validation.get("status") != "passed":
             accelerator_available = False
         if active_probe is not None:
@@ -2310,7 +2322,27 @@ def cmd_activate_runtime(payload: dict[str, Any]) -> int:
         return emit_error("RUNTIME_PROFILE_INVALID", str(error), task_id=payload.get("taskId"), recoverable=True)
     registered_overlay = _registered_runtime_overlay(backend, python_path)
     overlay_path = _overlay_path_from_state(state) or _overlay_path_from_state(registered_overlay)
-    if _is_bundled_runtime_env(env_dir) or _is_bundled_bootstrap_python(python_path):
+    bundled = _is_bundled_runtime_env(env_dir) or _is_bundled_bootstrap_python(python_path)
+
+    def activation_error(code: str, message: str, stage: str, validation: dict[str, Any] | None = None) -> int:
+        from worker_protocol import emit_error
+        extra: dict[str, Any] = {"backend": backend, "source": "bundled" if bundled else "managed"}
+        if backend == "rocm":
+            extra["runtimeDiagnostics"] = _rocm_failure_context(python_path, state or {}, stage)
+        if validation is not None:
+            extra["activationValidation"] = validation
+        return emit_error(code, message, task_id=payload.get("taskId"), recoverable=True, extra=extra)
+
+    def check_activation() -> dict[str, Any]:
+        try:
+            return _verify_rocm_activation(python_path, (state or {}).get("installedTargets", []), payload.get("deviceIds"),
+                **({"selected_device_ids": selected_devices} if selected_devices else {}))
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            from worker_protocol import _redact_sensitive_text
+            return {"status": "failed", "reason": "processFailed", "stage": "prepare-gpu-check", "devices": [],
+                    "message": _redact_sensitive_text(f"{type(error).__name__}: {error}")[:500]}
+
+    if bundled:
         try:
             probed = (
                 _probe_python_runtime(python_path, _backend_extra_names(manifest, backend), overlay_path)
@@ -2318,25 +2350,20 @@ def cmd_activate_runtime(payload: dict[str, Any]) -> int:
                 else _probe_python_runtime(python_path, _backend_extra_names(manifest, backend))
             )
         except Exception as exc:
-            from worker_protocol import emit_error
-            return emit_error("RUNTIME_ACTIVATION_FAILED", f"Bundled runtime {backend} failed validation: {exc}", recoverable=True)
+            return activation_error("RUNTIME_ACTIVATION_FAILED", f"Bundled runtime {backend} failed validation: {exc}", "probe-runtime")
         if not _runtime_probe_is_ready(backend, probed, manifest):
-            from worker_protocol import emit_error
-            return emit_error(
+            return activation_error(
                 "RUNTIME_ACTIVATION_FAILED",
                 f"Bundled runtime {backend} failed validation: torchBackend={probed.get('torchBackend')}, "
                 f"acceleratorAvailable={probed.get('acceleratorAvailable')}",
-                recoverable=True,
+                "verify-runtime",
             )
         activation_validation = None
         if backend == "rocm":
-            activation_validation = _verify_rocm_activation(python_path, (state or {}).get("installedTargets", []), payload.get("deviceIds"),
-                **({"selected_device_ids": selected_devices} if selected_devices else {}))
+            activation_validation = check_activation()
             if activation_validation.get("status") != "passed":
-                from worker_protocol import emit_error
-                return emit_error("RUNTIME_GPU_VALIDATION_FAILED", "The ROCm runtime did not pass basic GPU execution validation.",
-                                  task_id=payload.get("taskId"), recoverable=True,
-                                  extra={"activationValidation": activation_validation})
+                return activation_error("RUNTIME_GPU_VALIDATION_FAILED", "The ROCm runtime did not pass basic GPU execution validation.",
+                                        "gpu-check", activation_validation)
         active = {
             **(state or {}),
             **(registered_overlay or {}),
@@ -2358,28 +2385,19 @@ def cmd_activate_runtime(payload: dict[str, Any]) -> int:
             else _probe_python_runtime(python_path, _backend_extra_names(manifest, backend))
         )
     except Exception as exc:
-        from worker_protocol import emit_error
-        return emit_error(
-            "RUNTIME_ACTIVATION_FAILED",
-            f"Runtime {backend} failed validation: {exc}",
-            recoverable=True,
-        )
+        return activation_error("RUNTIME_ACTIVATION_FAILED", f"Runtime {backend} failed validation: {exc}", "probe-runtime")
     activation_validation = None
     if backend == "rocm":
-        activation_validation = _verify_rocm_activation(python_path, (state or {}).get("installedTargets", []), payload.get("deviceIds"),
-                **({"selected_device_ids": selected_devices} if selected_devices else {}))
+        activation_validation = check_activation()
         if activation_validation.get("status") != "passed":
-            from worker_protocol import emit_error
-            return emit_error("RUNTIME_GPU_VALIDATION_FAILED", "The ROCm runtime did not pass basic GPU execution validation.",
-                              task_id=payload.get("taskId"), recoverable=True,
-                              extra={"activationValidation": activation_validation})
+            return activation_error("RUNTIME_GPU_VALIDATION_FAILED", "The ROCm runtime did not pass basic GPU execution validation.",
+                                    "gpu-check", activation_validation)
     if not _runtime_probe_is_ready(backend, probed, manifest):
-        from worker_protocol import emit_error
-        return emit_error(
+        return activation_error(
             "RUNTIME_ACTIVATION_FAILED",
             f"Runtime {backend} failed validation: torchBackend={probed.get('torchBackend')}, "
             f"acceleratorAvailable={probed.get('acceleratorAvailable')}",
-            recoverable=True,
+            "verify-runtime",
         )
     if not state:
         state = _fresh_runtime_state_from_probe(backend, manifest, probed)
@@ -2631,6 +2649,7 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
     if sys.platform not in spec.get("platforms", []):
         from worker_protocol import emit_error
         return emit_error("RUNTIME_PLATFORM_UNSUPPORTED", f"Backend {backend} is not supported on {sys.platform}", task_id=task_id)
+    install_plan: dict[str, Any] = {}
     try:
         install_plan = _runtime_operation_plan(payload, manifest)
         assert_profile_installable(install_plan, accept_preview=payload.get("acceptPreview") is True)
@@ -2695,7 +2714,10 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
                 return 0
     except (ValueError, TypeError, KeyError, RuntimeError) as error:
         from worker_protocol import emit_error
-        return emit_error("RUNTIME_PROFILE_INVALID", str(error), task_id=task_id, recoverable=True)
+        extra: dict[str, Any] = {"backend": backend, "stage": "plan"}
+        if backend == "rocm":
+            extra["runtimeDiagnostics"] = _rocm_failure_context(None, install_plan, "plan")
+        return emit_error("RUNTIME_PROFILE_INVALID", str(error), task_id=task_id, recoverable=True, extra=extra)
     index_url = None
     mirror, index_url = _resolve_pypi_mirror(mirror, locale)
     env_dir = _env_dir(backend)
@@ -2721,7 +2743,9 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
         except (OSError, ValueError, RuntimeSpaceError) as error:
             from worker_protocol import emit_error
             return emit_error("RUNTIME_INSUFFICIENT_SPACE" if isinstance(error, RuntimeSpaceError) else "RUNTIME_INSTALL_FAILED",
-                              str(error), task_id=task_id, recoverable=True)
+                              str(error), task_id=task_id, recoverable=True,
+                              extra={"backend": backend, "action": action,
+                                     "runtimeDiagnostics": _rocm_failure_context(None, install_plan, "preflight")})
     try:
         had_existing_environment = env_dir.is_dir() and any(env_dir.iterdir())
     except OSError:
@@ -2732,6 +2756,12 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
     install_log_path = _env_log_path(backend)
     reinstall_backup: Path | None = None
     frozen_accelerators: dict[str, str] = {}
+    install_stage = "begin-transaction"
+    candidate_started = False
+    candidate_state: dict[str, Any] = {}
+    candidate_diagnostics: dict[str, Any] | None = None
+    pip_messages: deque[str] = deque(maxlen=6)
+    pip_exit_code: int | None = None
     accelerator_sources: dict[str, Any] = dict(cached.get("acceleratorPackageSources") or {}) if action == "addTargets" else {}
     locked_requirements_path = RUNTIME_ENVS_DIR / f".{backend}.locked-{uuid.uuid4().hex}.txt"
     seed_state: dict[str, Any] | None = None
@@ -2751,6 +2781,10 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
             file.write(f"[{stage}] {message}\n")
 
     def run_pip(args: list[str], stage: str, package_index: str | None = None) -> None:
+        nonlocal install_stage, pip_exit_code
+        install_stage = f"pip-{stage}"
+        pip_messages.clear()
+        pip_exit_code = None
         command = [str(env_python), "-m", "pip", "install", "--no-cache-dir"]
         report_path = env_dir / f"pymss-install-{stage}.json"
         command.extend(["--report", str(report_path)])
@@ -2772,6 +2806,9 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
                 message = line.rstrip()
                 append_log(stage, message)
                 _emit("runtime_install_log", {"stage": stage, "message": message}, task_id)
+                if backend == "rocm" and line.lstrip().startswith(("ERROR:", "WARNING:")):
+                    from worker_protocol import _redact_sensitive_text
+                    pip_messages.append(_redact_sensitive_text(message)[:300])
         except Exception:
             # If the protocol pipe is gone, do not leave pip orphaned while the worker reports
             # a failure.  An orphaned install can keep files locked and make the next click look
@@ -2785,6 +2822,7 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
             if close_stdout:
                 close_stdout()
         if process.wait() != 0:
+            pip_exit_code = process.returncode
             raise RuntimeError(f"pip failed during {stage} with exit code {process.returncode}")
         if report_path.is_file():
             report = _read_json_object(report_path)
@@ -2828,6 +2866,8 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
             previous_state = _read_json_object(_env_state_path(backend)) or {}
             source_profile = _recorded_runtime_profile(previous_state)
             transaction.begin("install", activate=activate, profile=source_profile, replace_previous=payload.get("replacePrevious") is True)
+            candidate_started = True
+            install_stage = "prepare-candidate"
             if action == "addTargets":
                 transaction.copy_current_candidate()
             else:
@@ -2839,6 +2879,7 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
                                        progress=lambda copied, total: _emit("runtime_install_stage", {
                                            "stage": "copy-seed", "copiedBytes": copied, "totalBytes": total}, task_id))
                 bootstrap_binding = seed_state.get("bootstrapBinding")
+        install_stage = "prepare-interpreter"
         install_log_path.write_text(
             f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] install backend={backend} mirror={mirror} manifest={manifest['manifestVersion']}\n",
             encoding="utf-8",
@@ -2890,8 +2931,10 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
         _emit("runtime_install_started", {"backend": backend, "manifestVersion": manifest["manifestVersion"], "logPath": str(install_log_path),
                                           "activate": activate, "space": space_report}, task_id)
         if action != "prepareSeed":
+            install_stage = "bootstrap-pip"
             _ensure_runtime_pip(env_python, task_id, append_log)
         if action == "prepareSeed":
+            install_stage = "verify-seed"
             base_probe = _probe_python_runtime(env_python, _backend_extra_names(manifest, backend))
             frozen_accelerators = _probed_accelerator_versions(base_probe, seed_state.get("devicePackageNames", []))
             verify_accelerator_versions(seed_state.get("resolvedAcceleratorPackages") or seed_state.get("acceleratorPackages") or {}, frozen_accelerators)
@@ -2900,6 +2943,7 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
         elif install_plan.get("resolutionStatus") == "locked":
             from worker_runtime_artifacts import build_locked_requirements, download_locked_artifacts
             artifacts = install_plan["artifacts"]
+            install_stage = "verify-base"
             if action == "addTargets":
                 before = _probe_python_runtime(env_python, _backend_extra_names(manifest, backend))
                 previous_versions = _probe_python_package_versions(env_python, list(cached["acceleratorPackageArtifacts"]))
@@ -2912,6 +2956,7 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
                 installed_names = set((cached.get("acceleratorPackageArtifacts") or {}))
                 artifacts = [item for item in artifacts if item["role"] == "device" and item["name"] not in installed_names]
             if artifacts:
+                install_stage = "download-locked-packages"
                 def download_notice(filename: str, provider: str) -> None:
                     message = f"Downloading locked runtime package: {filename} ({provider})"
                     append_log("locked", message)
@@ -2926,6 +2971,7 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
                         build_locked_requirements(install_plan, artifacts=artifacts, wheelhouse=wheelhouse), encoding="utf-8",
                     )
                     run_pip(["--no-index", "--require-hashes", "--no-deps", "--only-binary=:all:", "-r", str(locked_requirements_path)], "locked")
+            install_stage = "verify-locked-packages"
             base_probe = _probe_python_runtime(env_python, _backend_extra_names(manifest, backend))
             versions = _probe_python_package_versions(env_python, [item["name"] for item in install_plan["artifacts"]])
             frozen_accelerators = _probed_accelerator_versions(
@@ -2947,6 +2993,7 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
                 run_pip(list(torch["rocmRequirements"]), "rocm-sdk", None)
             torch_args = list(torch.get("requirements", [])) if torch.get("requirements") else [torch["requirement"]]
             run_pip((["--no-deps"] if torch.get("noDeps") else []) + torch_args, "torch", torch.get("indexUrl"))
+            install_stage = "verify-torch"
             base_probe = _probe_python_runtime(env_python, _backend_extra_names(manifest, backend))
             frozen_accelerators = _probed_accelerator_versions(base_probe)
             if not frozen_accelerators.get("torch"):
@@ -2974,7 +3021,9 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
         # Probe the interpreter that was just built, not _runtime_info_payload(): that one reads
         # the *active* runtime, which at this point is still the previously activated environment
         # — recording its torch build here is what made a CPU env report cu128.
+        install_stage = "probe-runtime"
         probed = _probe_python_runtime(env_python, _backend_extra_names(manifest, backend))
+        candidate_state = {key: probed.get(key) for key in ("pythonVersion", "torchVersion")}
         if install_plan.get("resolutionStatus") == "locked":
             probed["packageVersions"] = {**(probed.get("packageVersions") or {}), **versions}
         verify_accelerator_versions(frozen_accelerators, _probed_accelerator_versions(probed, install_plan.get("devicePackageNames", [])))
@@ -2993,7 +3042,9 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
             raise RuntimeError(
                 "Runtime manifest verification failed: " + "; ".join(manifest_failures)
             )
+        install_stage = "verify-audio"
         _verify_runtime_audio(env_python)
+        install_stage = "verify-profile"
         if backend == "rocm" and install_plan["profileId"] and install_plan.get("resolutionStatus") not in {"locked", "bundledSeed"}:
             verify_profile_accelerator_sources(install_plan, accelerator_sources)
         state = {
@@ -3025,13 +3076,17 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
         if bootstrap_binding:
             state["bootstrapBinding"] = bootstrap_binding
         state["activationValidation"] = {"status": "notRun"}
+        candidate_state = state
         if backend == "rocm" and activate:
+            install_stage = "gpu-check"
             _emit("runtime_install_stage", {"stage": "gpu-check", "message": "Checking basic ROCm device execution"}, task_id)
             state["activationValidation"] = _verify_rocm_activation(env_python, state.get("installedTargets", []), payload.get("deviceIds"),
                 **({"selected_device_ids": payload["selectedDeviceIds"]} if payload.get("selectedDeviceIds") else {}))
         if backend == "rocm":
+            install_stage = "discover-native-paths"
             from worker_runtime_paths import discover_rocm_native_paths
             state.update(discover_rocm_native_paths(env_dir, env_python))
+        install_stage = "write-candidate-state"
         if transaction:
             state["environmentTransactionId"] = transaction.record["id"]
             # A target addition retains the host ABI and its registered core overlay.
@@ -3046,18 +3101,22 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
         }
         if transaction:
             if activate and state["activationValidation"]["status"] != "passed":
+                candidate_diagnostics = _rocm_failure_context(env_python, {**install_plan, **state}, "gpu-check")
+                install_stage = "recover-gpu-check"
                 prepared = {key: value for key, value in active.items() if key != "activatedAt"}
                 retained = False
                 if not transaction.record["hadCurrent"]:
                     retained = transaction.commit_prepared()
                 if not retained:
                     transaction.abort()
+                candidate_diagnostics["recovery"] = "candidate-retained" if retained else "previous-runtime-preserved"
                 _emit("runtime_install_finished", {"backend": backend, "state": prepared if retained else cached or None,
                       "preparedState": {**prepared, "retained": retained}, "activated": False,
-                      "activationValidation": state["activationValidation"], "action": action,
+                      "activationValidation": state["activationValidation"], "runtimeDiagnostics": candidate_diagnostics, "action": action,
                       "logPath": str(install_log_path), "environmentRollbackAvailable": bool(transaction.previous_manifest())}, task_id)
                 return 0
             if action == "addTargets" and activate:
+                install_stage = "verify-active-overlay"
                 old_active = _read_runtime_state() or {}
                 if old_active.get("baseFingerprint") == state.get("baseFingerprint"):
                     active = {**old_active, **active}
@@ -3069,6 +3128,7 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
                         verify_accelerator_versions(frozen_accelerators, _probed_accelerator_versions(overlay_probe, install_plan.get("devicePackageNames", [])))
                         _verify_runtime_audio(env_python, overlay, core_api=True)
                         active.update({key: overlay_probe[key] for key in ("packages", "packageVersions", "pymssVersion", "pymssCoreVersion", "pymssGraphAvailable") if key in overlay_probe})
+            install_stage = "commit-runtime"
             transaction.commit(active if activate else None)
         elif activate:
             _write_runtime_state(active)
@@ -3084,12 +3144,26 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
         return 0
     except Exception as exc:
         from worker_protocol import emit_error
+        extra = {"backend": backend, "logPath": str(install_log_path), "action": action, "stage": install_stage}
         if transaction:
+            diagnostics = candidate_diagnostics or _rocm_failure_context(
+                env_python if candidate_started else None, {**install_plan, **candidate_state}, install_stage,
+            )
+            extra["runtimeDiagnostics"] = diagnostics
+            if pip_exit_code is not None and install_stage.startswith("pip-"):
+                diagnostics["pipExitCode"] = pip_exit_code
+                diagnostics["pipMessages"] = list(pip_messages)
+            validation = candidate_state.get("activationValidation")
+            if validation and validation.get("status") == "failed":
+                extra["activationValidation"] = validation
+            recovery_started = bool(transaction.record)
             try:
                 transaction.abort()
+                diagnostics["recovery"] = "completed" if recovery_started else "not-started"
             except Exception as recovery_error:
+                diagnostics["recovery"] = "failed"
                 return emit_error("RUNTIME_RECOVERY_FAILED", f"{exc}; recovery failed: {recovery_error}", task_id=task_id,
-                                  recoverable=True, extra={"backend": backend})
+                                  recoverable=True, extra=extra)
         if reinstall_backup and reinstall_backup.exists():
             import shutil
             if env_dir.exists():
@@ -3106,7 +3180,7 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
             detail=f"详细安装日志：{install_log_path}",
             task_id=task_id,
             recoverable=True,
-            extra={"backend": backend, "logPath": str(install_log_path)},
+            extra=extra,
         )
     finally:
         try:

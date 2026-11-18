@@ -7,20 +7,30 @@ from pathlib import Path
 from typing import Any
 
 from worker_protocol import _redact_sensitive_text
-from worker_runtime_inventory import _child, system_inventory
+from worker_runtime_inventory import InventoryProcessError, _child, system_inventory
 from worker_runtime_paths import discover_rocm_native_paths
 
 _CHECK = r'''
 import ctypes, json, re, sys
 targets, indices, selection = [json.loads(value) for value in sys.argv[1:4]]
 result = {'status': 'failed', 'devices': []}
+def error_text(error):
+ return type(error).__name__ + ': ' + (str(error).splitlines() or [''])[0][:300]
+
+stage = 'import-torch'
 try:
  import torch
+ result['torchVersion'] = str(getattr(torch, '__version__', ''))[:80]
+ result['hipVersion'] = str(getattr(torch.version, 'hip', None) or '')[:80]
+ stage = 'check-availability'
  if not getattr(torch.version, 'hip', None) or not torch.cuda.is_available():
   raise RuntimeError('No usable ROCm GPU is available')
+ stage = 'enumerate-devices'
  count = torch.cuda.device_count()
+ result['deviceCount'] = count
  pci_fn = None
  if selection['hipLibrary']:
+  stage = 'load-hip-library'
   library = ctypes.CDLL(selection['hipLibrary'])
   pci_fn = library.hipDeviceGetPCIBusId
   pci_fn.argtypes = [ctypes.POINTER(ctypes.c_char), ctypes.c_int, ctypes.c_int]
@@ -28,6 +38,7 @@ try:
  requested = set(selection['ids']); found = set()
  for index in (indices if indices is not None else list(range(min(count, 256)))):
   item = {'index': index, 'status': 'failed'}
+  device_stage = 'device-properties'
   try:
    prop = torch.cuda.get_device_properties(index)
    raw = str(getattr(prop, 'gcnArchName', '')).lower()
@@ -35,6 +46,7 @@ try:
    gfx = match.group(1) if match else None
    stable = None
    if pci_fn is not None:
+    device_stage = 'device-mapping'
     bus = ctypes.create_string_buffer(64)
     if pci_fn(bus, len(bus), index) == 0:
      pci = bus.value.decode('ascii').lower()
@@ -50,14 +62,18 @@ try:
    if targets and gfx not in targets:
     item['status'] = 'targetMissing'
    else:
+    device_stage = 'create-tensor'
     source = torch.ones(16, device='cuda:' + str(index), dtype=torch.float32)
+    device_stage = 'run-kernel'
     actual = (source + 1).sum()
+    device_stage = 'synchronize'
     torch.cuda.synchronize(index)
+    device_stage = 'read-result'
     if actual.item() != 32:
      raise RuntimeError('The minimum GPU kernel returned an incorrect result')
     item['status'] = 'passed'
   except Exception as error:
-   item['message'] = type(error).__name__ + ': ' + str(error).splitlines()[0][:300]
+   item.update({'stage': device_stage, 'message': error_text(error)})
   result['devices'].append(item)
  all_required = bool(requested) or indices is not None
  passed = bool(result['devices']) and (all(d['status'] == 'passed' for d in result['devices']) if all_required else any(d['status'] == 'passed' for d in result['devices']))
@@ -66,7 +82,7 @@ try:
   passed = False
  result['status'] = 'passed' if passed else 'failed'
 except Exception as error:
- result['message'] = type(error).__name__ + ': ' + str(error).splitlines()[0][:300]
+ result.update({'stage': stage, 'message': error_text(error)})
 print(json.dumps(result))
 '''
 
@@ -90,6 +106,7 @@ def verify_activation(python: Path, targets: list[str], device_ids: Any = None,
     root = _runtime_root(python)
     library = None
     unique_pnp = False
+    stage = "prepare-device-mapping"
     try:
         if any(value.startswith("hip-pci:") for value in selection):
             paths = discover_rocm_native_paths(root, python)
@@ -102,6 +119,7 @@ def verify_activation(python: Path, targets: list[str], device_ids: Any = None,
             adapters = [device for device in system_inventory() if device["vendor"] == "amd"]
             unique_pnp = len(selection) == 1 and len(adapters) == 1 and adapters[0]["id"] == selection[0]
         request = {"ids": selection, "hipLibrary": library, "uniquePnp": unique_pnp}
+        stage = "gpu-check-process"
         result = _child([str(python), "-I", "-B", "-c", _CHECK, json.dumps(targets), json.dumps(device_ids), json.dumps(request)],
                         timeout=60, environment=environment, last_json=True)
         if result.get("status") not in {"passed", "failed"} or not isinstance(result.get("devices"), list):
@@ -113,8 +131,62 @@ def verify_activation(python: Path, targets: list[str], device_ids: Any = None,
                 device["message"] = _redact_sensitive_text(str(device["message"]))[:500]
         return result
     except subprocess.TimeoutExpired as error:
-        return {"status": "failed", "reason": "timeout", "devices": [],
+        return {"status": "failed", "reason": "timeout", "stage": stage, "devices": [],
                 "message": f"The GPU activation check timed out after {error.timeout} seconds"}
+    except InventoryProcessError as error:
+        lines = error.stderr.decode("utf-8", errors="replace").strip().splitlines()
+        stderr_lines = []
+        remaining = 500
+        for line in reversed(lines[-2:]):
+            if not remaining:
+                break
+            clean = _redact_sensitive_text(line)[-remaining:]
+            stderr_lines.append(clean)
+            remaining -= len(clean)
+        return {"status": "failed", "reason": "processFailed", "stage": stage, "devices": [],
+                "exitCode": error.exit_code, "message": str(error),
+                **({"stderrLines": stderr_lines[::-1]} if stderr_lines else {})}
     except (OSError, ValueError, RuntimeError, IndexError) as error:
-        return {"status": "failed", "reason": "processFailed", "devices": [],
+        return {"status": "failed", "reason": "processFailed", "stage": stage, "devices": [],
                 "message": _redact_sensitive_text(f"{type(error).__name__}: {error}")[:500]}
+
+
+def failure_context(python: Path | None, state: dict[str, Any], stage: str) -> dict[str, Any]:
+    """Read candidate metadata before recovery, without importing anything from it."""
+    import sys
+
+    context: dict[str, Any] = {"stage": stage}
+    for key in ("profileId", "profileRevision", "pythonVersion", "torchVersion", "resolutionStatus",
+                "resolvedTargets", "installedTargets"):
+        if state.get(key) is not None:
+            context[key] = state[key]
+    if python is None:
+        return context
+
+    packages = {}
+    try:
+        root = _runtime_root(python)
+        for site in [root / "Lib/site-packages", *root.glob("lib/python*/site-packages")]:
+            for entry in site.glob("*.dist-info"):
+                name, _, version = entry.stem.rpartition("-")
+                name = name.lower().replace("_", "-")
+                if (name in {"torch", "torchaudio", "torchvision", "rocm", "pymss", "pymss-core"}
+                        or re.fullmatch(r"(?:rocm-sdk|amd-torch)(?:-[a-z0-9]+)*", name)):
+                    if re.fullmatch(r"[a-zA-Z0-9.+!_-]{1,80}", version):
+                        # An interrupted pip run may have left more than one version.
+                        packages[(name, version)] = {"name": name, "version": version}
+        context["packages"] = [
+            packages[key] for key in sorted(packages, key=lambda key: (key[0] not in {"torch", "rocm", "pymss", "pymss-core"}, key))[:32]
+        ]
+    except (OSError, RuntimeError):
+        context["packageInventory"] = "unavailable"
+    if sys.platform == "win32":
+        try:
+            adapters = system_inventory(timeout=4)
+            context["displayAdapters"] = [
+                {"name": device["name"], "vendor": device["vendor"], "driverVersion": device["driverVersion"]}
+                for device in sorted(adapters, key=lambda device: device["vendor"] != "amd")[:8]
+            ]
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            context["driverInventory"] = "unavailable"
+    return context

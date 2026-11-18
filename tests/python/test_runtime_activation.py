@@ -18,7 +18,7 @@ import worker_runtime_activation as activation
 
 
 class RuntimeActivationTests(unittest.TestCase):
-    def check(self, architectures, pci_ids, selected, *, unique_pnp=False):
+    def check(self, architectures, pci_ids, selected, *, unique_pnp=False, kernel_error=None):
         calls = []
 
         class Value:
@@ -36,12 +36,17 @@ class RuntimeActivationTests(unittest.TestCase):
                 buffer.value = pci_ids[index].encode()
                 return 0
 
+        def ones(*_args, **_kwargs):
+            if kernel_error is not None:
+                raise kernel_error
+            return Value()
+
         torch = types.SimpleNamespace(
-            version=types.SimpleNamespace(hip="10.0"), float32="fp32",
+            __version__="2.13.0+rocm10.0.0", version=types.SimpleNamespace(hip="10.0"), float32="fp32",
             cuda=types.SimpleNamespace(is_available=lambda: True, device_count=lambda: len(architectures),
                 get_device_properties=lambda i: types.SimpleNamespace(name="AMD", gcnArchName=architectures[i]),
                 synchronize=lambda index: calls.append(index)),
-            ones=lambda *_args, **_kwargs: Value(),
+            ones=ones,
         )
         request = {"ids": selected, "hipLibrary": "C:/verified/amdhip64.dll", "uniquePnp": unique_pnp}
         output = io.StringIO()
@@ -86,6 +91,41 @@ class RuntimeActivationTests(unittest.TestCase):
         with self.assertRaises(ValueError), mock.patch.object(activation, "_child") as child:
             activation.verify_activation(Path(sys.executable), [], selected_device_ids=["session:0"])
         child.assert_not_called()
+
+    def test_kernel_failure_keeps_stage_gpu_and_loaded_torch_versions(self):
+        report, calls = self.check(["gfx1031"], ["0000:03:00.0"], [], kernel_error=RuntimeError("device kernel image is invalid"))
+        self.assertEqual(calls, [])
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual((report["torchVersion"], report["hipVersion"]), ("2.13.0+rocm10.0.0", "10.0"))
+        self.assertEqual(report["deviceCount"], 1)
+        device = report["devices"][0]
+        self.assertEqual((device["gfx"], device["stage"]), ("gfx1031", "create-tensor"))
+        self.assertIn("device kernel image is invalid", device["message"])
+
+    def test_process_crash_keeps_exit_code_and_redacts_stderr(self):
+        crash = activation.InventoryProcessError(
+            3221225477, b"startup " * 100 + b"\nRuntimeError: https://user:secret@example.com/packages?token=hidden",
+        )
+        with mock.patch.object(activation, "_child", side_effect=crash):
+            report = activation.verify_activation(Path(sys.executable), [])
+        self.assertEqual(report["exitCode"], 3221225477)
+        self.assertEqual(report["stage"], "gpu-check-process")
+        lines = report["stderrLines"]
+        self.assertIn("RuntimeError", lines[-1])
+        self.assertLessEqual(sum(map(len, lines)), 500)
+        self.assertNotIn("secret", "\n".join(lines))
+        self.assertNotIn("hidden", "\n".join(lines))
+
+    def test_authorization_redaction_preserves_the_next_stderr_line(self):
+        crash = activation.InventoryProcessError(
+            9, b"Authorization: Bearer private-fixture\nRuntimeError: device kernel image is invalid\n",
+        )
+        with mock.patch.object(activation, "_child", side_effect=crash):
+            report = activation.verify_activation(Path(sys.executable), [])
+        self.assertEqual(report["stderrLines"], [
+            "Authorization: <redacted>",
+            "RuntimeError: device kernel image is invalid",
+        ])
 
 
 if __name__ == "__main__":

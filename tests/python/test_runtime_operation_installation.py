@@ -66,6 +66,9 @@ class RuntimeOperationTests(unittest.TestCase):
             mock.patch.object(bootstrap, "_verify_runtime_pip_check"),
             mock.patch.object(bootstrap, "_verify_runtime_audio"),
             mock.patch.object(bootstrap, "_verify_rocm_activation", return_value={"status": "passed"}),
+            mock.patch("worker_runtime_activation.system_inventory", return_value=[
+                {"name": "AMD Radeon", "vendor": "amd", "driverVersion": "32.0.1", "hardwareId": "private-device"},
+            ]),
             mock.patch.object(bootstrap, "_probe_python_runtime", side_effect=self.probe),
             mock.patch.object(bootstrap, "_probe_python_package_versions", side_effect=lambda _python, names, *_args: {n: self.installed.get(n) for n in names}),
             mock.patch.object(bootstrap, "_probe_python_distribution_sources", side_effect=self.sources),
@@ -445,14 +448,71 @@ class RuntimeOperationTests(unittest.TestCase):
         self.assertEqual(self.install(), 0)
         before = (self.root / "rocm/pymss-runtime-state.json").read_bytes()
         pointer = self.pointer.read_bytes()
-        with mock.patch.object(bootstrap, "_verify_rocm_activation", return_value={"status": "failed", "reason": "targetMissing"}):
+        package = self.root / "rocm/Lib/site-packages/rocm_sdk_device_gfx1031-10.0.0.dist-info"
+
+        def fail_gpu(*_args, **_kwargs):
+            package.mkdir(parents=True)
+            return {"status": "failed", "reason": "targetMissing"}
+
+        with mock.patch.object(bootstrap, "_verify_rocm_activation", side_effect=fail_gpu):
             self.assertEqual(self.install(activate=True), 0)
         self.assertEqual(self.pointer.read_bytes(), pointer)
         self.assertEqual((self.root / "rocm/pymss-runtime-state.json").read_bytes(), before)
         finished = [event[1] for event in self.events if event[0] == "runtime_install_finished"][-1]
         self.assertFalse(finished["activated"])
         self.assertFalse(finished["preparedState"]["retained"])
+        self.assertFalse(package.exists())
+        diagnostics = finished["runtimeDiagnostics"]
+        self.assertEqual(diagnostics["stage"], "gpu-check")
+        self.assertEqual(diagnostics["recovery"], "previous-runtime-preserved")
+        self.assertEqual(diagnostics["packages"], [{"name": "rocm-sdk-device-gfx1031", "version": "10.0.0"}])
+        self.assertEqual(diagnostics["displayAdapters"], [
+            {"name": "AMD Radeon", "vendor": "amd", "driverVersion": "32.0.1"},
+        ])
         self.assertFalse((self.root / ".rocm-transaction.json").exists())
+
+    def test_pip_failure_keeps_only_bounded_redacted_error_lines_after_recovery(self):
+        self.assertEqual(self.install(), 0)
+        before = self.state()
+        pip = mock.Mock(returncode=1)
+        pip.stdout = io.StringIO(
+            "Normal pip output\n" + "WARNING: Retry\n" * 8
+            + "ERROR: Could not install from https://user:secret@example.com/?token=hidden\n"
+        )
+        pip.wait.return_value = 1
+        with mock.patch.object(bootstrap.subprocess, "Popen", return_value=pip), \
+             mock.patch("worker_protocol.emit_error", return_value=1) as error:
+            self.assertEqual(self.install(), 1)
+        self.assertEqual(self.state(), before)
+        diagnostics = error.call_args.kwargs["extra"]["runtimeDiagnostics"]
+        self.assertEqual(diagnostics["stage"], "pip-locked")
+        self.assertEqual(diagnostics["recovery"], "completed")
+        self.assertEqual(diagnostics["pipExitCode"], 1)
+        self.assertEqual(len(diagnostics["pipMessages"]), 6)
+        self.assertIn("Could not install", diagnostics["pipMessages"][-1])
+        for value in ("Normal pip output", "secret", "hidden"):
+            self.assertNotIn(value, json.dumps(diagnostics))
+
+    def test_diagnostics_failure_does_not_replace_install_error_or_skip_recovery(self):
+        self.assertEqual(self.install(), 0)
+        before, pointer = self.state(), self.pointer.read_bytes()
+        marker = self.root / "rocm/previous-generation"
+        marker.touch()
+        for target, field in (("_runtime_root", "packageInventory"), ("failure_context", "collectionStatus")):
+            with self.subTest(target=target), \
+                 mock.patch.object(bootstrap, "_verify_runtime_audio", side_effect=RuntimeError("decoder failure")), \
+                 mock.patch(f"worker_runtime_activation.{target}", side_effect=RuntimeError("broken metadata path")), \
+                 mock.patch("worker_protocol.emit_error", return_value=1) as error:
+                self.assertEqual(self.install(), 1)
+                self.assertEqual(error.call_args.args, ("RUNTIME_INSTALL_FAILED", "decoder failure"))
+                diagnostics = error.call_args.kwargs["extra"]["runtimeDiagnostics"]
+                self.assertEqual(diagnostics[field], "unavailable")
+                self.assertEqual(diagnostics["stage"], "verify-audio")
+                self.assertEqual(diagnostics["recovery"], "completed")
+                self.assertEqual(self.state(), before)
+                self.assertEqual(self.pointer.read_bytes(), pointer)
+                self.assertTrue(marker.is_file())
+                self.assertFalse((self.root / ".rocm-transaction.json").exists())
 
     def test_first_gpu_failure_keeps_dependencies_pointer_and_overlays_for_activation_retry(self):
         pointer = self.pointer.read_bytes()

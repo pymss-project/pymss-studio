@@ -19,7 +19,13 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 @{devices=@(Get-CimInstance Win32_VideoController | Select-Object -First 64 Name,PNPDeviceID,DriverVersion)} | ConvertTo-Json -Depth 5 -Compress
 """
-_GATE = "import json,subprocess,sys; a=json.loads(sys.stdin.buffer.readline()); raise SystemExit(subprocess.call(a))"
+_GATE = """
+import json, os, subprocess, sys
+command = json.loads(sys.stdin.buffer.readline())
+code = subprocess.call(command)
+# subprocess returns an unsigned DWORD on Windows, but SystemExit takes a signed C int.
+raise SystemExit(code - 2**32 if os.name == 'nt' and code >= 2**31 else code)
+"""
 
 
 def _vendor(name: str, identity: str) -> str:
@@ -31,6 +37,13 @@ def _vendor(name: str, identity: str) -> str:
     if "ven_8086" in value or "intel" in value:
         return "intel"
     return "unknown"
+
+
+class InventoryProcessError(RuntimeError):
+    def __init__(self, exit_code: int, stderr: bytes):
+        super().__init__(f"The hardware inventory process exited with code {exit_code}")
+        self.exit_code = exit_code
+        self.stderr = stderr
 
 
 def _child(command: list[str], *, timeout: float = 20, directory: Path | None = None,
@@ -48,15 +61,22 @@ def _child(command: list[str], *, timeout: float = 20, directory: Path | None = 
                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     job = None
     outputs = [bytearray(), bytearray()]
-    oversized = [False]
+    oversized = [False, False]
+    output_limit = 128 * 1024
     readers = []
 
     def drain(stream, index: int) -> None:
+        buffer = outputs[index]
         while data := stream.read(16384):
-            remaining = 128 * 1024 - len(outputs[index])
-            outputs[index].extend(data[:max(0, remaining)])
+            remaining = output_limit - len(buffer)
             if len(data) > remaining:
-                oversized[0] = True
+                oversized[index] = True
+            if index == 0:
+                # The stdout protocol requires a complete, bounded response.
+                buffer.extend(data[:remaining])
+            else:
+                buffer.extend(data)
+                del buffer[:-output_limit]
 
     try:
         if os.name == "nt":
@@ -69,17 +89,6 @@ def _child(command: list[str], *, timeout: float = 20, directory: Path | None = 
         process.stdin.write((json.dumps(command) + "\n").encode())
         process.stdin.close()
         process.wait(timeout=timeout)
-        for reader in readers:
-            reader.join(timeout=1)
-        if process.returncode or oversized[0]:
-            raise RuntimeError("The hardware inventory process did not return a bounded response")
-        decoded = outputs[0].decode("utf-8-sig")
-        if not decoded.strip():
-            raise ValueError("The hardware inventory response is empty")
-        result = json.loads(decoded.strip().splitlines()[-1] if last_json else decoded)
-        if not isinstance(result, dict):
-            raise ValueError("The hardware inventory response must be an object")
-        return result
     finally:
         try:
             if job is not None:
@@ -103,12 +112,24 @@ def _child(command: list[str], *, timeout: float = 20, directory: Path | None = 
                 if stream is not None and not stream.closed:
                     stream.close()
 
+    if process.returncode:
+        raise InventoryProcessError(process.returncode, bytes(outputs[1]))
+    if any(oversized):
+        raise RuntimeError("The hardware inventory process did not return a bounded response")
+    decoded = outputs[0].decode("utf-8-sig")
+    if not decoded.strip():
+        raise ValueError("The hardware inventory response is empty")
+    result = json.loads(decoded.strip().splitlines()[-1] if last_json else decoded)
+    if not isinstance(result, dict):
+        raise ValueError("The hardware inventory response must be an object")
+    return result
 
-def system_inventory() -> list[dict[str, Any]]:
+
+def system_inventory(*, timeout: float = 20) -> list[dict[str, Any]]:
     if sys.platform != "win32":
         return []
     shell = Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-    raw = _child([str(shell), "-NoProfile", "-NonInteractive", "-Command", _SYSTEM_QUERY])
+    raw = _child([str(shell), "-NoProfile", "-NonInteractive", "-Command", _SYSTEM_QUERY], timeout=timeout)
     values = raw.get("devices", [])
     values = [values] if isinstance(values, dict) else values
     if not isinstance(values, list) or len(values) > 64:

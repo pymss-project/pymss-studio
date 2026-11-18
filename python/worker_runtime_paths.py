@@ -26,21 +26,37 @@ _QUERY = r'''
 import importlib.util, json, sys
 from pathlib import Path
 root = Path(sys.argv[1]).resolve()
+prefix = Path(sys.prefix).resolve()
 
 def fail(message, **details):
-    context = {**details, 'selectedEnvironment': str(root), 'sysPrefix': str(Path(sys.prefix).resolve()),
+    context = {**details, 'selectedEnvironment': str(root), 'sysPrefix': str(prefix),
                'pythonExecutable': sys.executable}
     raise RuntimeError(message + '; queryContext=' + json.dumps(context, ensure_ascii=False))
 
-if Path(sys.prefix).resolve() != root:
-    fail('ROCm SDK query interpreter is outside the selected environment')
+if prefix != root:
+    # Rust supplies an extended-length Windows path, while the venv launcher
+    # can report the same directory without that prefix.
+    try:
+        same_environment = sys.platform == 'win32' and root.samefile(prefix)
+    except OSError:
+        same_environment = False
+    if not same_environment:
+        fail('ROCm SDK query interpreter is outside the selected environment')
+
+def path_in_environment(origin):
+    resolved = Path(origin).resolve()
+    for base in (root, prefix):
+        if resolved.is_relative_to(base):
+            return root / resolved.relative_to(base)
+    return None
+
 spec = importlib.util.find_spec('rocm_sdk')
 result = {'modules': [], 'sdkAvailable': spec is not None, 'querySupported': False}
 if spec is not None:
     if not spec.origin:
         fail('ROCm SDK module has no file origin', module='rocm_sdk', origin=spec.origin,
              searchLocations=list(spec.submodule_search_locations or [])[:8])
-    if not Path(spec.origin).resolve().is_relative_to(root):
+    if path_in_environment(spec.origin) is None:
         fail('ROCm SDK module is outside the selected environment', module='rocm_sdk', origin=spec.origin)
     try:
         from rocm_sdk import _dist_info as di
@@ -54,10 +70,10 @@ if spec is not None:
             name = package.get_py_package_name(family)
             found = importlib.util.find_spec(name)
             if found is not None and found.origin:
-                module_root = Path(found.origin).resolve().parent
-                if not module_root.is_relative_to(root):
+                module_file = path_in_environment(found.origin)
+                if module_file is None:
                     fail('ROCm SDK package is outside the selected environment', module=name, origin=found.origin)
-                result['modules'].append({'name': name, 'root': str(module_root)})
+                result['modules'].append({'name': name, 'root': str(module_file.parent)})
 print(json.dumps(result))
 '''
 

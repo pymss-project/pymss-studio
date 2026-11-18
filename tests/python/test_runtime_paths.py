@@ -72,6 +72,18 @@ AVAILABLE_TARGET_FAMILIES = []
         for value in paths.resolve_rocm_native_paths(moved, report)["nativeToolDirs"]:
             self.assertTrue(Path(value).is_relative_to(moved.resolve()))
 
+    @unittest.skipUnless(os.name == "nt", "Windows extended-length paths")
+    def test_discovery_accepts_normal_and_extended_paths_to_the_same_environment(self):
+        sdk = self._official_sdk()
+        extended = Path("\\\\?\\" + str(self.environment.resolve()))
+        normal_report = paths.discover_rocm_native_paths(self.environment, self.python)
+        for root, python in ((extended, self.python), (self.environment, extended / "Scripts/python.exe")):
+            with self.subTest(root=root, python=python):
+                report = paths.discover_rocm_native_paths(root, python)
+                self.assertEqual(report, normal_report)
+                dirs = paths.resolve_rocm_native_paths(root, report)
+                self.assertTrue(Path(dirs["nativeToolDirs"][0]).samefile(sdk / "lib/llvm/bin"))
+
     def test_missing_sdk_uses_only_local_legacy_payloads(self):
         self._sdk_package("_rocm_sdk_core_legacy")
         report = paths.discover_rocm_native_paths(self.environment, self.python)

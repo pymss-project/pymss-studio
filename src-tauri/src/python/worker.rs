@@ -1363,6 +1363,9 @@ fn log_worker_event_with_scope(
         .unwrap_or_default();
     let level = if envelope.event_type == "error" || envelope.event_type.ends_with("_failed") {
         "ERROR"
+    } else if envelope.event_type == "runtime_install_finished"
+        && envelope.payload.pointer("/activationValidation/status").and_then(Value::as_str) == Some("failed") {
+        "WARN"
     } else if envelope.event_type == "operation_result"
         && envelope.payload.pointer("/outputs/report/value/failed").and_then(Value::as_array).is_some_and(|items| !items.is_empty()) {
         "WARN"
@@ -1458,7 +1461,7 @@ fn record_worker_event(command: &str, envelope: &WorkerEnvelope, level: &str) ->
         "code", "stage", "phase", "logPath", "operation", "action", "event", "version",
         "nodeType", "nodeIndex", "nodeCount", "nodeProgress", "overallFraction", "errorType",
         "audioIndex", "audioCount", "progress", "done", "unit",
-        "completed", "total", "succeeded", "backend", "model", "format", "outputFormat",
+        "completed", "total", "succeeded", "backend", "source", "model", "format", "outputFormat",
     ] {
         if let Some(value) = payload.get(key).filter(|value| !value.is_null()) {
             if value.is_string() || value.is_boolean() || value.is_number() {
@@ -1468,6 +1471,9 @@ fn record_worker_event(command: &str, envelope: &WorkerEnvelope, level: &str) ->
     }
     if let Some(validation) = payload.get("activationValidation").filter(|value| value.is_object()) {
         record.context.insert("activationValidation".into(), crate::diagnostic_report::summarize_activation_validation(validation));
+    }
+    if let Some(diagnostics) = payload.get("runtimeDiagnostics").filter(|value| value.is_object()) {
+        record.context.insert("runtimeDiagnostics".into(), crate::diagnostic_report::summarize_runtime_diagnostics(diagnostics));
     }
     let result = if envelope.event_type == "operation_result" {
         payload.pointer("/outputs/report/value").unwrap_or(payload)
@@ -3904,6 +3910,45 @@ trigger_worker_native_fault()
         assert_eq!(record.detail.as_deref(), Some("Traceback\nMemoryError"));
         assert_eq!(record.node_id.as_deref(), Some("node-a"));
         assert_eq!(record.context["code"], "OOM");
+    }
+
+    #[test]
+    fn rocm_failure_diagnostics_survive_log_and_report_summaries() {
+        let envelope: super::WorkerEnvelope = serde_json::from_value(serde_json::json!({
+            "type": "runtime_install_finished",
+            "payload": {
+                "backend": "rocm", "action": "upgrade", "activated": false,
+                "activationValidation": {
+                    "status": "failed", "torchVersion": "2.13.0+rocm10.0.0", "hipVersion": "10.0",
+                    "stderrLines": ["Authorization: Bearer private-fixture", "RuntimeError: device kernel image is invalid"],
+                    "devices": [{"index": 0, "gfx": "gfx1100", "stage": "create-tensor",
+                                 "status": "failed", "stableId": "private-id"}]
+                },
+                "runtimeDiagnostics": {
+                    "stage": "gpu-check", "profileId": "win-rocm100-multiarch",
+                    "recovery": "previous-runtime-preserved", "installedTargets": ["gfx1100"],
+                    "packages": [{"name": "rocm-sdk-device-gfx1100", "version": "10.0.0",
+                                  "url": "private-package-url"}],
+                    "displayAdapters": [{"name": "AMD Radeon RX 7900 XTX", "vendor": "amd",
+                                         "driverVersion": "32.0.32015.16001", "id": "private-id"}]
+                }
+            }
+        })).unwrap();
+        let record = super::record_worker_event("install_runtime", &envelope, "WARN");
+        let mut report = crate::diagnostic_context::DiagnosticContext::default();
+        report.observe(&record);
+        let snapshot = report.snapshot();
+        let context = &snapshot["issues"][0]["context"];
+        assert_eq!(context["activationValidation"]["devices"][0]["stage"], "create-tensor");
+        assert_eq!(context["activationValidation"]["hipVersion"], "10.0");
+        assert_eq!(context["activationValidation"]["stderrLines"][1], "RuntimeError: device kernel image is invalid");
+        assert_eq!(context["runtimeDiagnostics"]["packages"][0]["name"], "rocm-sdk-device-gfx1100");
+        assert_eq!(context["runtimeDiagnostics"]["displayAdapters"][0]["driverVersion"], "32.0.32015.16001");
+        assert_eq!(context["runtimeDiagnostics"]["recovery"], "previous-runtime-preserved");
+        for private in ["private-id", "private-package-url", "private-fixture"] {
+            assert!(!serde_json::to_string(&record).unwrap().contains(private));
+            assert!(!snapshot.to_string().contains(private));
+        }
     }
 
     #[test]
