@@ -1466,6 +1466,9 @@ fn record_worker_event(command: &str, envelope: &WorkerEnvelope, level: &str) ->
             }
         }
     }
+    if let Some(validation) = payload.get("activationValidation").filter(|value| value.is_object()) {
+        record.context.insert("activationValidation".into(), crate::diagnostic_report::summarize_activation_validation(validation));
+    }
     let result = if envelope.event_type == "operation_result" {
         payload.pointer("/outputs/report/value").unwrap_or(payload)
     } else { payload };

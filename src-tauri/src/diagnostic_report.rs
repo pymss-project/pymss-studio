@@ -1706,6 +1706,35 @@ pub(crate) fn summarize_diagnostic_page(payload: &Value) -> Value {
     summary.finish(result)
 }
 
+pub(crate) fn summarize_activation_validation(payload: &Value) -> Value {
+    let mut summary = Summary::default();
+    let mut result = summary.pick(payload, &["status", "reason"]);
+    if let Some(message) = payload.get("message").and_then(Value::as_str) {
+        result["message"] = summary.text(message, MAX_ERROR);
+    }
+    let devices = payload.get("devices").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+    let items = devices.iter().take(8).map(|device| {
+        let mut item = summary.pick(device, &["index", "name", "gfx", "status"]);
+        if let Some(message) = device.get("message").and_then(Value::as_str) {
+            item["message"] = summary.text(message, MAX_ERROR);
+        }
+        item
+    }).collect();
+    result["devices"] = Value::Array(items);
+    let omitted = payload.get("omittedDevices").and_then(Value::as_u64).unwrap_or(0)
+        .saturating_add(devices.len().saturating_sub(8) as u64);
+    if omitted > 0 {
+        result["omittedDevices"] = json!(omitted);
+        summary.omitted_items = usize::try_from(omitted).unwrap_or(usize::MAX);
+    }
+    // Logs and report snapshots summarize the same validation more than once.
+    let previous_count = |key: &str| payload.get("_summary").and_then(|value| value.get(key))
+        .and_then(Value::as_u64).and_then(|value| usize::try_from(value).ok()).unwrap_or(0);
+    summary.redacted_strings = summary.redacted_strings.max(previous_count("redactedStrings"));
+    summary.truncated_strings = summary.truncated_strings.max(previous_count("truncatedStrings"));
+    summary.finish(result)
+}
+
 pub(crate) fn summarize_probe(command: &str, payload: &Value) -> Value {
     if command == "network_diagnostics" {
         return summarize_network(payload);
@@ -1756,6 +1785,9 @@ pub(crate) fn summarize_probe(command: &str, payload: &Value) -> Value {
         ],
     );
     result["command"] = summary.text(command, MAX_TEXT);
+    if let Some(validation) = payload.get("activationValidation").filter(|value| value.is_object()) {
+        result["activationValidation"] = summarize_activation_validation(validation);
+    }
     for field in [
         "pymssError",
         "torchError",
@@ -1814,6 +1846,9 @@ pub(crate) fn summarize_probe(command: &str, payload: &Value) -> Value {
     for field in ["installState", "activeOverlay"] {
         if let Some(state) = payload.get(field).filter(|value| value.is_object()) {
             let mut item = summary.pick(state, &environment_fields);
+            if let Some(validation) = state.get("activationValidation").filter(|value| value.is_object()) {
+                item["activationValidation"] = summarize_activation_validation(validation);
+            }
             for key in ["packages", "packageVersions"] {
                 if let Some(packages) = state.get(key) {
                     item[key] = summary.pick(packages, PACKAGE_FIELDS);
@@ -1835,6 +1870,9 @@ pub(crate) fn summarize_probe(command: &str, payload: &Value) -> Value {
             .take(8)
             .map(|environment| {
                 let mut item = summary.pick(environment, &environment_fields);
+                if let Some(validation) = environment.get("activationValidation").filter(|value| value.is_object()) {
+                    item["activationValidation"] = summarize_activation_validation(validation);
+                }
                 for key in ["packages", "packageVersions"] {
                     if let Some(packages) = environment.get(key) {
                         item[key] = summary.pick(packages, PACKAGE_FIELDS);

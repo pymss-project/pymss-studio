@@ -106,6 +106,9 @@ fn record_summary(record: &LogRecord) -> Value {
             }
         }
     }
+    if let Some(validation) = record.context.get("activationValidation").filter(|value| value.is_object()) {
+        context.insert("activationValidation".into(), crate::diagnostic_report::summarize_activation_validation(validation));
+    }
     json!({
         "id": record.id, "timestamp": record.timestamp, "level": record.level,
         "source": record.source, "logger": record.logger, "event": record.event,

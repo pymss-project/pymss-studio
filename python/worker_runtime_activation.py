@@ -112,7 +112,9 @@ def verify_activation(python: Path, targets: list[str], device_ids: Any = None,
             if "message" in device:
                 device["message"] = _redact_sensitive_text(str(device["message"]))[:500]
         return result
-    except subprocess.TimeoutExpired:
-        return {"status": "failed", "reason": "timeout", "devices": []}
-    except (OSError, ValueError, RuntimeError, IndexError):
-        return {"status": "failed", "reason": "processFailed", "devices": []}
+    except subprocess.TimeoutExpired as error:
+        return {"status": "failed", "reason": "timeout", "devices": [],
+                "message": f"The GPU activation check timed out after {error.timeout} seconds"}
+    except (OSError, ValueError, RuntimeError, IndexError) as error:
+        return {"status": "failed", "reason": "processFailed", "devices": [],
+                "message": _redact_sensitive_text(f"{type(error).__name__}: {error}")[:500]}

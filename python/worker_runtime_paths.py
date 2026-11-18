@@ -10,21 +10,38 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
+
+# Packaging invokes this file with -I; only this tool needs its bundled helpers.
+# The SDK query below still runs in a separate isolated interpreter.
+if __name__ == "__main__" and sys.flags.isolated:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from worker_protocol import _redact_sensitive_text  # noqa: E402
 
 
 _QUERY = r'''
 import importlib.util, json, sys
 from pathlib import Path
 root = Path(sys.argv[1]).resolve()
+
+def fail(message, **details):
+    context = {**details, 'selectedEnvironment': str(root), 'sysPrefix': str(Path(sys.prefix).resolve()),
+               'pythonExecutable': sys.executable}
+    raise RuntimeError(message + '; queryContext=' + json.dumps(context, ensure_ascii=False))
+
 if Path(sys.prefix).resolve() != root:
-    raise RuntimeError('The SDK query interpreter belongs to another environment')
+    fail('ROCm SDK query interpreter is outside the selected environment')
 spec = importlib.util.find_spec('rocm_sdk')
 result = {'modules': [], 'sdkAvailable': spec is not None, 'querySupported': False}
 if spec is not None:
-    if not spec.origin or not Path(spec.origin).resolve().is_relative_to(root):
-        raise RuntimeError('ROCm SDK was resolved outside the selected environment')
+    if not spec.origin:
+        fail('ROCm SDK module has no file origin', module='rocm_sdk', origin=spec.origin,
+             searchLocations=list(spec.submodule_search_locations or [])[:8])
+    if not Path(spec.origin).resolve().is_relative_to(root):
+        fail('ROCm SDK module is outside the selected environment', module='rocm_sdk', origin=spec.origin)
     try:
         from rocm_sdk import _dist_info as di
     except ImportError:
@@ -39,7 +56,7 @@ if spec is not None:
             if found is not None and found.origin:
                 module_root = Path(found.origin).resolve().parent
                 if not module_root.is_relative_to(root):
-                    raise RuntimeError('ROCm SDK package is outside the selected environment')
+                    fail('ROCm SDK package is outside the selected environment', module=name, origin=found.origin)
                 result['modules'].append({'name': name, 'root': str(module_root)})
 print(json.dumps(result))
 '''
@@ -95,17 +112,19 @@ def discover_rocm_native_paths(
     environment = {key: value for key, value in os.environ.items()
                    if key not in ("PYTHONPATH", "PYTHONHOME")}
     query = subprocess.run(
-        [str(python_exe), "-I", "-B", "-c", _QUERY, str(root)],
+        [str(python_exe), "-I", "-B", "-X", "utf8", "-c", _QUERY, str(root)],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=timeout, env=environment, check=False,
     )
     if query.returncode:
         # Failed queries and interpreter/path mismatches never authorize
         # scanning another runtime or mixing stale SDK payloads.
-        if "outside the selected environment" in query.stderr or "another environment" in query.stderr:
-            raise RuntimeError("ROCm SDK query resolved outside the selected environment")
         detail = query.stderr.strip().splitlines()[-1] if query.stderr.strip() else f"exit code {query.returncode}"
-        raise RuntimeError(f"ROCm SDK path query failed in the selected environment: {detail}")
+        context = json.dumps({"selectedEnvironment": str(root), "pythonExecutable": str(python_exe),
+                              "exitCode": query.returncode}, ensure_ascii=False)
+        detail = _redact_sensitive_text(detail)[:4096]
+        context = _redact_sensitive_text(context)[:4096]
+        raise RuntimeError(f"ROCm SDK path query failed: {detail}; processContext={context}")
     else:
         data = json.loads(query.stdout)
         query_status = ("ok" if data.get("querySupported") else
