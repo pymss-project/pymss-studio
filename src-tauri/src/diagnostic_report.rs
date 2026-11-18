@@ -1458,7 +1458,7 @@ pub(crate) fn summarize_native_host(payload: &Value) -> Value {
         ],
     );
     result["capabilities"]["formats"] = summary.scalars(&payload["capabilities"]["formats"]);
-    result["session"] = summary.pick(&payload["session"], &["status", "hasProcess", "generation"]);
+    result["session"] = summary.pick(&payload["session"], &["status", "hasProcess", "activeCount", "busyCount"]);
     result["renders"] = summary.pick(&payload["renders"], &["status", "activeCount"]);
     result["scan"] = summary.pick(
         &payload["scan"],

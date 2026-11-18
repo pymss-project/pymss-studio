@@ -32,9 +32,29 @@ fn cache_summary(root: &Path) -> Result<Value, String> {
 pub(crate) fn snapshot(root: &Path, state: &PluginHostState) -> Value {
     let mut capabilities = super::plugin_host_capabilities();
     if let Some(object) = capabilities.as_object_mut() { object.remove("defaultDirectories"); }
-    let session = match state.session.try_lock() {
-        Ok(session) => json!({"status": if session.process.is_some() { "active" } else { "idle" },
-            "generation": session.generation, "hasProcess": session.process.is_some()}),
+    let session = match state.sessions.try_lock() {
+        Ok(sessions) => {
+            let mut active = 0;
+            let mut busy = 0;
+            let mut failed = false;
+            for session in sessions.windows.values().chain(&sessions.closing) {
+                match session.session.try_lock() {
+                    Ok(session) => active += usize::from(session.process.is_some()),
+                    Err(std::sync::TryLockError::WouldBlock) => busy += 1,
+                    Err(std::sync::TryLockError::Poisoned(_)) => failed = true,
+                }
+            }
+            if failed {
+                json!({"status": "error", "error": "Host state lock is poisoned"})
+            } else {
+                let status = if busy != 0 { "busy" } else if active != 0 { "active" } else { "idle" };
+                let mut snapshot = json!({"status": status, "activeCount": active, "busyCount": busy});
+                if active != 0 || busy == 0 {
+                    snapshot["hasProcess"] = json!(active != 0);
+                }
+                snapshot
+            }
+        }
         Err(error) => lock_failure(error),
     };
     let renders = match state.renders.try_lock() {
@@ -67,11 +87,14 @@ mod tests {
     fn locked_host_sections_are_reported_busy_without_waiting() {
         let root = tempfile::tempdir().unwrap();
         let state = PluginHostState::default();
-        let _session = state.session.lock().unwrap();
+        let session = state.live_session("editor-one", || true).unwrap();
+        let _session = session.session.lock().unwrap();
         let _renders = state.renders.lock().unwrap();
         let _storage = state.scan_storage.lock().unwrap();
         let snapshot = snapshot(root.path(), &state);
         for section in ["session", "renders", "storage"] { assert_eq!(snapshot[section]["status"], "busy"); }
+        assert_eq!(snapshot["session"]["busyCount"], 1);
+        assert!(snapshot["session"].get("hasProcess").is_none());
     }
 
     #[test]

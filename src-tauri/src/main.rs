@@ -283,10 +283,19 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building Pymss Studio")
-        .run(|app, event| {
-            if matches!(event, tauri::RunEvent::Exit) {
+        .run(|app, event| match event {
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Destroyed,
+                ..
+            } => {
+                app.state::<commands::plugin_host::PluginHostState>()
+                    .release_window(&label);
+            }
+            tauri::RunEvent::Exit => {
                 app.state::<commands::plugin_host::PluginHostState>().shutdown();
                 session_log::finish_automatic_reports(app);
             }
+            _ => {}
         });
 }

@@ -367,25 +367,26 @@ fn replacement_waits_for_modal_but_explicit_discard_and_shutdown_reclaim_the_own
         let mut fixture = Fixture::new();
         fixture.suspend("editor", Duration::from_millis(30));
         let state = PluginHostState::default();
+        let live = state.live_session("editor-project", || true).unwrap();
         let process = fixture.process.take().unwrap();
         let control = process.control.clone();
-        state.session_pid.publish(&process).unwrap();
+        live.session_pid.publish(&process).unwrap();
         {
-            let mut session = state.session.lock().unwrap();
+            let mut session = live.session.lock().unwrap();
             *session = Session {
                 generation: 1,
                 project_id: Some("project".into()),
                 native_session_id: Some("instance".into()),
                 process: Some(process),
             };
-            let result = prepare_live_load_with(&mut session, &state.session_pid, 2, &mut |_| {
+            let result = prepare_live_load_with(&mut session, &live.session_pid, 2, &mut |_| {
                 Some("Authorization".into())
             });
             assert!(matches!(result, Err(HostRequestError::DialogPending(_))));
             assert_eq!(session.generation, 2);
             assert_eq!(session.project_id.as_deref(), Some("project"));
             if !shutdown {
-                discard_session(&mut session, &state.session_pid, "project", 2, "instance");
+                discard_session(&mut session, &live.session_pid, "project", 2, "instance");
                 assert!(session.process.is_none());
             }
         }
@@ -393,8 +394,161 @@ fn replacement_waits_for_modal_but_explicit_discard_and_shutdown_reclaim_the_own
             state.shutdown();
         }
         assert!(!*control.active.lock().unwrap());
-        assert!(state.session.lock().unwrap().process.is_none());
+        assert!(live.session.lock().unwrap().process.is_none());
     }
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn window_destruction_returns_before_background_cleanup_and_reaps_the_host() {
+    let mut fixture = Fixture::new();
+    let root = tempfile::tempdir().unwrap();
+    let host = PluginHostState::default();
+    let live = host.live_session("editor-project", || true).unwrap();
+    let process = fixture.process.take().unwrap();
+    let control = process.control.clone();
+    live.session_pid.publish(&process).unwrap();
+    live.session.lock().unwrap().process = Some(process);
+
+    let process_guard = control.active.lock().unwrap();
+    let (closed, returned) = mpsc::channel();
+    let closer = {
+        let host = host.clone();
+        std::thread::spawn(move || {
+            host.release_window("editor-project");
+            closed.send(()).unwrap();
+        })
+    };
+    let returned_before_unlock = returned.recv_timeout(Duration::from_secs(2)).is_ok();
+    let registered_for_cleanup = host.sessions.lock().unwrap().closing.iter()
+        .any(|session| Arc::ptr_eq(session, &live));
+    let closing_snapshot = diagnostic_snapshot(root.path(), &host);
+    let busy_snapshot = {
+        let _busy = live.session.lock().unwrap();
+        diagnostic_snapshot(root.path(), &host)
+    };
+    drop(process_guard);
+    closer.join().unwrap();
+
+    assert!(returned_before_unlock, "window destruction waited for the host process lock");
+    assert!(registered_for_cleanup);
+    assert_eq!(closing_snapshot["session"]["hasProcess"], true);
+    assert_eq!(closing_snapshot["session"]["activeCount"], 1);
+    assert_eq!(busy_snapshot["session"]["busyCount"], 1);
+    assert!(busy_snapshot["session"].get("hasProcess").is_none());
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !host.sessions.lock().unwrap().closing.is_empty() {
+        assert!(std::time::Instant::now() < deadline, "background window cleanup did not finish");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(live.session_pid.id(), u32::MAX);
+    assert!(!*control.active.lock().unwrap());
+    assert!(live.session.lock().unwrap().process.is_none());
+    let reaped_snapshot = diagnostic_snapshot(root.path(), &host);
+    assert_eq!(reaped_snapshot["session"]["status"], "idle");
+    assert_eq!(reaped_snapshot["session"]["hasProcess"], false);
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn shutdown_reaps_a_closing_host_before_its_background_cleanup_starts() {
+    let mut fixture = Fixture::new();
+    let host = PluginHostState::default();
+    let live = host.live_session("editor-project", || true).unwrap();
+    let process = fixture.process.take().unwrap();
+    let control = process.control.clone();
+    live.session_pid.publish(&process).unwrap();
+    live.session.lock().unwrap().process = Some(process);
+
+    let closing = host.sessions.lock().unwrap().begin_close("editor-project").unwrap();
+    assert!(Arc::ptr_eq(&closing, &live));
+    host.shutdown();
+
+    assert_eq!(live.session_pid.id(), u32::MAX);
+    assert!(!*control.active.lock().unwrap());
+    assert!(live.session.lock().unwrap().process.is_none());
+    assert!(host.sessions.lock().unwrap().closing.is_empty());
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn two_editor_windows_can_snapshot_and_release_their_own_hosts() {
+    let mut first_host = Fixture::new();
+    let mut second_host = Fixture::new();
+    let host = PluginHostState::default();
+    let first = host.live_session("editor-first", || true).unwrap();
+    let second = host.live_session("editor-second", || true).unwrap();
+    for (live, fixture, project_id, native_id) in [
+        (&first, &mut first_host, "first", "first-native"),
+        (&second, &mut second_host, "second", "second-native"),
+    ] {
+        let mut session = live.session.lock().unwrap();
+        let generation = begin_load_generation(live, None).unwrap();
+        prepare_live_load_with(&mut session, &live.session_pid, generation, &mut |_| None).unwrap();
+        let process = fixture.process.take().unwrap();
+        live.session_pid.publish(&process).unwrap();
+        session.process = Some(process);
+        session.project_id = Some(project_id.into());
+        fixture
+            .replies
+            .send(Ok(json!({"id":1,"ok":true,"result":{"sessionId":native_id}})))
+            .unwrap();
+        request_session(
+            &mut session,
+            &live.session_pid,
+            json!({"op":"load"}),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    {
+        let _busy = second.session.lock().unwrap();
+        let snapshot = diagnostic_snapshot(root.path(), &host);
+        assert_eq!(snapshot["session"]["hasProcess"], true);
+        assert_eq!(snapshot["session"]["activeCount"], 1);
+        assert_eq!(snapshot["session"]["busyCount"], 1);
+    }
+
+    let first = host.live_session("editor-first", || true).unwrap();
+    let first_generation = first.generation.load(Ordering::Acquire);
+    assert!(require_generation(&first, first_generation).is_ok());
+    let mut session = first.session.lock().unwrap();
+    assert_eq!(session.project_id.as_deref(), Some("first"));
+    let snapshot = request_session(
+        &mut session,
+        &first.session_pid,
+        json!({"op":"snapshot"}),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    assert_eq!(snapshot["states"]["effect"], "fresh-state");
+    request_session(
+        &mut session,
+        &first.session_pid,
+        json!({"op":"unload"}),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    assert!(session.process.is_none());
+    drop(session);
+    host.release_window("editor-first");
+
+    let second = host.live_session("editor-second", || true).unwrap();
+    assert!(require_generation(&second, second.generation.load(Ordering::Acquire)).is_ok());
+    let mut session = second.session.lock().unwrap();
+    assert_eq!(session.project_id.as_deref(), Some("second"));
+    assert_eq!(session.native_session_id.as_deref(), Some("second-native"));
+    let status = request_session(
+        &mut session,
+        &second.session_pid,
+        json!({"op":"status"}),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    assert_eq!(status["position"], 2);
 }
 
 #[cfg(any(unix, windows))]
@@ -403,7 +557,7 @@ fn fatal_load_preparation_retains_the_claimed_generation_for_recovery() {
     let mut fixture = Fixture::new();
     fixture.suspend("editor", Duration::from_millis(30));
     fixture.replies.send(Err("The helper exited".into())).unwrap();
-    let state = PluginHostState::default();
+    let state = LiveSession::default();
     state.generation.store(1, Ordering::Release);
     let process = fixture.process.take().unwrap();
     state.session_pid.publish(&process).unwrap();

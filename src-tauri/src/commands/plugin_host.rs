@@ -10,7 +10,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 mod blacklist;
 mod diagnostics;
@@ -49,25 +49,96 @@ struct Session {
     process: Option<HostProcess>,
 }
 
+#[derive(Default)]
+struct LiveSession {
+    session: Mutex<Session>,
+    session_pid: ProcessLease,
+    generation: AtomicU64,
+    stopping: AtomicBool,
+}
+
+impl LiveSession {
+    fn reap(&self) {
+        if let Ok(mut session) = self.session.lock() {
+            close_session(&mut session, &self.session_pid);
+        }
+    }
+}
+
+#[derive(Default)]
+struct LiveSessions {
+    windows: HashMap<String, Arc<LiveSession>>,
+    closing: Vec<Arc<LiveSession>>,
+}
+
+impl LiveSessions {
+    fn begin_close(&mut self, label: &str) -> Option<Arc<LiveSession>> {
+        let session = self.windows.remove(label)?;
+        session.stopping.store(true, Ordering::Release);
+        // Keep ownership until cleanup finishes in case the app exits first.
+        self.closing.push(session.clone());
+        Some(session)
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct PluginHostState {
-    session: Arc<Mutex<Session>>,
-    session_pid: Arc<ProcessLease>,
+    sessions: Arc<Mutex<LiveSessions>>,
     renders: Arc<Mutex<HashMap<String, Arc<ProcessLease>>>>,
     scan_lock: Arc<Mutex<()>>,
     scan_process: Arc<ProcessLease>,
     scan_control: Arc<ScanControl>,
     scan_storage: Arc<Mutex<()>>,
     scan_sequence: Arc<AtomicU64>,
-    generation: Arc<AtomicU64>,
     stopping: Arc<AtomicBool>,
 }
 
 impl PluginHostState {
+    fn live_session(
+        &self,
+        label: &str,
+        is_current_window: impl FnOnce() -> bool,
+    ) -> Result<Arc<LiveSession>, String> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "Audio host sessions lock failed")?;
+        if self.stopping.load(Ordering::Acquire) || !is_current_window() {
+            return Err("The editor window is unavailable".into());
+        }
+        Ok(sessions.windows.entry(label.to_owned()).or_default().clone())
+    }
+
+    pub fn release_window(&self, label: &str) {
+        let Some(session) = self
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|mut sessions| sessions.begin_close(label))
+        else {
+            return;
+        };
+        let sessions = self.sessions.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            session.session_pid.cancel();
+            session.reap();
+            if let Ok(mut sessions) = sessions.lock() {
+                sessions.closing.retain(|closing| !Arc::ptr_eq(closing, &session));
+            }
+        });
+    }
+
     pub fn shutdown(&self) {
         self.stopping.store(true, Ordering::Release);
-        self.generation.fetch_add(1, Ordering::AcqRel);
-        self.session_pid.cancel();
+        let sessions = {
+            let mut sessions = self.sessions.lock().unwrap_or_else(|error| error.into_inner());
+            std::mem::take(&mut *sessions)
+        };
+        let owned = sessions.windows.values().chain(&sessions.closing);
+        for session in owned.clone() {
+            session.stopping.store(true, Ordering::Release);
+            session.session_pid.cancel();
+        }
         self.scan_process.cancel();
         self.scan_control.shutdown();
         if let Ok(renders) = self.renders.lock() {
@@ -75,9 +146,8 @@ impl PluginHostState {
                 pid.cancel();
             }
         }
-        if let Ok(mut session) = self.session.lock() {
-            session.process.take();
-            session.project_id = None;
+        for session in owned {
+            session.reap();
         }
     }
 }
@@ -241,7 +311,7 @@ impl ProcessLease {
     }
 
     fn release(&self) {
-        // Reuse the scanner lease without clearing a concurrent shutdown.
+        // Allow another process to be published unless the lease was cancelled.
         self.0
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -745,7 +815,7 @@ fn decode_response(response: Value, expected_id: u64) -> Result<Value, HostReque
 }
 
 fn close_session(session: &mut Session, pid: &ProcessLease) {
-    pid.clear();
+    pid.release();
     session.process.take();
     session.project_id = None;
     session.native_session_id = None;
@@ -763,7 +833,7 @@ fn discard_session(session: &mut Session, pid: &ProcessLease, project: &str, gen
     json!({ "closed": true, "superseded": !owned && !absent, "generation": generation })
 }
 
-fn begin_load_generation(state: &PluginHostState, expected: Option<u64>) -> Result<u64, String> {
+fn begin_load_generation(state: &LiveSession, expected: Option<u64>) -> Result<u64, String> {
     if let Some(expected) = expected {
         let next = expected.checked_add(1).ok_or("Audio host generation exhausted")?;
         state.generation.compare_exchange(expected, next, Ordering::AcqRel, Ordering::Acquire)
@@ -863,7 +933,7 @@ fn prepare_live_load_with(session: &mut Session, pid: &ProcessLease, generation:
     Ok(())
 }
 
-fn require_generation(state: &PluginHostState, generation: u64) -> Result<(), String> {
+fn require_generation(state: &LiveSession, generation: u64) -> Result<(), String> {
     if !state.stopping.load(Ordering::Acquire)
         && state.generation.load(Ordering::Acquire) == generation
     {
@@ -1118,10 +1188,21 @@ fn bind_editor_owner(request: &mut Value, owner: Option<usize>) -> Result<(), St
     Ok(())
 }
 
+fn is_current_window(window: &WebviewWindow) -> bool {
+    // A reopened editor reuses the label. The resource table belongs to the
+    // original WebView even when an IPC command from it starts after reopening.
+    fn resource_table(window: &WebviewWindow) -> *const tauri::ResourceTable {
+        std::ptr::from_ref(&*window.resources_table())
+    }
+    window
+        .get_webview_window(window.label())
+        .is_some_and(|current| resource_table(window) == resource_table(&current))
+}
+
 #[tauri::command]
 pub async fn plugin_host_request(
     app: AppHandle,
-    window: tauri::WebviewWindow,
+    window: WebviewWindow,
     state: State<'_, PluginHostState>,
     mut request: Value,
 ) -> Result<Value, String> {
@@ -1147,7 +1228,7 @@ pub async fn plugin_host_request(
     let owner = None;
     bind_editor_owner(&mut request, owner)?;
     request["transportOwner"] = json!(window.label());
-    let state = state.inner().clone();
+    let state = state.live_session(window.label(), || is_current_window(&window))?;
     let root = crate::storage::data_root_dir(&app).map_err(|error| error.to_string())?;
     let recovery_load = op == "load" && request.get("expectedGeneration").is_some();
     let generation = if op == "load" {
@@ -1919,7 +2000,7 @@ mod tests {
 
     #[test]
     fn recovery_ack_rejects_replacement_sessions_and_fenced_load_cannot_supersede_them() {
-        let state = PluginHostState::default();
+        let state = LiveSession::default();
         state.generation.store(9, Ordering::Release);
         let mut session = Session { project_id: Some("new".into()), native_session_id: Some("instance-new".into()), generation: 9, ..Session::default() };
         let reply = discard_session(&mut session, &state.session_pid, "old", 9, "instance-old");
@@ -1936,10 +2017,10 @@ mod tests {
 
     #[test]
     fn empty_session_cannot_authorize_recovery_over_a_pending_load() {
-        let state = PluginHostState::default();
+        let state = LiveSession::default();
         state.generation.store(8, Ordering::Release);
         let mut session = Session { generation: 8, ..Session::default() };
-        // A different window reserves a load before its blocking task obtains the session lock.
+        // A load is reserved before its blocking task obtains the session lock.
         let pending = begin_load_generation(&state, None).unwrap();
         assert_eq!(pending, 9);
         let reply = discard_session(&mut session, &state.session_pid, "old", pending, "old-native");
@@ -1950,7 +2031,7 @@ mod tests {
 
     #[test]
     fn failed_load_preflight_retains_the_claimed_generation_for_recovery() {
-        let state = PluginHostState::default();
+        let state = LiveSession::default();
         state.generation.store(8, Ordering::Release);
         let mut session = Session { generation: 8, ..Session::default() };
         let generation = begin_load_generation(&state, None).unwrap();
@@ -2074,12 +2155,20 @@ mod tests {
     #[test]
     fn shutdown_rejects_new_work_and_cancels_queued_scan_and_render_leases() {
         let state = PluginHostState::default();
+        let first = state.live_session("editor-a", || true).unwrap();
+        let second = state.live_session("editor-b", || true).unwrap();
+        let first_generation = begin_load_generation(&first, None).unwrap();
+        let second_generation = begin_load_generation(&second, None).unwrap();
         let queued = register_render(&state, "queued-task".into()).unwrap();
         state.shutdown();
         assert!(queued.require_active().is_err());
         assert!(register_render(&state, "later-task".into()).is_err());
         assert_eq!(state.scan_process.id(), u32::MAX);
-        assert!(require_generation(&state, state.generation.load(Ordering::Acquire)).is_err());
+        assert!(state.live_session("editor-c", || true).is_err());
+        assert!(require_generation(&first, first_generation).is_err());
+        assert!(require_generation(&second, second_generation).is_err());
+        assert_eq!(first.session_pid.id(), u32::MAX);
+        assert_eq!(second.session_pid.id(), u32::MAX);
     }
 
     #[cfg(any(unix, windows))]
@@ -2796,12 +2885,28 @@ mod tests {
 
     #[test]
     fn a_new_load_invalidates_old_requests_even_when_the_project_id_is_reused() {
-        let state = PluginHostState::default();
+        let state = LiveSession::default();
         let first = state.generation.fetch_add(1, Ordering::AcqRel) + 1;
         assert!(require_generation(&state, first).is_ok());
         let second = state.generation.fetch_add(1, Ordering::AcqRel) + 1;
         assert!(require_generation(&state, first).is_err());
         assert!(require_generation(&state, second).is_ok());
+    }
+
+    #[test]
+    fn closing_and_reopening_an_editor_rejects_its_stale_requests() {
+        let state = PluginHostState::default();
+        let old = state.live_session("editor-a", || true).unwrap();
+        let old_generation = begin_load_generation(&old, None).unwrap();
+        state.release_window("editor-a");
+
+        assert!(state.live_session("editor-a", || false).is_err());
+        let reopened = state.live_session("editor-a", || true).unwrap();
+        assert!(!Arc::ptr_eq(&reopened, &old));
+        assert!(state.live_session("editor-a", || false).is_err());
+        assert!(require_generation(&old, old_generation).is_err());
+        let new_generation = begin_load_generation(&reopened, None).unwrap();
+        assert!(require_generation(&reopened, new_generation).is_ok());
     }
 
     #[test]
@@ -2906,7 +3011,7 @@ mod tests {
             r#"{"id":2,"ok":true,"result":{"playing":false,"unavailablePlugins":[{"slotId":"missing","message":"Saved state is unavailable"}]}}"#,
         ]);
         let original_pid = pid.id();
-        let state = PluginHostState::default();
+        let state = LiveSession::default();
         state.generation.store(9, Ordering::Release);
         let mut update = json!({"projectId":"fixture","project":{"pluginChain":[{
             "id":"missing", "format":"vst3", "bypassed":false,
