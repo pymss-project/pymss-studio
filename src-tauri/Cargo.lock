@@ -2708,6 +2708,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "flate2",
+ "gtk",
  "libc",
  "minisign-verify",
  "percent-encoding",

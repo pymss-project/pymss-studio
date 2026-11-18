@@ -14,6 +14,8 @@ mod model_dir_migration;
 mod plugin_views;
 #[cfg(any(target_os = "linux", test))]
 mod appimage_environment;
+#[cfg(target_os = "linux")]
+mod linux_font_dpi;
 #[cfg(any(target_os = "macos", test))]
 mod macos_update;
 #[cfg(any(target_os = "linux", test))]
@@ -72,7 +74,10 @@ fn main() {
         }
     };
 
-    let builder = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "linux")]
+    let builder = builder.plugin(linux_font_dpi::init());
+    let builder = builder
         .register_uri_scheme_protocol("pymss-plugin", |ctx, request| {
             plugin_views::serve_view(ctx.app_handle(), &request)
         })
@@ -118,6 +123,8 @@ fn main() {
     builder
         .setup(|app| {
             let _ = session_log::init_session_log(app.handle());
+            #[cfg(target_os = "linux")]
+            linux_font_dpi::record_diagnostics(app.handle());
             python::worker::recover_audio_output_temps(app.handle());
             Ok(())
         })
