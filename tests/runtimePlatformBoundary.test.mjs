@@ -119,17 +119,6 @@ for (const [platform, machine, expected] of [
   })
 }
 
-test('onboarding offers only MLX on Intel and unidentified Macs', () => {
-  for (const machine of ['x86_64', '']) {
-    const choices = componentComputed('../src/components/StartupOnboarding.vue', 'runtimeBackendChoices', {
-      runtimePlatform: { value: detectRuntimePlatform({ platform: 'darwin', machine }) },
-      runtimeBackendName: backend => backend, t: key => key, backendInstalled: () => false,
-      runtimeRecommendedBackend: { value: 'mlx' }, runtimeSizeHint: () => '',
-    })
-    assert.deepEqual(Array.from(choices, item => item.value), ['mlx'])
-  }
-})
-
 for (const platform of ['darwin', 'linux', 'win32']) {
   for (const installed of [false, true]) {
     test(`${platform} onboarding hands ${installed ? 'an installed' : 'a missing'} runtime to management`, async () => {

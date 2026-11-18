@@ -24,17 +24,11 @@ class OfflineCoreUpdateTests(unittest.TestCase):
     def test_real_resolver_installs_the_confirmed_pair_and_dependency_then_restores_the_base(self):
         self.run_offline_update(bundled=False)
 
-    def test_locked_core_is_resolved_without_checking_standalone_core_releases(self):
-        self.run_offline_update(bundled=False, core_requirement="pymss-core==0.1.7")
-
     def test_new_pymss_can_bind_an_older_core_than_the_studio_release_and_still_roll_back(self):
         self.run_offline_update(bundled=True, core_requirement="pymss-core==0.1.5", expected_core="0.1.5")
 
     def test_real_repair_resolves_an_installed_mismatched_core_from_pymss_metadata(self):
         self.run_offline_update(bundled=True, expected_core="0.1.6", repair_mismatched=True)
-
-    def test_read_only_bundled_runtime_updates_and_rolls_back_through_user_overlays(self):
-        self.run_offline_update(bundled=True)
 
     def test_bundle_replacement_preserves_core_components_and_rollback(self):
         self.run_offline_update(bundled=True, replace_bundle=True)

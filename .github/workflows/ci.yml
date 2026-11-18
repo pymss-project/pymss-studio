@@ -10,12 +10,31 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Each push checks its own diff; a later push must not cancel those checks.
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  scope:
+    name: Determine test scope
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    outputs:
+      frontend: ${{ steps.select.outputs.frontend }}
+      backend: ${{ steps.select.outputs.backend }}
+      native: ${{ steps.select.outputs.native }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select checks for changed files
+        id: select
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python3 scripts/ci-test-scope.py
+
   worker-process-cleanup:
     name: Worker process cleanup (${{ matrix.os }})
+    needs: scope
+    if: ${{ !cancelled() && needs.scope.outputs.backend != 'false' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
@@ -39,6 +58,8 @@ jobs:
 
   runtime-safety:
     name: Runtime safety (${{ matrix.os }})
+    needs: scope
+    if: ${{ !cancelled() && needs.scope.outputs.backend != 'false' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
@@ -64,6 +85,8 @@ jobs:
 
   linux-native:
     name: Linux native runtime and backend
+    needs: scope
+    if: ${{ !cancelled() && needs.scope.outputs.backend != 'false' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
@@ -92,6 +115,8 @@ jobs:
 
   macos-updater:
     name: macOS updater
+    needs: scope
+    if: ${{ !cancelled() && needs.scope.outputs.backend != 'false' }}
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
@@ -117,30 +142,38 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml python::worker
 
   validate:
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.outputs.frontend != 'false' || needs.scope.outputs.backend != 'false') }}
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
       - uses: pnpm/action-setup@v4
+        if: needs.scope.outputs.frontend != 'false'
         with:
           version: 10.33.2
 
       - uses: actions/setup-node@v4
+        if: needs.scope.outputs.frontend != 'false'
         with:
           node-version: 22
           cache: pnpm
 
       - uses: actions/setup-python@v5
+        if: needs.scope.outputs.backend != 'false'
         with:
           python-version: '3.12'
 
       - uses: dtolnay/rust-toolchain@stable
+        if: needs.scope.outputs.backend != 'false'
 
       - name: Install frontend dependencies
+        if: needs.scope.outputs.frontend != 'false'
         run: pnpm install --frozen-lockfile
 
       - name: Install Python test dependencies
+        if: needs.scope.outputs.backend != 'false'
         shell: bash
         run: |
           python -m pip install --disable-pip-version-check --upgrade pip
@@ -150,19 +183,30 @@ jobs:
           python -m pip install --disable-pip-version-check --prefer-binary \
             -r python/requirements-ci.txt
 
-      - name: Run all tests
+      - name: Run frontend tests
+        if: needs.scope.outputs.frontend != 'false'
+        run: pnpm test:frontend
+
+      - name: Run Python and Rust tests
+        if: needs.scope.outputs.backend != 'false'
+        shell: bash
         run: |
-          pnpm plugins:prepare --release
-          pnpm test:all
+          python -X utf8 scripts/prepare-preinstalled-plugins.py --release
+          python -m unittest discover -s tests/python -t tests -p "test_*.py"
+          cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Build frontend
+        if: needs.scope.outputs.frontend != 'false'
         run: pnpm build
 
       - name: Check Tauri backend
+        if: needs.scope.outputs.backend != 'false'
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
   native:
     name: Native host (${{ matrix.os }})
+    needs: scope
+    if: ${{ !cancelled() && needs.scope.outputs.native != 'false' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     strategy:

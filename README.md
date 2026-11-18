@@ -284,7 +284,7 @@ The project defaults to its configured remote repository, including during deskt
 | `pnpm test:rust` | Rust backend tests. |
 | `pnpm test:all` | Run the three layers sequentially after preparing their dependencies. |
 
-For documentation changes, verify content and links. Frontend changes should run relevant tests and `pnpm build`; Worker/backend changes should run the corresponding layer's tests. CI uses Node.js 22, Python 3.12, and Rust stable, and runs `pnpm test:all` plus the frontend build.
+For documentation changes, verify content and links. Frontend changes should run relevant tests and `pnpm build`; Worker/backend changes should run the corresponding layer's tests. CI uses Node.js 22, Python 3.12, and Rust stable. Pushes and pull requests run frontend, backend, and native plugin checks according to the files changed. Manual runs, build or release configuration changes, and unknown change scopes run all checks.
 
 <details>
 <summary>Python Worker debugging and environment variables</summary>

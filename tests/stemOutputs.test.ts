@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { normalizeStemOutputs, stemFromOutputPath } from '../src/utils/stemOutputs.ts'
+import { sortStemOutputsByOrder } from '../src/utils/stemOrder.ts'
 
 test('normalizes advanced workflow output metadata to the shared stem contract', () => {
   assert.deepEqual(
@@ -43,4 +44,16 @@ test('native POSIX stems preserve literal backslashes while Windows input hints 
   assert.deepEqual(normalizeStemOutputs([{ path: 'song_vocals.wav' }], 'C:\\audio\\song.wav'), [
     { path: 'song_vocals.wav', stem: 'vocals' },
   ])
+})
+
+test('sorts outputs by configured stem order', () => {
+  const outputs = [
+    { stem: 'instrument', path: '/outputs/instrument.flac' },
+    { stem: 'vocals', path: '/outputs/vocals.flac' },
+  ]
+
+  assert.deepEqual(
+    sortStemOutputsByOrder(outputs, ['vocals', 'instrument']),
+    [outputs[1], outputs[0]],
+  )
 })

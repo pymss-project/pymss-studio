@@ -284,7 +284,7 @@ pnpm tauri dev
 | `pnpm test:rust` | Rust 后端测试。 |
 | `pnpm test:all` | 依次执行三层测试；需先准备各层依赖。 |
 
-只修改文档时检查内容和链接即可；前端修改应运行相应测试与 `pnpm build`，Worker 或后端修改应执行对应层测试。CI 使用 Node.js 22、Python 3.12 和 Rust stable，并运行 `pnpm test:all` 与前端构建。
+只修改文档时检查内容和链接即可；前端修改应运行相应测试与 `pnpm build`，Worker 或后端修改应执行对应层测试。CI 使用 Node.js 22、Python 3.12 和 Rust stable。推送和 PR 按变更范围运行前端、后端和原生插件检查；手动运行 CI、涉及构建与发布配置，或无法确定变更范围时执行全量检查。
 
 <details>
 <summary>Python Worker 调试与环境变量</summary>
