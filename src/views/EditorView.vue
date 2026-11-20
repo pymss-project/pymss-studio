@@ -23,6 +23,7 @@ import { useEditorPlayback } from '@/composables/useEditorPlayback'
 import { useEditorProjectBridge } from '@/composables/useEditorProjectBridge'
 import { useEditorRecording } from '@/composables/useEditorRecording'
 import { useDiagnosticWindowState } from '@/features/diagnostics/windowState'
+import { adjacentClipEdge, timelineClipEdges } from '@/utils/editorClips'
 import type { EditorClipDrop, EditorTimelineTool } from '@/types/editor'
 import type { EditorClipCommand } from '@/utils/editorClipShortcuts'
 import { useEditorShortcuts } from '@/composables/useEditorShortcuts'
@@ -320,6 +321,20 @@ function toggleSelectedTrackFlag(flag: 'muted' | 'solo') {
 }
 
 const timelineTool = ref<EditorTimelineTool>('selection')
+const snappingEnabled = ref(true)
+const clipEdges = computed(() => timelineClipEdges(session.value?.tracks ?? [], editor.sourceMap))
+
+function toggleSnapping() {
+  snappingEnabled.value = !snappingEnabled.value
+}
+
+function seekClipEdge(direction: -1 | 1) {
+  if (recordingBusy.value) return
+  const edge = adjacentClipEdge(clipEdges.value, playbackCurrentTime.value, direction)
+  if (edge === null) return
+  seekTimeline(edge)
+  if (playback.intent.value === 'pause') playbackFollowPlayhead('seek')
+}
 
 function setTimelineTool(tool: EditorTimelineTool) {
   timelineTool.value = tool
@@ -340,6 +355,7 @@ const clipCommandState = computed(() => {
     copy: ready && editor.canCopyClip,
     paste: ready && editor.canPasteClip,
     split: ready && editor.canSplitClipAt(playbackCurrentTime.value),
+    splitAll: ready && editor.canSplitAllClipsAt(playbackCurrentTime.value),
     delete: ready && editor.canCutClip,
   }
 })
@@ -360,6 +376,9 @@ function runClipCommand(command: EditorClipCommand) {
       break
     case 'split':
       editor.splitSelectedClipAt(playbackCurrentTime.value)
+      break
+    case 'splitAll':
+      editor.splitAllClipsAt(playbackCurrentTime.value)
       break
     case 'paste': {
       const clip = editor.pasteClipAt(playbackCurrentTime.value)
@@ -486,6 +505,8 @@ const { onTimelineKeydown } = useEditorShortcuts({
   toggleSolo: () => toggleSelectedTrackFlag('solo'),
   clipCommand: runClipCommand,
   setTimelineTool,
+  toggleSnapping,
+  seekClipEdge,
 })
 
 watch(() => editor.session?.id, stopPlaybackAndReset)
@@ -632,6 +653,7 @@ watch(
             :track-levels="trackLevels"
             :clip-command-state="clipCommandState"
             :timeline-tool="timelineTool"
+            :snapping-enabled="snappingEnabled"
             :editing-disabled="recordingBusy"
             :external-dragging="isDraggingExternalOnMixer"
             :external-importing="isImportingExternal"
@@ -650,6 +672,7 @@ watch(
             @remove-track="removeTrack"
             @clip-command="runClipCommand"
             @set-tool="setTimelineTool"
+            @toggle-snapping="toggleSnapping"
             @split-at="splitAtPointer"
             @drop-clip="dropClip"
             @reveal-track="revealTrackSource"

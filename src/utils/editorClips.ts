@@ -94,35 +94,87 @@ export function overwriteClipsInRange(
   return result.sort((left, right) => left.start - right.start)
 }
 
-export type ClipTimingEditMode = 'move' | 'trim-start' | 'trim-end'
-
-function roundTime(value: number) {
-  return Math.round(value * 1000) / 1000
+export function timelineClipEdges(tracks: EditorTrack[], sources: Map<string, EditorSource>, excludeClipId?: string) {
+  const edges = new Set([0])
+  for (const track of tracks) {
+    for (const clip of clipsForTrack(track, sources)) {
+      if (clip.id === excludeClipId) continue
+      if (Number.isFinite(clip.start)) edges.add(clip.start)
+      const end = clip.start + clip.duration
+      if (Number.isFinite(end)) edges.add(end)
+    }
+  }
+  return [...edges].sort((a, b) => a - b)
 }
 
+const TIMELINE_EPSILON = 1e-8
+
+export function adjacentClipEdge(edges: readonly number[], time: number, direction: -1 | 1) {
+  for (let step = 0; step < edges.length; step++) {
+    const edge = edges[direction === 1 ? step : edges.length - 1 - step]
+    if ((edge - time) * direction > TIMELINE_EPSILON) return edge
+  }
+  return null
+}
+
+export type ClipTimingEditMode = 'move' | 'trim-start' | 'trim-end'
+type ClipTiming = Pick<EditorClip, 'start' | 'offset' | 'duration'>
+
 export function resolveClipTimingEdit(
-  clip: Pick<EditorClip, 'start' | 'offset' | 'duration'>,
+  clip: ClipTiming,
   mode: ClipTimingEditMode,
   delta: number,
   sourceDuration = 0,
-): Partial<Pick<EditorClip, 'start' | 'offset' | 'duration'>> {
-  if (mode === 'move') {
-    return { start: roundTime(Math.max(0, clip.start + delta)) }
-  }
+): Partial<ClipTiming> {
+  if (mode === 'move') return { start: Math.max(0, clip.start + delta) }
+
+  const minDuration = Math.min(0.05, clip.duration)
   if (mode === 'trim-start') {
     const minDelta = -Math.min(clip.start, clip.offset)
-    const maxDelta = Math.max(0, clip.duration - 0.05)
+    const maxDelta = clip.duration - minDuration
     const applied = Math.min(maxDelta, Math.max(minDelta, delta))
     return {
-      start: roundTime(clip.start + applied),
-      offset: roundTime(clip.offset + applied),
-      duration: roundTime(clip.duration - applied),
+      start: clip.start + applied,
+      offset: clip.offset + applied,
+      duration: clip.duration - applied,
     }
   }
   const maxDuration = sourceDuration > 0
-    ? Math.max(0.05, sourceDuration - clip.offset)
+    ? Math.max(minDuration, sourceDuration - clip.offset)
     : Number.MAX_SAFE_INTEGER
   return {
-    duration: roundTime(Math.min(maxDuration, Math.max(0.05, clip.duration + delta))),
+    duration: Math.min(maxDuration, Math.max(minDuration, clip.duration + delta)),
   }
+}
+
+export function resolveSnappedClipTimingEdit(
+  clip: ClipTiming,
+  mode: ClipTimingEditMode,
+  delta: number,
+  sourceDuration: number,
+  snapTargets: readonly number[],
+  tolerance: number,
+) {
+  let patch = resolveClipTimingEdit(clip, mode, delta, sourceDuration)
+  let snapTime: number | null = null
+  let nearestDistance = tolerance
+  const start = clip.start
+  const end = start + clip.duration
+  const edges = mode === 'move' ? [start, end] : [mode === 'trim-start' ? start : end]
+  for (const edge of edges) {
+    for (const target of snapTargets) {
+      const distance = Math.abs(edge + delta - target)
+      if (distance >= nearestDistance) continue
+      const snapped = resolveClipTimingEdit(clip, mode, target - edge, sourceDuration)
+      const snappedStart = snapped.start ?? start
+      const snappedEdge = edge === start && mode !== 'trim-end'
+        ? snappedStart
+        : snappedStart + (snapped.duration ?? clip.duration)
+      if (Math.abs(snappedEdge - target) > TIMELINE_EPSILON) continue
+      patch = snapped
+      snapTime = target
+      nearestDistance = distance
+    }
+  }
+  return { patch, snapTime }
 }

@@ -16,6 +16,8 @@ export type EditorShortcutHandlers = {
   toggleSolo: () => void
   clipCommand: (command: EditorClipCommand) => void
   setTimelineTool: (tool: EditorTimelineTool) => void
+  toggleSnapping: () => void
+  seekClipEdge: (direction: -1 | 1) => void
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -37,11 +39,19 @@ export function useEditorShortcuts(handlers: EditorShortcutHandlers) {
       if (!event.repeat) handlers.clipCommand(command)
       return
     }
-    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+    if (event.altKey || event.shiftKey) return
+    if (event.ctrlKey !== event.metaKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+      event.preventDefault()
+      handlers.seekClipEdge(event.key === 'ArrowLeft' ? -1 : 1)
+      return
+    }
+    if (event.ctrlKey || event.metaKey) return
     const key = event.key.toLowerCase()
-    if (key !== 'v' && key !== 'c') return
+    if (key !== 'v' && key !== 'c' && key !== 's') return
     event.preventDefault()
-    if (!event.repeat) handlers.setTimelineTool(key === 'v' ? 'selection' : 'razor')
+    if (event.repeat) return
+    if (key === 's') handlers.toggleSnapping()
+    else handlers.setTimelineTool(key === 'v' ? 'selection' : 'razor')
   }
 
   function onKeydown(event: KeyboardEvent) {

@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import {
+  adjacentClipEdge,
   clipIsActive,
   clipMediaTime,
   clipsForTrack,
   overwriteClipsInRange,
   resolveClipTimingEdit,
+  resolveSnappedClipTimingEdit,
   syncSingleClipFadeCompatibility,
+  timelineClipEdges,
   timelineDuration,
 } from '../src/utils/editorClips.ts'
 import type { EditorClip, EditorSource, EditorTrack } from '../src/types/editor.ts'
@@ -118,6 +121,41 @@ describe('editor clip timeline helpers', () => {
     })
     assert.deepEqual(resolveClipTimingEdit(timing, 'trim-end', 9, 6), { duration: 5 })
     assert.deepEqual(resolveClipTimingEdit(timing, 'trim-end', -9, 6), { duration: 0.05 })
+  })
+
+  it('navigates unique clip boundaries and skips the current cut', () => {
+    const sources = new Map([[source.id, source]])
+    const firstClip = clipsForTrack(track, sources)[0]
+    const secondTrack = { ...track, id: 'second', clips: [{ ...firstClip, id: 'second', start: 4, duration: 3 }] }
+    const edges = timelineClipEdges([track, secondTrack], sources)
+    assert.deepEqual(edges, [0, 4, 7])
+    assert.equal(adjacentClipEdge(edges, 4, -1), 0)
+    assert.equal(adjacentClipEdge(edges, 4, 1), 7)
+    assert.equal(adjacentClipEdge(edges, 5, -1), 4)
+    assert.equal(adjacentClipEdge(edges, 7, 1), null)
+    assert.deepEqual(timelineClipEdges([track, secondTrack], sources, 'second'), [0, 4])
+  })
+
+  it('snaps either moving edge without rounding target times', () => {
+    const timing = { start: 3, offset: 1, duration: 2 }
+    const target = 7 + 1 / 48000
+    const moved = resolveSnappedClipTimingEdit(timing, 'move', 1.97, 8, [target], 0.08)
+    assert.equal(moved.snapTime, target)
+    assert.ok(Math.abs(moved.patch.start! + timing.duration - target) < 1e-10)
+    const start = resolveSnappedClipTimingEdit(timing, 'move', 0.97, 8, [4], 0.08)
+    assert.deepEqual(start, { patch: { start: 4 }, snapTime: 4 })
+  })
+
+  it('snaps trim edges within the source and skips unreachable targets', () => {
+    const timing = { start: 3, offset: 1, duration: 2 }
+    assert.deepEqual(resolveSnappedClipTimingEdit(timing, 'trim-start', -0.97, 4, [1.99, 2], 0.08), {
+      patch: { start: 2, offset: 0, duration: 3 }, snapTime: 2,
+    })
+    assert.deepEqual(resolveSnappedClipTimingEdit(timing, 'trim-end', 0.99, 4, [6.01], 0.08), {
+      patch: { duration: 2.99 }, snapTime: null,
+    })
+    const short = { start: 1, offset: 0, duration: 1 / 48000 }
+    assert.equal(resolveClipTimingEdit(short, 'trim-end', -1, 4).duration, short.duration)
   })
 
   it('keeps both sides of a clip when punch-in recording overwrites its middle', () => {

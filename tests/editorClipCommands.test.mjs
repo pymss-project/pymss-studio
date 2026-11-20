@@ -137,3 +137,28 @@ test('moves and copies clips across tracks without replacing destination audio',
   editor.redo()
   assert.deepEqual(editor.session.tracks[1].clips.map(item => item.id), ['clip-b', duplicate.id])
 })
+
+test('splits multiple tracks at one time with one undo and leaves locked clips intact', t => {
+  const { editor, clip } = environment(t)
+  const [first, second] = editor.session.tracks
+  const locked = { ...clip, id: 'locked', locked: true }
+  const atBoundary = { ...clip, id: 'boundary', start: 4 }
+  first.clips.push(locked, atBoundary)
+  editor.selectClip('a', clip.id)
+  editor.splitAllClipsAt(2)
+  assert.equal(editor.canUndo, false)
+  editor.splitAllClipsAt(4)
+  assert.equal(first.clips.length, 4)
+  assert.equal(second.clips.length, 2)
+  assert.deepEqual(first.clips.find(item => item.id === locked.id), locked)
+  assert.deepEqual(first.clips.find(item => item.id === atBoundary.id), atBoundary)
+  assert.equal(editor.selectedClip.start, 4)
+  assert.equal(editor.selectedClip.offset, 3)
+  assert.equal(second.clips[1].start, 4)
+  editor.undo()
+  assert.equal(editor.canUndo, false)
+  assert.deepEqual(editor.session.tracks.map(track => track.clips.length), [3, 1])
+  assert.equal(editor.selectedClip.id, clip.id)
+  editor.redo()
+  assert.deepEqual(editor.session.tracks.map(track => track.clips.length), [4, 2])
+})

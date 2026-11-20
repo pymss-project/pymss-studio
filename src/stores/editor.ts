@@ -1808,14 +1808,15 @@ export const useEditorStore = defineStore('editor', () => {
     if (!track || !clip) return
     const source = sourceMap.value.get(clip.assetId)
     const sourceDuration = Math.max(0, Number(source?.duration || 0))
-    const maxOffset = sourceDuration > 0 ? Math.max(0, sourceDuration - 0.01) : Number.MAX_SAFE_INTEGER
+    const minDuration = Math.min(1 / (source?.sampleRate || 48000), clip.duration)
+    const maxOffset = sourceDuration > 0 ? Math.max(0, sourceDuration - minDuration) : Number.MAX_SAFE_INTEGER
     const nextOffset = clamp(Number(patch.offset ?? clip.offset), 0, maxOffset)
     const availableDuration = sourceDuration > 0
-      ? Math.max(0.01, sourceDuration - nextOffset)
+      ? Math.max(minDuration, sourceDuration - nextOffset)
       : Number.MAX_SAFE_INTEGER
     clip.start = Math.max(0, Number(patch.start ?? clip.start))
     clip.offset = nextOffset
-    clip.duration = clamp(Number(patch.duration ?? clip.duration), 0.01, availableDuration)
+    clip.duration = clamp(Number(patch.duration ?? clip.duration), minDuration, availableDuration)
     clip.fadeIn = clamp(clip.fadeIn, 0, clip.duration)
     clip.fadeOut = clamp(clip.fadeOut, 0, clip.duration)
     syncSingleClipFadeCompatibility(track)
@@ -1921,38 +1922,69 @@ export const useEditorStore = defineStore('editor', () => {
     return clip
   }
 
-  function canSplitClipAt(time: number) {
-    const clip = selectedClip.value
-    if (!clip || !canCutClip.value) return false
+  function clipCanSplitAt(clip: EditorClip, time: number) {
+    if (clip.locked) return false
     // Each half must contain at least one source sample.
     const sample = 1 / (sourceMap.value.get(clip.assetId)?.sampleRate || 48000)
     return time - clip.start >= sample && clip.start + clip.duration - time >= sample
   }
 
-  function splitSelectedClipAt(time: number) {
-    const track = selectedTrack.value
+  function canSplitClipAt(time: number) {
     const clip = selectedClip.value
-    if (!track?.clips || !clip || !canSplitClipAt(time)) return
+    return clip !== null && !interactionDepth.value && clipCanSplitAt(clip, time)
+  }
 
-    const leftDuration = time - clip.start
-    const rightDuration = clip.duration - leftDuration
-    const right = {
-      ...clip,
-      id: makeId('clip'),
-      start: time,
-      offset: clip.offset + leftDuration,
-      duration: rightDuration,
-      fadeIn: 0,
-      fadeOut: Math.min(clip.fadeOut, rightDuration),
+  function canSplitAllClipsAt(time: number) {
+    return !interactionDepth.value && Boolean(session.value?.tracks.some((track) =>
+      clipsForTrack(track, sourceMap.value).some((clip) => clipCanSplitAt(clip, time)),
+    ))
+  }
+
+  function splitClipsAt(time: number, tracks: EditorTrack[], onlyClipId?: string) {
+    if (interactionDepth.value) return
+    let nextSelectedClipId = selectedClipId.value
+    const changes: { track: EditorTrack; clips: EditorClip[] }[] = []
+
+    for (const track of tracks) {
+      let changed = false
+      const clips = clipsForTrack(track, sourceMap.value).flatMap((clip) => {
+        if ((onlyClipId && clip.id !== onlyClipId) || !clipCanSplitAt(clip, time)) return [clip]
+
+        const leftDuration = time - clip.start
+        const rightDuration = clip.duration - leftDuration
+        const right: EditorClip = {
+          ...clip,
+          id: makeId('clip'),
+          start: time,
+          offset: clip.offset + leftDuration,
+          duration: rightDuration,
+          fadeIn: 0,
+          fadeOut: Math.min(clip.fadeOut, rightDuration),
+        }
+        if (track.id === selectedTrackId.value && clip.id === selectedClipId.value) nextSelectedClipId = right.id
+        changed = true
+        return [
+          { ...clip, duration: leftDuration, fadeIn: Math.min(clip.fadeIn, leftDuration), fadeOut: 0 },
+          right,
+        ]
+      })
+      if (changed) changes.push({ track, clips: clips.sort((a, b) => a.start - b.start) })
     }
 
+    if (!changes.length) return
     pushHistory()
-    clip.duration = leftDuration
-    clip.fadeIn = Math.min(clip.fadeIn, leftDuration)
-    clip.fadeOut = 0
-    track.clips = [...track.clips, right].sort((a, b) => a.start - b.start)
-    selectClip(track.id, right.id)
+    for (const { track, clips } of changes) replaceTrackClips(track, clips)
+    selectedClipId.value = nextSelectedClipId
     scheduleSave()
+  }
+
+  function splitSelectedClipAt(time: number) {
+    if (!selectedTrack.value || !selectedClip.value) return
+    splitClipsAt(time, [selectedTrack.value], selectedClip.value.id)
+  }
+
+  function splitAllClipsAt(time: number) {
+    if (session.value) splitClipsAt(time, session.value.tracks)
   }
 
   function removeSource(sourceId: string) {
@@ -2351,12 +2383,14 @@ export const useEditorStore = defineStore('editor', () => {
     canCutClip,
     canPasteClip,
     canSplitClipAt,
+    canSplitAllClipsAt,
     copySelectedClip,
     cutSelectedClip,
     deleteSelectedClip,
     dropClip,
     pasteClipAt,
     splitSelectedClipAt,
+    splitAllClipsAt,
     removeSource,
     exportMix,
     cancelExport,

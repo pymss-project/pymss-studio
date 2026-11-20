@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { CutOutline, EllipsisHorizontal, NavigateOutline } from '@vicons/ionicons5'
+import { CutOutline, EllipsisHorizontal, MagnetOutline, NavigateOutline } from '@vicons/ionicons5'
 import type { DropdownOption } from 'naive-ui'
 import type { EditorClip, EditorClipDrop, EditorSource, EditorTimelineTool, EditorTrack } from '@/types/editor'
 import EditorWaveform from '@/components/editor/EditorWaveform.vue'
@@ -9,7 +9,8 @@ import { editorClipShortcutLabel, type EditorClipCommand } from '@/utils/editorC
 import { formatTime, formatTimecode } from '@/utils/editorTime'
 import {
   clipsForTrack as resolveTrackClips,
-  resolveClipTimingEdit,
+  resolveSnappedClipTimingEdit,
+  timelineClipEdges,
   type ClipTimingEditMode,
 } from '@/utils/editorClips'
 
@@ -24,6 +25,7 @@ const props = defineProps<{
   trackLevels: Record<string, [number, number]>
   clipCommandState: Record<EditorClipCommand, boolean>
   timelineTool: EditorTimelineTool
+  snappingEnabled: boolean
   editingDisabled?: boolean
   externalDragging?: boolean
   externalImporting?: boolean
@@ -43,6 +45,7 @@ const emit = defineEmits<{
   removeTrack: [trackId: string]
   clipCommand: [command: EditorClipCommand]
   setTool: [tool: EditorTimelineTool]
+  toggleSnapping: []
   splitAt: [time: number]
   dropClip: [drop: EditorClipDrop]
   revealTrack: [trackId: string]
@@ -63,6 +66,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const HEADER_WIDTH = 180
+const SNAP_DISTANCE_PX = 7
 const scrollEl = ref<HTMLElement | null>(null)
 const scrollViewportWidth = ref(0)
 let resizeObserver: ResizeObserver | null = null
@@ -109,6 +113,7 @@ const contextTrack = ref<EditorTrack | null>(null)
 const contextClip = ref<{ track: EditorTrack; clip: EditorClip } | null>(null)
 const mixerRootEl = ref<HTMLElement | null>(null)
 const activeClipEditId = ref<string | null>(null)
+const clipSnapTime = ref<number | null>(null)
 const clipDropPreview = ref<{ drop: EditorClipDrop; clip: EditorClip } | null>(null)
 type ClipEditState = {
   pointerId: number
@@ -123,6 +128,7 @@ type ClipEditState = {
   offset: number
   duration: number
   sourceDuration: number
+  snapTargets: number[]
   begun: boolean
 }
 let clipEditState: ClipEditState | null = null
@@ -134,7 +140,7 @@ const timelineTools = [
 ] as const
 const clipCommandLabels = {
   cut: 'editor.cutClip', copy: 'editor.copyClip', paste: 'editor.pasteClip',
-  split: 'editor.splitClip', delete: 'editor.removeClip',
+  split: 'editor.splitClip', splitAll: 'editor.splitAllClips', delete: 'editor.removeClip',
 } as const
 
 function clipMenuItem(command: EditorClipCommand): DropdownOption {
@@ -153,6 +159,7 @@ const trackMenuOptions = computed<DropdownOption[]>(() => {
   if (!track) return []
   return [
     clipMenuItem('paste'),
+    clipMenuItem('splitAll'),
     { type: 'divider', key: 'track-divider' },
     {
       key: 'inspect',
@@ -175,6 +182,7 @@ const clipMenuOptions = computed<DropdownOption[]>(() => [
   clipMenuItem('copy'),
   clipMenuItem('paste'),
   clipMenuItem('split'),
+  clipMenuItem('splitAll'),
   clipMenuItem('delete'),
   { type: 'divider', key: 'clip-divider' },
   { key: 'inspect', label: t('editor.menuClipParams') },
@@ -285,6 +293,7 @@ function beginClipPointer(event: PointerEvent, track: EditorTrack, clip: EditorC
     offset: clip.offset,
     duration: clip.duration,
     sourceDuration: Math.max(0, Number(sourceForClip(clip)?.duration || 0)),
+    snapTargets: [props.currentTime, ...timelineClipEdges(props.tracks, props.sourceMap, clip.id)],
     begun: false,
   }
   activeClipEditId.value = clip.id
@@ -293,12 +302,25 @@ function beginClipPointer(event: PointerEvent, track: EditorTrack, clip: EditorC
   window.addEventListener('pointercancel', finishClipPointer)
 }
 
-function clipDropAt(event: PointerEvent, active: ClipEditState): EditorClipDrop | null {
-  const lane = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('[data-clip-lane]')
-  if (!lane || !mixerRootEl.value?.contains(lane) || !lane.dataset.clipLane) return null
+function timingAtPointer(event: PointerEvent, active: ClipEditState) {
   const scrollDelta = (scrollEl.value?.scrollLeft ?? 0) - active.scrollLeft
   const delta = (event.clientX - active.clientX + scrollDelta) / props.pixelsPerSecond
-  const start = delta === 0 ? active.start : resolveClipTimingEdit(active, 'move', delta).start ?? active.start
+  const useSnap = props.snappingEnabled && (active.mode !== 'move' || delta !== 0)
+  const { patch, snapTime } = resolveSnappedClipTimingEdit(
+    active, active.mode, delta, active.sourceDuration, useSnap ? active.snapTargets : [],
+    SNAP_DISTANCE_PX / props.pixelsPerSecond,
+  )
+  clipSnapTime.value = snapTime
+  return patch
+}
+
+function clipDropAt(event: PointerEvent, active: ClipEditState): EditorClipDrop | null {
+  const lane = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('[data-clip-lane]')
+  if (!lane || !mixerRootEl.value?.contains(lane) || !lane.dataset.clipLane) {
+    clipSnapTime.value = null
+    return null
+  }
+  const { start = active.start } = timingAtPointer(event, active)
   return {
     clipId: active.clip.id,
     fromTrackId: active.trackId,
@@ -323,9 +345,7 @@ function handleClipPointerMove(event: PointerEvent) {
     clipDropPreview.value = drop ? { drop, clip: active.clip } : null
     return
   }
-  const delta = deltaPx / props.pixelsPerSecond
-  const patch = resolveClipTimingEdit(active, active.mode, delta, active.sourceDuration)
-  emit('updateClipTiming', { trackId: active.trackId, clipId: active.clip.id, patch })
+  emit('updateClipTiming', { trackId: active.trackId, clipId: active.clip.id, patch: timingAtPointer(event, active) })
 }
 
 function clearClipPointer() {
@@ -337,6 +357,7 @@ function clearClipPointer() {
   clipEditState = null
   activeClipEditId.value = null
   clipDropPreview.value = null
+  clipSnapTime.value = null
   if (active.begun && active.mode !== 'move') emit('commitClipEdit')
 }
 
@@ -464,6 +485,11 @@ function containsPoint(x: number, y: number) {
   return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
 }
 
+function toggleTimelineSnapping() {
+  focusTimeline()
+  emit('toggleSnapping')
+}
+
 function useTimelineTool(tool: EditorTimelineTool) {
   focusTimeline()
   emit('setTool', tool)
@@ -567,6 +593,19 @@ defineExpose({
               @click="useTimelineTool(tool.id)"
             >
               <n-icon :component="tool.icon" />
+            </button>
+            <button
+              type="button"
+              class="chip ruler__tool"
+              :class="{ 'chip--active': snappingEnabled }"
+              :aria-pressed="snappingEnabled"
+              :aria-label="t('editor.snapToEdges')"
+              aria-keyshortcuts="S"
+              :title="t('editor.snapToEdges') + ' (S)'"
+              @keydown.space.stop
+              @click="toggleTimelineSnapping"
+            >
+              <n-icon :component="MagnetOutline" />
             </button>
           </div>
           <small>{{ tracks.length }}</small>
@@ -726,6 +765,12 @@ defineExpose({
             </div>
           </div>
         </div>
+        <span
+          v-if="snappingEnabled && clipSnapTime !== null"
+          class="clip-snap-line"
+          aria-hidden="true"
+          :style="{ transform: `translateX(${HEADER_WIDTH + clipSnapTime * pixelsPerSecond}px)` }"
+        />
       </div>
 
       <div
@@ -1396,6 +1441,14 @@ defineExpose({
   color: var(--primary-strong);
   background: color-mix(in srgb, var(--primary-soft) 44%, var(--surface-1));
   font-size: 12px;
+}
+
+.clip-snap-line {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 2;
+  border-left: 1px dashed var(--on-surface);
+  pointer-events: none;
 }
 
 .global-playhead {
