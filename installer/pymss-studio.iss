@@ -38,18 +38,31 @@ SetupIconFile=..\src-tauri\icons\icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 CloseApplications=yes
 RestartApplications=no
+ChangesEnvironment=yes
 DirExistsWarning=no
 
 [Languages]
 Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[CustomMessages]
+english.CliTask=Make pymss available in this user's terminal
+chinesesimplified.CliTask=在当前用户的终端中使用 pymss
+english.CliConflict=An existing pymss command was found. Its PATH will be preserved.%n%1%nStudio CLI: %2
+chinesesimplified.CliConflict=已检测到现有 pymss 命令，将保留原有 PATH。%n%1%nStudio 命令行：%2
+english.CliSkipped=User PATH registration was skipped. Studio CLI: %1
+chinesesimplified.CliSkipped=已跳过用户 PATH 注册。Studio 命令行：%1
+
 [Tasks]
+Name: "clipath"; Description: "{cm:CliTask}"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
+Source: "cli-path.ps1"; Flags: dontcopy
+Source: "cli-path.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "python-runtime\runtime-envs\*"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\pymss.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "\pymss.exe,python-runtime\runtime-envs\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceDir}\python-runtime\runtime-envs\*"; DestDir: "{app}\python-runtime\runtime-envs"; Excludes: "active-runtime.json"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallBundledRuntimeEnvs
 ; The bootstrap runtime stays read-only; only runtime-envs is writable for managed installs.
 
@@ -66,8 +79,12 @@ Filename: "{app}\bin\VC_redist.x64.exe"; Parameters: "/install /quiet /norestart
 Filename: "{cmd}"; Parameters: "/C del /F /Q ""{app}\bin\VC_redist.x64.exe"""; Flags: runhidden waituntilterminated skipifdoesntexist; Check: not IsVCRedistX64Installed
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
+[UninstallDelete]
+Type: files; Name: "{app}\pymss-studio.cli-uninstall-v1"
+
 [Code]
 var
+  RegisterCliPath: Boolean;
   FreshInstallKnown: Boolean;
   FreshInstallResult: Boolean;
 
@@ -197,17 +214,72 @@ begin
   RepairVenvConfig('rocm');
 end;
 
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Script: string;
+  Code: Integer;
+begin
+  if CurUninstallStep <> usUninstall then Exit;
+  { The uninstall helper runs elevated, including for a custom writable install directory. }
+  Script := ExpandConstant('{tmp}\studio-cli-uninstall.ps1');
+  if not CopyFile(ExpandConstant('{app}\cli-path.ps1'), Script, False) then begin
+    Log('Skipping PATH cleanup: the installed helper could not be copied.');
+    Exit;
+  end;
+  if CompareText(GetSHA256OfFile(Script), '{#GetSHA256OfFile(SourcePath + "cli-path.ps1")}') <> 0 then begin
+    Log('Skipping PATH cleanup: the installed helper could not be verified.');
+    Exit;
+  end;
+  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + Script + '" Remove "' +
+    ExpandConstant('{app}') + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) then
+    Log('Unable to start PATH cleanup: ' + SysErrorMessage(Code))
+  else if Code <> 0 then
+    Log('PATH cleanup failed with exit code ' + IntToStr(Code));
+end;
+
+procedure ConfigureCliPath(Action: string);
+var
+  Script, Report, Params, MessageText, Launcher: string;
+  Found: AnsiString;
+  Code: Integer;
+begin
+  RegisterCliPath := False;
+  Launcher := ExpandConstant('{app}\pymss.exe');
+  Report := ExpandConstant('{tmp}\pymss-command.txt');
+  if Action = 'Check' then begin
+    ExtractTemporaryFile('cli-path.ps1');
+    Script := ExpandConstant('{tmp}\cli-path.ps1');
+  end else Script := ExpandConstant('{app}\cli-path.ps1');
+  Params := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + Script + '" ' +
+    Action + ' "' + ExpandConstant('{app}') + '" -Report "' + Report + '"';
+  DeleteFile(Report);
+  if ExecAsOriginalUser(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      Params, '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0) then begin
+    RegisterCliPath := True;
+    Exit;
+  end;
+  MessageText := FmtMessage(CustomMessage('CliSkipped'), [Launcher]);
+  if (Code = 2) and LoadStringFromFile(Report, Found) then
+    MessageText := FmtMessage(CustomMessage('CliConflict'), [UTF8Decode(Found), Launcher]);
+  Log(MessageText);
+  SuppressibleMsgBox(MessageText, mbInformation, MB_OK, IDOK);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssInstall then
   begin
     FreshInstallResult := IsFreshInstall();
     FreshInstallKnown := True;
+    if WizardIsTaskSelected('clipath') then ConfigureCliPath('Check');
   end;
   if CurStep = ssPostInstall then
   begin
+    if RegisterCliPath then ConfigureCliPath('Add');
     RepairBundledRuntimeEnvs();
     CleanupInstallTree();
     SaveStringToFile(ExpandConstant('{app}') + '\pymss-studio.inno-install', 'managed' + #13#10, False);
+    SaveStringToFile(ExpandConstant('{app}\pymss-studio.cli-uninstall-v1'), '1' + #13#10, False);
   end;
 end;

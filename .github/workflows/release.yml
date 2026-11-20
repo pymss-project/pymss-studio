@@ -395,4 +395,4 @@ jobs:
           prerelease: true
           make_latest: false
           overwrite_files: true
-          files: artifacts/*-v1-*-update.json
+          files: artifacts/*-v*-*-update.json

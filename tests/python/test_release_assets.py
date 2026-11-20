@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import zipfile
 import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import importlib.util
@@ -211,10 +212,13 @@ class ReleaseAssetsTests(unittest.TestCase):
         updates = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(updates)
         archive = self.file("Pymss-Studio-1.2.3-windows-x64-update.zip")
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("pymss.exe", b"cli")
         self.file(archive.name + ".sig", b"signed-archive")
         self.file("Pymss-Studio-1.2.3-windows-x64-online-setup.exe")
         channels = updates.generate(self.source, {"RELEASE_TAG": "v1.2.3", "RELEASE_AUTO_UPDATE_SUPPORTED": "true"})
         ASSETS.public_assets(self.source, self.output, "1.2.3")
+        self.assertEqual(set(channels), {"stable-v2-windows-x64-update.json", "prerelease-v2-windows-x64-update.json"})
         for channel in channels:
             data = json.loads((self.source / channel).read_text())
             target = data["platforms"]["windows-x86_64"]
@@ -234,7 +238,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         self.assertIn("--merge-published", public["run"])
         updater = steps[-1]
         self.assertEqual(updater["with"]["tag_name"], "updater")
-        self.assertEqual(updater["with"]["files"], "artifacts/*-v1-*-update.json")
+        self.assertEqual(updater["with"]["files"], "artifacts/*-v*-*-update.json")
         names = [step.get("name") for step in steps]
         verify = names.index("Verify both runtime mirrors before publication")
         for provider in ("HuggingFace", "ModelScope"):

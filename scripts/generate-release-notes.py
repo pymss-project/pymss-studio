@@ -29,6 +29,13 @@ UPDATE_PLATFORMS = (
 )
 
 
+def update_metadata_name(artifacts: Path, slug: str) -> str:
+    current = f"prerelease-v2-{slug}-update.json"
+    if slug == "windows-x64" and (artifacts / current).is_file():
+        return current
+    return f"prerelease-v1-{slug}-update.json"
+
+
 def mirror_download_roots(version: str):
     folder = quote(version, safe="")
     return (
@@ -115,7 +122,7 @@ def fetch_published_release(
         metadata["mirror-packages"] = {"names": mirror_only}
     update_section = body.partition("## 在线更新 / In-app updates")[2].split("\n## ", 1)[0]
     for slug, platform in UPDATE_PLATFORMS:
-        name = f"prerelease-v1-{slug}-update.json"
+        name = update_metadata_name(artifacts, slug)
         if (artifacts / name).is_file():
             continue
         if name in assets:
@@ -172,7 +179,7 @@ def render_release_notes(
         if slug.split("-", 1)[0] not in platforms:
             continue
         # This channel is generated for both stable releases and prereleases.
-        metadata_name = f"prerelease-v1-{slug}-update.json"
+        metadata_name = update_metadata_name(artifacts, slug)
         metadata_path = artifacts / metadata_name
         metadata = (published_metadata or {}).get(metadata_name)
         status = (published_metadata or {}).get("update-status", {}).get(slug, "请在应用内检查 / Check in the application")

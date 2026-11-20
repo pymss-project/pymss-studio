@@ -15,6 +15,7 @@ import time
 import urllib.request
 import uuid
 from collections import deque
+from contextlib import ExitStack
 from functools import partial, wraps
 from pathlib import Path
 from typing import Any, Callable
@@ -141,7 +142,19 @@ def _serialized_runtime_command(command: Callable[..., int], *, query: bool = Fa
             # Repairing queries hold the same lock as writers for their entire operation.
             # Read-only installations may only be observed, never repaired or recovered.
             with runtime_lock(RUNTIME_ENVS_DIR / ".runtime-management.lock", allow_read_only=query) as writable:
-                return command(payload, repair=writable) if query else command(payload)
+                if not query:
+                    return command(payload)
+                with ExitStack() as leases:
+                    if writable and os.name == "nt":
+                        # The console may be importing this interpreter. Keep inventory
+                        # available while deferring repairs until the last CLI exits.
+                        try:
+                            writable = leases.enter_context(runtime_lock(
+                                RUNTIME_ENVS_DIR / ".pymss-cli-query.lock", timeout=0, allow_read_only=True,
+                            ))
+                        except RuntimeLockBusy:
+                            writable = False
+                    return command(payload, repair=writable)
         except RuntimeLockBusy:
             from worker_protocol import emit_error
             return emit_error(
@@ -2587,7 +2600,7 @@ def _ensure_runtime_pip(
 def _repair_runtime_venv_config(env_dir: Path) -> bool:
     cfg = env_dir / "pyvenv.cfg"
     from worker_runtime_seed import bound_bootstrap_python
-    bootstrap = bound_bootstrap_python(env_dir, RUNTIME_ENVS_DIR, _bootstrap_python_path())
+    bootstrap = bound_bootstrap_python(env_dir, env_dir.parent, _bootstrap_python_path())
     if not cfg.is_file() or not bootstrap.is_file():
         return False
     content = "\n".join([

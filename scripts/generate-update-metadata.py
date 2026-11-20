@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,6 +39,14 @@ def generate(artifacts: Path, environment: dict[str, str]) -> list[str]:
             if type(size) is not int or not 0 < size <= 16 * 1024**3 or not sidecar.get("pymss_runtime_contract"):
                 raise ValueError("Invalid macOS update runtime metadata")
             extra = {key: sidecar[key] for key in ("pymss_unpacked_size", "pymss_runtime_contract")}
+        generations = ("v1",)
+        if slug == "windows-x64":
+            # Derive the channel from the actual signed payload. Full CLI updates
+            # leave the last v1 bridge published for clients skipping versions.
+            with zipfile.ZipFile(artifacts / asset) as archive:
+                includes_cli = "pymss.exe" in archive.namelist()
+            extra["pymss_windows_cli_update"] = includes_cli
+            generations = ("v2",) if includes_cli else ("v1", "v2")
         for channel in channels:
             data = {
                 "version": version,
@@ -57,9 +66,10 @@ def generate(artifacts: Path, environment: dict[str, str]) -> list[str]:
                 },
                 **extra,
             }
-            name = f"{channel}-v1-{slug}-update.json"
-            (artifacts / name).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            generated.append(name)
+            for generation in generations:
+                name = f"{channel}-{generation}-{slug}-update.json"
+                (artifacts / name).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                generated.append(name)
     if not generated:
         raise ValueError("No signed managed update archives were found")
     (artifacts / "managed-update-metadata.txt").write_text("\n".join(generated) + "\n", encoding="utf-8")

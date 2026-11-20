@@ -254,7 +254,10 @@ jobs:
           PYMSS_BUILD_VARIANT: windows-x64-cuda
           PYMSS_BUILD_UPDATE_SUPPORTED: 'true'
           PYMSS_BUILD_OFFICIAL: ${{ github.repository == 'pymss-project/pymss-studio' && github.repository_owner == 'pymss-project' && 'true' || 'false' }}
-        run: pnpm plugins:build --no-bundle
+        run: |
+          pnpm plugins:build --no-bundle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --release --locked --manifest-path src-tauri/Cargo.toml --features studio-cli --bin pymss
 
       - name: Download shared Windows bundled tools
         uses: actions/download-artifact@v4
@@ -269,6 +272,7 @@ jobs:
           $stage = "release/${{ steps.meta.outputs.stage_name }}"
           if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "src-tauri/target/release/pymss.exe" "$stage/pymss.exe"
           Copy-Item "src-tauri/target/release/pymss-studio.exe" "$stage/Pymss Studio.exe"
           Copy-Item "python" "$stage/python" -Recurse
           Copy-Item "python-runtime" "$stage/python-runtime" -Recurse
@@ -308,6 +312,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Staged CUDA list_models failed with exit code $LASTEXITCODE" }
           & "$stage\python-runtime\runtime-envs\cuda\Scripts\python.exe" "$stage\python\runtime_audio_probe.py" --check-core
           if ($LASTEXITCODE -ne 0) { throw "Staged CUDA audio decoding failed with exit code $LASTEXITCODE" }
+          python scripts/verify-windows-cli.py "$stage"
+          if ($LASTEXITCODE -ne 0) { throw "Staged pymss CLI verification failed" }
           ./scripts/prepare-python-runtime.ps1 -RewriteRuntimeEnvConfigs -TemplateRuntimeEnvConfigs -RuntimeEnvsDir "$stage/python-runtime/runtime-envs" -RuntimeDir "$stage/python-runtime"
           $workspacePattern = [regex]::Escape((Resolve-Path ".").Path)
           $leakedConfig = Get-ChildItem "$stage/python-runtime/runtime-envs" -Recurse -File |
@@ -437,7 +443,10 @@ jobs:
           PYMSS_BUILD_VARIANT: windows-x64-cpu
           PYMSS_BUILD_UPDATE_SUPPORTED: 'true'
           PYMSS_BUILD_OFFICIAL: ${{ github.repository == 'pymss-project/pymss-studio' && github.repository_owner == 'pymss-project' && 'true' || 'false' }}
-        run: pnpm plugins:build --no-bundle
+        run: |
+          pnpm plugins:build --no-bundle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --release --locked --manifest-path src-tauri/Cargo.toml --features studio-cli --bin pymss
 
       - name: Download shared Windows bundled tools
         uses: actions/download-artifact@v4
@@ -452,6 +461,7 @@ jobs:
           $stage = "release/${{ steps.meta.outputs.stage_name }}"
           if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "src-tauri/target/release/pymss.exe" "$stage/pymss.exe"
           Copy-Item "src-tauri/target/release/pymss-studio.exe" "$stage/Pymss Studio.exe"
           Copy-Item "python" "$stage/python" -Recurse
           Copy-Item "python-runtime" "$stage/python-runtime" -Recurse
@@ -481,7 +491,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Staged CPU pymss.graph import failed" }
           & "$stage\python-runtime\runtime-envs\cpu\Scripts\python.exe" "$stage\python\worker.py" list_models --payload "{}"
           if ($LASTEXITCODE -ne 0) { throw "Staged CPU list_models failed with exit code $LASTEXITCODE" }
-           ./scripts/prepare-python-runtime.ps1 -RewriteRuntimeEnvConfigs -TemplateRuntimeEnvConfigs -RuntimeEnvsDir "$stage/python-runtime/runtime-envs" -RuntimeDir "$stage/python-runtime"
+          python scripts/verify-windows-cli.py "$stage"
+          if ($LASTEXITCODE -ne 0) { throw "Staged pymss CLI verification failed" }
+          ./scripts/prepare-python-runtime.ps1 -RewriteRuntimeEnvConfigs -TemplateRuntimeEnvConfigs -RuntimeEnvsDir "$stage/python-runtime/runtime-envs" -RuntimeDir "$stage/python-runtime"
           $workspacePattern = [regex]::Escape((Resolve-Path ".").Path)
            $leakedConfig = Get-ChildItem "$stage/python-runtime/runtime-envs" -Recurse -File |
             Where-Object { $_.Extension -in @('.cfg', '.json', '.txt', '.ini') } |
@@ -597,7 +609,10 @@ jobs:
           PYMSS_BUILD_VARIANT: windows-x64-managed
           PYMSS_BUILD_UPDATE_SUPPORTED: 'true'
           PYMSS_BUILD_OFFICIAL: ${{ github.repository == 'pymss-project/pymss-studio' && github.repository_owner == 'pymss-project' && 'true' || 'false' }}
-        run: pnpm plugins:build --no-bundle
+        run: |
+          pnpm plugins:build --no-bundle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --release --locked --manifest-path src-tauri/Cargo.toml --features studio-cli --bin pymss
       - name: Download shared Windows bundled tools
         uses: actions/download-artifact@v4
         with:
@@ -609,6 +624,7 @@ jobs:
         run: |
           $stage = "release/${{ steps.meta.outputs.stage_name }}"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "src-tauri/target/release/pymss.exe" "$stage/pymss.exe"
           Copy-Item "src-tauri/target/release/pymss-studio.exe" "$stage/Pymss Studio.exe"
           Copy-Item "python" "$stage/python" -Recurse
           Copy-Item "python-runtime" "$stage/python-runtime" -Recurse
@@ -627,6 +643,8 @@ jobs:
           Remove-Item $probeVenv -Recurse -Force
           & "$stage\python-runtime\python.exe" "$stage\python\worker.py" runtime_info --payload "{}"
            if ($LASTEXITCODE -ne 0) { throw "Online runtime bootstrap check failed" }
+           python scripts/verify-windows-cli.py "$stage" --online
+           if ($LASTEXITCODE -ne 0) { throw "Online CLI guidance check failed" }
            Get-ChildItem "$stage\python" -Recurse -Directory -Filter "__pycache__" |
              Remove-Item -Recurse -Force
            Get-ChildItem "$stage\python" -Recurse -File -Include "*.pyc", "*.pyo" |
@@ -657,6 +675,11 @@ jobs:
           name: ${{ needs.windows-online-prepare.outputs.stage_artifact }}
           path: release/${{ needs.windows-online-prepare.outputs.stage_name }}
       - name: Build online portable archive
+        env:
+          # Publish an auto-update-enabled stable bridge first (also updates prerelease).
+          # Set PYMSS_WINDOWS_UPDATE_LAYOUT=v2 for subsequent releases. Old clients
+          # continue to receive that bridge from v1, including on the mirrors.
+          WINDOWS_UPDATE_LAYOUT: ${{ vars.PYMSS_WINDOWS_UPDATE_LAYOUT || 'bridge' }}
         shell: pwsh
         run: |
           $stageName = '${{ needs.windows-online-prepare.outputs.stage_name }}'
@@ -665,7 +688,10 @@ jobs:
           $updateArchive = (Resolve-Path "release").Path + "\Pymss-Studio-${{ needs.windows-online-prepare.outputs.version }}-windows-x64-update.zip"
            Push-Location "release/$stageName"
            # Keep bundled tools in the portable archive only. Add bin here when a tool update needs to be distributed.
-           & "C:\Program Files\7-Zip\7z.exe" a -tzip $updateArchive "Pymss Studio.exe" "python"
+           $files = @("Pymss Studio.exe", "python")
+           if ($env:WINDOWS_UPDATE_LAYOUT -eq 'v2') { $files += 'pymss.exe' }
+           elseif ($env:WINDOWS_UPDATE_LAYOUT -ne 'bridge') { throw "Invalid Windows update layout" }
+           & "C:\Program Files\7-Zip\7z.exe" a -tzip $updateArchive @files
           if ($LASTEXITCODE -ne 0) { throw "Unable to create the managed update archive" }
           Pop-Location
           $updateSize = (Get-Item -LiteralPath $updateArchive).Length
@@ -766,7 +792,10 @@ jobs:
           PYMSS_BUILD_VARIANT: windows-x64-rocm
           PYMSS_BUILD_UPDATE_SUPPORTED: 'true'
           PYMSS_BUILD_OFFICIAL: ${{ github.repository == 'pymss-project/pymss-studio' && github.repository_owner == 'pymss-project' && 'true' || 'false' }}
-        run: pnpm plugins:build --no-bundle
+        run: |
+          pnpm plugins:build --no-bundle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --release --locked --manifest-path src-tauri/Cargo.toml --features studio-cli --bin pymss
       - name: Download shared Windows bundled tools
         uses: actions/download-artifact@v4
         with:
@@ -778,6 +807,7 @@ jobs:
         run: |
           $stage = "release/${{ steps.meta.outputs.stage_name }}"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "src-tauri/target/release/pymss.exe" "$stage/pymss.exe"
           Copy-Item "src-tauri/target/release/pymss-studio.exe" "$stage/Pymss Studio.exe"
           Copy-Item "python" "$stage/python" -Recurse
           Copy-Item "python-runtime" "$stage/python-runtime" -Recurse
@@ -814,6 +844,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Staged ROCm pymss.graph import failed" }
           & "$stage\python-runtime\runtime-envs\rocm\Scripts\python.exe" "$stage\python\worker.py" list_models --payload "{}"
           if ($LASTEXITCODE -ne 0) { throw "Staged ROCm list_models failed" }
+          python scripts/verify-windows-cli.py "$stage"
+          if ($LASTEXITCODE -ne 0) { throw "Staged pymss CLI verification failed" }
           ./scripts/prepare-python-runtime.ps1 -RewriteRuntimeEnvConfigs -TemplateRuntimeEnvConfigs -RuntimeEnvsDir "$stage/python-runtime/runtime-envs" -RuntimeDir "$stage/python-runtime"
           $workspacePattern = [regex]::Escape((Resolve-Path ".").Path)
           $leakedConfig = Get-ChildItem "$stage/python-runtime/runtime-envs" -Recurse -File |

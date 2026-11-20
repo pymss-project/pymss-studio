@@ -2,9 +2,16 @@
 name = "pymss-studio"
 version = "0.0.12"
 edition = "2021"
+default-run = "pymss-studio"
 authors = ["TheSmallHanCat"]
 
+[[bin]]
+name = "pymss"
+path = "src/bin/pymss.rs"
+required-features = ["studio-cli"]
+
 [features]
+studio-cli = []
 default = ["native-plugins"]
 native-plugins = ["dep:pymss-audio-host"]
 vst-lab = ["native-plugins"]
@@ -38,7 +45,7 @@ sha2 = "0.10"
 pymss-audio-host = { path = "../native/audio-host", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp", "Win32_System_SystemInformation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp", "Win32_System_SystemInformation", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

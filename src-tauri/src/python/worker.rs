@@ -4,7 +4,9 @@ use crate::python::protocol::WorkerEnvelope;
 use crate::session_log;
 use crate::state::AppState;
 use crate::storage;
-use serde::Deserialize;
+#[path = "runtime_selection.rs"]
+mod runtime_selection;
+use runtime_selection::*;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -71,25 +73,6 @@ use process_tree::CREATE_NO_WINDOW;
 
 const PYTHON_TERMINAL_LOG_PREFIX: &str = "__PYMSS_STUDIO_TERMINAL_LOG__";
 static PROGRESS_LOG_TIMES: OnceLock<Mutex<HashMap<String, (Instant, u64)>>> = OnceLock::new();
-const HOST_PYTHON_ENV_VARS: &[&str] = &[
-    "PYTHONHOME",
-    "PYTHONPATH",
-    "PYTHONUSERBASE",
-    "PYTHONSTARTUP",
-    "PYTHONEXECUTABLE",
-    "__PYVENV_LAUNCHER__",
-    "VIRTUAL_ENV",
-    "PYENV_VERSION",
-    "CONDA_PREFIX",
-    "CONDA_PREFIX_1",
-    "CONDA_DEFAULT_ENV",
-    "CONDA_PROMPT_MODIFIER",
-    "CONDA_SHLVL",
-    "CONDA_EXE",
-    "_CE_CONDA",
-    "_CE_M",
-];
-
 static PAYLOAD_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct BackgroundTask {
@@ -261,6 +244,8 @@ impl RuntimeAccess {
 }
 
 struct RuntimeAccessGuard<'a> {
+    #[cfg(windows)]
+    external: Vec<Arc<std::fs::File>>,
     access: &'a Mutex<RuntimeAccess>,
     updating: bool,
     installing_plugins: bool,
@@ -354,7 +339,7 @@ fn acquire_runtime_access<'a>(
     } else {
         state.users += 1;
     }
-    Ok(Some(RuntimeAccessGuard { access, updating, installing_plugins }))
+    Ok(Some(RuntimeAccessGuard { access, updating, installing_plugins, #[cfg(windows)] external: Vec::new() }))
 }
 
 fn worker_scratch(command: &str, payload: &Value) -> std::io::Result<Option<tempfile::TempDir>> {
@@ -424,7 +409,7 @@ fn runtime_idle_release_event(access: &Mutex<RuntimeAccess>, event: Option<Value
 fn has_pending_runtime_transaction(app: &AppHandle) -> AppResult<bool> {
     let mut roots = vec![storage::runtime_envs_dir(app)?];
     roots.extend(bundled_runtime_envs_dir(app)?);
-    Ok(roots.iter().any(|root| root.join(".rocm-transaction.json").exists()))
+    Ok(roots.iter().any(|root| root.join(".rocm-transaction.json").exists() || root.join(".overlay-activation.json").exists()))
 }
 
 fn recovery_query(command: &str) -> bool {
@@ -435,18 +420,29 @@ fn acquire_worker_runtime_access(app: &AppHandle, command: &str, payload: &Value
     let access_command = if recovery_query(command) && has_pending_runtime_transaction(app)? {
         "recover_runtime"
     } else { runtime_access_command(command, payload) };
-    acquire_runtime_access(&RUNTIME_ACCESS, access_command)
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ActiveRuntimeRecord {
-    python_path: String,
-    backend: Option<String>,
-    source: Option<String>,
-    overlay_path: Option<String>,
-    #[serde(default)]
-    debug_override: bool,
+    let guard = acquire_runtime_access(&RUNTIME_ACCESS, access_command)?;
+    #[cfg(windows)]
+    let guard = if let Some(mut guard) = guard {
+        use crate::cli_access::{resource, RUNTIME, MODELS};
+        let root = storage::runtime_envs_dir(app)?;
+        let lease = if guard.installing_plugins {
+            // Studio permits simultaneous plugin downloads in one process. They
+            // share a single exclusive OS lease and release it after the last one.
+            static INSTALLS: Mutex<std::sync::Weak<std::fs::File>> = Mutex::new(std::sync::Weak::new());
+            let mut current = INSTALLS.lock().map_err(|_| AppError::Worker("Plugin access lock poisoned".into()))?;
+            if let Some(lease) = current.upgrade() { lease } else {
+                let lease = Arc::new(resource(&root, RUNTIME, true)?);
+                *current = Arc::downgrade(&lease);
+                lease
+            }
+        } else { Arc::new(resource(&root, RUNTIME, guard.updating)?) };
+        guard.external.push(lease);
+        if matches!(command, "import_custom_model" | "unregister_custom_model" | "relink_custom_model" | "remap_custom_model_paths") {
+            guard.external.push(Arc::new(resource(&storage::settings_dir(app)?, MODELS, true)?));
+        }
+        Some(guard)
+    } else { None };
+    Ok(guard)
 }
 
 fn worker_path(app: &AppHandle) -> AppResult<PathBuf> {
@@ -583,220 +579,12 @@ fn bootstrap_python_path(app: &AppHandle) -> AppResult<String> {
     }
 }
 
-fn runtime_python_command_path(python: &Path) -> Option<PathBuf> {
-    if !python.is_file() {
-        return None;
-    }
-    // Resolve directory aliases while keeping a POSIX venv's executable symlink.
-    // Resolving the executable itself launches the base interpreter and loses pyvenv.cfg.
-    Some(
-        python
-            .parent()?
-            .canonicalize()
-            .ok()?
-            .join(python.file_name()?),
-    )
-}
-
-fn resolve_active_runtime_record(file: &PathBuf) -> Option<(String, Option<String>)> {
-    if !file.is_file() {
-        return None;
-    }
-    let content = std::fs::read_to_string(file).ok()?;
-    let record: ActiveRuntimeRecord = serde_json::from_str(&content).ok()?;
-    let python = PathBuf::from(&record.python_path);
-    // Resolve the directory, but retain the interpreter filename. On Unix a venv
-    // python is usually a symlink to the base interpreter; canonicalizing that
-    // final component both loses the venv and breaks backend ownership checks.
-    let resolved = if python.is_absolute() {
-        python
-    } else {
-        file.parent()?.join(python)
-    };
-    let executable = resolved.parent()?.canonicalize().ok()?.join(resolved.file_name()?);
-    executable.is_file().then(|| (executable.to_string_lossy().to_string(), record.source))
-}
-
 fn bundled_runtime_envs_dir(app: &AppHandle) -> AppResult<Option<PathBuf>> {
     let user_runtime = storage::runtime_envs_dir(app)?.canonicalize().ok();
     Ok(distinct_bundled_runtime_env(
         user_runtime,
         storage::bundled_runtime_envs_dir(app)?,
     ))
-}
-
-fn distinct_bundled_runtime_env(
-    user_runtime: Option<PathBuf>,
-    bundled: Option<PathBuf>,
-) -> Option<PathBuf> {
-    bundled.filter(|path| path.canonicalize().ok() != user_runtime)
-}
-
-fn active_runtime_python_path(app: &AppHandle, developer_mode: bool) -> AppResult<Option<String>> {
-    let user_file = storage::active_runtime_file(app)?;
-    if let Some((path, _source)) = resolve_active_runtime_record(&user_file) {
-        let is_managed = is_user_runtime_python_path(app, &path)?;
-        let is_debug_override = active_debug_override_path_allowed(
-            &user_file,
-            &path,
-            developer_mode,
-        );
-        if (is_managed || is_debug_override) && active_path_backend_matches(&user_file, &path) {
-            return Ok(Some(path));
-        }
-    };
-    if let Some(envs_dir) = bundled_runtime_envs_dir(app)? {
-        let bundled_file = envs_dir.join("active-runtime.json");
-        if let Some((path, _source)) = resolve_active_runtime_record(&bundled_file) {
-            if is_bundled_runtime_python_path(&bundled_file, &path)? {
-                return Ok(Some(path));
-            }
-        }
-    }
-    Ok(None)
-}
-
-fn resolve_runtime_overlay_for_record(
-    file: &Path,
-    active_python: &str,
-    allowed_roots: &[PathBuf],
-) -> Option<PathBuf> {
-    let content = std::fs::read_to_string(file).ok()?;
-    let record: ActiveRuntimeRecord = serde_json::from_str(&content).ok()?;
-    let (record_python, _) = resolve_active_runtime_record(&file.to_path_buf())?;
-    let expected = runtime_python_command_path(Path::new(active_python))?;
-    let recorded = runtime_python_command_path(Path::new(&record_python))?;
-    if expected != recorded {
-        return None;
-    }
-    let raw_overlay = record.overlay_path?.trim().to_string();
-    if raw_overlay.is_empty() {
-        return None;
-    }
-    let overlay = PathBuf::from(raw_overlay);
-    let overlay = if overlay.is_absolute() {
-        overlay
-    } else {
-        file.parent()?.join(overlay)
-    };
-    let overlay = overlay.canonicalize().ok()?;
-    if !overlay.is_dir() {
-        return None;
-    }
-    allowed_roots
-        .iter()
-        .filter_map(|root| root.canonicalize().ok())
-        .any(|root| overlay.starts_with(root.join(".overlays")))
-        .then_some(overlay)
-}
-
-fn active_runtime_overlay_path(app: &AppHandle, active_python: &str) -> AppResult<Option<PathBuf>> {
-    let user_runtime = storage::runtime_envs_dir(app)?;
-    let mut records = vec![storage::active_runtime_file(app)?];
-    let mut allowed_roots = vec![user_runtime];
-    if let Some(bundled) = bundled_runtime_envs_dir(app)? {
-        records.push(bundled.join("active-runtime.json"));
-        allowed_roots.push(bundled);
-    }
-    Ok(records
-        .into_iter()
-        .find_map(|file| resolve_runtime_overlay_for_record(&file, active_python, &allowed_roots)))
-}
-
-fn is_bundled_runtime_python_path(file: &Path, python_path: &str) -> AppResult<bool> {
-    let content = std::fs::read_to_string(file)?;
-    let record: ActiveRuntimeRecord = serde_json::from_str(&content)?;
-    let backend = record
-        .backend
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    if !matches!(backend.as_str(), "cpu" | "cuda" | "rocm" | "mlx") {
-        return Ok(false);
-    }
-    let Some(envs_dir) = file.parent() else {
-        return Ok(false);
-    };
-    let envs_dir = envs_dir.canonicalize()?;
-    let runtime_root = envs_dir
-        .parent()
-        .ok_or_else(|| AppError::Worker("bundled runtime root is missing".into()))?;
-    let Some(python) = runtime_python_command_path(Path::new(python_path)) else {
-        return Ok(false);
-    };
-    let bootstrap_matches = [
-        runtime_root.join("python.exe"),
-        runtime_root.join("bin").join("python3"),
-        runtime_root.join("bin").join("python"),
-    ]
-    .into_iter()
-    .filter_map(|candidate| runtime_python_command_path(&candidate))
-    .any(|candidate| candidate == python);
-    if bootstrap_matches {
-        return Ok(backend == "mlx");
-    }
-    let Some(env_dir) = python.parent().and_then(Path::parent) else {
-        return Ok(false);
-    };
-    Ok(env_dir.starts_with(&envs_dir)
-        && env_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.eq_ignore_ascii_case(&backend)))
-}
-
-fn active_path_backend_matches(file: &Path, python_path: &str) -> bool {
-    let Ok(content) = std::fs::read_to_string(file) else {
-        return false;
-    };
-    let Ok(record) = serde_json::from_str::<ActiveRuntimeRecord>(&content) else {
-        return false;
-    };
-    let Some(backend) = record.backend.filter(|value| !value.trim().is_empty()) else {
-        return false;
-    };
-    if !matches!(
-        backend.trim().to_ascii_lowercase().as_str(),
-        "cpu" | "cuda" | "rocm" | "mlx"
-    ) {
-        return false;
-    }
-    let path = PathBuf::from(python_path);
-    path.parent()
-        .and_then(Path::parent)
-        .and_then(|env| env.file_name())
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case(backend.trim()))
-}
-
-fn active_debug_override_path_allowed(
-    file: &Path,
-    python_path: &str,
-    developer_mode: bool,
-) -> bool {
-    if !developer_mode {
-        return false;
-    }
-    let Ok(content) = std::fs::read_to_string(file) else {
-        return false;
-    };
-    let Ok(record) = serde_json::from_str::<ActiveRuntimeRecord>(&content) else {
-        return false;
-    };
-    record.debug_override && active_path_backend_matches(file, python_path)
-}
-
-fn is_user_runtime_python_path(app: &AppHandle, path: &str) -> AppResult<bool> {
-    let runtime_envs = storage::runtime_envs_dir(app)?;
-    let runtime_root = runtime_envs.canonicalize().unwrap_or(runtime_envs);
-    let python_path = PathBuf::from(&path);
-    let env_dir = python_path
-        .parent()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf);
-    Ok(env_dir
-        .and_then(|path| path.canonicalize().ok())
-        .is_some_and(|path| path.starts_with(&runtime_root)))
 }
 
 pub(crate) fn bundled_bin_dirs(app: &AppHandle) -> AppResult<Vec<PathBuf>> {
@@ -832,45 +620,6 @@ fn bundled_openssl_env(app: &AppHandle) -> AppResult<Option<(PathBuf, PathBuf)>>
         }
     }
     Ok(None)
-}
-
-fn path_separator() -> &'static str {
-    if cfg!(windows) {
-        ";"
-    } else {
-        ":"
-    }
-}
-
-fn prepend_path(existing: Option<String>, dirs: Vec<PathBuf>) -> Option<String> {
-    if dirs.is_empty() {
-        return existing;
-    }
-
-    let mut parts: Vec<String> = dirs
-        .into_iter()
-        .map(|dir| dir.to_string_lossy().to_string())
-        .collect();
-
-    if let Some(value) = existing {
-        if !value.trim().is_empty() {
-            parts.push(value);
-        }
-    }
-
-    Some(parts.join(path_separator()))
-}
-
-fn isolate_python_environment(cmd: &mut Command, cache_root: &Path) {
-    for key in HOST_PYTHON_ENV_VARS {
-        cmd.env_remove(key);
-    }
-    // An interpreter flag also works for isolated/embedded Python, which can
-    // ignore PYTHONFAULTHANDLER inherited through the environment.
-    cmd.args(["-X", "faulthandler"])
-        .env("PYTHONNOUSERSITE", "1")
-        .env("NUMBA_CACHE_DIR", cache_root.join("numba-cache"))
-        .env("PIP_CACHE_DIR", cache_root.join("pip-cache"));
 }
 
 fn default_output_dir(app: &AppHandle) -> AppResult<PathBuf> {
@@ -927,19 +676,19 @@ fn build_worker_command(
     // Runtime management must never run inside the environment it is managing: the bootstrap
     // interpreter is the only one guaranteed to exist while an environment is being built,
     // switched, or deleted.
+    let root = storage::runtime_envs_dir(app)?;
+    let bundled = bundled_runtime_envs_dir(app)?;
     let active_runtime_python = if requires_bootstrap_python(command) {
         None
     } else {
-        active_runtime_python_path(app, developer_mode)?
+        active_python(&root, bundled.as_deref(), developer_mode)?
     };
     let active_overlay = active_runtime_python
         .as_deref()
-        .map(|python| active_runtime_overlay_path(app, python))
-        .transpose()?
-        .flatten();
+        .and_then(|python| active_overlay(&root, bundled.as_deref(), python));
     let python = select_worker_python(command, &bootstrap_python, active_runtime_python)?;
-    let mut managed_roots = vec![storage::runtime_envs_dir(app)?];
-    managed_roots.extend(bundled_runtime_envs_dir(app)?);
+    let mut managed_roots = vec![root];
+    managed_roots.extend(bundled);
     runtime_native_paths::reject_reserved_interpreter(Path::new(&python), &managed_roots)?;
     runtime_native_paths::reject_reserved_interpreter(Path::new(&bootstrap_python), &managed_roots)?;
     runtime_native_paths::reject_managed_bootstrap(Path::new(&bootstrap_python), &managed_roots)?;

@@ -33,6 +33,8 @@ import { normalizeBeginnerGuideProgress, type BeginnerGuideProgress } from '@/fe
 const studioLog = createLogger('ui.stores.settings')
 
 type AppPathsPayload = {
+  cliPath?: string
+  cliPathSupported?: boolean
   dataRoot: string
   settingsDir: string
   modelsDir: string
@@ -730,14 +732,16 @@ export const useSettingsStore = defineStore('settings', () => {
     modelDir.value = targetModelDir
     try {
       await refreshModelDataAfterDirChange()
+      await saveAppStore('app-settings', persistable.value)
       await invoke('confirm_model_dir_migration_switch', {
         payload: { taskId },
       })
     } catch (error) {
+      modelDir.value = previousModelDir
+      await saveAppStore('app-settings', persistable.value).catch(() => {})
       await invoke('cancel_model_dir_migration', {
         payload: { taskId },
       }).catch(() => {})
-      modelDir.value = previousModelDir
       await refreshModelDataAfterDirChange().catch(() => {})
       modelDirMigrationState.value = {
         ...modelDirMigrationState.value,

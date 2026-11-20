@@ -162,6 +162,8 @@ struct MigrationSessionState {
 
 #[derive(Debug, Default)]
 pub struct ModelDirMigrationSession {
+    #[cfg(windows)]
+    _cli_access: Option<std::fs::File>,
     state: Mutex<MigrationSessionState>,
     condvar: Condvar,
 }
@@ -809,7 +811,11 @@ pub fn start_model_dir_migration(
         .task_id
         .clone()
         .unwrap_or_else(|| format!("model_dir_migration_{}", chrono_like_timestamp()));
-    let session = Arc::new(ModelDirMigrationSession::default());
+    let session = Arc::new(ModelDirMigrationSession {
+        #[cfg(windows)]
+        _cli_access: Some(crate::cli_access::resource(&crate::storage::settings_dir(&app)?, crate::cli_access::MIGRATION, true)?),
+        ..Default::default()
+    });
     let migrations = state.migrations.clone();
     migrations
         .lock()

@@ -21,7 +21,7 @@ use windows_sys::Win32::System::Threading::{
     THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
 };
 
-use super::CREATE_NO_WINDOW;
+use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 fn ticks(time: FILETIME) -> u64 {
     (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
@@ -107,11 +107,20 @@ pub(super) struct QueryJob(OwnedHandle);
 
 impl QueryJob {
     pub(super) fn spawn(command: &mut Command) -> io::Result<(Child, Self)> {
-        Self::spawn_with_setup(command, |_| Ok(()))
+        Self::spawn_with_setup(command, CREATE_NO_WINDOW, |_| Ok(()))
+    }
+
+    #[cfg(feature = "studio-cli")]
+    pub(crate) fn console_status(command: &mut Command) -> io::Result<std::process::ExitStatus> {
+        let (mut child, job) = Self::spawn_with_setup(command, 0, |_| Ok(()))?;
+        let status = child.wait()?;
+        job.terminate_and_wait(std::time::Duration::from_secs(10))?;
+        Ok(status)
     }
 
     fn spawn_with_setup(
         command: &mut Command,
+        flags: u32,
         before_assignment: impl FnOnce(&Child) -> io::Result<()>,
     ) -> io::Result<(Child, Self)> {
         unsafe {
@@ -133,7 +142,7 @@ impl QueryJob {
             }
             // No worker code (including a venv launcher) may run before the
             // process belongs to the job. All later descendants inherit it.
-            command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+            command.creation_flags(flags | CREATE_SUSPENDED);
             let mut child = command.spawn()?;
             let setup = before_assignment(&child).and_then(|()| {
                 if AssignProcessToJobObject(handle, child.as_raw_handle()) == 0 {
@@ -347,7 +356,7 @@ mod tests {
     #[test]
     fn worker_is_suspended_before_job_assignment() {
         let marker = Marker::new();
-        let result = QueryJob::spawn_with_setup(&mut marker.command(), |child| {
+        let result = QueryJob::spawn_with_setup(&mut marker.command(), CREATE_NO_WINDOW, |child| {
             let thread = startup_thread(child.id())?;
             let previous = unsafe { SuspendThread(thread.as_raw_handle()) };
             if previous == u32::MAX {
@@ -380,7 +389,7 @@ mod tests {
     fn failed_startup_reaps_the_suspended_worker_without_executing_it() {
         let marker = Marker::new();
         let mut retained = None;
-        let result = QueryJob::spawn_with_setup(&mut marker.command(), |child| {
+        let result = QueryJob::spawn_with_setup(&mut marker.command(), CREATE_NO_WINDOW, |child| {
             retained = Some(child.as_handle().try_clone_to_owned()?);
             Err(io::Error::other("Rejected startup fixture"))
         });

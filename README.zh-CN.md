@@ -101,6 +101,23 @@ Pymss Studio 将 [pymss](https://github.com/pymss-project/pymss) 音乐源分离
 xattr -cr '/Applications/Pymss Studio.app'
 ```
 
+### Windows 命令行
+
+安装版和便携版都在 `Pymss Studio.exe` 同目录提供 `pymss.exe`。在 PowerShell 中进入该目录后可运行以下命令。
+
+```powershell
+.\pymss.exe --help
+.\pymss.exe list --user-only --json
+```
+
+命令使用 Studio 当前的运行环境、模型目录及自定义模型。GUI 关闭后也可运行。需要临时指定模型目录时，在支持的子命令后传入 `--model-dir`。在「设置 → 运行环境管理」可复制当前安装的完整调用命令。
+
+7z 便携版首次启动时保留当前 PATH。需要在任意目录运行命令时，打开「设置 → 运行环境管理 → 命令行」，点击「添加到用户 PATH」，然后重新打开终端。移走便携目录后，可在同一位置更新已登记的路径。删除便携版前可在这里移除由 Studio 添加的目录。
+
+安装器可以把入口加入当前用户 PATH。若已有同名命令，安装器会保留现有配置。打开新终端后可用 `where.exe pymss` 查看来源。
+
+旧安装版首次升级到支持命令行的版本时，请使用新版 Windows 安装器覆盖安装，以登记启动器和 PATH 卸载清理。之后可继续使用应用内更新。
+
 ## 快速上手
 
 1. **完成启动引导。** 选择界面语言、主题、数据目录和推理环境；在线版需等待运行环境安装完成。

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { vSliderA11y } from '@/directives/sliderAccessibility'
+import RuntimeCliSettings from '@/components/RuntimeCliSettings.vue'
 import TaskLogConsole from '@/components/TaskLogConsole.vue'
 import InferenceParameterHelp from '@/components/InferenceParameterHelp.vue'
 import { useBeginnerGuideStore } from '@/stores/beginnerGuide'
@@ -2213,6 +2214,16 @@ onMounted(async () => {
             </div>
             </div>
           </article>
+
+          <article v-if="settings.appPaths?.cliPath" class="about-info-card" aria-labelledby="runtime-cli-title">
+            <h2 id="runtime-cli-title" class="section-title runtime-cli-title">
+              <span class="section-title__icon" aria-hidden="true">
+                <n-icon :component="TerminalOutline" size="18" />
+              </span>
+              {{ t('settings.cliLauncher') }}
+            </h2>
+            <RuntimeCliSettings :launcher="settings.appPaths.cliPath" />
+          </article>
         </section>
 
         <!-- Paths -->
@@ -3510,6 +3521,10 @@ onMounted(async () => {
 .runtime-section {
   display: grid;
   gap: 16px;
+}
+
+.runtime-cli-title {
+  margin: 0;
 }
 
 .runtime-envs-card {

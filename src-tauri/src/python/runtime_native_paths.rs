@@ -195,7 +195,9 @@ pub(super) fn reject_pending_environment(
     };
     for root in managed_roots {
         let root = root.canonicalize().unwrap_or_else(|_| root.clone());
-        if root.join(".rocm-transaction.json").exists() && environment == root.join("rocm") {
+        if root.join(".overlay-activation.json").exists()
+            || (root.join(".rocm-transaction.json").exists() && environment == root.join("rocm"))
+        {
             return Err(AppError::Worker("RUNTIME_RECOVERY_REQUIRED: A runtime transaction must be recovered before executing this environment".into()));
         }
     }

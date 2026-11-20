@@ -101,6 +101,23 @@ If quarantine attributes prevent a macOS application from a trusted source from 
 xattr -cr '/Applications/Pymss Studio.app'
 ```
 
+### Windows command line
+
+The installer and portable archive include `pymss.exe` beside `Pymss Studio.exe`. Run these commands from that directory in PowerShell.
+
+```powershell
+.\pymss.exe --help
+.\pymss.exe list --user-only --json
+```
+
+The launcher uses Studio's active runtime, model directory, and custom model registry even when the GUI is closed. Commands that accept `--model-dir` can override the directory for one invocation. Copy the full PowerShell command from **Settings → Runtime Environments**.
+
+Portable archives leave PATH unchanged on first launch. To run the command from any directory, go to **Settings → Runtime Environments → Command line**, choose **Add to user PATH**, and open a new terminal. Use the same setting to update the path after moving the portable directory or to remove Studio's entry before deleting it.
+
+The installer can add Studio to the current user's PATH. If another `pymss` command already exists, its registration is preserved. Use `where.exe pymss` in a new terminal to check the command source.
+
+To add command-line support to an existing installed copy, run the new Windows installer over it once. This registers the launcher and PATH cleanup with the uninstaller. Later updates can be installed from within Studio.
+
 ## Quick start
 
 1. **Finish onboarding.** Choose language, theme, data directory, and runtime. The Online package needs to finish installing an inference environment.

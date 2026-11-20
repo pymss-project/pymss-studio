@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import zipfile
 import importlib.util
 import json
 import os
@@ -114,20 +115,43 @@ class WindowsReleaseTests(unittest.TestCase):
                     asset = folder / f"Pymss-Studio-{version}-{slug}.{suffix}"
                     asset.write_bytes(b"archive")
                     asset.with_name(asset.name + ".sig").write_text("signature", encoding="utf-8")
+                    if slug.startswith("windows"):
+                        with zipfile.ZipFile(asset, "w") as archive:
+                            archive.writestr("Pymss Studio.exe", b"bridge")
                     if slug.startswith("macos"):
                         asset.with_name(asset.name + ".json").write_text(json.dumps({
                             "version": version, "pymss_unpacked_size": 1,
                             "pymss_runtime_contract": {"schemaVersion": 1},
                         }), encoding="utf-8")
                 files = modules["metadata"].generate(folder, environment)
-                self.assertEqual(len(files), 3 if mode == "prerelease" else 6)
+                self.assertEqual(len(files), 4 if mode == "prerelease" else 8)
                 for name in files:
                     metadata = json.loads((folder / name).read_text(encoding="utf-8"))
                     self.assertEqual(metadata["version"], version)
                     self.assertEqual(metadata["pymss_update_supported"], automatic)
                     self.assertEqual(metadata["pymss_requires_manual_install"], not automatic)
+                    if "windows-x64" in name:
+                        self.assertIs(metadata["pymss_windows_cli_update"], False)
                     if mode == "prerelease":
                         self.assertEqual(metadata["channel"], "prerelease")
+
+    def test_cli_update_metadata_only_targets_compatible_generation(self):
+        spec = importlib.util.spec_from_file_location("update_metadata", ROOT / "scripts/generate-update-metadata.py")
+        metadata = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(metadata)
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            archive_path = folder / "Pymss-Studio-1.2.3-windows-x64-update.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("Pymss Studio.exe", b"app")
+                archive.writestr("pymss.exe", b"cli")
+            archive_path.with_suffix(".zip.sig").write_text("signature", encoding="utf-8")
+            files = metadata.generate(folder, {"RELEASE_TAG": "v1.2.3", "RELEASE_AUTO_UPDATE_SUPPORTED": "true"})
+            self.assertEqual(files, ["stable-v2-windows-x64-update.json", "prerelease-v2-windows-x64-update.json"])
+            for name in files:
+                data = json.loads((folder / name).read_text(encoding="utf-8"))
+                self.assertIs(data["pymss_windows_cli_update"], True)
+                self.assertIs(data["pymss_update_supported"], True)
 
     def test_every_package_downloads_the_same_tools_before_staging(self):
         producer = self.windows["windows-bundled-tools"]

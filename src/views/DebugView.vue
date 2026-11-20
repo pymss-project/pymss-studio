@@ -632,6 +632,51 @@ const pathRows = computed(() => [
   { label: t('debug.logsDir'), value: logsDir.value },
   { label: t('debug.tempDir'), value: tempDir.value },
 ])
+interface CliPathDetails {
+  launcher: string
+  launcherExists: boolean
+  userPathContainsStudio: boolean
+  systemPathContainsStudio: boolean
+  registeredDirectory: string | null
+  persistedCommand: string | null
+  processCommand: string | null
+}
+
+const showCliPathDiagnostics = computed(() => developerMode.value
+  && activeTab.value === 'runtime' && !!settings.appPaths?.cliPathSupported && isTauriRuntime())
+const cliPathDetails = ref<CliPathDetails | null>(null)
+const cliPathLoading = ref(false)
+const cliPathError = ref('')
+const cliPathRows = computed(() => {
+  const details = cliPathDetails.value
+  if (!details) return []
+  return [
+    { label: t('debug.cliLauncherPath'), path: details.launcher, fallback: '', reveal: details.launcherExists },
+    { label: t('debug.cliPersistedCommand'), path: details.persistedCommand, fallback: t('debug.cliCommandNotFound'), reveal: true },
+    { label: t('debug.cliProcessCommand'), path: details.processCommand, fallback: t('debug.cliCommandNotFound'), reveal: true },
+    { label: t('debug.cliRegisteredDirectory'), path: details.registeredDirectory, fallback: t('debug.cliNoRegistration'), reveal: false },
+  ]
+})
+
+async function refreshCliPathDiagnostics() {
+  if (!showCliPathDiagnostics.value || cliPathLoading.value) return
+  cliPathLoading.value = true
+  cliPathError.value = ''
+  try {
+    const result = await invoke<{ diagnostics: CliPathDetails }>('manage_cli_path', { action: 'diagnostics' })
+    cliPathDetails.value = result.diagnostics
+  } catch (error) {
+    cliPathDetails.value = null
+    cliPathError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    cliPathLoading.value = false
+  }
+}
+
+watch(showCliPathDiagnostics, (visible) => {
+  if (visible) void refreshCliPathDiagnostics()
+}, { immediate: true })
+
 const runtimeTree = computed<RuntimeTreeNode[]>(() => {
   const info = app.runtimeInfo
   const environments = info?.installedEnvironments || []
@@ -1621,6 +1666,47 @@ onBeforeUnmount(() => {
       </div>
     </n-card>
 
+    <n-card v-if="showCliPathDiagnostics" class="debug-card debug-cli-path" :bordered="true" size="small">
+      <template #header>
+        <div class="debug-section-title">
+          <n-icon :component="TerminalOutline" />
+          <span>{{ t('debug.cliPathTitle') }}</span>
+        </div>
+      </template>
+      <template #header-extra>
+        <n-button size="tiny" secondary :loading="cliPathLoading" :disabled="cliPathLoading" @click="refreshCliPathDiagnostics">
+          {{ t('common.refresh') }}
+        </n-button>
+      </template>
+      <p v-if="cliPathError" role="alert">{{ t('debug.cliPathReadFailed') }} {{ cliPathError }}</p>
+      <p v-else-if="!cliPathDetails && cliPathLoading" role="status">{{ t('settings.cliPathChecking') }}</p>
+      <template v-else-if="cliPathDetails">
+        <div class="debug-cli-path__status" aria-live="polite">
+          <n-tag size="small" :type="cliPathDetails.launcherExists ? 'success' : 'warning'">
+            {{ t(cliPathDetails.launcherExists ? 'debug.cliLauncherFound' : 'debug.cliLauncherMissing') }}
+          </n-tag>
+          <n-tag size="small" :type="cliPathDetails.userPathContainsStudio ? 'success' : 'default'">
+            {{ t(cliPathDetails.userPathContainsStudio ? 'debug.cliInUserPath' : 'debug.cliOutsideUserPath') }}
+          </n-tag>
+          <n-tag size="small" :type="cliPathDetails.systemPathContainsStudio ? 'success' : 'default'">
+            {{ t(cliPathDetails.systemPathContainsStudio ? 'debug.cliInSystemPath' : 'debug.cliOutsideSystemPath') }}
+          </n-tag>
+        </div>
+        <div class="path-debug-grid">
+          <div v-for="row in cliPathRows" :key="row.label" class="path-debug-row">
+            <span>{{ row.label }}</span>
+            <code :title="row.path || undefined">{{ row.path || row.fallback }}</code>
+            <n-button size="tiny" tertiary :disabled="!row.path" @click="row.path && copyText(row.path, 'debug.pathCopied')">
+              {{ t('common.copy') }}
+            </n-button>
+            <n-button size="tiny" secondary :disabled="!row.path || !row.reveal" @click="row.path && revealPath(row.path)">
+              {{ t('common.open') }}
+            </n-button>
+          </div>
+        </div>
+        <p class="debug-group-hint debug-cli-path__hint">{{ t('debug.cliPathLookupHint') }}</p>
+      </template>
+    </n-card>
     </section>
 
       <ApplicationUpdateDiagnostics v-if="activeTab === 'updates'" :snapshot="updateDiagnostics" />
@@ -3703,6 +3789,10 @@ onBeforeUnmount(() => {
 .path-debug-row {
   grid-template-columns: 150px minmax(0, 1fr) auto auto;
 }
+
+.debug-cli-path { grid-column: 1 / -1; }
+.debug-cli-path__status { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.debug-cli-path__hint { margin: 12px 0 0; }
 
 .diagnostic-row__main code {
   overflow: visible;

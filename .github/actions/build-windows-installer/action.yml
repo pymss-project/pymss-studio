@@ -25,6 +25,9 @@ runs:
     - uses: actions/setup-python@v5
       with:
         python-version: '3.12'
+    - name: Verify user PATH registration in an isolated registry key
+      shell: powershell
+      run: ./tests/manual/windows_cli_path.ps1
     - name: Install Inno Setup 7 x64
       shell: pwsh
       run: |

@@ -29,6 +29,9 @@ mod session_log;
 mod single_instance;
 mod state;
 mod storage;
+mod studio_paths;
+#[cfg(windows)]
+mod cli_access;
 mod terminal;
 mod update_manager;
 mod update_sources;
@@ -184,6 +187,7 @@ fn main() {
             commands::app_cmd::set_plugin_view_root,
             commands::app_cmd::describe_operation,
             commands::app_cmd::get_app_paths,
+            commands::cli_path::manage_cli_path,
             commands::app_cmd::get_env_info,
             commands::app_cmd::generate_waveform_peaks,
             commands::app_cmd::begin_editor_recording,

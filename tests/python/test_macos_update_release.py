@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import zipfile
 import copy
 import hashlib
 import importlib.util
@@ -307,6 +308,8 @@ phase=installed
             for name in (windows, macos):
                 (root / name).write_bytes(b"archive")
                 (root / f"{name}.sig").write_text("signature", encoding="utf-8")
+            with zipfile.ZipFile(root / windows, "w") as archive:
+                archive.writestr("Pymss Studio.exe", b"bridge")
             sidecar = {
                 "version": "1.2.3", "pymss_unpacked_size": 100,
                 "pymss_runtime_contract": BUILD.runtime_contract(MANIFEST),
@@ -316,7 +319,7 @@ phase=installed
                 "RELEASE_TAG": "v1.2.3", "RELEASE_AUTO_UPDATE_SUPPORTED": "false",
                 "RELEASE_MACOS_AUTO_UPDATE_SUPPORTED": "true",
             })
-            self.assertEqual(len(names), 4)
+            self.assertEqual(len(names), 6)
             win = json.loads((root / "stable-v1-windows-x64-update.json").read_text())
             mac = json.loads((root / "stable-v1-macos-arm64-update.json").read_text())
             self.assertFalse(win["pymss_update_supported"])
