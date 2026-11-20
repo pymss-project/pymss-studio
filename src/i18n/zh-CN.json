@@ -857,6 +857,8 @@
     "clipTrimStart": "拖动调整片段起点",
     "clipTrimEnd": "拖动调整片段终点",
     "menuClipParams": "查看片段参数",
+    "selectionTool": "选择工具",
+    "razorTool": "剃刀工具",
     "cutClip": "剪切片段",
     "copyClip": "复制片段",
     "pasteClip": "在播放头粘贴",

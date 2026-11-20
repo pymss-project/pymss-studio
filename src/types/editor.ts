@@ -31,6 +31,16 @@ export type EditorClip = {
   locked: boolean
 }
 
+export type EditorTimelineTool = 'selection' | 'razor'
+
+export type EditorClipDrop = {
+  clipId: string
+  fromTrackId: string
+  toTrackId: string
+  start: number
+  copy: boolean
+}
+
 /** Persist unknown formats and opaque state references so projects remain recoverable. */
 export type EditorPluginSlot = {
   id: string

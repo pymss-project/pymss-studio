@@ -857,6 +857,8 @@
     "clipTrimStart": "Drag to trim the clip start",
     "clipTrimEnd": "Drag to trim the clip end",
     "menuClipParams": "Show clip parameters",
+    "selectionTool": "Selection Tool",
+    "razorTool": "Razor Tool",
     "cutClip": "Cut Clip",
     "copyClip": "Copy Clip",
     "pasteClip": "Paste at Playhead",

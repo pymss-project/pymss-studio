@@ -20,7 +20,7 @@ const shortcuts = reactive({})
 const pinia = createPinia()
 const settings = useSettingsStore(pinia)
 const ShortcutHost = { setup() {
-  useEditorShortcuts(Object.fromEntries(['togglePlay', 'stop', 'undo', 'redo', 'zoomIn', 'zoomOut', 'save', 'toHome', 'seek', 'toggleMute', 'toggleSolo', 'clipCommand'].map(name => [name, () => shortcuts[name] = (shortcuts[name] || 0) + 1])))
+  useEditorShortcuts(Object.fromEntries(['togglePlay', 'stop', 'undo', 'redo', 'zoomIn', 'zoomOut', 'save', 'toHome', 'seek', 'toggleMute', 'toggleSolo', 'clipCommand', 'setTimelineTool'].map(name => [name, () => shortcuts[name] = (shortcuts[name] || 0) + 1])))
   return () => null
 } }
 window.selectFixture = { state, shortcuts, settings, blur: () => instance.blur(), focus: () => instance.focus(), theme(value) { state.theme = value; applyTheme(value, 'blue') } }

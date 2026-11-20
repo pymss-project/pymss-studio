@@ -23,6 +23,7 @@ import { useEditorPlayback } from '@/composables/useEditorPlayback'
 import { useEditorProjectBridge } from '@/composables/useEditorProjectBridge'
 import { useEditorRecording } from '@/composables/useEditorRecording'
 import { useDiagnosticWindowState } from '@/features/diagnostics/windowState'
+import type { EditorClipDrop, EditorTimelineTool } from '@/types/editor'
 import type { EditorClipCommand } from '@/utils/editorClipShortcuts'
 import { useEditorShortcuts } from '@/composables/useEditorShortcuts'
 
@@ -318,6 +319,20 @@ function toggleSelectedTrackFlag(flag: 'muted' | 'solo') {
   editor.toggleTrackFlag(editor.selectedTrackId, flag)
 }
 
+const timelineTool = ref<EditorTimelineTool>('selection')
+
+function setTimelineTool(tool: EditorTimelineTool) {
+  timelineTool.value = tool
+}
+
+function splitAtPointer(time: number) {
+  if (!recordingBusy.value) editor.splitSelectedClipAt(time)
+}
+
+function dropClip(drop: EditorClipDrop) {
+  if (!recordingBusy.value) editor.dropClip(drop)
+}
+
 const clipCommandState = computed(() => {
   const ready = !recordingBusy.value && !editor.loading && !showExportDialog.value
   return {
@@ -470,6 +485,7 @@ const { onTimelineKeydown } = useEditorShortcuts({
   toggleMute: () => toggleSelectedTrackFlag('muted'),
   toggleSolo: () => toggleSelectedTrackFlag('solo'),
   clipCommand: runClipCommand,
+  setTimelineTool,
 })
 
 watch(() => editor.session?.id, stopPlaybackAndReset)
@@ -615,6 +631,7 @@ watch(
             :pixels-per-second="editor.pixelsPerSecond"
             :track-levels="trackLevels"
             :clip-command-state="clipCommandState"
+            :timeline-tool="timelineTool"
             :editing-disabled="recordingBusy"
             :external-dragging="isDraggingExternalOnMixer"
             :external-importing="isImportingExternal"
@@ -632,6 +649,9 @@ watch(
             @seek="seekTimeline"
             @remove-track="removeTrack"
             @clip-command="runClipCommand"
+            @set-tool="setTimelineTool"
+            @split-at="splitAtPointer"
+            @drop-clip="dropClip"
             @reveal-track="revealTrackSource"
             @zoom-in="editor.zoomIn"
             @zoom-out="editor.zoomOut"

@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { EllipsisHorizontal } from '@vicons/ionicons5'
+import { CutOutline, EllipsisHorizontal, NavigateOutline } from '@vicons/ionicons5'
 import type { DropdownOption } from 'naive-ui'
-import type { EditorClip, EditorSource, EditorTrack } from '@/types/editor'
+import type { EditorClip, EditorClipDrop, EditorSource, EditorTimelineTool, EditorTrack } from '@/types/editor'
 import EditorWaveform from '@/components/editor/EditorWaveform.vue'
 import { editorClipShortcutLabel, type EditorClipCommand } from '@/utils/editorClipShortcuts'
 import { formatTime, formatTimecode } from '@/utils/editorTime'
@@ -23,6 +23,7 @@ const props = defineProps<{
   pixelsPerSecond: number
   trackLevels: Record<string, [number, number]>
   clipCommandState: Record<EditorClipCommand, boolean>
+  timelineTool: EditorTimelineTool
   editingDisabled?: boolean
   externalDragging?: boolean
   externalImporting?: boolean
@@ -41,6 +42,9 @@ const emit = defineEmits<{
   seek: [time: number]
   removeTrack: [trackId: string]
   clipCommand: [command: EditorClipCommand]
+  setTool: [tool: EditorTimelineTool]
+  splitAt: [time: number]
+  dropClip: [drop: EditorClipDrop]
   revealTrack: [trackId: string]
   showInspector: []
   contextMute: [trackId: string]
@@ -105,12 +109,16 @@ const contextTrack = ref<EditorTrack | null>(null)
 const contextClip = ref<{ track: EditorTrack; clip: EditorClip } | null>(null)
 const mixerRootEl = ref<HTMLElement | null>(null)
 const activeClipEditId = ref<string | null>(null)
+const clipDropPreview = ref<{ drop: EditorClipDrop; clip: EditorClip } | null>(null)
 type ClipEditState = {
   pointerId: number
   trackId: string
-  clipId: string
   mode: ClipTimingEditMode
+  clip: EditorClip
+  copy: boolean
   clientX: number
+  clientY: number
+  scrollLeft: number
   start: number
   offset: number
   duration: number
@@ -120,6 +128,10 @@ type ClipEditState = {
 let clipEditState: ClipEditState | null = null
 
 const isMac = /Mac/i.test(navigator.platform)
+const timelineTools = [
+  { id: 'selection', label: 'editor.selectionTool', icon: NavigateOutline, shortcut: 'V' },
+  { id: 'razor', label: 'editor.razorTool', icon: CutOutline, shortcut: 'C' },
+] as const
 const clipCommandLabels = {
   cut: 'editor.cutClip', copy: 'editor.copyClip', paste: 'editor.pasteClip',
   split: 'editor.splitClip', delete: 'editor.removeClip',
@@ -225,10 +237,10 @@ function clipWaveWidth(clip: EditorClip) {
   return Math.max(1, Math.ceil(clip.duration * props.pixelsPerSecond))
 }
 
-function clipStyle(clip: EditorClip) {
+function clipStyle(clip: EditorClip, start = clip.start) {
   return {
     width: `${Math.max(1, Math.min(laneWidth.value, clipWaveWidth(clip)))}px`,
-    transform: `translateX(${Math.max(0, clip.start * props.pixelsPerSecond)}px)`,
+    transform: `translateX(${Math.max(0, start * props.pixelsPerSecond)}px)`,
   }
 }
 
@@ -245,20 +257,34 @@ function beginClipPointer(event: PointerEvent, track: EditorTrack, clip: EditorC
   if (event.button !== 0) return
   event.preventDefault()
   event.stopPropagation()
+  if (clipEditState) return
   focusTimeline()
   emit('selectClip', { trackId: track.id, clipId: clip.id })
-  if (clip.locked || props.editingDisabled) return
-  const source = sourceForClip(clip)
+  if (props.editingDisabled) return
+
+  if (props.timelineTool === 'razor') {
+    if (clip.locked || mode !== 'move') return
+    const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect()
+    emit('splitAt', clip.start + (event.clientX - bounds.left) / props.pixelsPerSecond)
+    return
+  }
+
+  const copy = mode === 'move' && event.altKey
+  if (clip.locked && !copy) return
+  if (mode === 'move') (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
   clipEditState = {
     pointerId: event.pointerId,
     trackId: track.id,
-    clipId: clip.id,
     mode,
+    clip,
+    copy,
     clientX: event.clientX,
+    clientY: event.clientY,
+    scrollLeft: scrollEl.value?.scrollLeft ?? 0,
     start: clip.start,
     offset: clip.offset,
     duration: clip.duration,
-    sourceDuration: Math.max(0, Number(source?.duration || 0)),
+    sourceDuration: Math.max(0, Number(sourceForClip(clip)?.duration || 0)),
     begun: false,
   }
   activeClipEditId.value = clip.id
@@ -267,29 +293,60 @@ function beginClipPointer(event: PointerEvent, track: EditorTrack, clip: EditorC
   window.addEventListener('pointercancel', finishClipPointer)
 }
 
+function clipDropAt(event: PointerEvent, active: ClipEditState): EditorClipDrop | null {
+  const lane = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('[data-clip-lane]')
+  if (!lane || !mixerRootEl.value?.contains(lane) || !lane.dataset.clipLane) return null
+  const scrollDelta = (scrollEl.value?.scrollLeft ?? 0) - active.scrollLeft
+  const delta = (event.clientX - active.clientX + scrollDelta) / props.pixelsPerSecond
+  const start = delta === 0 ? active.start : resolveClipTimingEdit(active, 'move', delta).start ?? active.start
+  return {
+    clipId: active.clip.id,
+    fromTrackId: active.trackId,
+    toTrackId: lane.dataset.clipLane,
+    start,
+    copy: active.copy,
+  }
+}
+
 function handleClipPointerMove(event: PointerEvent) {
   const active = clipEditState
   if (!active || event.pointerId !== active.pointerId) return
   const deltaPx = event.clientX - active.clientX
-  if (!active.begun && Math.abs(deltaPx) < 2) return
   if (!active.begun) {
+    const distance = active.mode === 'move' ? Math.hypot(deltaPx, event.clientY - active.clientY) : Math.abs(deltaPx)
+    if (distance < 3) return
     active.begun = true
-    emit('beginClipEdit')
+    if (active.mode !== 'move') emit('beginClipEdit')
   }
-  const delta = deltaPx / Math.max(1, props.pixelsPerSecond)
+  if (active.mode === 'move') {
+    const drop = clipDropAt(event, active)
+    clipDropPreview.value = drop ? { drop, clip: active.clip } : null
+    return
+  }
+  const delta = deltaPx / props.pixelsPerSecond
   const patch = resolveClipTimingEdit(active, active.mode, delta, active.sourceDuration)
-  emit('updateClipTiming', { trackId: active.trackId, clipId: active.clipId, patch })
+  emit('updateClipTiming', { trackId: active.trackId, clipId: active.clip.id, patch })
 }
 
-function finishClipPointer(event: PointerEvent) {
+function clearClipPointer() {
   const active = clipEditState
-  if (!active || event.pointerId !== active.pointerId) return
+  if (!active) return
   window.removeEventListener('pointermove', handleClipPointerMove)
   window.removeEventListener('pointerup', finishClipPointer)
   window.removeEventListener('pointercancel', finishClipPointer)
   clipEditState = null
   activeClipEditId.value = null
-  if (active.begun) emit('commitClipEdit')
+  clipDropPreview.value = null
+  if (active.begun && active.mode !== 'move') emit('commitClipEdit')
+}
+
+function finishClipPointer(event: PointerEvent) {
+  const active = clipEditState
+  if (!active || event.pointerId !== active.pointerId) return
+  const drop = active.begun && active.mode === 'move' && event.type === 'pointerup' && !props.editingDisabled
+    ? clipDropAt(event, active) : null
+  clearClipPointer()
+  if (drop) emit('dropClip', drop)
 }
 
 function trackLevel(trackId: string) {
@@ -365,11 +422,11 @@ function handleTimelineWheel(event: WheelEvent) {
 onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   resizeObserver = null
-  window.removeEventListener('pointermove', handleClipPointerMove)
-  window.removeEventListener('pointerup', finishClipPointer)
-  window.removeEventListener('pointercancel', finishClipPointer)
-  if (clipEditState?.begun) emit('commitClipEdit')
-  clipEditState = null
+  clearClipPointer()
+})
+
+watch(() => props.editingDisabled, (disabled) => {
+  if (disabled) clearClipPointer()
 })
 
 function allowAssetDrop(trackId?: string | null) {
@@ -405,6 +462,11 @@ function containsPoint(x: number, y: number) {
   if (!root) return false
   const rect = root.getBoundingClientRect()
   return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+}
+
+function useTimelineTool(tool: EditorTimelineTool) {
+  focusTimeline()
+  emit('setTool', tool)
 }
 
 function focusTimeline() {
@@ -467,7 +529,16 @@ defineExpose({
 </script>
 
 <template>
-  <section ref="mixerRootEl" class="editor-mixer" tabindex="0" :aria-label="t('editor.timeline')" :class="{ 'editor-mixer--external-drop': externalDragging }">
+  <section
+    ref="mixerRootEl"
+    class="editor-mixer"
+    tabindex="0"
+    :aria-label="t('editor.timeline')"
+    :class="{
+      'editor-mixer--external-drop': externalDragging,
+      'editor-mixer--razor': timelineTool === 'razor' && !editingDisabled,
+    }"
+  >
     <div v-if="externalDragging || externalImporting" class="external-drop-hint" role="status">
       <n-spin v-if="externalImporting" size="small" />
       <span>{{ t(externalImporting ? 'editor.importingAudio' : 'editor.dropImportsTracks') }}</span>
@@ -481,6 +552,23 @@ defineExpose({
       <div class="ruler">
         <div class="ruler__head">
           <span>{{ t('editor.tracks') }}</span>
+          <div class="ruler__tools">
+            <button
+              v-for="tool in timelineTools"
+              :key="tool.id"
+              type="button"
+              class="chip ruler__tool"
+              :class="{ 'chip--active': tool.id === timelineTool }"
+              :aria-pressed="tool.id === timelineTool"
+              :aria-label="t(tool.label)"
+              :aria-keyshortcuts="tool.shortcut"
+              :title="t(tool.label) + ' (' + tool.shortcut + ')'"
+              @keydown.space.stop
+              @click="useTimelineTool(tool.id)"
+            >
+              <n-icon :component="tool.icon" />
+            </button>
+          </div>
           <small>{{ tracks.length }}</small>
         </div>
         <div class="ruler__track" :style="{ width: `${laneWidth}px` }" @click="seekFromEvent">
@@ -550,7 +638,7 @@ defineExpose({
             </div>
           </div>
 
-          <div class="track-row__lane" @click="seekFromEvent">
+          <div class="track-row__lane" :data-clip-lane="track.id" @click="seekFromEvent">
             <div class="track-wave" :style="{ width: `${laneWidth}px`, '--track-color': track.color || '#7aa2ff' }">
               <div
                 v-for="clip in clipsForTrack(track)"
@@ -561,6 +649,8 @@ defineExpose({
                   'track-wave__clip--muted': clip.muted,
                   'track-wave__clip--selected': clip.id === selectedClipId,
                   'track-wave__clip--editing': clip.id === activeClipEditId,
+                  'track-wave__clip--locked': clip.locked,
+                  'track-wave__clip--moving': clipDropPreview?.drop.clipId === clip.id && !clipDropPreview.drop.copy,
                 }"
                 :style="clipStyle(clip)"
                 tabindex="0"
@@ -569,10 +659,12 @@ defineExpose({
                 :title="sourceForClip(clip)?.name || track.name"
                 @focusin="emit('selectClip', { trackId: track.id, clipId: clip.id })"
                 @pointerdown="beginClipPointer($event, track, clip, 'move')"
+                @lostpointercapture="finishClipPointer"
                 @click.stop
                 @contextmenu.stop.prevent="openClipContextMenu($event, track, clip)"
               >
                 <button
+                  v-if="timelineTool === 'selection'"
                   class="track-wave__trim track-wave__trim--start"
                   type="button"
                   :aria-label="t('editor.clipTrimStart')"
@@ -600,6 +692,7 @@ defineExpose({
                 </div>
                 <div v-else class="track-wave__empty">{{ t('editor.laneNoAudio') }}</div>
                 <button
+                  v-if="timelineTool === 'selection'"
                   class="track-wave__trim track-wave__trim--end"
                   type="button"
                   :aria-label="t('editor.clipTrimEnd')"
@@ -607,6 +700,14 @@ defineExpose({
                   @pointerdown.stop="beginClipPointer($event, track, clip, 'trim-end')"
                   @click.stop
                 />
+              </div>
+              <div
+                v-if="clipDropPreview?.drop.toTrackId === track.id"
+                class="track-wave__clip track-wave__drop-preview"
+                :style="clipStyle(clipDropPreview.clip, clipDropPreview.drop.start)"
+                aria-hidden="true"
+              >
+                <span v-if="clipDropPreview.drop.copy">+</span>
               </div>
               <div
                 v-if="recordingPreview?.trackId === track.id"
@@ -782,6 +883,22 @@ defineExpose({
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.ruler__tools {
+  display: flex;
+  gap: 3px;
+  margin-left: auto;
+  margin-right: 8px;
+}
+
+.ruler__tool {
+  line-height: 1;
+}
+
+.ruler__tool :deep(svg) {
+  width: 13px;
+  height: 13px;
 }
 
 .ruler__grid {
@@ -1063,6 +1180,28 @@ defineExpose({
   box-shadow: none;
   cursor: grab;
   touch-action: none;
+}
+
+.editor-mixer--razor .track-wave__clip {
+  cursor: crosshair;
+}
+
+.editor-mixer--razor .track-wave__clip--locked {
+  cursor: not-allowed;
+}
+
+.track-wave__clip--moving {
+  opacity: 0.45;
+}
+
+.track-wave__drop-preview {
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+  pointer-events: none;
 }
 
 .track-wave__clip--muted {

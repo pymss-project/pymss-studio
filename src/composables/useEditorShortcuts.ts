@@ -1,3 +1,4 @@
+import type { EditorTimelineTool } from '@/types/editor'
 import { matchEditorClipShortcut, type EditorClipCommand } from '@/utils/editorClipShortcuts'
 import { onBeforeUnmount, onMounted } from 'vue'
 
@@ -14,6 +15,7 @@ export type EditorShortcutHandlers = {
   toggleMute: () => void
   toggleSolo: () => void
   clipCommand: (command: EditorClipCommand) => void
+  setTimelineTool: (tool: EditorTimelineTool) => void
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -28,10 +30,18 @@ export function useEditorShortcuts(handlers: EditorShortcutHandlers) {
   // Clip edits belong to the focused timeline. Dialogs and other panels own their clipboard.
   function onTimelineKeydown(event: KeyboardEvent) {
     if (event.defaultPrevented || event.isComposing || isEditableTarget(event.target)) return
+    if (document.querySelector('[aria-modal="true"], .n-modal-mask')) return
     const command = matchEditorClipShortcut(event)
-    if (!command || document.querySelector('[aria-modal="true"], .n-modal-mask')) return
+    if (command) {
+      event.preventDefault()
+      if (!event.repeat) handlers.clipCommand(command)
+      return
+    }
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+    const key = event.key.toLowerCase()
+    if (key !== 'v' && key !== 'c') return
     event.preventDefault()
-    if (!event.repeat) handlers.clipCommand(command)
+    if (!event.repeat) handlers.setTimelineTool(key === 'v' ? 'selection' : 'razor')
   }
 
   function onKeydown(event: KeyboardEvent) {

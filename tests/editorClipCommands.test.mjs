@@ -108,3 +108,32 @@ test('splits only inside an unlocked clip and keeps source timing and outer fade
   editor.copySelectedClip()
   assert.equal(editor.canPasteClip, true)
 })
+
+test('moves and copies clips across tracks without replacing destination audio', t => {
+  const { editor, clip } = environment(t)
+  editor.selectClip('a', clip.id)
+  const drop = { clipId: clip.id, fromTrackId: 'a', toTrackId: 'b', start: 4, copy: false }
+  editor.dropClip(drop)
+  assert.deepEqual(editor.session.tracks[0].clips, [])
+  assert.equal(editor.session.tracks[0].sourceId, '')
+  assert.equal(editor.selectedTrackId, 'b')
+  assert.deepEqual(editor.selectedClip, { ...clip, start: 4 })
+  assert.deepEqual(editor.session.tracks[1].clips.map(item => item.id), ['clip-b', clip.id])
+  editor.undo()
+  assert.deepEqual(editor.session.tracks[0].clips, [clip])
+  assert.equal(editor.canUndo, false)
+
+  editor.dropClip({ ...drop, copy: true })
+  const duplicate = editor.selectedClip
+  assert.notEqual(duplicate.id, clip.id)
+  assert.deepEqual(duplicate, { ...clip, id: duplicate.id, start: 4 })
+  assert.deepEqual(editor.session.tracks[0].clips, [clip])
+  editor.dropClip({ clipId: duplicate.id, fromTrackId: 'b', toTrackId: 'b', start: 1, copy: false })
+  assert.deepEqual(editor.session.tracks[1].clips.map(item => item.id), [duplicate.id, 'clip-b'])
+  editor.undo()
+  assert.deepEqual(editor.session.tracks[1].clips.map(item => item.id), ['clip-b', duplicate.id])
+  editor.undo()
+  assert.equal(editor.session.tracks[1].clips.length, 1)
+  editor.redo()
+  assert.deepEqual(editor.session.tracks[1].clips.map(item => item.id), ['clip-b', duplicate.id])
+})

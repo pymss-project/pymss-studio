@@ -27,6 +27,7 @@ import type {
   EditorSource,
   EditorSourceRole,
   EditorClip,
+  EditorClipDrop,
   EditorTrack,
   EditorAssetTreeNode,
 } from '@/types/editor'
@@ -1855,19 +1856,43 @@ export const useEditorStore = defineStore('editor', () => {
     scheduleSave()
   }
 
+  function replaceTrackClips(track: EditorTrack, clips: EditorClip[]) {
+    track.clips = clips
+    // Empty legacy tracks fall back to sourceId in playback, export and reload.
+    if (!clips.some((clip) => clip.assetId === track.sourceId)) {
+      track.sourceId = clips.at(-1)?.assetId || ''
+    }
+    syncSingleClipFadeCompatibility(track)
+  }
+
+  function dropClip(drop: EditorClipDrop) {
+    if (!session.value || interactionDepth.value || !Number.isFinite(drop.start) || drop.start < 0) return
+    const origin = session.value.tracks.find((track) => track.id === drop.fromTrackId)
+    const destination = session.value.tracks.find((track) => track.id === drop.toTrackId)
+    const clip = origin?.clips?.find((item) => item.id === drop.clipId)
+    if (!origin?.clips || !destination || !clip || !sourceMap.value.has(clip.assetId)) return
+    if (!drop.copy && (clip.locked || (origin === destination && clip.start === drop.start))) return
+
+    const moved = { ...clip, id: drop.copy ? makeId('clip') : clip.id, start: drop.start }
+    const destinationClips = clipsForTrack(destination, sourceMap.value).filter(
+      (item) => drop.copy || item.id !== clip.id,
+    )
+    pushHistory()
+    if (!drop.copy && origin !== destination) {
+      replaceTrackClips(origin, origin.clips.filter((item) => item.id !== clip.id))
+    }
+    replaceTrackClips(destination, [...destinationClips, moved].sort((a, b) => a.start - b.start))
+    selectClip(destination.id, moved.id)
+    scheduleSave()
+  }
+
   function deleteSelectedClip() {
     const track = selectedTrack.value
     const clip = selectedClip.value
     if (!track?.clips || !clip || !canCutClip.value) return
 
     pushHistory()
-    const remaining = track.clips.filter((item) => item.id !== clip.id)
-    track.clips = remaining
-    // Empty legacy tracks fall back to sourceId in playback, export and reload.
-    if (!remaining.some((item) => item.assetId === track.sourceId)) {
-      track.sourceId = remaining.at(-1)?.assetId || ''
-    }
-    syncSingleClipFadeCompatibility(track)
+    replaceTrackClips(track, track.clips.filter((item) => item.id !== clip.id))
     selectedClipId.value = null
     scheduleSave()
   }
@@ -1890,9 +1915,7 @@ export const useEditorStore = defineStore('editor', () => {
 
     const clip = { ...copied, id: makeId('clip'), start: time }
     pushHistory()
-    track.clips = [...clipsForTrack(track, sourceMap.value), clip].sort((a, b) => a.start - b.start)
-    if (!track.sourceId) track.sourceId = clip.assetId
-    syncSingleClipFadeCompatibility(track)
+    replaceTrackClips(track, [...clipsForTrack(track, sourceMap.value), clip].sort((a, b) => a.start - b.start))
     selectClip(track.id, clip.id)
     scheduleSave()
     return clip
@@ -2331,6 +2354,7 @@ export const useEditorStore = defineStore('editor', () => {
     copySelectedClip,
     cutSelectedClip,
     deleteSelectedClip,
+    dropClip,
     pasteClipAt,
     splitSelectedClipAt,
     removeSource,
