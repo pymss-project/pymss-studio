@@ -9,7 +9,8 @@
  *  - drop the litegraph-only `floatingLinks` / `reroutes` arrays
  */
 import type { ISerialisedGraph, ISerialisedNode, SerialisableGraph, SerialisableLLink } from '@comfyorg/litegraph/dist/types/serialisation'
-import { normalizeGraphWorkflowDefinition } from '../workflows/formats'
+import type { NativeParameters } from '../features/inference/parameters'
+import { comfySeparationNodeType, normalizeGraphWorkflowDefinition } from '../workflows/formats'
 
 export interface ComfyNode {
   id: number
@@ -53,12 +54,12 @@ export interface ComfyWorkflow {
  * suitable for pymss.graph.load_comfy_file (after JSON.stringify).
  */
 export function litegraphToComfy(serialized: ISerialisedGraph | any): ComfyWorkflow {
-  const rawNodes: ISerialisedNode[] = serialized.nodes || []
+  const rawNodes = normalizeGraphWorkflowDefinition({ nodes: serialized.nodes || [] }).nodes as ISerialisedNode[]
   const nodes: ComfyNode[] = rawNodes.map((n) => {
     const out: ComfyNode = {
       ...n,
       id: Number(n.id),
-      type: String(n.type),
+      type: comfySeparationNodeType(String(n.type)),
       pos: [Number(n.pos?.[0]) || 0, Number(n.pos?.[1]) || 0],
       size: [Number(n.size?.[0]) || 0, Number(n.size?.[1]) || 0],
       flags: (n.flags as Record<string, unknown>) || {},
@@ -151,6 +152,12 @@ export function comfyLinksToLitegraph(links: unknown[]): SerialisableLLink[] {
     })
   }
   return out
+}
+
+/** Overrides travel with the separation node in Comfy JSON and history snapshots. */
+export function setGraphNodeInferenceOverrides(node: { properties: Record<string, unknown> }, overrides: NativeParameters) {
+  if (Object.keys(overrides).length) node.properties.studioInferenceOverrides = { ...overrides }
+  else delete node.properties.studioInferenceOverrides
 }
 
 /** Accept native ComfyUI graphs and the tuple/object hybrids saved by older Studio versions. */

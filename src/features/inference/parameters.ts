@@ -1,4 +1,8 @@
 export type ParameterMode = 'model' | 'custom'
+export function effectiveTtaOverride(mode: ParameterMode, ttaOverride: boolean | undefined) {
+  return mode === 'custom' ? ttaOverride : undefined
+}
+
 export type NativeParameters = Record<string, number | boolean>
 export type ParameterCapability = {
   kind: 'free' | 'lattice' | 'fixed' | 'unsupported' | 'unknown'
@@ -118,6 +122,13 @@ export function nearestLegalChunk(target: number, cap: ParameterCapability): num
     .sort((a, b) => Math.abs(a - target) - Math.abs(b - target) || a - b)[0]
 }
 
+/** Convert a percentage in hundredths to native overlap samples, retaining at least one sample of hop. */
+export function overlapSamplesForBasisPoints(chunk: number, bp: number) {
+  const product = chunk * (10000 - bp)
+  if (!safe(chunk) || chunk < 1 || !safe(bp) || bp < 0 || bp > 10000 || !safe(product)) return undefined
+  return chunk - Math.max(1, Math.floor(product / 10000))
+}
+
 export function resolveParameters(
   metadata: ParameterResolutionMetadata | undefined,
   library: Record<string, unknown> | undefined,
@@ -189,9 +200,10 @@ export function resolveParameters(
     for (const [key, value] of Object.entries(intent.vr || {})) if (value !== undefined) assign(key, value)
     if (typeof p.chunk_size === 'number' && typeof modelO === 'number' && typeof modelC === 'number') {
       if (intent.overlapBasisPoints !== undefined && editable('overlap_size')) {
-        const bp = intent.overlapBasisPoints, product = p.chunk_size * (10000 - bp)
-        if (!safe(bp) || bp < 1 || bp > 9900 || !safe(product)) result.issues.push({ key: 'overlap_size', code: 'invalidValue' })
-        else { p.overlap_size = p.chunk_size - Math.max(1, Math.floor(product / 10000)); source.overlap_size = 'custom' }
+        const bp = intent.overlapBasisPoints
+        const samples = overlapSamplesForBasisPoints(p.chunk_size, bp)
+        if (samples === undefined || bp < 1 || bp > 9900) result.issues.push({ key: 'overlap_size', code: 'invalidValue' })
+        else { p.overlap_size = samples; source.overlap_size = 'custom' }
       } else if (p.chunk_size !== modelC) {
         const o = count ? p.chunk_size - Math.floor(p.chunk_size / count) : ratioOverlap(p.chunk_size, modelC, modelO)
         if (o === undefined) result.issues.push({ key: 'overlap_size', code: 'invalidValue' })

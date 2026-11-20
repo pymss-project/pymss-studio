@@ -252,6 +252,16 @@ export function isWorkflowSeparationNodeType(value: unknown): boolean {
   return type.endsWith('_separate') || type.endsWith('_separate_list')
 }
 
+const LEGACY_COMFY_SEPARATION_TYPES = new Set([
+  'mss_separate', 'mss_separate_list',
+  'vr_separate', 'vr_separate_list',
+  'custom_mss_separate', 'custom_mss_separate_list',
+])
+
+export function comfySeparationNodeType(type: string): string {
+  return LEGACY_COMFY_SEPARATION_TYPES.has(type) ? `pymss_${type}` : type
+}
+
 const WORKFLOW_SAVE_NODE_TYPES = new Set([
   'pymss_save_audio',
   'SaveAudio',
@@ -331,10 +341,30 @@ export function normalizeGraphWorkflowDefinition(
   const nodes = definition.nodes.map((value) => {
     if (!isRecord(value)) return value
     const type = String(value.type || '').replace(/^pymss_/, '')
-    if (type !== 'custom_mss_separate' && type !== 'custom_mss_separate_list') return value
-
     const widgets = value.widgets_values
     if (!Array.isArray(widgets)) return value
+
+    const separator = type.replace(/_list$/, '')
+    if ((separator === 'mss_separate' || separator === 'vr_separate') && typeof widgets[3] === 'boolean') {
+      const [model, device, legacyDeviceIds, downloadMissing, sourceOrDeviceIds, ...rest] = widgets
+      const hasSource = ['modelscope', 'huggingface', 'hf-mirror'].includes(String(sourceOrDeviceIds))
+      const deviceIds = hasSource ? legacyDeviceIds : sourceOrDeviceIds ?? legacyDeviceIds
+      changed = true
+      return {
+        ...value,
+        // Studio stores the checkbox before the source and device IDs.
+        widgets_values: [model, device, downloadMissing, hasSource ? sourceOrDeviceIds : 'Default',
+          deviceIds ?? '0', ...rest],
+      }
+    }
+    if ((separator === 'mss_separate' || separator === 'vr_separate')
+      && (widgets[3] === undefined || widgets[3] === null || widgets[3] === '')) {
+      const [model, device, downloadMissing, , ...rest] = widgets
+      changed = true
+      return { ...value, widgets_values: [model, device, downloadMissing ?? true, 'Default', ...rest] }
+    }
+    if (separator !== 'custom_mss_separate') return value
+
     const hasLegacyDownloadFields = typeof widgets[3] === 'boolean'
       && typeof widgets[4] === 'string'
     if (!hasLegacyDownloadFields) return value

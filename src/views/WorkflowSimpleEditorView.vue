@@ -48,7 +48,7 @@ const { t, locale } = useI18n()
 const workflow = useWorkflowStore()
 const model = useModelStore()
 const { workflows } = storeToRefs(workflow)
-const { downloadedModels, selectedModel, modelInferenceOverrides } = storeToRefs(model)
+const { downloadedModels, selectedModel } = storeToRefs(model)
 
 const currentWindow = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window ? getCurrentWindow() : null
 const isMacOS = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform)
@@ -522,7 +522,7 @@ useDiagnosticWindowState('workflow', () => ({
       v-else-if="loaded" ref="editorRef" :key="editorRenderKey" :inert="closing"
       v-model:draft="draft" v-model:name="name"
       :runtime-controls="true" :node-states="liveNodeStates" :node-logs="liveNodeLogs" :execution-visible="executionMatchesDraft"
-      :models="downloadedModels" :model-inference-overrides="modelInferenceOverrides"
+      :models="downloadedModels"
       :form-error="formError" :advisory="modelAdvisory" :can-run="canRun"
       @close="closeEditor" @run="runWorkflow" @name-editing="nameEditing = $event" @output-settings="showOutputSettings = true">
       <template #save-status>

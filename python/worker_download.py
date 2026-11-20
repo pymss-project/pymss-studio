@@ -2,14 +2,23 @@ from __future__ import annotations
 
 import inspect
 import os
+import shutil
 import threading
 import time
 import traceback
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+from worker_file_publish import publish_file_once
 from worker_models import (
+    CATALOG_CONFIG_STAGING_PREFIX,
     auxiliary_paths_for,
+    catalog_config_operation,
+    catalog_config_revision,
+    catalog_config_staging_lock,
     config_path_for,
     effective_source_for,
     get_any_model_entry,
@@ -20,6 +29,7 @@ from worker_models import (
 )
 from worker_protocol import emit, emit_error
 from worker_proxy import effective_proxy_url
+from worker_runtime_lock import runtime_lock
 
 
 _UNFETCHED_FILE_INDEX = object()
@@ -141,6 +151,58 @@ def files_for_studio_model(model_name: str, model_dir: str | None = None) -> tup
         files.append((str(entry.config_relpath), config_path))
     files.extend((str(relpath), path) for relpath, path in zip(entry.auxiliary_relpaths, auxiliary_paths_for(entry, model_dir)))
     return entry, files
+
+
+@contextmanager
+def _stage_catalog_config(parent: Path) -> Iterator[Path]:
+    directory = parent / f"{CATALOG_CONFIG_STAGING_PREFIX}{uuid4().hex}"
+    lock_path = catalog_config_staging_lock(directory)
+    try:
+        with runtime_lock(lock_path):
+            directory.mkdir()
+            try:
+                yield directory
+            finally:
+                shutil.rmtree(directory)
+    finally:
+        try:
+            lock_path.unlink(missing_ok=True)
+        except PermissionError as exc:
+            # A scanner's handle can keep this unique marker open on Windows.
+            if getattr(exc, "winerror", None) != 32:
+                raise
+
+
+def ensure_catalog_config(entry: Any, model_dir: str | None, source: str) -> None:
+    """Fetch only the catalog YAML when the user asks to read inherited parameters."""
+    if is_user_model_entry(entry) or not entry.config_relpath:
+        raise ValueError("This model does not have a downloadable catalog configuration")
+    path = config_path_for(entry, model_dir)
+    if path is None:
+        return
+    with catalog_config_operation(path) as revision_path:
+        if path.is_file():
+            return
+        revision = catalog_config_revision(revision_path)
+    from pymss import model_download
+    from worker_models import load_parameter_resolution
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _stage_catalog_config(path.parent) as directory:
+        staged = directory / path.name
+        prepare_pymss_download(model_download, None, download_method="urllib")
+        download_studio_model(model_download, entry.name, [(entry.config_relpath, staged)],
+                              source=source, proxy=effective_proxy_url(), entry=entry)
+        if not load_parameter_resolution(entry.model_type, staged, model_path_for(entry, model_dir)):
+            raise ValueError("No inference parameter metadata in the downloaded model configuration")
+        with catalog_config_operation(path) as revision_path:
+            if catalog_config_revision(revision_path) != revision:
+                raise ValueError("Model files were deleted during configuration download")
+            # Another editor or the model downloader may have completed first. Keep that file.
+            try:
+                publish_file_once(staged, path)
+            except FileExistsError:
+                pass
 
 
 def download_studio_model(

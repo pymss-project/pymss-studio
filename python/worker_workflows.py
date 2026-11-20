@@ -12,7 +12,7 @@ Contract (payload fields, sent by stores/task.ts via start_workflow_inference):
   inputs for comfy load nodes),
   tasks (batch mode: [{taskId, input | inputs, output}], ...),
   output, outputFormat, outputLayout, modelDir, source, downloadMethod,
-  device, deviceIds, useTta, debug, audioParams.
+  device, deviceIds, useTta, debug, audioParams, workflowParameters.
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ import traceback
 from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from worker_protocol import emit, emit_error, task_logging
 from worker_paths import normalize_output_dir as _normalize_output_dir
@@ -35,6 +35,9 @@ from worker_rocm import (
     RocmCompatibilityError, RocmInferenceError, RocmWorkerAbort, assert_rocm_operation_succeeded,
     begin_rocm_operation, rocm_worker_poisoned,
 )
+
+if TYPE_CHECKING:
+    from worker_workflow_parameters import DownloadFingerprints
 
 
 @contextmanager
@@ -1182,7 +1185,7 @@ def _workflow_separator_factory(**kwargs: Any) -> Any:
 def _workflow_snapshot_factory(payload: dict[str, Any]) -> Any:
     """Bind resolved ensemble parameters without changing ordinary workflow inheritance."""
     snapshots = payload.get("resolvedInferences")
-    if snapshots is None:
+    if snapshots is None or "workflowParameters" in payload:
         return _workflow_separator_factory
     from worker_inference_constraints import InferenceParameterError
     from worker_inference_snapshot import validate_snapshot_payload
@@ -1245,7 +1248,8 @@ def _validate_workflow_plugin_nodes(definition: Any) -> None:
 
 def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
                inputs: dict[str, str] | None, output_dir: str, output_layout: str,
-               *, separator_cache: Any = None) -> dict[str, Any]:
+               *, separator_cache: Any = None,
+               model_downloads: DownloadFingerprints | None = None) -> dict[str, Any]:
     graph = _workflow_graph()
 
     # Activate marketplace plugins so plugin-contributed graph node types are
@@ -1284,6 +1288,9 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
         raise RuntimeError("Workflow definition is required")
 
     simple_output_metadata: list[dict[str, str]] = []
+    simple_params: dict[str, dict[str, Any]] | None = None
+    simple_step_params: dict[str, dict[str, Any]] | None = None
+    simple_model_dirs: dict[str, str | None] | None = None
     output_format = str(payload.get("outputFormat") or "").strip().lower()
     output_format = output_format or "wav"
     if fmt == "yaml":
@@ -1305,9 +1312,12 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
             wf = pwf.Workflow(version=1, defaults=defaults, steps=[])
         else:
             wf = pwf.load_workflow_data(data)
-        inference_params = _simple_inference_params(wf)
+        simple_params = _simple_inference_params(wf)
         dag = graph.compile_workflow_to_dag(wf)
-        _apply_simple_inference_params(dag, inference_params)
+        _apply_simple_inference_params(dag, simple_params)
+        if "workflowParameters" in payload:
+            simple_step_params = {step.id: step.inference_params for step in wf.steps}
+            simple_model_dirs = {step.id: step.model_dir for step in wf.steps}
         reserved_simple_names: set[str] = set()
         simple_output_metadata = _apply_simple_output_names(
             dag,
@@ -1336,6 +1346,18 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
     dynamic_folders: dict[str, str] = {}
     if workbench:
         dynamic_folders = _prepare_workbench_outputs(dag, output_targets)
+    native_node_types = {}
+    if "workflowParameters" in payload:
+        from worker_workflow_parameters import install_workflow_parameters, native_parameter_node_event
+
+        native_node_types = {node.id: node.type for node in dag.nodes}
+        install_workflow_parameters(
+            graph, dag, payload["workflowParameters"],
+            simple_params=simple_params, simple_step_params=simple_step_params,
+            simple_model_dirs=simple_model_dirs,
+            downloads=model_downloads,
+            report=lambda event: emit("workflow_node_parameters", event, task_id=task_id),
+        )
     task_output_dir.mkdir(parents=True, exist_ok=True)
     saved_paths: list[str] = []
     output_records: list[Any | None] = []
@@ -1367,6 +1389,9 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
         callbacks = {"execution_event_callback": _emit_execution(task_id, log_scope)} \
             if fmt != "yaml" and getattr(graph, "EXECUTION_EVENT_VERSION", 0) >= 1 \
             else {"progress_event_callback": _emit_progress(task_id, log_scope)}
+        if "workflowParameters" in payload:
+            callback_key, callback = next(iter(callbacks.items()))
+            callbacks[callback_key] = lambda event: callback(native_parameter_node_event(event))
         run_kwargs = {}
         parameters = inspect.signature(graph.run_dag).parameters
         if "host_request" in parameters:
@@ -1467,7 +1492,7 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
                 if isinstance(artifact, StringArtifact):
                     node_values.append({
                         "nodeId": node.id,
-                        "nodeType": str(node.type),
+                        "nodeType": str(native_node_types.get(node.id, node.type)),
                         "slot": slot,
                         "value": published_paths.get(str(artifact.value), str(artifact.value)),
                     })
@@ -1547,6 +1572,7 @@ def _cmd_infer_workflow_batch(payload: dict[str, Any], raw_tasks: list[Any]) -> 
     try:
         definition = payload.get("workflow")
         separator_cache = None
+        parameter_options = {"model_downloads": {}} if "workflowParameters" in payload else {}
         if isinstance(definition, dict) and "steps" in definition:
             # Match pymss' workflow batch runner: reuse the bounded native cache
             # across files, and release it when the batch finishes. Limit the
@@ -1584,7 +1610,8 @@ def _cmd_infer_workflow_batch(payload: dict[str, Any], raw_tasks: list[Any]) -> 
                                         input_path=input_path or None,
                                         inputs=item_inputs or None,
                                         output_dir=output_dir, output_layout=output_layout,
-                                         **({"separator_cache": separator_cache} if separator_cache is not None else {}))
+                                        **parameter_options,
+                                        **({"separator_cache": separator_cache} if separator_cache is not None else {}))
                     assert_rocm_operation_succeeded()
                     emit("task_stage", {"stage": "writing_output", "message": "Collecting workflow outputs", "progress": 92}, task_id=task_id)
                     emit("task_done", {**result, "outputRoot": output_dir}, task_id=task_id)

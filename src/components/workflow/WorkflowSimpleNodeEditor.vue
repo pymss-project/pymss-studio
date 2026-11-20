@@ -14,11 +14,12 @@ import {
 import { WORKFLOW_NODE_STATUS_KEYS, type WorkflowNodeState } from '@/workflows/workbench'
 import WorkflowNodeLog from '@/components/workflow/WorkflowNodeLog.vue'
 import type { WorkflowNodeLogs } from '@/workflows/nodeLogs'
-import type { ModelDefaultInferenceParams, ModelEntry } from '@/stores/model'
-import AlignedInferenceInputNumber from '@/components/AlignedInferenceInputNumber.vue'
-import { inferenceChunkSizeIssue, resolveInferenceChunkStep, resolveInferenceSampleStep } from '@/features/inference/sampleStep'
-import { hasInvalidSimpleInferenceNumbers } from '@/workflows/formats'
+import WorkflowInferenceParameters from '@/components/workflow/WorkflowInferenceParameters.vue'
+import type { ModelEntry } from '@/stores/model'
+import type { NativeParameters } from '@/features/inference/parameters'
+import { simpleStepHasCustomParameters, workflowParameterTargets } from '@/workflows/inferencePolicy'
 import {
+  buildSimpleWorkflowDefinition,
   configuredStemsFor,
   createDefaultSimpleEditorUi,
   createEnsembleDraft,
@@ -26,7 +27,7 @@ import {
   createStepDraft,
   renderSimpleOutputFilename,
   fitSimpleEditorViewport,
-  normalizeSimpleInferenceParams,
+  setSimpleStepInferenceOverrides,
   SIMPLE_ENSEMBLE_ALGORITHMS,
   SIMPLE_AUDIO_OPERATIONS,
   isSimpleAudioOperation,
@@ -37,7 +38,6 @@ import {
   type SimpleEditorPoint,
   type SimpleEnsembleDraft,
   type SimpleStepDraft,
-  type SimpleWorkflowInferenceParams,
 } from '@/utils/workflowSimple'
 import {
   analyzeSimpleModelChangeImpact,
@@ -73,13 +73,11 @@ const props = withDefaults(defineProps<{
   nodeLogs?: WorkflowNodeLogs
   executionVisible?: boolean
   nodeSummaries?: Record<string, string>
-  modelInferenceOverrides?: Record<string, ModelDefaultInferenceParams>
   saving?: boolean
   formError?: string
   advisory?: string
   canRun?: boolean
 }>(), {
-  modelInferenceOverrides: () => ({}),
   saving: false,
   formError: '',
   advisory: '',
@@ -93,7 +91,7 @@ const emit = defineEmits<{
   'name-editing': [editing: boolean]
 }>()
 
-const { t, locale } = useI18n()
+const { t, locale } = useI18n({ useScope: 'global' })
 const vNumberA11y = useNumberInputAccessibility()
 const editingName = ref(false)
 const showWorkflowSettings = ref(false)
@@ -141,17 +139,13 @@ const pendingConnection = ref<PendingConnection | null>(null)
 const hoverTarget = ref<SimpleConnectionHoverTarget>(null)
 const pointerWorld = ref<SimpleEditorPoint>({ x: 500, y: 300 })
 const showNodeTypeChooser = ref(false)
-const showInferenceEditor = ref(false)
 const inferenceEditorStepId = ref('')
-const inferenceMode = ref<'global' | 'custom'>('global')
-const inferenceDraft = ref<SimpleWorkflowInferenceParams>({})
-const initialInferenceDraft = ref<SimpleWorkflowInferenceParams>({})
-const initialInferenceParams = ref<SimpleWorkflowInferenceParams | undefined>()
 const pendingNodePoint = ref<SimpleEditorPoint | null>(null)
 const contextMenuVisible = ref(false)
 const contextMenuX = ref(0)
 const contextMenuY = ref(0)
 const contextMenuPoint = ref<SimpleEditorPoint | null>(null)
+const contextMenuStepId = ref('')
 const selectedNodeId = ref('')
 const history = ref<string[]>([])
 const future = ref<string[]>([])
@@ -171,7 +165,7 @@ const NODE_WIDTH = 300
 const ENSEMBLE_WIDTH = 320
 const INPUT_WIDTH = 280
 const SAVE_WIDTH = 340
-const NODE_HEIGHT_BASE = 166
+const NODE_HEIGHT_BASE = 184
 const PORT_GAP = 26
 const SAVE_ROW_GAP = 84
 
@@ -212,119 +206,28 @@ const defaultNormalizeOptions = computed(() => [
 const inferenceEditorStep = computed(() => (
   draft.value.steps.find(step => step.id === inferenceEditorStepId.value) || null
 ))
-const inferenceEditorModel = computed(() => {
-  const modelName = inferenceEditorStep.value?.model || ''
-  return props.models.find(model => model.name === modelName || model.aliases?.includes(modelName)) || null
-})
-const inferenceEditorModelType = computed(() => String(
-  inferenceEditorStep.value?.modelType?.trim() || inferenceEditorModel.value?.modelType || '',
-).trim().toLowerCase())
-const inferenceEditorIsVr = computed(() => inferenceEditorModelType.value === 'vr')
-const inferenceEditorSampleStep = computed(() => inferenceEditorModel.value?.inferenceParamMeta?.recommendedSampleStep)
-const inferenceEditorOverlapStep = computed(() => resolveInferenceSampleStep(inferenceEditorModel.value?.inferenceParamMeta, 1))
-const inferenceEditorChunkStep = computed(() => resolveInferenceChunkStep(inferenceEditorModel.value?.inferenceParamMeta, 1024))
-const inferenceEditorChunkConstraint = computed(() => inferenceEditorModel.value?.inferenceParamMeta?.chunkSizeConstraint)
-const inferenceEditorChunkIssue = computed(() => inferenceChunkSizeIssue(inferenceDraft.value.chunk_size, inferenceEditorModel.value?.inferenceParamMeta))
-
-function inferenceNumber(key: keyof SimpleWorkflowInferenceParams, fallback: number) {
-  const value = inferenceDraft.value[key]
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
-}
-
-function inferenceBoolean(key: keyof SimpleWorkflowInferenceParams, fallback = false) {
-  const value = inferenceDraft.value[key]
-  return typeof value === 'boolean' ? value : fallback
-}
-
-function updateInferenceNumber(key: keyof SimpleWorkflowInferenceParams, value: number | null) {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return
-  inferenceDraft.value = { ...inferenceDraft.value, [key]: value }
-}
-
-function updateInferenceBoolean(key: keyof SimpleWorkflowInferenceParams, value: boolean) {
-  inferenceDraft.value = { ...inferenceDraft.value, [key]: value }
-}
-
-function modelInferenceDefaults(model: ModelEntry | null): SimpleWorkflowInferenceParams {
+const inferenceTarget = computed(() => {
   const step = inferenceEditorStep.value
-  const defaults = {
-    ...(model?.defaultInferenceParams || {}),
-    ...(props.modelInferenceOverrides[model?.name || step?.model || ''] || {}),
-  } as SimpleWorkflowInferenceParams
-  const modelType = inferenceEditorModelType.value
-  for (const key of ['batch_size', 'overlap_size', 'chunk_size', 'window_size'] as const) {
-    const value = defaults[key]
-    if (typeof value === 'number' && value <= 0) delete defaults[key]
-  }
-  if (defaults.batch_size === undefined) defaults.batch_size = 1
-  if (modelType === 'vr') {
-    if (defaults.window_size === undefined) defaults.window_size = 512
-    if (defaults.aggression === undefined) defaults.aggression = 5
-    if (defaults.enable_post_process === undefined) defaults.enable_post_process = false
-    if (defaults.post_process_threshold === undefined) defaults.post_process_threshold = 0.2
-    if (defaults.high_end_process === undefined) defaults.high_end_process = false
-    if (defaults.normalize === undefined) defaults.normalize = false
-  } else {
-    if (defaults.standardize === undefined) defaults.standardize = false
-    if (defaults.normalize === undefined) defaults.normalize = false
-  }
-  if (defaults.enable_tta === undefined) defaults.enable_tta = false
-  if (draft.value.defaultNormalize !== null) defaults.normalize = draft.value.defaultNormalize
-  return defaults
-}
+  if (!step) return
+  const definition = buildSimpleWorkflowDefinition(draft.value)
+  const target = workflowParameterTargets(definition).find(item => item.id === step.id.trim())
+  return target && { ...target, overrides: { ...step.inferenceParams } }
+})
 
 function openInferenceEditor(step: SimpleStepDraft) {
+  if (props.readonly) return
+  closeNodeContextMenu()
   inferenceEditorStepId.value = step.id
-  inferenceMode.value = step.inferenceParams ? 'custom' : 'global'
-  initialInferenceParams.value = step.inferenceParams ? { ...step.inferenceParams } : undefined
-  initialInferenceDraft.value = {
-    ...modelInferenceDefaults(inferenceEditorModel.value),
-    ...(step.inferenceParams || {}),
-  }
-  inferenceDraft.value = { ...initialInferenceDraft.value }
-  showInferenceEditor.value = true
-}
-
-function updateInferenceFollowGlobal(value: boolean) {
-  if (value) {
-    inferenceDraft.value = modelInferenceDefaults(inferenceEditorModel.value)
-    initialInferenceDraft.value = { ...inferenceDraft.value }
-    initialInferenceParams.value = undefined
-    inferenceMode.value = 'global'
-    return
-  }
-  inferenceMode.value = 'custom'
 }
 
 function closeInferenceEditor() {
-  showInferenceEditor.value = false
   inferenceEditorStepId.value = ''
 }
 
-function saveInferenceEditor() {
+function saveInferenceEditor(overrides: NativeParameters, modelDefaultKeys: string[]) {
   const step = inferenceEditorStep.value
-  if (!step) return
-  if (inferenceMode.value === 'custom' && inferenceEditorChunkIssue.value) {
-    message.warning(t('inference.invalidChunkSize', inferenceEditorChunkIssue.value))
-    return
-  }
-  if (inferenceMode.value === 'global') {
-    step.inferenceParams = undefined
-  } else {
-    const original = initialInferenceParams.value
-    const params = original
-      ? Object.fromEntries(Object.entries(inferenceDraft.value).filter(([key, value]) => (
-          Object.hasOwn(original, key)
-          || value !== initialInferenceDraft.value[key as keyof SimpleWorkflowInferenceParams]
-        )))
-      : inferenceDraft.value
-    const invalid = Object.entries(params).find(([key, value]) => hasInvalidSimpleInferenceNumbers({ [key]: value }))
-    if (invalid) {
-      message.warning(t('workflows.invalidInferenceNumber', { parameter: invalid[0], value: String(invalid[1]) }))
-      return
-    }
-    step.inferenceParams = normalizeSimpleInferenceParams(params)
-  }
+  if (!step || props.readonly) return
+  setSimpleStepInferenceOverrides(draft.value, step, overrides, modelDefaultKeys)
   recordHistory()
   closeInferenceEditor()
 }
@@ -1035,7 +938,7 @@ function applyModelUpdate(step: SimpleStepDraft, value: string, stems: string[])
   step.stems = stems
   // Per-step inference values belong to the previous model. A model change
   // deliberately returns the step to the global fallback chain.
-  step.inferenceParams = undefined
+  setSimpleStepInferenceOverrides(draft.value, step, {})
   step.outputNames = Object.fromEntries(stems.map(stem => [stem, oldNamesByStem.get(stem.toLowerCase()) || '%filename%_%stem%_%model%']))
   const nextSave: Record<string, string> = {}
   stems.forEach((stem) => {
@@ -1129,6 +1032,8 @@ function toggleEnsembleSave(ensemble: SimpleEnsembleDraft) {
 
 function closeNodeContextMenu() {
   contextMenuVisible.value = false
+  contextMenuStepId.value = ''
+  contextMenuPoint.value = null
 }
 
 function openNodeTypeChooser(at?: SimpleEditorPoint) {
@@ -1152,22 +1057,38 @@ function openCanvasContextMenu(event: MouseEvent) {
   const target = event.target instanceof Element ? event.target : null
   if (target?.closest('[data-simple-node], .simple-node-editor__edge-group')) return
   event.preventDefault()
+  contextMenuStepId.value = ''
   contextMenuPoint.value = canvasWorldPoint(event)
+  positionContextMenu(event)
+}
+
+function openStepContextMenu(step: SimpleStepDraft, event: MouseEvent) {
+  if (props.readonly) return
+  selectedNodeId.value = step.id
+  contextMenuStepId.value = step.id
+  contextMenuPoint.value = null
+  positionContextMenu(event)
+}
+
+function positionContextMenu(event: MouseEvent) {
   contextMenuVisible.value = false
   contextMenuX.value = event.clientX
   contextMenuY.value = event.clientY
-  requestAnimationFrame(() => {
-    contextMenuVisible.value = true
-  })
+  void nextTick(() => { contextMenuVisible.value = true })
 }
 
 function handleNodeContextMenuSelect(key: string | number) {
   if (props.readonly) { closeNodeContextMenu(); return }
   const point = contextMenuPoint.value || undefined
+  if (key === 'inference') {
+    const step = draft.value.steps.find(item => item.id === contextMenuStepId.value)
+    if (step) openInferenceEditor(step)
+    else closeNodeContextMenu()
+    return
+  }
   if (key === 'ensemble') addEnsemble(point)
   else if (key === 'separation') addStep(point)
   else if (isSimpleAudioOperation(key)) addEnsemble(point, key)
-  contextMenuPoint.value = null
   closeNodeContextMenu()
 }
 
@@ -1274,6 +1195,7 @@ function handleCanvasDoubleClick(event: MouseEvent) {
 
 function applyRemoveStep(step: SimpleStepDraft) {
   if (draft.value.steps.length <= 1) return
+  setSimpleStepInferenceOverrides(draft.value, step, {})
   draft.value.steps = draft.value.steps.filter(item => item.id !== step.id)
   const nodes = { ...draft.value.ui.nodes }
   delete nodes[step.id]
@@ -1524,22 +1446,25 @@ onBeforeUnmount(() => {
           <WorkflowNodeLog node-id="input" :node-label="t('workflows.originalInput')" :state="nodeStates?.input" :logs="nodeLogs?.input" :pending="executionVisible" />
         </article>
 
-        <article v-for="(step, index) in draft.steps" :key="step.id" class="simple-node simple-node--step" :class="{ 'simple-node--selected': selectedNodeId === step.id }" :style="{ ...nodeStyle(step.id), width: `${NODE_WIDTH}px`, minHeight: `${stepHeight(step)}px` }" :data-simple-node="step.id" :data-node-status="nodeStates?.[step.id]?.status" @pointerdown.stop="beginNodeDrag(step.id, $event)">
+        <article v-for="(step, index) in draft.steps" :key="step.id" class="simple-node simple-node--step" :class="{ 'simple-node--selected': selectedNodeId === step.id }" :style="{ ...nodeStyle(step.id), width: `${NODE_WIDTH}px`, minHeight: `${stepHeight(step)}px` }" :data-simple-node="step.id" :data-node-status="nodeStates?.[step.id]?.status" @pointerdown.stop="beginNodeDrag(step.id, $event)" @contextmenu.stop.prevent="openStepContextMenu(step, $event)">
           <header>
-            <div><span>{{ t('workflows.separationNode') }} {{ index + 1 }}</span><strong>{{ step.model || t('workflows.stepModelPlaceholder') }}</strong></div>
+            <div><span>{{ t('workflows.separationNode') }} {{ index + 1 }}
+              <i v-if="simpleStepHasCustomParameters(step.inferenceParams, draft.ui.nativeInferenceSteps?.includes(step.id))"
+                class="step-override-dot" role="img"
+                :aria-label="t('workflows.inferenceWorkflowCustom')" :title="t('workflows.inferenceWorkflowCustom')" />
+            </span><strong>{{ step.model || t('workflows.stepModelPlaceholder') }}</strong></div>
             <span class="simple-node__header-actions">
               <button type="button" class="simple-icon-button" :title="t('workflows.moveStepEarlier')" :disabled="readonly || (!canMoveSimpleStep(draft, step.id, -1))" @pointerdown.stop @click.stop="moveStep(step, -1)">↑</button>
               <button type="button" class="simple-icon-button" :title="t('workflows.moveStepLater')" :disabled="readonly || (!canMoveSimpleStep(draft, step.id, 1))" @pointerdown.stop @click.stop="moveStep(step, 1)">↓</button>
               <button :disabled="readonly"
                 type="button"
                 class="simple-icon-button simple-inference-settings"
-                :class="{ 'simple-inference-settings--custom': Boolean(step.inferenceParams) }"
-                :title="`${t('workflows.stepInferenceParams')} · ${t(step.inferenceParams ? 'workflows.inferenceWorkflowCustom' : 'workflows.inferenceInheritParams')}`"
+                :aria-label="`${t('workflows.stepInferenceParams')} · ${step.model || step.id}`"
+                :title="t('workflows.stepInferenceParams')"
                 @pointerdown.stop
                 @click.stop="openInferenceEditor(step)"
               >
                 <n-icon :component="SettingsOutline" />
-                <span v-if="step.inferenceParams" class="simple-inference-settings__dot" aria-hidden="true" />
               </button>
               <button type="button" class="simple-icon-button" :title="t('workflows.removeStep')" :disabled="readonly || (draft.steps.length <= 1)" @pointerdown.stop @click.stop="removeStep(step)"><n-icon :component="CloseOutline" /></button>
             </span>
@@ -1617,7 +1542,7 @@ onBeforeUnmount(() => {
       <div class="simple-node-editor__defaults">
         <label><span>{{ t('workflows.defaultDevice') }}</span><AppSelect :aria-label="t('workflows.defaultDevice')" :ref="(instance: unknown) => setSelectInstance('default-device', instance)" v-model:value="draft.defaultDevice" :disabled="readonly" size="small" :options="[{ label: 'Auto', value: 'auto' }, { label: 'CPU', value: 'cpu' }, { label: 'CUDA', value: 'cuda' }, { label: 'MPS', value: 'mps' }, { label: 'MLX', value: 'mlx' }]" /></label>
         <label><span>{{ t('workflows.defaultFormat') }}</span><AppSelect :aria-label="t('workflows.defaultFormat')" :ref="(instance: unknown) => setSelectInstance('default-format', instance)" v-model:value="draft.defaultFormat" :disabled="readonly" size="small" :options="[{ label: 'WAV', value: 'wav' }, { label: 'FLAC', value: 'flac' }, { label: 'MP3', value: 'mp3' }, { label: 'M4A', value: 'm4a' }]" /></label>
-        <label><span>{{ t('workflows.defaultNormalize') }}</span><AppSelect :aria-label="t('workflows.defaultNormalize')" v-model:value="defaultNormalizeMode" :disabled="readonly" size="small" :options="defaultNormalizeOptions" /></label>
+        <label v-if="draft.defaultNormalize != null"><span>{{ t('workflows.defaultNormalize') }}</span><AppSelect :aria-label="t('workflows.defaultNormalize')" v-model:value="defaultNormalizeMode" :disabled="readonly" size="small" :options="defaultNormalizeOptions" /></label>
       </div>
       <template #footer><div class="simple-workflow-settings-actions"><n-button v-if="!readonly" size="small" secondary @click="autoLayout(); showWorkflowSettings = false"><template #icon><n-icon :component="LocateOutline" /></template>{{ t('workflows.autoLayout') }}</n-button><n-button size="small" secondary @click="showWorkflowSettings = false">{{ t('common.close') }}</n-button></div></template>
     </n-modal>
@@ -1642,91 +1567,15 @@ onBeforeUnmount(() => {
       </div>
     </n-modal>
 
-    <n-modal :show="showInferenceEditor" @update:show="(value: boolean) => !value && closeInferenceEditor()">
-      <n-card :aria-label="t('workflows.stepInferenceTitle')"
-        class="simple-inference-modal"
-        :title="t('workflows.stepInferenceTitle')"
-        :bordered="false"
-        closable
-        role="dialog"
-        aria-modal="true"
-        style="width: var(--modal-width-sm)"
-        @close="closeInferenceEditor"
-      >
-        <div v-if="inferenceEditorStep" class="simple-inference-modal__body">
-          <div class="simple-inference-modal__top">
-            <p class="simple-inference-modal__model" :title="inferenceEditorStep.model">
-              <span>{{ t('workflows.stepModel') }}</span>
-              <strong>{{ inferenceEditorStep.model }}</strong>
-            </p>
-            <label class="simple-inference-follow">
-              <span>{{ t('workflows.inferenceFollowGlobalShort') }}</span>
-              <n-switch :aria-label="t('workflows.inferenceFollowGlobalShort')"
-                :value="inferenceMode === 'global'"
-                size="small"
-                @update:value="updateInferenceFollowGlobal"
-              />
-            </label>
-          </div>
-
-          <div class="simple-inference-fields" :class="{ 'simple-inference-fields--locked': inferenceMode === 'global' }">
-            <div class="simple-inference-grid">
-              <label>
-                <span>{{ t('inference.batchSize') }}</span>
-                <n-input-number v-number-a11y="t('inference.batchSize')" :value="inferenceNumber('batch_size', 1)" :min="1" :max="32" :precision="0" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('batch_size', $event)" />
-              </label>
-              <template v-if="inferenceEditorIsVr">
-                <label>
-                  <span>{{ t('inference.vrWindowSize') }}</span>
-                  <n-input-number v-number-a11y="t('inference.vrWindowSize')" :value="inferenceNumber('window_size', 512)" :min="1" :precision="0" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('window_size', $event)" />
-                </label>
-                <label>
-                  <span>{{ t('inference.vrAggression') }}</span>
-                  <n-input-number v-number-a11y="t('inference.vrAggression')" :value="inferenceNumber('aggression', 5)" :min="0" :precision="0" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('aggression', $event)" />
-                </label>
-                <label>
-                  <span>{{ t('inference.vrPostProcessThreshold') }}</span>
-                  <n-input-number v-number-a11y="t('inference.vrPostProcessThreshold')" :value="inferenceNumber('post_process_threshold', 0.2)" :min="0" :max="1" :step="0.01" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('post_process_threshold', $event)" />
-                </label>
-              </template>
-              <template v-else>
-                <label>
-                  <span>{{ t('inference.overlapSize') }}</span>
-                  <AlignedInferenceInputNumber :label="t('inference.overlapSize')" :value="inferenceNumber('overlap_size', 0)" :step="inferenceEditorOverlapStep" :alignment-step="inferenceEditorSampleStep" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('overlap_size', $event)" />
-                </label>
-                <label>
-                  <span>{{ t('inference.chunkSize') }}</span>
-                  <AlignedInferenceInputNumber :label="t('inference.chunkSize')" :value="inferenceNumber('chunk_size', 0)" :step="inferenceEditorChunkStep" :alignment-step="inferenceEditorChunkConstraint?.step || inferenceEditorSampleStep" :alignment-offset="inferenceEditorChunkConstraint?.offset" :alignment-min="inferenceEditorChunkConstraint?.min" :disabled="inferenceMode === 'global'" @update:value="updateInferenceNumber('chunk_size', $event)" />
-                  <n-text v-if="inferenceEditorChunkIssue" type="warning">{{ t('inference.invalidChunkSize', inferenceEditorChunkIssue) }}</n-text>
-                </label>
-              </template>
-            </div>
-
-            <div class="simple-inference-switches">
-              <label v-if="!inferenceEditorIsVr"><n-switch :aria-label="t('inference.standardize')" :value="inferenceBoolean('standardize')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('standardize', $event)" /><span>{{ t('inference.standardize') }}</span></label>
-              <label><n-switch :aria-label="t('inference.normalize')" :value="inferenceBoolean('normalize')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('normalize', $event)" /><span>{{ t('inference.normalize') }}</span></label>
-              <label><n-switch :aria-label="t('workflows.inferenceEnableTta')" :value="inferenceBoolean('enable_tta')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('enable_tta', $event)" /><span>{{ t('workflows.inferenceEnableTta') }}</span></label>
-              <label v-if="inferenceEditorIsVr"><n-switch :aria-label="t('inference.vrHighEndProcess')" :value="inferenceBoolean('high_end_process')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('high_end_process', $event)" /><span>{{ t('inference.vrHighEndProcess') }}</span></label>
-              <label v-if="inferenceEditorIsVr"><n-switch :aria-label="t('inference.vrEnablePostProcess')" :value="inferenceBoolean('enable_post_process')" size="small" :disabled="inferenceMode === 'global'" @update:value="updateInferenceBoolean('enable_post_process', $event)" /><span>{{ t('inference.vrEnablePostProcess') }}</span></label>
-            </div>
-            <div v-if="inferenceMode === 'global'" class="simple-inference-fields__mask" aria-hidden="true" />
-          </div>
-        </div>
-        <template #footer>
-          <div class="simple-inference-modal__footer">
-            <n-button secondary @click="closeInferenceEditor">{{ t('common.cancel') }}</n-button>
-            <n-button type="primary" :disabled="!inferenceEditorStep" @click="saveInferenceEditor">{{ t('common.save') }}</n-button>
-          </div>
-        </template>
-      </n-card>
-    </n-modal>
+    <WorkflowInferenceParameters v-if="inferenceTarget" :key="inferenceTarget.id" :target="inferenceTarget"
+      @close="closeInferenceEditor" @save="saveInferenceEditor" />
 
     <n-dropdown
       placement="bottom-start"
       trigger="manual"
       :x="contextMenuX"
       :y="contextMenuY"
-      :options="nodeTypeMenuOptions"
+      :options="contextMenuStepId ? [{ key: 'inference', label: t('workflows.stepInferenceParams') }] : nodeTypeMenuOptions"
       :show="contextMenuVisible"
       @clickoutside="closeNodeContextMenu"
       @select="handleNodeContextMenuSelect"
@@ -2068,10 +1917,8 @@ onBeforeUnmount(() => {
 
 .simple-node__body :deep(.app-select) { min-width: 0; }
 
-.simple-inference-settings { position: relative; }
+.step-override-dot { display: inline-block; width: 7px; height: 7px; margin-inline-start: 3px; vertical-align: middle; border-radius: 50%; background: var(--primary); }
 .simple-inference-settings:hover { background: color-mix(in srgb, var(--primary) 12%, transparent) !important; color: var(--primary-strong) !important; }
-.simple-inference-settings--custom { background: color-mix(in srgb, var(--primary) 10%, transparent); color: var(--primary-strong); }
-.simple-inference-settings__dot { position: absolute; top: 3px; right: 3px; width: 5px; height: 5px; border: 1px solid var(--surface-1); border-radius: 50%; background: var(--primary); box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 28%, transparent); }
 
 .simple-port {
   position: relative;
@@ -2196,36 +2043,6 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
-.simple-inference-modal {
-  overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--outline) 72%, transparent) !important;
-  border-radius: 14px !important;
-  background: var(--surface-1) !important;
-  box-shadow: 0 24px 68px color-mix(in srgb, #000 24%, transparent) !important;
-}
-
-.simple-inference-modal :deep(.n-card-header) { padding: 18px 20px 10px; }
-.simple-inference-modal :deep(.n-card-header__main) { color: var(--on-surface); font-size: 17px; font-weight: 680; letter-spacing: -.02em; }
-.simple-inference-modal :deep(.n-card__content) { padding: 4px 20px 18px; }
-.simple-inference-modal :deep(.n-card__footer) { padding: 12px 20px 16px; border-top: 1px solid color-mix(in srgb, var(--outline) 54%, transparent); }
-.simple-inference-modal__body { display: grid; gap: 14px; }
-.simple-inference-modal__top { min-width: 0; display: flex; justify-content: space-between; align-items: center; gap: 16px; }
-.simple-inference-modal__model { min-width: 0; display: flex; align-items: baseline; gap: 8px; margin: 0; }
-.simple-inference-modal__model span { flex: 0 0 auto; color: var(--on-surface-muted); font-size: 10px; }
-.simple-inference-modal__model strong { min-width: 0; overflow: hidden; color: var(--on-surface); text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 650; }
-.simple-inference-follow { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; color: var(--on-surface); font-size: 11px; font-weight: 620; }
-.simple-inference-fields { position: relative; display: grid; gap: 12px; padding-top: 2px; }
-.simple-inference-fields--locked .simple-inference-grid,
-.simple-inference-fields--locked .simple-inference-switches { filter: saturate(.72); }
-.simple-inference-fields__mask { position: absolute; z-index: 2; inset: -4px; border-radius: 10px; background: color-mix(in srgb, var(--surface-1) 32%, transparent); cursor: not-allowed; }
-.simple-inference-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding-top: 2px; }
-.simple-inference-grid label { min-width: 0; display: grid; gap: 5px; color: var(--on-surface-muted); font-size: 10px; font-weight: 600; }
-.simple-inference-grid :deep(.n-input-number),
-.simple-inference-grid :deep(.aligned-inference-input) { width: 100%; }
-.simple-inference-switches { display: flex; flex-wrap: wrap; gap: 8px 16px; padding-top: 2px; }
-.simple-inference-switches label { display: inline-flex; align-items: center; gap: 7px; color: var(--on-surface-muted); font-size: 10px; font-weight: 600; }
-.simple-inference-modal__footer { display: flex; justify-content: flex-end; gap: 8px; }
-
 .simple-node-type-modal__choices {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2274,6 +2091,5 @@ onBeforeUnmount(() => {
   .simple-node-editor__title { min-width: 0; }
   .simple-node-editor__actions { width: 100%; }
   .simple-node-type-modal__choices { grid-template-columns: 1fr; }
-  .simple-inference-grid { grid-template-columns: 1fr; }
 }
 </style>

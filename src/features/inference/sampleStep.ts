@@ -1,4 +1,4 @@
-import { normalizeResolutionMetadata, type ParameterResolutionMetadata } from './parameters.ts'
+import { normalizeResolutionMetadata, type ParameterCapability, type ParameterResolutionMetadata } from './parameters.ts'
 
 export type InferenceParamMeta = {
   recommendedSampleStep?: number
@@ -44,6 +44,20 @@ export function resolveInferenceSampleStep(meta: InferenceParamMeta | undefined,
 
 export function resolveInferenceChunkStep(meta: InferenceParamMeta | undefined, fallback: number) {
   return normalizeInferenceParamMeta(meta)?.chunkSizeConstraint?.step || resolveInferenceSampleStep(meta, fallback)
+}
+
+/** Native workflow controls use the same model increments as the separation controls. */
+export function workflowNumberStep(key: string, cap?: ParameterCapability, meta?: InferenceParamMeta) {
+  if (cap?.kind === 'lattice' && cap.step) {
+    return { step: cap.step, alignmentStep: cap.step, alignmentOffset: cap.offset, alignmentMin: cap.min }
+  }
+  if (key === 'chunk_size') {
+    const constraint = meta?.chunkSizeConstraint
+    return { step: resolveInferenceChunkStep(meta, 1024), alignmentStep: constraint?.step || meta?.recommendedSampleStep,
+      alignmentOffset: constraint?.offset, alignmentMin: constraint?.min }
+  }
+  if (key === 'overlap_size') return { step: resolveInferenceSampleStep(meta, cap?.step || 1), alignmentStep: meta?.recommendedSampleStep }
+  return { step: cap?.step || (key === 'post_process_threshold' ? 0.01 : 1) }
 }
 
 export function inferenceChunkSizeIssue(value: number | null | undefined, meta: InferenceParamMeta | undefined) {

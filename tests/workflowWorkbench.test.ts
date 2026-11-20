@@ -89,6 +89,7 @@ test('simple output identities and generated operation nodes map to their editor
   const definition = { version: 1, steps: [{ id: 'split', stems: ['Vocals'], save: { Vocals: 'Default' } }], ensembles: [{ id: 'mix', save: 'Default', output_stem: 'Instrumental' }] }
   assert.deepEqual(workflowOutputNodes(definition).map(node => node.id), ['save:split:Vocals', 'studio:ensemble-save:mix'])
   assert.equal(visibleWorkflowNodeId('step:split', definition), 'split')
+  assert.equal(visibleWorkflowNodeId('step:split', { ...definition, steps: [{ id: ' split ' }] }), ' split ')
   assert.equal(visibleWorkflowNodeId('studio:ensemble:mix:mix:2', definition), 'mix')
   assert.equal(visibleWorkflowNodeId('studio:ensemble-save:mix', definition), 'save')
   assert.equal(visibleWorkflowNodeId('unknown-helper', definition), '')

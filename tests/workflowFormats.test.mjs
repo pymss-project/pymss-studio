@@ -43,6 +43,9 @@ const {
   normalizeSimpleInferenceParams,
   renderSimpleOutputFilename,
 } = await vite.ssrLoadModule('/src/utils/workflowSimple.ts')
+const { resolveWorkflowNode, workflowParameterTargets } = await vite.ssrLoadModule('/src/workflows/inferencePolicy.ts')
+const { buildWorkflowPreview } = await vite.ssrLoadModule('/src/workflows/preview.ts')
+const { workflowExecutionSignature } = await vite.ssrLoadModule('/src/workflows/workbench.ts')
 
 const {
   analyzeSimpleModelChangeImpact,
@@ -168,6 +171,26 @@ test('legacy simple save filename templates migrate to flat output names', () =>
   assert.equal(normalized.steps[0].output_names.vocals, '%filename%_vocals_first.wav')
   assert.equal(normalized.steps[1].save.clean, 'mastered')
   assert.equal(normalizeSimpleWorkflowDefinition(normalized), normalized)
+})
+
+test('simple editor reload preserves explicit zero overlap across padded step IDs', () => {
+  const definition = {
+    version: 1,
+    studio: { editor: 'simple', viewport: { x: 0, y: 0, zoom: 1 }, nodes: {}, nativeInferenceSteps: ['vocals'] },
+    steps: [{ id: ' vocals ', model: 'model.ckpt', input: 'input', stems: ['vocals'],
+      save: { vocals: 'separated' }, inference_params: { overlap_size: 0 } }],
+  }
+  assert.equal(analyzeSimpleWorkflow(definition).editable, true)
+  const draft = hydrateSimpleWorkflow(definition)
+  assert.deepEqual(draft.ui.nativeInferenceSteps, [' vocals '])
+  const saved = buildSimpleWorkflowDefinition(draft)
+  const [target] = workflowParameterTargets(saved)
+  const planned = resolveWorkflowNode(target, undefined, {}, { mode: 'model', intent: {} })
+  assert.equal(planned.parameters.overlap_size, 0)
+  assert.equal(planned.sources.overlap_size, 'node')
+  assert.equal(buildWorkflowPreview(definition, key => key).nodes.find(node => node.id === 'step: vocals ').customParameters, true)
+  const sameMarker = { ...definition, studio: { ...definition.studio, nativeInferenceSteps: [' vocals '] } }
+  assert.equal(workflowExecutionSignature(sameMarker), workflowExecutionSignature(definition))
 })
 
 test('legacy simple custom audio filenames migrate regardless of template prefix', () => {

@@ -343,7 +343,7 @@ defineExpose({ focus, blur })
       <SelectTrigger :id="controlId" :ref="setControl" v-bind="inputProps" class="app-select__control" :aria-label="name" :aria-labelledby="ariaLabelledby" :aria-busy="loading || undefined"
         @pointerdown.capture="onTriggerPointerDown" @pointerup.capture="onTriggerPointerUp"
         @keydown.esc="closeOnEscape">
-        <SelectValue class="app-select__value"><span v-if="!selected.length" class="app-select__placeholder">{{ placeholder || t('common.pleaseSelect') }}</span><template v-else>{{ display }}</template></SelectValue>
+        <SelectValue class="app-select__value"><span v-if="!selected.length" class="app-select__placeholder">{{ placeholder || t('common.pleaseSelect') }}</span><slot v-else name="selected-value">{{ display }}</slot></SelectValue>
         <span class="app-select__arrow" aria-hidden="true"><span v-if="loading">…</span><slot v-else name="arrow"><svg viewBox="0 0 16 16"><path d="m3.5 6 4.5 4 4.5-4" /></svg></slot></span>
       </SelectTrigger>
       <button v-if="clearable && selected.length" type="button" class="app-select__clear app-select__clear--single" :disabled="disabled" :aria-label="t('common.clear') + (name ? ': ' + name : '')" @pointerdown.prevent @click.stop="clear">×</button>

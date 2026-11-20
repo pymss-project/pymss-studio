@@ -20,6 +20,7 @@ const vite = await createServer({
           import { reactive } from 'vue'
           export const settings = reactive({
             maxConcurrentSeparations: 1,
+            modelDir: '',
             outputDir: 'D:/DefaultOutput', downloadSource: 'modelscope', downloadMethod: 'aria2c',
             defaultFormat: 'wav', developerMode: false,
             getRuntimeDeviceConfig: () => ({ device: 'cpu', deviceIds: [] }),
@@ -48,7 +49,9 @@ afterEach(async () => {
   for (const store of stores.splice(0)) store.$dispose()
   Reflect.deleteProperty(globalThis, 'window')
   Reflect.deleteProperty(globalThis, 'localStorage')
+  settings.modelDir = ''
   settings.outputDir = 'D:/DefaultOutput'
+  settings.downloadSource = 'modelscope'
   settings.maxConcurrentSeparations = 1
 })
 
@@ -1110,6 +1113,29 @@ test('shared ensemble parameters validate participating models without previous 
   assert.equal(task.customParameterIntent.chunkMilliseconds, 8000)
 })
 
+test('legacy enabled TTA is retained as a custom preference and is inactive while following the model', async () => {
+  const values = storage({ 'separate-state': { version: 2, parameterMode: 'model', useTta: true } })
+  const task = await newStore()
+  const bindings = { inputs: { input: { files: ['D:/Audio/song.wav'] } }, outputs: {},
+    primaryInput: 'input', outputLayout: 'flat', outputDirectory: 'E:/Output' }
+  assert.equal(task.ttaOverride, true)
+  assert.equal(task.useTta, false)
+  const single = (await task.prepareInferenceSnapshots(['model-a']))['model-a']
+  assert.equal(single.useTta, false)
+  assert.equal(single.sources.enable_tta, 'runtime-default')
+  const inherited = (await task.startWorkbenchInference(workflow, bindings)).tasks[0].runConfig.workflowParameters.nodes.split
+  assert.equal(inherited.useTta, false)
+  assert.equal(inherited.sources.enable_tta, 'runtime-default')
+
+  await task.applyParameterSettings('custom', {}, task.ttaOverride)
+  const custom = (await task.startWorkflowInference(workflow)).tasks[0].runConfig.workflowParameters.nodes.split
+  assert.equal(custom.useTta, true)
+  assert.equal(custom.sources.enable_tta, 'custom')
+  const persisted = JSON.parse(values.get('pymss-studio:separate-state'))
+  assert.equal(persisted.ttaOverride, true)
+  assert.equal(Object.hasOwn(persisted, 'useTta'), false)
+})
+
 test('legacy separation values are archived and cannot silently widen into model-library or workflow defaults', async () => {
   const values = storage({ 'separate-state': { version: 1, inferenceParamsByModel: { 'model-a': { chunk_size: 441000, overlap_size: 220500, normalize: true } } } })
   const task = await newStore()
@@ -1258,6 +1284,31 @@ async function resumeRestoredQueue(snapshots, concurrency = 1) {
 async function restoreWorkflowQueue(count, inputCounts, workbench = false) {
   return resumeRestoredQueue(queuedWorkflowSnapshots(count, inputCounts, workbench))
 }
+
+for (const mode of ['model', 'workflow']) {
+  for (const count of [1, 2]) {
+    test(`${mode} keeps the default model directory for ${count} restored queued file(s)`, async () => {
+      storage()
+      const task = await newStore()
+      task.inputFiles = Array.from({ length: count }, (_, index) => `D:/Audio/input-${index}.wav`)
+      const { tasks } = mode === 'model' ? await task.startSeparation() : await task.startWorkflowInference(workflow)
+      assert.equal(tasks.length, count)
+      assert.ok(tasks.every(item => item.runConfig.modelDir === null))
+
+      settings.modelDir = 'D:/NewModels'
+      const { calls } = await resumeRestoredQueue(tasks)
+      assert.equal(calls.length, 1)
+      assert.equal(calls[0].modelDir, null)
+    })
+  }
+}
+
+test('a restored workflow without a recorded model directory uses the current setting', async () => {
+  settings.modelDir = 'D:/CurrentModels'
+  const { calls } = await restoreWorkflowQueue(1, [1])
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].modelDir, 'D:/CurrentModels')
+})
 
 test('a restored file workflow can be cancelled while live node metadata is loading', async () => {
   const snapshots = queuedWorkflowSnapshots(1, [0], true)
@@ -1440,3 +1491,389 @@ for (const platform of ['linux', 'darwin']) {
     assert.deepEqual(legacyRestored.outputs.map(output => output.path), expected)
   })
 }
+
+test('separation page and workbench freeze the same per-step values and replay them after the global setting changes', async () => {
+  storage()
+  const task = await newStore()
+  const model = useModelStore()
+  await model.setModelInferenceOverrides('model-a', { batch_size: 4 })
+  const definition = {
+    version: 1,
+    steps: [
+      { ...workflow.definition.steps[0], id: 'A' },
+      { ...workflow.definition.steps[0], id: 'B', inference_params: { batch_size: 1, enable_tta: false } },
+    ],
+  }
+  const entry = { ...workflow, definition }
+  const bindings = { inputs: { input: { files: ['D:/Audio/song.wav'] } }, outputs: {},
+    primaryInput: 'input', outputLayout: 'flat', outputDirectory: 'E:/Output' }
+  const submitBoth = async () => [
+    (await task.startWorkflowInference(entry)).tasks[0],
+    (await task.startWorkbenchInference(entry, bindings)).tasks[0],
+  ]
+  for (const item of await submitBoth()) {
+    assert.equal(item.runConfig.workflowParameters.nodes.A.parameters.batch_size, 4)
+    assert.equal(item.runConfig.workflowParameters.nodes.B.parameters.batch_size, 1)
+  }
+  await task.applyParameterSettings('custom', { batchSize: 2 }, true)
+  const submitted = await submitBoth()
+  for (const item of submitted) {
+    const { A, B } = item.runConfig.workflowParameters.nodes
+    assert.equal(A.parameters.batch_size, 2)
+    assert.equal(A.sources.batch_size, 'custom')
+    assert.equal(A.useTta, true)
+    assert.equal(B.parameters.batch_size, 1)
+    assert.equal(B.sources.batch_size, 'node')
+    assert.equal(B.useTta, false)
+  }
+  await task.applyParameterSettings('custom', { batchSize: 3 }, undefined)
+  for (const item of submitted) {
+    item.status = 'failed'
+    assert.deepEqual((await task.retryTask(item.id)).runConfig.workflowParameters, item.runConfig.workflowParameters)
+    assert.equal(item.runConfig.workflowParameters.nodes.A.parameters.batch_size, 2)
+  }
+  assert.equal(definition.steps[0].inference_params, undefined)
+})
+
+test('workflow submission loads a missing catalog config once before applying global custom parameters', async () => {
+  storage()
+  const task = await newStore()
+  const model = useModelStore()
+  const resolution = model.selectedInfo.inferenceParamMeta.resolution
+  model.models = [{ ...model.models[0], configPath: 'D:/Models/model-a.yaml', inferenceParamMeta: undefined }]
+  const lookups = []
+  model.getWorkflowParameterMetadata = async (target, directory, fetchMissingConfig) => {
+    lookups.push([target.model, Boolean(fetchMissingConfig)])
+    return { resolution: fetchMissingConfig ? resolution : undefined, missingCatalogConfig: !fetchMissingConfig }
+  }
+  await task.applyParameterSettings('custom', { normalize: true })
+  const input = workflow.definition.steps[0]
+  const entry = { ...workflow, definition: {
+    version: 1, steps: [{ ...input, id: ' A ' }, { ...input, id: 'B', inference_params: { normalize: false } }, { ...input, id: 'C' }],
+  } }
+  const bindings = { inputs: { input: { files: ['D:/Audio/song.wav'] } }, outputs: {},
+    primaryInput: 'input', outputLayout: 'flat', outputDirectory: 'E:/Output' }
+  const direct = await task.startWorkflowInference(entry)
+  const workbench = await task.startWorkbenchInference(entry, bindings)
+  assert.deepEqual(lookups, [['model-a', false], ['model-a', true], ['model-a', false], ['model-a', true]])
+  for (const result of [direct, workbench]) {
+    const { A, B, C } = result.tasks[0].runConfig.workflowParameters.nodes
+    assert.equal(A.parameters.normalize, true)
+    assert.equal(A.sources.normalize, 'custom')
+    assert.equal(B.parameters.normalize, false)
+    assert.equal(C.parameters.normalize, true)
+    assert.equal(A.fingerprint, resolution.fingerprint)
+  }
+  assert.equal(entry.definition.steps[0].id, ' A ')
+})
+
+test('VR catalog configuration is fetched even when runtime fallback metadata is available', async () => {
+  storage()
+  const task = await newStore()
+  const model = useModelStore()
+  const configPath = 'D:/Models/vr.yaml'
+  const defaults = { batch_size: 2, normalize: false }
+  const resolution = {
+    version: 1, fingerprint: 'vr-fallback', defaults, overlap: { kind: 'unknown' },
+    capabilities: { batch_size: { kind: 'free' }, normalize: { kind: 'free' } },
+  }
+  const entry = {
+    name: 'vr-model', modelType: 'vr', source: 'catalog', configPath, missingPaths: [configPath],
+    inferenceParamMeta: { resolution },
+  }
+  const calls = []
+  model.models = [entry]
+  window.__TAURI_INTERNALS__ = {
+    metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+    async invoke(command, { payload } = {}) {
+      if (command !== 'get_model_info') return { started: true }
+      calls.push([payload.model, Boolean(payload.fetchMissingConfig)])
+      return payload.fetchMissingConfig
+        ? { ...entry, missingPaths: [], inferenceParamMeta: { resolution: {
+          ...resolution, fingerprint: 'vr-config', defaults: { ...defaults, batch_size: 3 },
+        } } }
+        : entry
+    },
+  }
+  const result = await task.startWorkflowInference({ ...workflow, definition: {
+    version: 1, steps: [{ ...workflow.definition.steps[0], model: entry.name, model_type: 'vr' }],
+  } })
+  const snapshot = result.tasks[0].runConfig.workflowParameters.nodes.split
+  assert.deepEqual(calls, [['vr-model', false], ['vr-model', true]])
+  assert.equal(snapshot.parameters.batch_size, 3)
+  assert.equal(snapshot.fingerprint, 'vr-config')
+})
+
+test('workflow metadata reads distinguish a snapshotted default directory from the current setting', async () => {
+  storage()
+  await newStore()
+  const model = useModelStore()
+  const entry = model.models[0]
+  const dirs = []
+  settings.modelDir = 'D:/NewModels'
+  window.__TAURI_INTERNALS__ = {
+    async invoke(command, { payload }) {
+      assert.equal(command, 'get_model_info')
+      dirs.push(payload.modelDir)
+      return entry
+    },
+  }
+
+  await model.getWorkflowParameterMetadata({ model: entry.name }, null)
+  await model.getWorkflowParameterMetadata({ model: entry.name })
+  assert.deepEqual(dirs, [null, 'D:/NewModels'])
+})
+
+test('Comfy-MSS export resolves only overridden nodes and never downloads model metadata', async () => {
+  storage()
+  const task = await newStore()
+  const model = useModelStore()
+  const original = model.selectedInfo.inferenceParamMeta.resolution
+  const resolution = { ...original, defaults: { ...original.defaults, overlap_size: 0 } }
+  model.modelInferenceOverrides['model-a'] = { batch_size: 5 }
+  await task.applyParameterSettings('custom', { batchSize: 6 }, true)
+  const calls = []
+  let missingCatalogConfig = true
+  model.getWorkflowParameterMetadata = async (target, directory, download) => {
+    calls.push([target.id, directory, download])
+    return { resolution, missingCatalogConfig }
+  }
+  const nodes = [1, 2].map(id => ({
+    id, type: 'pymss_mss_separate', widgets_values: ['model-a'],
+    properties: id === 2 ? { studioInferenceOverrides: { normalize: true } } : {},
+  }))
+  const definition = { nodes, links: [] }
+  await assert.rejects(task.prepareComfyExportParameters(definition), /comfyExportMissingConfig/)
+  missingCatalogConfig = false
+  const plan = await task.prepareComfyExportParameters(definition)
+  assert.deepEqual(calls, [['2', null, undefined], ['2', null, undefined]])
+  assert.deepEqual(Object.keys(plan.nodes), ['2'])
+  assert.equal(plan.nodes['2'].parameters.batch_size, resolution.defaults.batch_size)
+  assert.equal(plan.nodes['2'].modelDefaultOverlap, 0)
+  assert.equal(plan.nodes['2'].parameters.normalize, true)
+  assert.equal(plan.nodes['2'].useTta, false)
+})
+
+test('reads and downloads for one model update metadata in order across sources', async () => {
+  storage()
+  await newStore()
+  const model = useModelStore()
+  const original = JSON.parse(JSON.stringify(model.selectedInfo))
+  const configPath = 'D:/Models/model-a.yaml'
+  const installed = { ...original, configPath, missingPaths: [], inferenceParamMeta: {
+    resolution: { ...original.inferenceParamMeta.resolution, fingerprint: 'downloaded-config' },
+  } }
+  const calls = []
+  let finishDownload
+  window.__TAURI_INTERNALS__ = {
+    async invoke(command, { payload }) {
+      assert.equal(command, 'get_model_info')
+      calls.push([Boolean(payload.fetchMissingConfig), payload.source])
+      if (payload.fetchMissingConfig) return new Promise(resolve => { finishDownload = resolve })
+      return installed
+    },
+  }
+  const download = model.getWorkflowParameterMetadata({ model: original.name, downloadSource: 'huggingface' }, null, true)
+  const read = model.getWorkflowParameterMetadata({ model: original.name, downloadSource: 'modelscope' }, null)
+  assert.deepEqual(calls, [[true, 'huggingface']])
+  finishDownload(installed)
+  const [downloaded, observed] = await Promise.all([download, read])
+  assert.deepEqual(calls, [[true, 'huggingface'], [false, undefined]])
+  assert.equal(observed.resolution.fingerprint, downloaded.resolution.fingerprint)
+  assert.equal(model.selectedInfo.inferenceParamMeta.resolution.fingerprint, 'downloaded-config')
+})
+
+test('a catalog refresh cannot restore stale metadata after a concurrent config download', async () => {
+  storage()
+  await newStore()
+  const model = useModelStore()
+  const original = JSON.parse(JSON.stringify(model.selectedInfo))
+  const configPath = 'D:/Models/model-a.yaml'
+  const installed = { ...original, configPath, missingPaths: [], inferenceParamMeta: {
+    resolution: { ...original.inferenceParamMeta.resolution, fingerprint: 'downloaded-config' },
+  } }
+  let finishList
+  window.__TAURI_INTERNALS__ = {
+    async invoke(command) {
+      if (command === 'list_models') return new Promise(resolve => { finishList = resolve })
+      assert.equal(command, 'get_model_info')
+      return installed
+    },
+  }
+  const refresh = model.loadModels()
+  await model.getWorkflowParameterMetadata({ model: original.name }, null, true)
+  finishList({ models: [{ ...original, configPath, missingPaths: [configPath] }], categories: [], categoriesCn: {}, modelDir: null })
+  await refresh
+  assert.equal(model.models[0].inferenceParamMeta.resolution.fingerprint, 'downloaded-config')
+  assert.equal(model.selectedInfo.inferenceParamMeta.resolution.fingerprint, 'downloaded-config')
+  assert.deepEqual(model.selectedInfo.missingPaths, [])
+})
+
+test('a catalog refresh keeps a completed model download when only the weights were missing', async () => {
+  storage()
+  await newStore()
+  const model = useModelStore()
+  const original = JSON.parse(JSON.stringify(model.selectedInfo))
+  const modelPath = 'D:/Models/model-a.ckpt'
+  const configPath = 'D:/Models/model-a.yaml'
+  const beforeDownload = { ...original, modelPath, configPath, downloaded: false, missingPaths: [modelPath] }
+  const installed = { ...beforeDownload, downloaded: true, missingPaths: [], inferenceParamMeta: {
+    resolution: { ...original.inferenceParamMeta.resolution, fingerprint: 'downloaded-weights' },
+  } }
+  let finishList
+  window.__TAURI_INTERNALS__ = {
+    async invoke(command) {
+      assert.equal(command, 'list_models')
+      return new Promise(resolve => { finishList = resolve })
+    },
+  }
+  const refresh = model.loadModels()
+  model.handleWorkerEvent({ type: 'download_done', taskId: 'download_model-a', payload: {
+    model: original.name, modelInfo: installed, downloaded: [modelPath], skipped: [configPath],
+  } })
+  assert.equal(model.selectedInfo.downloaded, true)
+  finishList({ models: [beforeDownload], categories: [], categoriesCn: {}, modelDir: 'D:/Models' })
+  await refresh
+  assert.equal(model.models[0].downloaded, true)
+  assert.equal(model.selectedInfo.inferenceParamMeta.resolution.fingerprint, 'downloaded-weights')
+  assert.deepEqual(model.selectedInfo.missingPaths, [])
+})
+
+for (const fetchMissingConfig of [false, true]) {
+  test(`a late metadata query cannot roll back a completed download (fetch config: ${fetchMissingConfig})`, async () => {
+    storage()
+    await newStore()
+    const model = useModelStore()
+    const original = JSON.parse(JSON.stringify(model.selectedInfo))
+    const modelPath = 'D:/Models/model-a.ckpt'
+    const configPath = 'D:/Models/model-a.yaml'
+    const beforeDownload = { ...original, modelPath, configPath, downloaded: false, missingPaths: [modelPath] }
+    const installed = { ...beforeDownload, downloaded: true, missingPaths: [], inferenceParamMeta: {
+      resolution: { ...original.inferenceParamMeta.resolution, fingerprint: 'installed-weights' },
+    } }
+    let finishList, finishMetadata
+    window.__TAURI_INTERNALS__ = {
+      async invoke(command) {
+        if (command === 'list_models') return new Promise(resolve => { finishList = resolve })
+        assert.equal(command, 'get_model_info')
+        return new Promise(resolve => { finishMetadata = resolve })
+      },
+    }
+    const refresh = model.loadModels()
+    const query = model.getWorkflowParameterMetadata({ model: original.name }, null, fetchMissingConfig)
+    model.handleWorkerEvent({ type: 'download_done', taskId: 'download_model-a', payload: {
+      model: original.name, modelInfo: installed, downloaded: [modelPath], skipped: [configPath],
+    } })
+    finishMetadata(beforeDownload)
+    assert.equal((await query).resolution.fingerprint, 'installed-weights')
+    assert.equal(model.selectedInfo.downloaded, true)
+    finishList({ models: [installed], categories: [], categoriesCn: {}, modelDir: 'D:/Models' })
+    await refresh
+    assert.equal(model.models[0].downloaded, true)
+    assert.equal(model.selectedInfo.inferenceParamMeta.resolution.fingerprint, 'installed-weights')
+  })
+}
+
+test('YAML model names with a category prefix are normalized for submission metadata', async () => {
+  storage()
+  const task = await newStore()
+  const entry = JSON.parse(JSON.stringify(useModelStore().selectedInfo))
+  const requests = []
+  window.__TAURI_INTERNALS__ = {
+    metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+    async invoke(command, { payload } = {}) {
+      if (command !== 'get_model_info') return { started: true }
+      requests.push(payload.model)
+      assert.equal(payload.model, entry.name)
+      return entry
+    },
+  }
+  const displayName = '  [vocals] ' + entry.name + '  '
+  const definition = { version: 1, steps: [{ ...workflow.definition.steps[0], model: displayName }] }
+  const result = await task.startWorkflowInference({ ...workflow, definition })
+  assert.deepEqual(requests, [entry.name])
+  assert.equal(result.tasks[0].runConfig.workflowParameters.nodes.split.model, entry.name)
+  assert.equal(result.tasks[0].runConfig.workflowDefinition.steps[0].model, displayName)
+})
+
+test('advanced workflow preflight looks up the complete registered name of a custom model', async () => {
+  storage()
+  const task = await newStore()
+  const model = useModelStore()
+  const name = '[My]-vocals'
+  const entry = { ...model.selectedInfo, name, modelPath: 'D:/Models/vocals.ckpt', source: 'user' }
+  model.models = [entry]
+  const requests = []
+  window.__TAURI_INTERNALS__ = {
+    metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+    async invoke(command, { payload } = {}) {
+      if (command !== 'get_model_info') return { started: true }
+      requests.push(payload.inferenceTarget.modelName)
+      assert.equal(payload.inferenceTarget.modelName, name)
+      return { resolution: entry.inferenceParamMeta.resolution }
+    },
+  }
+  const definition = {
+    nodes: [
+      { id: 1, type: 'pymss_custom_mss_separate_list', widgets_values: [name, 'bs_roformer', 'auto', '0', false] },
+      { id: 2, type: 'pymss_save_audio' },
+    ],
+    links: [],
+  }
+  const result = await task.startWorkbenchInference({ ...workflow, definition }, {
+    inputs: {}, outputs: {}, outputLayout: 'flat', outputDirectory: 'E:/Output',
+  })
+  assert.deepEqual(requests, [name])
+  assert.equal(result.tasks[0].runConfig.workflowParameters.nodes['1'].model, name)
+})
+
+test('config preflight respects the advanced separation node download setting', async () => {
+  const values = storage()
+  const task = await newStore()
+  const model = useModelStore()
+  const resolution = model.selectedInfo.inferenceParamMeta.resolution
+  model.models = [{ ...model.models[0], configPath: 'D:/Models/model-a.yaml', inferenceParamMeta: undefined }]
+  const lookups = []
+  const downloadSources = []
+  model.getWorkflowParameterMetadata = async (target, _directory, fetchMissingConfig) => {
+    lookups.push(Boolean(fetchMissingConfig))
+    if (fetchMissingConfig) downloadSources.push(target.downloadSource)
+    return { resolution: fetchMissingConfig ? resolution : undefined, missingCatalogConfig: !fetchMissingConfig }
+  }
+  await task.applyParameterSettings('custom', { normalize: true })
+  const widgets = ['model-a', 'auto', false]
+  const entry = { ...workflow, definition: {
+    nodes: [{ id: 1, type: 'mss_separate', widgets_values: widgets }, { id: 2, type: 'pymss_save_audio' }],
+    links: [],
+  } }
+  const bindings = { inputs: {}, outputs: {}, outputLayout: 'flat', outputDirectory: 'E:/Output' }
+  await assert.rejects(task.startWorkbenchInference(entry, bindings), /metadataUnavailable/)
+  assert.deepEqual(lookups, [false])
+  widgets[2] = true
+  const result = await task.startWorkbenchInference(entry, bindings)
+  assert.deepEqual(lookups, [false, false, true])
+  assert.equal(result.tasks[0].runConfig.workflowParameters.nodes['1'].parameters.normalize, true)
+  widgets.splice(2, 1, '0', false)
+  await assert.rejects(task.startWorkbenchInference(entry, bindings), /metadataUnavailable/)
+  widgets[3] = true
+  settings.downloadSource = 'huggingface'
+  const imported = await task.startWorkbenchInference(entry, bindings)
+  assert.deepEqual(lookups.slice(3), [false, false, true])
+  assert.deepEqual(downloadSources, ['modelscope', 'huggingface'])
+  assert.equal(imported.tasks[0].runConfig.downloadSource, 'huggingface')
+  const { workflowParameters, workflowDefinition } = imported.tasks[0].runConfig
+  assert.equal(workflowParameters.nodes['1'].parameters.normalize, true)
+  assert.equal(workflowParameters.nodes['1'].downloadMissing, true)
+  assert.equal(workflowParameters.nodes['1'].downloadSource, undefined)
+  assert.deepEqual(workflowDefinition.nodes[0].widgets_values.slice(2, 5), [true, 'Default', '0'])
+
+  const oldTask = JSON.parse(JSON.stringify(imported.tasks[0]))
+  oldTask.status = 'failed'
+  delete oldTask.runConfig.workflowParameters.nodes['1'].downloadMissing
+  oldTask.runConfig.workflowDefinition.nodes[0].widgets_values = ['model-a', 'auto', '0', false]
+  values.set('pymss-studio:task-history', JSON.stringify({ tasks: [oldTask] }))
+  const restored = await newStore()
+  const retry = await restored.retryTask(oldTask.id)
+  assert.equal(retry.runConfig.workflowParameters.nodes['1'].downloadMissing, false)
+  assert.equal(retry.runConfig.workflowParameters.nodes['1'].fingerprint, resolution.fingerprint)
+})

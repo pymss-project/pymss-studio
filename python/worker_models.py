@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import sys
 import traceback
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from worker_asr_cache import is_complete_asr_model_cache
 from worker_platform import description as platform_description
@@ -18,6 +22,9 @@ import yaml
 from worker_inference_constraints import InferenceParameterError, chunk_size_constraint
 from worker_inference_snapshot import build_parameter_resolution
 from worker_protocol import WORKER_VERSION, _as_bool, _as_float, _as_int, emit, emit_error, import_available
+from worker_runtime_lock import RuntimeLockBusy, runtime_lock
+
+CATALOG_CONFIG_STAGING_PREFIX = ".pymss-config-"
 
 
 def package_version(distribution: str) -> str | None:
@@ -192,6 +199,30 @@ def _debug_dir() -> Path:
         os.environ.get("PYMSS_STUDIO_DEBUG_DIR")
         or Path.home() / ".cache" / "pymss-studio" / "debug"
     )
+
+
+@contextmanager
+def catalog_config_operation(config_path: Path) -> Iterator[Path]:
+    """Share the deletion revision across workers that can publish this configuration."""
+    key = hashlib.sha256(os.fsencode(os.path.normcase(config_path.resolve()))).hexdigest()
+    directory = _debug_dir().parent / "model-config-operations"
+    try:
+        with runtime_lock(directory / f"{key}.lock"):
+            yield directory / f"{key}.revision"
+    except RuntimeLockBusy as exc:
+        raise OSError("Another operation is updating this model's configuration") from exc
+
+
+def catalog_config_revision(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
+def catalog_config_staging_lock(directory: Path) -> Path:
+    # Installations sharing the model directory must see the same lock.
+    return directory.with_name(f"{directory.name}.lock")
 
 
 def _debug_catalog_path() -> Path:
@@ -665,7 +696,10 @@ def load_parameter_resolution(
     model_path: str | Path | None,
 ) -> dict[str, Any] | None:
     """Execution-side twin of the metadata path: same YAML loader, builder and fingerprint."""
+    auto = model_type == "auto"
     path = Path(config_path) if config_path else None
+    if auto and path is None and model_path:
+        path = Path(f"{model_path}.yaml")
     config: dict[str, Any] | None = None
     if path is not None and path.is_file():
         try:
@@ -673,6 +707,12 @@ def load_parameter_resolution(
         except Exception as exc:
             raise InferenceParameterError(f"Model config {path} could not be read: {exc}") from exc
     try:
+        if auto:
+            from pymss_core import detect_model_type
+
+            if config is None:
+                raise InferenceParameterError("Automatic model detection requires a readable YAML configuration")
+            model_type = detect_model_type(config)
         return build_parameter_resolution(
             model_type, config, config_path=path if config is not None else None, model_path=model_path,
         )
@@ -1263,6 +1303,21 @@ def get_any_model_entry(model_name: str) -> Any:
 
 
 def cmd_model_info(payload: dict[str, Any]) -> int:
+    target = payload.get("inferenceTarget")
+    if isinstance(target, dict):
+        model_path, config_path = target.get("modelPath"), target.get("configPath")
+        model_type = target.get("modelType")
+        if target.get("modelName"):
+            from pymss.user_models import get_user_model_entry
+
+            entry = get_user_model_entry(target["modelName"])
+            model_path, config_path = model_path_for(entry), config_path_for(entry)
+            model_type = model_type or entry.model_type
+        resolution = load_parameter_resolution(
+            model_type, config_path, model_path,
+        )
+        emit("model_info", {"resolution": resolution})
+        return 0
     model_name = payload.get("model")
     if not model_name:
         return emit_error("MODEL_NOT_FOUND", "Missing model name")
@@ -1272,6 +1327,9 @@ def cmd_model_info(payload: dict[str, Any]) -> int:
         return emit_error("MODEL_NOT_FOUND", str(exc))
 
     model_dir = payload.get("modelDir") or None
+    if payload.get("fetchMissingConfig") is True:
+        from worker_download import ensure_catalog_config
+        ensure_catalog_config(entry, model_dir, payload.get("source") or "modelscope")
     emit("model_info", model_to_dict(entry, model_dir, include_local_state=True))
     return 0
 
@@ -1326,8 +1384,19 @@ def cmd_delete_model(payload: dict[str, Any]) -> int:
             f"{model_name} is an imported custom model; remove it from the custom model list instead"
         )
 
-    model_path = model_path_for(entry, model_dir)
     config_path = config_path_for(entry, model_dir)
+    operation = catalog_config_operation(config_path) if config_path is not None else nullcontext()
+    try:
+        with operation as revision:
+            if revision is not None:
+                revision.write_text(uuid4().hex, encoding="utf-8")
+            return _delete_catalog_model_files(entry, model_dir, config_path, task_id)
+    except OSError as exc:
+        return fail(str(exc))
+
+
+def _delete_catalog_model_files(entry: Any, model_dir: str | None, config_path: Path | None, task_id: str | None) -> int:
+    model_path = model_path_for(entry, model_dir)
     auxiliary_paths = auxiliary_paths_for(entry, model_dir)
 
     def expand_cleanup_paths(path: Path) -> list[Path]:
@@ -1453,9 +1522,20 @@ def _scan_root_file_sizes(root: Path) -> dict[str, tuple[Path, int]]:
     scanned: dict[str, tuple[Path, int]] = {}
     if not root.exists():
         return scanned
-    for dirpath, _, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root):
         base = Path(dirpath)
+        if base.name.startswith(CATALOG_CONFIG_STAGING_PREFIX):
+            try:
+                with runtime_lock(catalog_config_staging_lock(base), timeout=0, create=False):
+                    pass
+            except FileNotFoundError:
+                pass
+            except RuntimeLockBusy:
+                dirnames.clear()
+                continue
         for filename in filenames:
+            if filename.startswith(CATALOG_CONFIG_STAGING_PREFIX) and filename.endswith(".lock"):
+                continue
             file_path = base / filename
             try:
                 size = int(file_path.stat().st_size)

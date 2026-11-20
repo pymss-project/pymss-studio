@@ -13,12 +13,13 @@ class RuntimeLockBusy(RuntimeError):
 
 
 @contextmanager
-def runtime_lock(path: Path, *, timeout: float = 5.0, allow_read_only: bool = False) -> Iterator[bool]:
-    """Yield whether repairs are allowed; read-only queries never use a separate lock file."""
+def runtime_lock(path: Path, *, timeout: float = 5.0, allow_read_only: bool = False, create: bool = True) -> Iterator[bool]:
+    """Yield whether the lock is writable, optionally requiring an existing lock file."""
     writable = True
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handle = path.open("a+b")
+        if create:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("a+b" if create else "r+b")
     except OSError as exc:
         if not allow_read_only or exc.errno not in {errno.EACCES, errno.EPERM, errno.EROFS}:
             raise

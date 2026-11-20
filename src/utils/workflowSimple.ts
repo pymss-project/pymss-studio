@@ -11,6 +11,7 @@ import {
   type SimpleAudioOperation,
   type SimpleProcessingAlgorithm,
 } from '@/workflows/formats'
+import { explicitOverlapStepIds, workflowModelName } from '@/workflows/inferencePolicy'
 import { analyzeWorkflowInputs } from '@/utils/workflowInputs'
 import type { ModelDefaultInferenceParams } from '@/stores/model'
 
@@ -125,6 +126,8 @@ export type SimpleEditorUi = {
   editor: 'simple'
   viewport: { x: number; y: number; zoom: number }
   nodes: Record<string, SimpleEditorPoint>
+  /** Distinguishes an explicit overlap of zero from the legacy model-default sentinel. */
+  nativeInferenceSteps?: string[]
 }
 
 /** Calculate a centered viewport that contains all visible simple-editor nodes. */
@@ -204,6 +207,20 @@ export function normalizeSimpleInferenceParams(value: unknown): SimpleWorkflowIn
   return Object.keys(normalized).length ? normalized as SimpleWorkflowInferenceParams : undefined
 }
 
+export function setSimpleStepInferenceOverrides(
+  draft: SimpleDraft,
+  step: SimpleStepDraft,
+  values: Record<string, number | boolean>,
+  modelDefaultKeys: readonly string[] = [],
+) {
+  step.inferenceParams = normalizeSimpleInferenceParams(values)
+  const nativeSteps = new Set(draft.ui.nativeInferenceSteps)
+  if (step.inferenceParams?.overlap_size === 0 && !modelDefaultKeys.includes('overlap_size')) nativeSteps.add(step.id)
+  else nativeSteps.delete(step.id)
+  if (nativeSteps.size) draft.ui.nativeInferenceSteps = [...nativeSteps]
+  else delete draft.ui.nativeInferenceSteps
+}
+
 export type ComfyOverview = {
   nodeCount: number
   linkCount: number
@@ -219,7 +236,6 @@ export type ComfyOverview = {
 export function analyzeComfyOverview(definition: unknown, saveNodeTypes?: ReadonlySet<string>): ComfyOverview | null {
   if (!isRecord(definition) || !Array.isArray(definition.nodes)) return null
   const nodes = definition.nodes as any[]
-  const stripPrefix = (raw: string) => raw.replace(/^\[[^\]]*\]\s*/, '').trim()
   const models: string[] = []
   let separateCount = 0
   let outputCount = 0
@@ -227,8 +243,7 @@ export function analyzeComfyOverview(definition: unknown, saveNodeTypes?: Readon
     const type = String(node?.type || '')
     if (isWorkflowSeparationNodeType(type)) {
       separateCount += 1
-      const raw = String(node.widgets_values?.[0] || '').trim()
-      const model = stripPrefix(raw)
+      const model = workflowModelName(node.widgets_values?.[0], type)
       if (model && !models.includes(model)) models.push(model)
     }
     if (isWorkflowSaveNodeType(type, saveNodeTypes)) outputCount += 1
@@ -395,6 +410,9 @@ function hydrateSimpleEditorUi(
     const id = ensemble.id || `ensemble${index + 1}`
     if (!nodes[id]) nodes[id] = { x: 360 + steps.length * 330 + index * 330, y: 220 + (index % 2) * 140 }
   })
+  const explicitOverlap = explicitOverlapStepIds(value)
+  const nativeInferenceSteps = steps.filter(step => step.inferenceParams?.overlap_size === 0
+    && explicitOverlap.has(step.id.trim())).map(step => step.id)
   return {
     editor: 'simple',
     viewport: {
@@ -403,6 +421,7 @@ function hydrateSimpleEditorUi(
       zoom: Number.isFinite(zoom) && zoom > 0 ? Math.min(2, Math.max(0.35, zoom)) : fallback.viewport.zoom,
     },
     nodes,
+    ...(nativeInferenceSteps.length ? { nativeInferenceSteps } : {}),
   }
 }
 

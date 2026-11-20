@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import sys
 import tempfile
 import threading
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from queue import Queue
 from types import ModuleType, SimpleNamespace
@@ -23,10 +25,156 @@ from worker_download import (
     _watch_download_progress,
     cmd_download_model,
     download_studio_model,
+    ensure_catalog_config,
     files_for_studio_model,
     prepare_pymss_download,
 )
+from worker_models import (
+    CATALOG_CONFIG_STAGING_PREFIX,
+    _scan_root_file_sizes,
+    catalog_config_staging_lock,
+    cmd_cleanup_model_residual_files,
+    cmd_delete_model,
+)
 from worker_proxy import effective_proxy_url, parse_proxy_config
+from worker_runtime_lock import runtime_lock
+
+
+class WorkflowConfigDownloadTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.config = self.directory / "karaoke" / "model.yaml"
+        self.weights = self.directory / "model.ckpt"
+        self.entry = SimpleNamespace(name="model.ckpt", config_relpath="karaoke/model.yaml", model_type="mel_band_roformer")
+        self.enterContext(mock.patch("worker_models._debug_dir", return_value=self.directory / "debug"))
+        self.enterContext(mock.patch("worker_download.config_path_for", return_value=self.config))
+        self.enterContext(mock.patch("worker_download.model_path_for", return_value=self.weights))
+        self.enterContext(mock.patch("worker_download.prepare_pymss_download"))
+        self.download = self.enterContext(mock.patch("worker_download.download_studio_model", side_effect=self.write_fixture))
+
+    def write_fixture(self, _sdk, name, files, **options):
+        self.assertEqual(name, self.entry.name)
+        self.assertEqual([remote for remote, _ in files], [self.entry.config_relpath])
+        files[0][1].write_text("audio: {chunk_size: 640000, sample_rate: 44100}\ninference: {batch_size: 2, num_overlap: 4}\n", encoding="utf-8")
+
+    def test_only_config_is_installed_and_existing_files_are_reused(self):
+        ensure_catalog_config(self.entry, str(self.directory), "modelscope")
+        ensure_catalog_config(self.entry, str(self.directory), "modelscope")
+        self.assertTrue(self.config.is_file())
+        self.assertFalse(self.weights.exists())
+        self.download.assert_called_once()
+
+    def test_failed_transfer_and_concurrent_install_do_not_overwrite_config(self):
+        self.download.side_effect = OSError("offline")
+        with self.assertRaisesRegex(OSError, "offline"):
+            ensure_catalog_config(self.entry, str(self.directory), "modelscope")
+        self.assertFalse(self.config.exists())
+        def install_while_downloading(*args, **kwargs):
+            self.write_fixture(*args, **kwargs)
+            self.config.write_bytes(b"concurrent configuration")
+        self.download.side_effect = install_while_downloading
+        ensure_catalog_config(self.entry, str(self.directory), "modelscope")
+        self.assertEqual(self.config.read_bytes(), b"concurrent configuration")
+
+    def test_volume_without_hard_links_uses_exclusive_rename(self):
+        with mock.patch("worker_file_publish.os.link", side_effect=OSError(errno.ENOTSUP, "Hard links unavailable")):
+            ensure_catalog_config(self.entry, str(self.directory), "modelscope")
+        self.assertIn("chunk_size: 640000", self.config.read_text(encoding="utf-8"))
+
+        self.config.unlink()
+
+        def concurrent_install(_temporary, destination):
+            destination.write_bytes(b"concurrent configuration")
+            raise OSError(errno.ENOTSUP, "Hard links unavailable")
+
+        with mock.patch("worker_file_publish.os.link", side_effect=concurrent_install):
+            ensure_catalog_config(self.entry, str(self.directory), "modelscope")
+        self.assertEqual(self.config.read_bytes(), b"concurrent configuration")
+
+    def test_delete_cancels_an_in_flight_config_without_blocking_a_later_download(self):
+        self.weights.write_bytes(b"weights")
+
+        def delete_while_downloading(*args, **kwargs):
+            self.write_fixture(*args, **kwargs)
+            with (
+                mock.patch("pymss.model_registry.get_model_entry", return_value=self.entry),
+                mock.patch("worker_models.model_path_for", return_value=self.weights),
+                mock.patch("worker_models.config_path_for", return_value=self.config),
+                mock.patch("worker_models.auxiliary_paths_for", return_value=[]),
+                mock.patch("worker_models.model_to_dict", return_value={}),
+                mock.patch("worker_models.emit") as emit,
+            ):
+                self.assertEqual(cmd_delete_model({"model": self.entry.name, "taskId": "delete_model"}), 0)
+                self.assertEqual(emit.call_args.args[0], "model_delete_done")
+
+        self.download.side_effect = delete_while_downloading
+        with self.assertRaisesRegex(ValueError, "deleted during configuration download"):
+            ensure_catalog_config(self.entry, str(self.directory), "modelscope")
+        self.assertFalse(self.weights.exists())
+        self.assertFalse(self.config.exists())
+        self.download.side_effect = self.write_fixture
+        ensure_catalog_config(self.entry, str(self.directory), "modelscope")
+        self.assertTrue(self.config.is_file())
+
+    def test_residual_cleanup_leaves_the_active_config_download_alone(self):
+        model_root = self.config.parent
+        model_root.mkdir()
+        residual = model_root / "leftover.part"
+        residual.write_bytes(b"residual")
+
+        def cleanup_while_downloading(*args, **kwargs):
+            self.write_fixture(*args, **kwargs)
+            staged = args[2][0][1]
+            # Desktop installations can use the same model directory with separate app data.
+            with (
+                mock.patch("worker_models._debug_dir", return_value=self.directory / "other-install" / "debug"),
+                mock.patch("worker_models.emit") as emit,
+            ):
+                self.assertEqual(cmd_cleanup_model_residual_files({
+                    "modelDir": str(model_root), "taskId": "cleanup_residual_test",
+                }), 0)
+            event, payload = emit.call_args.args
+            self.assertEqual(event, "model_residual_cleanup_done")
+            self.assertEqual(payload["deleted"], [str(residual)])
+            self.assertTrue(staged.is_file())
+
+        self.download.side_effect = cleanup_while_downloading
+        ensure_catalog_config(self.entry, str(model_root), "modelscope")
+        self.assertTrue(self.config.is_file())
+        self.assertFalse(residual.exists())
+
+    def test_storage_probe_handle_does_not_block_config_publication(self):
+        model_root = self.config.parent
+        with ExitStack() as scan_handles:
+            def probe(path, **options):
+                # A scan can open the lock and be suspended before it probes or closes it.
+                scan_handles.enter_context(path.open("r+b"))
+                return runtime_lock(path, **options)
+
+            def scan_while_downloading(*args, **kwargs):
+                self.write_fixture(*args, **kwargs)
+                with mock.patch("worker_models.runtime_lock", side_effect=probe) as scanner:
+                    self.assertEqual(_scan_root_file_sizes(model_root), {})
+                scanner.assert_called_once()
+
+            self.download.side_effect = scan_while_downloading
+            ensure_catalog_config(self.entry, str(model_root), "modelscope")
+            self.assertTrue(self.config.is_file())
+            self.assertEqual([path for path, _ in _scan_root_file_sizes(model_root).values()], [self.config])
+            self.assertFalse(any(path.is_dir() for path in model_root.iterdir()))
+
+    def test_residual_cleanup_still_removes_abandoned_config_data(self):
+        model_root = self.config.parent
+        staging = model_root / f"{CATALOG_CONFIG_STAGING_PREFIX}abandoned"
+        staging.mkdir(parents=True)
+        with runtime_lock(catalog_config_staging_lock(staging)):
+            pass
+        config = staging / "model.yaml.part"
+        config.write_bytes(b"partial YAML")
+        with mock.patch("worker_models.emit") as emit:
+            self.assertEqual(cmd_cleanup_model_residual_files({"modelDir": str(model_root)}), 0)
+        self.assertEqual(emit.call_args.args[1]["deleted"], [str(config)])
+        self.assertFalse(config.exists())
 
 
 class EffectiveProxyUrlTest(unittest.TestCase):

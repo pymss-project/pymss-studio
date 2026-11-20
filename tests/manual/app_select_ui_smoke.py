@@ -285,7 +285,7 @@ with sync_playwright() as p:
           const model = useModelStore(), task = useTaskStore(), entry = {...createDemoModels()[0], downloaded: true}
           model.ensureModelMetadata = async () => entry
           model.models = [entry]; model.selectedModel = entry.name; model.selectedInfo = entry; model.modelsLoaded = true
-          task.parameterMode = 'custom'; task.customParameterIntent = {}; task.useTta = false
+          task.parameterMode = 'custom'; task.customParameterIntent = {}; task.ttaOverride = false
           useAppStore().envInfo = {pymssAvailable: true, torchAvailable: true, torchBackend: 'cpu'}
           window.selectSettingsFixture = settings
         }""")

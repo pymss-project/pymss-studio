@@ -1,4 +1,5 @@
 import { BUILTIN_SPECS, NODE_SPECS, type NodeSpec } from './nodeSpecs'
+import { comfySeparationNodeType } from '../workflows/formats'
 
 export type NodeTranslator = (key: string, named?: Record<string, unknown>) => unknown
 
@@ -238,7 +239,7 @@ export function translateLiteGraphMenuText(value: string, translator?: NodeTrans
   }
   const spec = NODE_SPECS[value]
     || BUILTIN_SPECS[value]
-    || NODE_SPECS[value.replace(/^pymss_/, '')]
+    || NODE_SPECS[comfySeparationNodeType(value)]
   return spec ? translateNodeTitle(spec, translator) : value
 }
 

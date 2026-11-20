@@ -285,6 +285,18 @@ onMounted(async () => {
     bootReady.value = true
   }, 120)
   if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+    if (!isMainTaskOwner() && isStandaloneRoute.value) {
+      const refreshPreferences = async () => {
+        const { useTaskStore } = await import('@/stores/task')
+        await useTaskStore().refreshParameterPreferences()
+      }
+      const unlisten = await listen('pymss://inference-preferences-changed', () => {
+        void refreshPreferences().catch(error => studioLog.warn('Failed to refresh inference preferences', error))
+      })
+      if (unmounted) unlisten()
+      else workflowEventUnlisteners.push(unlisten)
+      await refreshPreferences().catch(error => studioLog.warn('Failed to load inference preferences', error))
+    }
     await listenForMainWorkflowEvent('pymss://workflow-editors-changed', event => {
       workflow.applyEditorSnapshot(event.payload)
     })

@@ -176,7 +176,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
     inputs: [],
     outputs: [{ name: 'mss_params', type: PORT.MSS_PARAMS }],
     widgets: [
-      { name: 'batch_size', type: 'number', default: 1 },
+      { name: 'batch_size', type: 'number', default: 1, min: 1, step: 1 },
       { name: 'overlap_size', type: 'text', default: 'Default' },
       { name: 'chunk_size', type: 'text', default: 'Default' },
       { name: 'normalize', type: 'toggle', default: false },
@@ -191,18 +191,18 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
     inputs: [],
     outputs: [{ name: 'vr_params', type: PORT.VR_PARAMS }],
     widgets: [
-      { name: 'batch_size', type: 'number', default: 1 },
-      { name: 'window_size', type: 'number', default: 512 },
-      { name: 'aggression', type: 'number', default: 5 },
+      { name: 'batch_size', type: 'number', default: 1, min: 1, step: 1 },
+      { name: 'window_size', type: 'number', default: 512, min: 1, step: 1 },
+      { name: 'aggression', type: 'number', default: 5, min: 0, max: 100, step: 1 },
       { name: 'enable_tta', type: 'toggle', default: false },
       { name: 'high_end_process', type: 'toggle', default: false },
       { name: 'enable_post_process', type: 'toggle', default: false },
-      { name: 'post_process_threshold', type: 'number', default: 0.2 },
+      { name: 'post_process_threshold', type: 'number', default: 0.2, min: 0, max: 1, step: 0.01 },
       { name: 'normalize', type: 'toggle', default: false },
     ],
   },
-  mss_separate: {
-    type: 'mss_separate',
+  pymss_mss_separate: {
+    type: 'pymss_mss_separate',
     title: 'MSS Separate',
     category: 'pymss/separate',
     inputs: [
@@ -213,15 +213,15 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
     dynamicStems: true,
     widgets: [
       { name: 'model_name', type: 'combo', default: '', options: [] },
-      { name: 'device', type: 'combo', default: 'auto', options: ['auto', 'cpu', 'cuda', 'mps'] },
+      { name: 'device', type: 'combo', default: 'auto', options: ['auto', 'cpu', 'cuda', 'mps', 'mlx'] },
       { name: 'download_missing', type: 'toggle', default: true },
-      { name: 'source', type: 'combo', default: 'modelscope', options: ['modelscope', 'huggingface'] },
+      { name: 'source', type: 'combo', default: 'modelscope', options: ['Default', 'modelscope', 'huggingface', 'hf-mirror'] },
       { name: 'device_ids', type: 'text', default: '0' },
       { name: 'debug', type: 'toggle', default: false },
     ],
   },
-  vr_separate: {
-    type: 'vr_separate',
+  pymss_vr_separate: {
+    type: 'pymss_vr_separate',
     title: 'VR Separate',
     category: 'pymss/separate',
     inputs: [
@@ -232,15 +232,15 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
     dynamicStems: true,
     widgets: [
       { name: 'model_name', type: 'combo', default: '', options: [] },
-      { name: 'device', type: 'combo', default: 'auto', options: ['auto', 'cpu', 'cuda', 'mps'] },
+      { name: 'device', type: 'combo', default: 'auto', options: ['auto', 'cpu', 'cuda', 'mps', 'mlx'] },
       { name: 'download_missing', type: 'toggle', default: true },
-      { name: 'source', type: 'combo', default: 'modelscope', options: ['modelscope', 'huggingface'] },
+      { name: 'source', type: 'combo', default: 'modelscope', options: ['Default', 'modelscope', 'huggingface', 'hf-mirror'] },
       { name: 'device_ids', type: 'text', default: '0' },
       { name: 'debug', type: 'toggle', default: false },
     ],
   },
-  custom_mss_separate: {
-    type: 'custom_mss_separate',
+  pymss_custom_mss_separate: {
+    type: 'pymss_custom_mss_separate',
     title: 'Custom MSS Separate',
     category: 'pymss/separate',
     inputs: [
@@ -251,8 +251,8 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
     dynamicStems: true,
     widgets: [
       { name: 'model_name', type: 'combo', default: '', options: [] },
-      { name: 'model_type', type: 'combo', default: 'mel_band_roformer', options: ['auto', 'mel_band_roformer', 'bs_roformer', 'bs_roformer_hyperace', 'bs_conformer', 'mel_band_conformer', 'mdx23c', 'htdemucs', 'apollo', 'bandit', 'bandit_v2', 'scnet'] },
-      { name: 'device', type: 'combo', default: 'auto', options: ['auto', 'cpu', 'cuda', 'mps'] },
+      { name: 'model_type', type: 'combo', default: 'auto', options: ['auto', 'mel_band_roformer', 'bs_roformer', 'bs_roformer_hyperace', 'bs_conformer', 'mel_band_conformer', 'mdx23c', 'htdemucs', 'apollo', 'bandit', 'bandit_v2', 'scnet'] },
+      { name: 'device', type: 'combo', default: 'auto', options: ['auto', 'cpu', 'cuda', 'mps', 'mlx'] },
       { name: 'device_ids', type: 'text', default: '0' },
       { name: 'debug', type: 'toggle', default: false },
     ],
@@ -346,7 +346,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
   },
 }
 
-for (const type of ['mss_separate', 'vr_separate', 'custom_mss_separate']) {
+for (const type of ['pymss_mss_separate', 'pymss_vr_separate', 'pymss_custom_mss_separate']) {
   const spec = NODE_SPECS[type]!
   NODE_SPECS[`${type}_list`] = {
     ...spec,
@@ -366,6 +366,7 @@ export const BUILTIN_SPECS: Record<string, NodeSpec> = {
   LoadAudio: {
     type: 'LoadAudio',
     title: 'Load Audio (Legacy)',
+    hidden: true,
     category: 'pymss/builtin',
     inputs: [{ name: 'audio', type: PORT.COMBO, widget: { name: 'audio' } }],
     outputs: [

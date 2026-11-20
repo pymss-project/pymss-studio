@@ -108,12 +108,12 @@ function parameterContext(singleName, selectedNames, pendingNames = []) {
   const models = [vr, { name: 'mss-a', inferenceParamMeta: { resolution: metadata(48000) } },
     { name: 'mss-b', inferenceParamMeta: { resolution: metadata() } }]
   const names = new Set(['selectedModelName', 'selectedModelListItem', 'currentModelInfo', 'ensembleModelEntries',
-    'parameterReferenceModel', 'parameterDraftResolution', 'showParameterPresets'])
+    'parameterReferenceModel', 'settingsParameterModel', 'parameterDraftResolution', 'showParameterPresets'])
   const declarations = source.statements.filter(statement => ts.isVariableStatement(statement)
     && statement.declarationList.declarations.some(item => ts.isIdentifier(item.name) && names.has(item.name.text)))
   const script = ts.transpileModule(declarations.map(item => item.getText(source)).join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
   const state = { computed, supportsInferencePresets, resolveParameters,
-    selectedModel: ref(singleName), model: reactive({ selectedInfo: models.find(item => item.name === singleName), getModelInferenceOverrides: () => ({ batch_size: 4 }) }),
+    runMode: ref('model'), selectedModel: ref(singleName), model: reactive({ selectedInfo: models.find(item => item.name === singleName), getModelInferenceOverrides: () => ({ batch_size: 4 }) }),
     listedDownloadedModels: ref(models), ensembleEnabled: ref(true), ensembleModels: ref(selectedNames),
     parameterDraftMode: ref('custom'), parameterDraftIntent: ref({ chunkMilliseconds: 8000, overlapBasisPoints: 2000 }),
     pending: reactive(new Set(pendingNames)),

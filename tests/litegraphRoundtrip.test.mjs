@@ -167,11 +167,12 @@ test('every advanced editor node type can be created, serialized and restored', 
 
     const exported = exportGraph(graph)
     assert.equal(exported.nodes.length, 1, `serialize ${type}`)
-    assert.equal(exported.nodes[0].type, type, `preserve type ${type}`)
+    const exportedType = /^(mss|vr|custom_mss)_separate(_list)?$/.test(type) ? `pymss_${type}` : type
+    assert.equal(exported.nodes[0].type, exportedType, `export type ${type}`)
 
     const restored = load(exported)
     assert.equal(restored.nodes.length, 1, `restore ${type}`)
-    assert.equal(restored.nodes[0].type, type, `restore type ${type}`)
+    assert.equal(restored.nodes[0].type, exportedType, `restore type ${type}`)
   }
 })
 
@@ -654,6 +655,27 @@ test('all separate aliases and list variants have editable widgets and stable ou
   }
 })
 
+test('the add-node menus list the six Comfy-MSS separators once and keep legacy types importable', () => {
+  const expected = ['pymss_mss_separate', 'pymss_vr_separate', 'pymss_custom_mss_separate']
+    .flatMap(type => [type, `${type}_list`]).sort()
+  const specs = { ...NODE_SPECS, ...BUILTIN_SPECS }
+  const toolbar = Object.values(specs).filter(spec => !spec.hidden)
+  const visible = category => LiteGraph.getNodeTypesInCategory(category).filter(node => !node.skip_list)
+  const nativeMenu = visible(LiteGraph.registered_node_types.pymss_mss_separate.category)
+  assert.deepEqual(toolbar.filter(spec => spec.category === 'pymss/separate').map(spec => spec.type).sort(), expected)
+  assert.deepEqual(nativeMenu.map(node => node.type).sort(), expected)
+  for (const type of ['LoadAudio', 'PreviewAudio', ...expected.map(type => type.slice('pymss_'.length))]) {
+    const cls = LiteGraph.registered_node_types[type]
+    assert.ok(LiteGraph.createNode(type), type)
+    assert.ok(cls.skip_list, type)
+    assert.ok(!visible(cls.category).includes(cls), type)
+    assert.ok(!toolbar.some(spec => spec.type === type), type)
+  }
+  const custom = LiteGraph.createNode('pymss_custom_mss_separate')
+  assert.equal(custom.widgets.find(widget => widget.name === 'model_type').value, 'auto')
+  assert.ok(custom.widgets.find(widget => widget.name === 'device').options.values.includes('mlx'))
+})
+
 test('real fixtures retain every node and link through two editor round-trips without Python', () => {
   for (const name of ['example_mss_separate', 'example_ensemble', 'example_vr_separate', 'example_custom_mss_separate', 'example_batch_separate']) {
     const source = fixture(name)
@@ -743,9 +765,9 @@ test('litegraph serialize -> adapter -> pymss load_comfy_file (round-trip)', { s
   assert.ok(Array.isArray(comfy.nodes) && comfy.nodes.length === 4, 'four nodes serialized')
   assert.ok(Array.isArray(comfy.links) && comfy.links.length === 3, 'three links serialized')
   const types = comfy.nodes.map((n) => n.type).sort()
-  assert.deepEqual(types, ['mss_separate', 'pymss_load_audio', 'pymss_mss_params', 'pymss_save_audio'])
+  assert.deepEqual(types, ['pymss_load_audio', 'pymss_mss_params', 'pymss_mss_separate', 'pymss_save_audio'])
 
-  const sep = comfy.nodes.find((n) => n.type === 'mss_separate')
+  const sep = comfy.nodes.find((n) => n.type === 'pymss_mss_separate')
   assert.ok(sep, 'separate node present')
   assert.ok(Array.isArray(sep.widgets_values), 'separate node has widgets_values')
   assert.equal(sep.outputs.length, 4, 'separate node has 4 stem outputs (2 stems x audio/string)')

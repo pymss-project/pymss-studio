@@ -32,6 +32,7 @@ import {
   isWorkflowSeparationNodeType,
 } from '@/workflows/formats'
 import { storeGraphDefaults } from '@/workflows/graphDefaults'
+import { workflowModelName } from '@/workflows/inferencePolicy'
 
 const studioLog = createLogger('ui.views.WorkflowNodeEditorView')
 
@@ -108,17 +109,14 @@ const formError = computed(() => {
 
 /** Advisory (non-blocking): separate nodes referencing models that are not in
  * the downloaded list. Saving a graph must never be blocked by model state —
- * the model may be downloaded later, or the graph shared to another machine.
- * comfy-mss serializes model widgets as ``[category] filename`` — strip the
- * annotation prefix before matching (mirrors pymss' runtime behaviour). */
+ * the model may be downloaded later, or the graph shared to another machine. */
 const missingModelNodes = computed(() => {
   const nodes = Array.isArray(definition.value.nodes) ? definition.value.nodes as any[] : []
   const downloaded = new Set(downloadedModels.value.map(item => item.name))
   const missing: string[] = []
   for (const n of nodes) {
     if (isWorkflowSeparationNodeType(n.type)) {
-      const raw = String((n as any).widgets_values?.[0] || '').trim()
-      const model = raw.replace(/^\[[^\]]*\]\s*/, '').trim()
+      const model = workflowModelName(n.widgets_values?.[0], n.type)
       if (model && !downloaded.has(model)) missing.push(String(n.id))
     }
   }

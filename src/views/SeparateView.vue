@@ -64,6 +64,8 @@ import { isTutorialFrame } from '@/features/onboarding/demoContext'
 import { useBeginnerGuideStore } from '@/stores/beginnerGuide'
 import { visibleParameterGuides } from '@/features/onboarding/parameters'
 import InferenceParameterFields from '@/components/InferenceParameterFields.vue'
+import InferenceSettingsCard from '@/components/InferenceSettingsCard.vue'
+import { findWorkflowModel, workflowParameterTargets } from '@/workflows/inferencePolicy'
 import WorkflowDescriptionDialog from '@/components/workflow/WorkflowDescriptionDialog.vue'
 import WorkflowDescriptionEditor from '@/components/workflow/WorkflowDescriptionEditor.vue'
 import { legacyWorkflowDescription, resolveWorkflowDescription } from '@/workflows/metadata'
@@ -108,7 +110,6 @@ const {
   separateOutputLayout: outputLayout,
   separateOutputNamingTemplate: outputNamingTemplate,
   separateCustomStemOrder: customStemOrder,
-  useTta,
   selectedStems,
   selectedStemsCleared: persistedOutputStemSelectionCleared,
   modelListViewMode,
@@ -122,14 +123,14 @@ const isDragging = ref(false)
 const showSettingsDrawer = ref(false)
 const parameterDraftMode = ref<ParameterMode>('model')
 const parameterDraftIntent = ref<CustomParameterIntent>({})
-const parameterDraftTta = ref(false)
+const parameterDraftTta = ref<boolean>()
 const applyingParameters = ref(false)
 const parameterMetadataError = ref('')
 const parameterMetadataLoading = ref(false)
 const audioDraft = ref({ wavBitDepth: settings.wavBitDepth, flacBitDepth: settings.flacBitDepth, mp3BitRate: settings.mp3BitRate, m4aBitRate: settings.m4aBitRate, m4aCodec: settings.m4aCodec })
 const parameterDraftResolution = computed(() => resolveParameters(parameterReferenceModel.value?.inferenceParamMeta?.resolution, model.getModelInferenceOverrides(parameterReferenceModel.value?.name || ''), parameterDraftMode.value, parameterDraftIntent.value))
 const showParameterPresets = computed(() => parameterDraftMode.value === 'custom'
-  && supportsInferencePresets(parameterReferenceModel.value?.inferenceParamMeta?.resolution))
+  && supportsInferencePresets(settingsParameterModel.value?.inferenceParamMeta?.resolution))
 const parameterPresetsDisabled = computed(() => applyingParameters.value || parameterMetadataLoading.value || Boolean(parameterMetadataError.value))
 const selectedParameterPreset = computed(() => matchingInferencePreset(parameterDraftIntent.value))
 function applyParameterPreset(preset: InferencePreset) {
@@ -137,8 +138,8 @@ function applyParameterPreset(preset: InferencePreset) {
   parameterDraftIntent.value = { ...parameterDraftIntent.value,
     chunkMilliseconds: preset.chunkMilliseconds, overlapBasisPoints: preset.overlapBasisPoints }
 }
-const canResetParameterDraft = computed(() => parameterDraftMode.value !== 'model' || Object.keys(parameterDraftIntent.value).length > 0)
-const pendingLegacy = computed(() => task.pendingLegacyParameters(parameterReferenceModel.value?.name || ''))
+const canResetParameterDraft = computed(() => parameterDraftMode.value !== 'model' || Object.keys(parameterDraftIntent.value).length > 0 || parameterDraftTta.value !== undefined)
+const pendingLegacy = computed(() => runMode.value === 'model' && task.pendingLegacyParameters(parameterReferenceModel.value?.name || ''))
 const legacyPreview = computed(() => task.previewLegacyParameters(parameterReferenceModel.value?.name || ''))
 const legacyComparison = computed(() => {
   const preview = legacyPreview.value
@@ -160,9 +161,10 @@ watch(showSettingsDrawer, async show => {
   if (!show) return
   parameterDraftMode.value = task.parameterMode
   parameterDraftIntent.value = JSON.parse(JSON.stringify(task.customParameterIntent))
-  parameterDraftTta.value = task.useTta
+  parameterDraftTta.value = task.ttaOverride
   audioDraft.value = { wavBitDepth: settings.wavBitDepth, flacBitDepth: settings.flacBitDepth, mp3BitRate: settings.mp3BitRate, m4aBitRate: settings.m4aBitRate, m4aCodec: settings.m4aCodec }
   parameterMetadataError.value = ''
+  parameterMetadataLoading.value = false
   if (runMode.value !== 'model') return
   parameterMetadataLoading.value = true
   try {
@@ -175,6 +177,7 @@ watch(showSettingsDrawer, async show => {
 function resetParameterDraft() {
   parameterDraftMode.value = 'model'
   parameterDraftIntent.value = {}
+  parameterDraftTta.value = undefined
 }
 
 async function applyParameters() {
@@ -188,8 +191,8 @@ async function applyParameters() {
         const result = resolveParameters(entry?.inferenceParamMeta?.resolution, model.getModelInferenceOverrides(name), parameterDraftMode.value, parameterDraftIntent.value)
         if (result.issues.length) throw new Error(`${name}: ${t(`parameterEditor.error.${result.issues[0]!.code}`, { field: result.issues[0]!.key })}`)
       }
-      await task.applyParameterSettings(parameterDraftMode.value, parameterDraftIntent.value, parameterDraftTta.value)
     }
+    await task.applyParameterSettings(parameterDraftMode.value, parameterDraftIntent.value, parameterDraftTta.value)
     Object.assign(settings, audioDraft.value)
     showSettingsDrawer.value = false
   } catch (error) { message.error(error instanceof Error ? error.message : String(error)) }
@@ -212,7 +215,7 @@ async function editModelParameters() {
     showSettingsDrawer.value = false
     await router.push({ path: '/models', query: { parameters: name } })
   }
-  const changed = parameterDraftMode.value !== task.parameterMode || parameterDraftTta.value !== task.useTta
+  const changed = parameterDraftMode.value !== task.parameterMode || parameterDraftTta.value !== task.ttaOverride
     || JSON.stringify(parameterDraftIntent.value) !== JSON.stringify(task.customParameterIntent)
     || Object.entries(audioDraft.value).some(([key, value]) => value !== settings[key as keyof typeof audioDraft.value])
   if (changed) {
@@ -264,7 +267,7 @@ const guideTarget = ref<HTMLElement | null>(null)
 let guideOpenedSettings = false
 const helpTopics = computed(() => parameterHelpTopics(parameterReferenceModel.value?.modelType))
 const guidedParameter = computed(() => beginnerGuide.parameterStep && (!beginnerGuide.demoActive || isTutorialFrame()) ? beginnerGuide.currentParameter : undefined)
-const guideRequiresAdvanced = computed(() => guidedParameter.value?.group === 'inference' && guidedParameter.value.id !== 'tta')
+const guideRequiresAdvanced = computed(() => guidedParameter.value?.group === 'inference')
 watch(showSettingsDrawer, () => { parameterHelpPage.value = null })
 const showEnsembleModal = ref(false)
 const showNamingModal = ref(false)
@@ -443,8 +446,8 @@ watch(expandedInferenceSections, names => {
 async function locateGuidedParameter() {
   await nextTick()
   if (!beginnerGuide.parameterStep || !showSettingsDrawer.value || parameterHelpPage.value !== null) return
-  if (isTutorialFrame() && guidedParameter.value?.group === 'inference'
-      && !['parameterSource', 'tta'].includes(guidedParameter.value.id)) {
+  if (isTutorialFrame() && guideRequiresAdvanced.value
+      && guidedParameter.value?.id !== 'parameterSource' && parameterDraftMode.value !== 'custom') {
     parameterDraftMode.value = 'custom'
     await nextTick()
   }
@@ -506,6 +509,27 @@ const parameterReferenceModel = computed(() => {
     || entries.find(item => supportsInferencePresets(item.inferenceParamMeta?.resolution))
     || entries.find(item => item.inferenceParamMeta?.resolution) || entries[0] || null
 })
+// A workflow with several models has no single sample rate or common native defaults.
+const workflowParameterModels = computed(() => {
+  if (runMode.value !== 'workflow' || !selectedWorkflow.value) return []
+  return workflowParameterTargets(selectedWorkflow.value.definition).map(target => {
+    const entry = findWorkflowModel(modelEntries.value, target)
+    const type = (target.modelType || entry?.modelType || target.kind).toLowerCase()
+    return { kind: type === 'vr' ? 'vr' as const : 'mss' as const, entry, target }
+  })
+})
+const workflowFamilies = computed(() => [...new Set(workflowParameterModels.value.map(item => item.kind))])
+const workflowReference = computed(() => {
+  const models = workflowParameterModels.value
+  const first = models[0]?.entry
+  if (!first || !selectedWorkflow.value) return
+  const { modelDir } = resolveWorkflowRuntimeDefaults(selectedWorkflow.value.definition, {
+    device: 'auto', outputFormat: settings.defaultFormat, modelDir: settings.modelDir || null,
+  })
+  if (modelDir && modelDir !== settings.modelDir) return
+  if (models.every(({ entry, target }) => entry?.name === first.name && !target.modelPath && !target.modelDir)) return first
+})
+const settingsParameterModel = computed(() => runMode.value === 'workflow' ? workflowReference.value : parameterReferenceModel.value)
 const ensembleStemOptionsByModel = computed(() => Object.fromEntries(
   ensembleModelEntries.value.map(item => [
     item.name,
@@ -1975,7 +1999,7 @@ function buildEnsembleWorkflow(submission: ReturnType<typeof captureEnsembleSubm
       { name: `${stem} (Audio)`, type: 'AUDIO', links: [] },
       { name: `${stem} (String)`, type: 'STRING', links: [] },
     ]
-    nodes.push({ id: sepId, type: 'mss_separate', pos: [560, 100 + index * 160], size: [240, 100], flags: {}, order: nodes.length, mode: 0, properties: {}, widgets_values: [modelName, device, true, submission.downloadSource, submission.deviceIds, false], inputs: [{ name: 'audio', type: 'AUDIO', link: null }, { name: 'params', type: 'PYMSS_MSS_PARAMS', shape: 7, link: null }], outputs: sepOutputs })
+    nodes.push({ id: sepId, type: 'pymss_mss_separate', pos: [560, 100 + index * 160], size: [240, 100], flags: {}, order: nodes.length, mode: 0, properties: {}, widgets_values: [modelName, device, true, submission.downloadSource, submission.deviceIds, false], inputs: [{ name: 'audio', type: 'AUDIO', link: null }, { name: 'params', type: 'PYMSS_MSS_PARAMS', shape: 7, link: null }], outputs: sepOutputs })
     separateIds.push(sepId)
     separateStemOutSlots.push(index) // stem Audio is output slot 0 of each sep (only one stem)
     // wire load.audio -> sep.audio, params -> sep.params
@@ -3065,63 +3089,54 @@ async function retryCurrentTask() {
         @close="parameterHelpPage = null" @previous="parameterHelpPage > 0 ? parameterHelpPage-- : parameterHelpPage = null"
         @next="parameterHelpPage < helpTopics.length - 1 ? parameterHelpPage++ : parameterHelpPage = null"
       />
-      <n-card :aria-label="t('separate.settingsDrawerTitle')"
+      <InferenceSettingsCard
         v-else
         ref="settingsCardRef"
-        class="settings-modal"
-        :title="t('separate.settingsDrawerTitle')"
-        :bordered="false"
-        closable
-        role="dialog"
-        aria-modal="true"
+        :presets="showParameterPresets ? INFERENCE_PRESETS : undefined"
+        :active-preset="selectedParameterPreset" :presets-disabled="parameterPresetsDisabled"
+        :tta="parameterDraftMode === 'custom' ? parameterDraftTta === true : undefined"
+        :tta-disabled="applyingParameters" :tta-guided="guidedParameter?.id === 'tta'"
+        :reset-disabled="!canResetParameterDraft" :applying="applyingParameters"
+        :apply-disabled="runMode === 'model' && (parameterMetadataLoading || !!parameterMetadataError || !!pendingLegacy || parameterDraftResolution.issues.length > 0)"
         @close="showSettingsDrawer = false"
+        @preset="applyParameterPreset" @update:tta="(value: boolean) => parameterDraftTta = value"
+        @reset="resetParameterDraft" @apply="applyParameters"
       >
-        <div class="settings-drawer__content">
-          <div v-if="runMode === 'model'" class="settings-inference">
-            <div class="parameter-section-heading">
-              <div class="parameter-section-heading__title">
-                <h3>{{ t('parameterEditor.inferenceGroup') }}</h3>
-                <div v-if="showParameterPresets" class="parameter-presets" data-parameter-guide="presets" role="group" :aria-label="t('parameterEditor.presets.label')">
-                  <n-button v-for="preset in INFERENCE_PRESETS" :key="preset.id" size="tiny" secondary
-                    :type="selectedParameterPreset === preset.id ? 'primary' : 'default'"
-                    :aria-pressed="selectedParameterPreset === preset.id" :disabled="parameterPresetsDisabled"
-                    @click="applyParameterPreset(preset)">{{ t(preset.label) }}</n-button>
-                </div>
-              </div>
-              <div class="parameter-section-heading__actions" data-parameter-guide="parameterSource">
-                <n-radio-group class="parameter-source-switch" :value="parameterDraftMode" name="inference-parameter-source" size="small" :disabled="applyingParameters" :aria-label="t('parameterEditor.parameterSource')" @update:value="(value: 'model' | 'custom') => parameterDraftMode = value">
-                  <n-radio-button value="model">{{ t('parameterEditor.followModel') }}</n-radio-button>
-                  <n-radio-button value="custom">{{ t('parameterEditor.source.custom') }}</n-radio-button>
-                </n-radio-group>
-                <n-button quaternary circle size="small" :aria-label="t('parameterHelp.label')" @click="openParameterHelp"><n-icon :component="InformationCircleOutline" /></n-button>
-              </div>
-            </div>
-            <div class="parameter-context">
-              <p class="advanced-hint">{{ t(parameterDraftMode === 'model' ? 'parameterEditor.followHint' : 'parameterEditor.modeHint') }}</p>
-              <n-button v-if="parameterDraftMode === 'model' && parameterReferenceModel" text type="primary" size="tiny" class="parameter-model-link" :disabled="applyingParameters" @click="editModelParameters">{{ t('parameterEditor.editModelSettings') }}<template #icon><n-icon :component="OpenOutline" /></template></n-button>
-            </div>
-            <n-alert v-if="pendingLegacy" type="warning" :bordered="false">
-              {{ t('parameterEditor.migrationHint') }}
-              <div v-if="legacyPreview" class="parameter-migration-values">
-                <n-table size="small" :bordered="false" :single-line="false">
-                  <thead><tr><th>{{ t('parameterEditor.batch.columnField') }}</th><th>{{ t('parameterEditor.migrationCurrent') }}</th><th>{{ t('parameterEditor.migrationPrevious') }}</th><th>{{ t('parameterEditor.migrationAfter') }}</th></tr></thead>
-                  <tbody><tr v-for="row in legacyComparison" :key="row.key"><td>{{ row.key }}</td><td>{{ legacyValue(row.current) }}</td><td>{{ legacyValue(row.old) }}</td><td>{{ legacyValue(row.after) }}</td></tr></tbody>
-                </n-table>
-                <p v-if="legacyPreview.imported.issues.length">{{ t('parameterEditor.modelLibrary.draftInvalid') }}</p>
-              </div>
-              <n-space>
-                <n-button size="small" :disabled="applyingParameters" @click="resolveLegacy('keep')">{{ t('parameterEditor.keepModelSettings') }}</n-button>
-                <n-button size="small" :disabled="applyingParameters || parameterMetadataLoading || !legacyPreview || legacyPreview.imported.issues.length > 0" @click="resolveLegacy('import')">{{ t('parameterEditor.importLegacy') }}</n-button>
-              </n-space>
-            </n-alert>
-            <n-alert v-if="parameterMetadataError" type="error" :bordered="false">{{ parameterMetadataError }}</n-alert>
-            <InferenceParameterFields
-              :metadata="parameterReferenceModel?.inferenceParamMeta?.resolution"
-              :library="model.getModelInferenceOverrides(parameterReferenceModel?.name || '')"
-              :mode="parameterDraftMode" v-model:intent="parameterDraftIntent"
-              :loading="parameterMetadataLoading" :disabled="applyingParameters"
-            />
+        <template #source>
+          <n-radio-group class="parameter-source-switch" :value="parameterDraftMode" name="inference-parameter-source" size="small" :disabled="applyingParameters" :aria-label="t('parameterEditor.parameterSource')" @update:value="(value: 'model' | 'custom') => parameterDraftMode = value">
+            <n-radio-button value="model">{{ t('parameterEditor.followModel') }}</n-radio-button>
+            <n-radio-button value="custom">{{ t('parameterEditor.source.custom') }}</n-radio-button>
+          </n-radio-group>
+          <n-button quaternary circle size="small" :aria-label="t('parameterHelp.label')" @click="openParameterHelp"><n-icon :component="InformationCircleOutline" /></n-button>
+        </template>
+        <template #context>
+          <p>{{ t(parameterDraftMode === 'model' ? 'parameterEditor.followHint' : 'parameterEditor.modeHint') }}</p>
+          <n-button v-if="runMode === 'model' && parameterDraftMode === 'model' && parameterReferenceModel" text type="primary" size="tiny" class="parameter-model-link" :disabled="applyingParameters" @click="editModelParameters">{{ t('parameterEditor.editModelSettings') }}<template #icon><n-icon :component="OpenOutline" /></template></n-button>
+        </template>
+        <n-alert v-if="pendingLegacy" type="warning" :bordered="false">
+          {{ t('parameterEditor.migrationHint') }}
+          <div v-if="legacyPreview" class="parameter-migration-values">
+            <n-table size="small" :bordered="false" :single-line="false">
+              <thead><tr><th>{{ t('parameterEditor.batch.columnField') }}</th><th>{{ t('parameterEditor.migrationCurrent') }}</th><th>{{ t('parameterEditor.migrationPrevious') }}</th><th>{{ t('parameterEditor.migrationAfter') }}</th></tr></thead>
+              <tbody><tr v-for="row in legacyComparison" :key="row.key"><td>{{ row.key }}</td><td>{{ legacyValue(row.current) }}</td><td>{{ legacyValue(row.old) }}</td><td>{{ legacyValue(row.after) }}</td></tr></tbody>
+            </n-table>
+            <p v-if="legacyPreview.imported.issues.length">{{ t('parameterEditor.modelLibrary.draftInvalid') }}</p>
           </div>
+          <n-space>
+            <n-button size="small" :disabled="applyingParameters" @click="resolveLegacy('keep')">{{ t('parameterEditor.keepModelSettings') }}</n-button>
+            <n-button size="small" :disabled="applyingParameters || parameterMetadataLoading || !legacyPreview || legacyPreview.imported.issues.length > 0" @click="resolveLegacy('import')">{{ t('parameterEditor.importLegacy') }}</n-button>
+          </n-space>
+        </n-alert>
+        <n-alert v-if="parameterMetadataError" type="error" :bordered="false">{{ parameterMetadataError }}</n-alert>
+        <InferenceParameterFields
+          v-if="runMode === 'model' || parameterDraftMode === 'custom'"
+          :metadata="settingsParameterModel?.inferenceParamMeta?.resolution"
+          :workflow-families="runMode === 'workflow' && !settingsParameterModel?.inferenceParamMeta?.resolution ? workflowFamilies : undefined"
+          :library="model.getModelInferenceOverrides(settingsParameterModel?.name || '')"
+          :mode="parameterDraftMode" v-model:intent="parameterDraftIntent"
+          :loading="parameterMetadataLoading" :disabled="applyingParameters"
+        />
+        <template #output>
           <section class="settings-output">
             <div class="settings-subhead">
               <h3>{{ runMode === 'model' ? t('parameterEditor.runtimeGroup') : `${t('separate.audioQualityTitle')} · ${formatLabel}` }}</h3>
@@ -3129,10 +3144,6 @@ async function retryCurrentTask() {
                 ? 'separate.workflowAudioQualityHint' : 'separate.audioQualityEditable') }}</span>
             </div>
             <div v-if="runMode === 'model' || effectiveFormat === 'm4a'" class="settings-list">
-              <div v-if="runMode === 'model'" class="settings-row" data-parameter-guide="tta" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'tta' }">
-                <label>{{ t('separate.tta') }}</label>
-                <n-switch v-model:value="parameterDraftTta" size="small" :aria-label="t('separate.tta')" :disabled="applyingParameters" />
-              </div>
               <div v-if="runMode === 'model' && effectiveFormat === 'wav'" class="settings-row field-block" data-parameter-guide="wavBitDepth" :class="{ 'parameter-guide-target--active': guidedParameter?.id === 'wavBitDepth' }">
                 <label for="separate-wav-bit-depth">{{ t('audio.wavBitDepth') }}</label>
                 <AppSelect id="separate-wav-bit-depth" v-model:value="audioDraft.wavBitDepth" size="small" :label="t('audio.wavBitDepth')" :options="wavBitDepthOptions" :disabled="applyingParameters" />
@@ -3155,19 +3166,14 @@ async function retryCurrentTask() {
               </div>
             </div>
           </section>
-        </div>
-
-        <ParameterFieldGuide v-if="guidedParameter" ref="fieldGuideRef" :parameter="guidedParameter" :target="guideTarget" />
-
-        <template #footer>
-          <div v-if="settingsCanScroll" class="settings-scroll-hint" aria-hidden="true">{{ t('parameterEditor.scrollMore') }}<n-icon :component="ChevronDownOutline" /></div>
-          <div class="parameter-modal-footer">
-            <n-button v-if="runMode === 'model'" secondary :disabled="applyingParameters || !canResetParameterDraft" @click="resetParameterDraft">{{ t('parameterEditor.restoreDefaults') }}</n-button>
-            <n-button secondary :disabled="applyingParameters" @click="showSettingsDrawer = false">{{ t('common.cancel') }}</n-button>
-            <n-button type="primary" :loading="applyingParameters" :disabled="runMode === 'model' && (parameterMetadataLoading || !!parameterMetadataError || !!pendingLegacy || parameterDraftResolution.issues.length > 0)" @click="applyParameters">{{ t('parameterEditor.apply') }}</n-button>
-          </div>
         </template>
-      </n-card>
+        <template #overlay>
+          <ParameterFieldGuide v-if="guidedParameter" ref="fieldGuideRef" :parameter="guidedParameter" :target="guideTarget" />
+        </template>
+        <template #footer-hint>
+          <div v-if="settingsCanScroll" class="settings-scroll-hint" aria-hidden="true">{{ t('parameterEditor.scrollMore') }}<n-icon :component="ChevronDownOutline" /></div>
+        </template>
+      </InferenceSettingsCard>
     </n-modal>
     <n-modal v-model:show="showNamingModal" style="width:var(--modal-width-sm)">
       <n-card :aria-label="t('separate.namingModalTitle')"
@@ -4407,8 +4413,7 @@ async function retryCurrentTask() {
   box-sizing: border-box;
 }
 .separate-note-modal__footer,
-.separate-workflow-meta-modal__footer,
-.parameter-modal-footer {
+.separate-workflow-meta-modal__footer {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
@@ -5168,49 +5173,6 @@ async function retryCurrentTask() {
 .batch-queue-row__actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 
 
-.settings-drawer__content {
-  display: grid;
-  gap: 24px;
-  min-height: 0;
-  padding-top: 14px;
-}
-
-.settings-modal {
-  width: min(700px, calc(100vw - 48px));
-  max-height: min(calc(100dvh - 88px), 840px);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  border-radius: 16px;
-}
-
-.settings-modal :deep(.n-card-header) {
-  flex: 0 0 auto;
-  padding: 16px 24px 0;
-}
-
-.settings-modal :deep(.n-card-header__main) {
-  font-size: 17px;
-  font-weight: 600;
-}
-
-.settings-modal :deep(.n-card-content),
-.settings-modal :deep(.n-card__content) {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: auto;
-  padding: 0 24px 12px;
-}
-
-.settings-modal :deep(.n-card-footer),
-.settings-modal :deep(.n-card__footer) {
-  flex: 0 0 auto;
-  position: relative;
-  padding: 12px 24px;
-  border-top: 1px solid color-mix(in srgb, var(--outline) 86%, transparent);
-  background: color-mix(in srgb, var(--surface-1) 96%, transparent);
-}
-
 .naming-modal {
   max-height: min(620px, var(--modal-max-height));
   display: flex;
@@ -5467,13 +5429,9 @@ async function retryCurrentTask() {
   gap: 12px;
 }
 
-.settings-inference, .settings-output { display: grid; gap: 10px; min-width: 0; }
-.parameter-section-heading, .settings-subhead { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 6px 12px; min-height: 28px; }
-.parameter-section-heading h3, .settings-subhead h3 { margin: 0; font-size: 14px; font-weight: 600; color: var(--on-surface-heading); }
-.parameter-section-heading__title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; min-width: 0; }
-.parameter-section-heading__title h3 { flex-shrink: 0; }
-.parameter-presets { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-.parameter-section-heading__actions { display: flex; align-items: center; gap: 4px; }
+.settings-output { display: grid; gap: 10px; min-width: 0; }
+.settings-subhead { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 6px 12px; min-height: 28px; }
+.settings-subhead h3 { margin: 0; font-size: 14px; font-weight: 600; color: var(--on-surface-heading); }
 .parameter-source-switch { display: inline-flex; overflow: hidden; padding: 0; border: 1px solid var(--outline); border-radius: 9px; background: var(--surface-2); }
 .parameter-source-switch :deep(.n-radio-button) { height: 28px; line-height: 28px; padding: 0 13px; border: 0; border-radius: 0; background: transparent; box-shadow: none; font-size: 12px; color: var(--on-surface-muted); transition: color 160ms ease, background 200ms ease, box-shadow 200ms ease; }
 .parameter-source-switch :deep(.n-radio-group__splitor), .parameter-source-switch :deep(.n-radio-button__state-border) { display: none; }
@@ -5483,16 +5441,12 @@ async function retryCurrentTask() {
 .parameter-source-switch :deep(.n-radio-button:has(input:focus-visible)) { box-shadow: inset 0 -2px var(--primary); }
 .parameter-source-switch :deep(.n-radio-button--disabled) { opacity: .55; }
 .settings-subhead span { font-size: 11px; line-height: 1.4; color: var(--on-surface-muted); }
-/* The hint belongs to the heading above it, so it sits closer than the grid gap. */
-.parameter-context { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; margin-top: -6px; }
-.parameter-context .advanced-hint { margin: 0; font-size: 11px; font-weight: 400; line-height: 1.5; color: var(--on-surface-muted); }
 .settings-list { display: grid; min-width: 0; padding: 2px 16px; border-radius: 12px; background: color-mix(in srgb, var(--surface-2) 65%, var(--surface-1)); }
 .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; }
 .settings-row + .settings-row { border-top: 1px solid color-mix(in srgb, var(--outline) 80%, transparent); }
 .settings-row > label { font-size: 13px; font-weight: 500; color: var(--on-surface); white-space: nowrap; }
 .settings-row :deep(.app-select) { width: 150px; }
 .parameter-model-link { font-size: 11px; }
-.parameter-modal-footer { align-items: center; flex-wrap: wrap; }
 .settings-scroll-hint { position: absolute; inset: auto 0 100%; height: 27px; display: flex; align-items: end; justify-content: center; gap: 4px; padding-bottom: 3px; pointer-events: none; background: linear-gradient(transparent, var(--surface-1) 85%); color: var(--on-surface-muted); font-size: 10px; }
 .parameter-migration-values { overflow-x: auto; margin: 12px 0; }
 .parameter-migration-values th, .parameter-migration-values td { white-space: nowrap; }
@@ -5517,13 +5471,6 @@ async function retryCurrentTask() {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
-}
-
-.advanced-hint {
-  margin: 0 0 12px;
-  color: var(--on-surface-muted);
-  font-size: 12px;
-  line-height: 1.5;
 }
 
 .advanced-loading,
@@ -5647,21 +5594,6 @@ async function retryCurrentTask() {
   .preview-track__time { grid-column: 1 / -1; }
   .progress-ring { width: 120px; height: 120px; }
   .progress-ring__center strong { font-size: 32px; }
-  .settings-modal {
-    width: min(700px, calc(100vw - 32px));
-    max-height: min(calc(100dvh - 88px), 840px);
-  }
-  .settings-modal :deep(.n-card-content),
-  .settings-modal :deep(.n-card__content) {
-    padding-left: 16px;
-    padding-right: 16px;
-  }
-  .settings-modal :deep(.n-card-header),
-  .settings-modal :deep(.n-card-footer),
-  .settings-modal :deep(.n-card__footer) {
-    padding-left: 16px;
-    padding-right: 16px;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

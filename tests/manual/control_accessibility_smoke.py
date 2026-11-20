@@ -178,7 +178,7 @@ with sync_playwright() as playwright:
           models.ensureModelMetadata = async () => entries[0]
           models.models = entries; models.selectedModel = entries[0].name
           models.selectedInfo = entries[0]; models.modelsLoaded = true
-          task.parameterMode = 'custom'; task.customParameterIntent = {}; task.useTta = false; task.ensembleEnabled = false
+          task.parameterMode = 'custom'; task.customParameterIntent = {}; task.ttaOverride = false; task.ensembleEnabled = false
           useAppStore().envInfo = {pymssAvailable:true, torchAvailable:true, torchBackend:'cpu'}
         }""")
         expect(page.get_by_role('switch', name='提交后清空', exact=True)).to_be_visible()

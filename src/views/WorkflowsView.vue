@@ -27,6 +27,7 @@ import WorkflowDescriptionDialog from '@/components/workflow/WorkflowDescription
 import WorkflowDescriptionPreview from '@/components/workflow/WorkflowDescriptionPreview.vue'
 import WorkflowDescriptionEditor from '@/components/workflow/WorkflowDescriptionEditor.vue'
 import { useModelStore, type ModelEntry } from '@/stores/model'
+import { useTaskStore } from '@/stores/task'
 import { useWorkflowNodeStore } from '@/stores/workflowNodes'
 import {
   WorkflowGuidConflictError,
@@ -44,6 +45,7 @@ import { WorkflowEditorInUseError } from '@/utils/workflowEditorState'
 import { themeIsDark } from '@/utils/theme'
 import { hasInvalidSimpleStructure, isGraphWorkflowDefinition, isSimpleWorkflowDefinition } from '@/workflows/formats'
 import { litegraphToComfy } from '@/litegraph/graphAdapter'
+import { buildComfyWorkflowExport, ComfyParameterExportError } from '@/workflows/comfyExport'
 import { createWorkflowMetadata, legacyWorkflowDescription, parseWorkflowFile, resolveWorkflowDescription, serializeWorkflowFile, type WorkflowMetadata } from '@/workflows/metadata'
 import { isTauriRuntime } from '@/utils/appStore'
 import {
@@ -89,6 +91,8 @@ let contextInfoReturnFocus: HTMLElement | null = null
 const exportDialogOpen = ref(false)
 const exportBusy = ref(false)
 const exportWorkflowId = ref('')
+const exportFormat = ref<'comfy' | 'studio'>('comfy')
+const exportGraph = computed(() => isGraphWorkflowDefinition(workflows.value.find(entry => entry.id === exportWorkflowId.value)?.definition))
 const exportMetadata = ref<WorkflowMetadata>({ guid: '' })
 const exportStudioVersion = ref(packageMeta.version)
 const descriptionDialogOpen = ref(false)
@@ -906,12 +910,12 @@ async function confirmExportWorkflow() {
       studioVersion: exportStudioVersion.value,
     }, async (entry, metadata) => {
       const definition = entry.definition
-      const payload = isGraphWorkflowDefinition(definition)
-        ? { ...definition, ...litegraphToComfy(definition) }
-        : definition
-      const suffix = isGraphWorkflowDefinition(definition)
-        ? 'comfy-mss.json'
-        : 'pymss-workflow.json'
+      const graph = isGraphWorkflowDefinition(definition)
+      const portable = graph && exportFormat.value === 'comfy'
+      const payload = portable
+        ? { ...definition, ...buildComfyWorkflowExport(definition, await useTaskStore().prepareComfyExportParameters(definition)) }
+        : graph ? { ...definition, ...litegraphToComfy(definition) } : definition
+      const suffix = portable ? 'comfy-mss.json' : 'pymss-workflow.json'
       const fileName = `${workflowSlug(entry.name || t('workflows.untitled'))}.${suffix}`
       const content = serializeWorkflowFile(payload, metadata)
       if (isTauriRuntime()) {
@@ -936,6 +940,10 @@ async function confirmExportWorkflow() {
       message.warning(t('workflows.workflowExportGuidConflict'))
       return
     }
+    if (error instanceof ComfyParameterExportError) {
+      message.error(t('workflows.comfyParameterExportError', { node: error.node, field: error.field }))
+      return
+    }
     const label = fileSaved ? t('workflows.workflowExportMetadataSaveFailed') : t('workflows.workflowExportFailed')
     message.error(`${label}: ${error instanceof Error ? error.message : String(error)}`)
   } finally {
@@ -946,6 +954,7 @@ async function confirmExportWorkflow() {
 async function exportWorkflowEntry(current: WorkflowEntry) {
   if (exportBusy.value || exportDialogOpen.value) return
   exportWorkflowId.value = current.id
+  exportFormat.value = 'comfy'
   exportMetadata.value = createWorkflowMetadata(current.metadata)
   exportStudioVersion.value = packageMeta.version
   exportDialogOpen.value = true
@@ -1234,6 +1243,13 @@ watch([() => selectedWorkflow.value?.id, () => selectedWorkflow.value?.name], ()
       :mask-closable="!exportBusy" :close-on-esc="!exportBusy" :closable="!exportBusy"
       role="dialog" aria-modal="true" :aria-label="t('workflows.exportWorkflow')">
       <n-form label-placement="top" @submit.prevent="confirmExportWorkflow">
+        <n-form-item v-if="exportGraph" :label="t('workflows.workflowExportFormat')">
+          <n-radio-group v-model:value="exportFormat" size="small" :aria-label="t('workflows.workflowExportFormat')" :disabled="exportBusy">
+            <n-radio-button value="comfy">Comfy-MSS</n-radio-button>
+            <n-radio-button value="studio">Pymss Studio</n-radio-button>
+          </n-radio-group>
+          <template #feedback><span v-if="exportFormat === 'comfy'">{{ t('workflows.comfyExportParameterScope') }}</span></template>
+        </n-form-item>
         <n-form-item :label="t('workflows.workflowAuthor')" label-for="workflow-export-author">
           <n-input v-model:value="exportMetadata.author" :maxlength="200" :disabled="exportBusy"
             :input-props="{ id: 'workflow-export-author' }" />
@@ -1282,7 +1298,7 @@ watch([() => selectedWorkflow.value?.id, () => selectedWorkflow.value?.name], ()
                 <AppSelect :value="selectedDraft.defaultFormat" :options="formatOptions" :to="true" :disabled="isNodeEditorOpen || updatingWorkflowDefaults"
                   :loading="updatingWorkflowDefaults" :aria-label="t('workflows.defaultFormat')" @update:value="updateSelectedDefaultFormat" />
               </div>
-              <div class="wf-param">
+              <div v-if="selectedDraft.defaultNormalize != null" class="wf-param">
                 <label>{{ t('workflows.defaultNormalize') }}</label>
                 <AppSelect :value="normalizeMode(selectedDraft.defaultNormalize)" :options="normalizeOptions" :to="true" :disabled="isNodeEditorOpen || updatingWorkflowDefaults"
                   :loading="updatingWorkflowDefaults" :aria-label="t('workflows.defaultNormalize')" @update:value="updateSelectedDefaultNormalize" />

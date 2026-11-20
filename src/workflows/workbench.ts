@@ -1,4 +1,5 @@
 import { detectWorkflowFormat, isWorkflowSaveNodeType } from './formats.ts'
+import { explicitOverlapStepIds } from './inferencePolicy.ts'
 
 export type WorkflowNodeState = {
   status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'skipped' | 'unknown'
@@ -130,7 +131,7 @@ export function visibleWorkflowNodeId(runtimeId: string, definition: Record<stri
   if (detectWorkflowFormat(definition) !== 'simple') return runtimeId
   if (runtimeId === 'input' || runtimeId === 'input_audio') return 'input'
   const steps = (Array.isArray(definition.steps) ? definition.steps : []).filter(record)
-  const step = steps.find(item => runtimeId === `step:${item.id}`)
+  const step = steps.find(item => typeof item.id === 'string' && runtimeId === `step:${item.id.trim()}`)
   if (step) return String(step.id)
   if (runtimeId.startsWith('save:') || runtimeId.startsWith('studio:ensemble-save:')) return 'save'
   const items = (Array.isArray(definition.ensembles) ? definition.ensembles : []).filter(record)
@@ -165,7 +166,11 @@ export function visibleWorkflowNodeStates(definition: Record<string, unknown>, s
 /** Compare processing data while ignoring camera positions and node appearance. */
 export function workflowExecutionSignature(definition: Record<string, unknown>): string {
   const data = cloneWorkflow(definition)
-  if (detectWorkflowFormat(data) === 'simple') delete data.studio
+  if (detectWorkflowFormat(data) === 'simple') {
+    const nativeSteps = explicitOverlapStepIds(data.studio)
+    if (nativeSteps.size) data.studio = { nativeInferenceSteps: [...nativeSteps].sort() }
+    else delete data.studio
+  }
   else {
     for (const key of ['last_node_id', 'last_link_id', 'groups']) delete data[key]
     for (const node of (Array.isArray(data.nodes) ? data.nodes : []).filter(record)) {

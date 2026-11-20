@@ -3,6 +3,9 @@ import { workerLogRecord, type LogRecord } from '@/utils/logRecord'
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { emit } from '@tauri-apps/api/event'
+import { normalizeResolutionMetadata } from '@/features/inference/parameters'
+import { findWorkflowModel, type WorkflowParameterTarget } from '@/workflows/inferencePolicy'
 import { isTauriRuntime, loadAppStore, saveAppStore } from '@/utils/appStore'
 import { isMainTaskOwner } from '@/utils/taskOwner'
 import { matchesModelQuery } from '@/utils/modelSearch'
@@ -461,7 +464,9 @@ export const useModelStore = defineStore('model', () => {
   const legacyModelInferenceOverrides = ref<Record<string, ModelDefaultInferenceParams>>({})
   const modelInferenceRevision = ref(0)
   let inferenceMutationQueue: Promise<void> = Promise.resolve()
-  const metadataLoads = new Map<string, Promise<ModelEntry>>()
+  const metadataLoads = new Map<string, { downloadSource?: string; promise: Promise<ModelEntry> }>()
+  const modelFileRevisions = new Map<string, number>()
+  let activeModelList: { directory: string | null; updates: Map<string, ModelEntry> } | undefined
   const modelInferenceBaseDefaults = ref<Record<string, ModelDefaultInferenceParams>>({})
   const modelInferenceBaseKnown = ref<Record<string, boolean>>({})
   const modelInferenceBaseSources = ref<Record<string, ModelEntry['defaultInferenceParamsSource']>>({})
@@ -684,6 +689,20 @@ export const useModelStore = defineStore('model', () => {
     if (selectedInfo.value?.name === name) selectedInfo.value = normalizeModelEntryWithOverrides(selectedInfo.value, { rememberBase: false })
   }
 
+  let preferenceRead = 0
+  async function refreshInferencePreferences() {
+    if (isMainTaskOwner()) return
+    const request = ++preferenceRead
+    const stored = await loadAppStore<StoredModelState>('model-state')
+    if (request !== preferenceRead || !stored?.modelInferenceSchemaVersion) return
+    const next = normalizeModelInferenceOverrides(stored.modelInferenceOverrides)
+    if (JSON.stringify(next) === JSON.stringify(modelInferenceOverrides.value)) return
+    const names = new Set([...Object.keys(modelInferenceOverrides.value), ...Object.keys(next)])
+    modelInferenceOverrides.value = next
+    modelInferenceRevision.value++
+    for (const name of names) refreshModelInferenceOverrides(name)
+  }
+
   function mutateInferenceOverrides(
     build: () => Array<{ name: string; overrides?: ModelDefaultInferenceParams }>,
     expectedRevision?: number,
@@ -719,6 +738,7 @@ export const useModelStore = defineStore('model', () => {
         updates.forEach(item => refreshModelInferenceOverrides(item.name))
         throw error
       }
+      if (isTauriRuntime()) void emit('pymss://inference-preferences-changed').catch(error => studioLog.warn('Failed to broadcast model parameter changes', error))
     })
     inferenceMutationQueue = mutation
     return mutation
@@ -818,6 +838,9 @@ export const useModelStore = defineStore('model', () => {
   }
 
   function upsertModel(modelInfo: ModelEntry) {
+    const { name } = modelInfo
+    modelFileRevisions.set(name, (modelFileRevisions.get(name) ?? 0) + 1)
+    activeModelList?.updates.set(name, modelInfo)
     const normalizedModel = normalizeModelEntryWithOverrides(modelInfo)
     const index = models.value.findIndex((item) => item.name === modelInfo.name)
     if (index >= 0) models.value[index] = normalizedModel
@@ -828,6 +851,8 @@ export const useModelStore = defineStore('model', () => {
 
   async function loadModels() {
     const settings = useSettingsStore()
+    const request = { directory: settings.modelDir || null, updates: new Map<string, ModelEntry>() }
+    activeModelList = request
     isLoading.value = true
     error.value = null
     try {
@@ -837,10 +862,15 @@ export const useModelStore = defineStore('model', () => {
           supportedOnly: false,
           includeLocalState: true,
           includeCustom: true,
-          modelDir: settings.modelDir || null,
+          modelDir: request.directory,
         },
       })
-      models.value = result.models.map((model) => normalizeModelEntryWithOverrides(model))
+      if (activeModelList !== request || (settings.modelDir || null) !== request.directory) return
+      models.value = result.models.map(model => {
+        const update = request.updates.get(model.name)
+        // An in-flight list can predate a file operation, even if its response arrives last.
+        return normalizeModelEntryWithOverrides(update && update.modelPath === model.modelPath ? update : model)
+      })
       categories.value = result.categories
       categoriesCn.value = result.categoriesCn
       modelDir.value = result.modelDir
@@ -855,33 +885,76 @@ export const useModelStore = defineStore('model', () => {
         selectedModel.value = firstDownloaded?.name || ''
       }
     } catch (err) {
-      error.value = err instanceof Error ? err.message : String(err)
+      if (activeModelList === request) error.value = err instanceof Error ? err.message : String(err)
       throw err
     } finally {
-      isLoading.value = false
+      if (activeModelList === request) {
+        activeModelList = undefined
+        isLoading.value = false
+      }
     }
   }
 
-  function ensureModelMetadata(name: string, force = false): Promise<ModelEntry> {
+  function ensureModelMetadata(name: string, force = false, fetchMissingConfig = false, source = useSettingsStore().downloadSource): Promise<ModelEntry> {
     const directory = useSettingsStore().modelDir || null
-    const cached = selectedInfo.value?.name === name ? selectedInfo.value : models.value.find(item => item.name === name)
-    if (!force && cached?.inferenceParamMeta?.resolution) return Promise.resolve(cached)
     const key = JSON.stringify([directory, name])
+    const downloadSource = fetchMissingConfig ? source : undefined
     const pending = metadataLoads.get(key)
-    if (pending) return pending
-    const load = invoke<ModelEntry>('get_model_info', { payload: { model: name, modelDir: directory } }).then(info => {
+    const cachedModel = () => selectedInfo.value?.name === name ? selectedInfo.value : models.value.find(item => item.name === name)
+    const cached = cachedModel()
+    if (pending && pending.downloadSource === downloadSource) return pending.promise
+    if (!pending && !force && !fetchMissingConfig && cached?.inferenceParamMeta?.resolution) return Promise.resolve(cached)
+    const readModel = async () => {
+      const revision = modelFileRevisions.get(name)
+      const info = await invoke<ModelEntry>('get_model_info', { payload: { model: name, modelDir: directory,
+        ...(fetchMissingConfig ? { fetchMissingConfig, source } : {}),
+      } })
       if ((useSettingsStore().modelDir || null) !== directory) throw new Error('Model directory changed while loading parameters')
-      const previousFingerprint = cached?.inferenceParamMeta?.resolution?.fingerprint
+      const current = cachedModel()
+      // A completed file operation supersedes metadata read before its completion.
+      if (current && current.modelPath === info.modelPath && revision !== modelFileRevisions.get(name)) return current
+      const previousFingerprint = current?.inferenceParamMeta?.resolution?.fingerprint
       const nextFingerprint = info.inferenceParamMeta?.resolution?.fingerprint
       if (previousFingerprint !== nextFingerprint) delete modelInferenceBaseKnown.value[name]
+      if (fetchMissingConfig && activeModelList?.directory === directory) activeModelList.updates.set(info.name, info)
       const normalized = normalizeModelEntryWithOverrides(info)
       const index = models.value.findIndex(item => item.name === name)
       if (index >= 0) models.value[index] = normalized
       if (selectedModel.value === name) selectedInfo.value = normalized
       return normalized
-    }).finally(() => { if (metadataLoads.get(key) === load) metadataLoads.delete(key) })
-    metadataLoads.set(key, load)
+    }
+    // The model cache and local YAML are shared by all download sources.
+    const request = pending ? pending.promise.then(readModel, readModel) : readModel()
+    const load = request.finally(() => { if (metadataLoads.get(key)?.promise === load) metadataLoads.delete(key) })
+    metadataLoads.set(key, { downloadSource, promise: load })
     return load
+  }
+
+  async function getWorkflowParameterMetadata(target: WorkflowParameterTarget, directory?: string | null, fetchMissingConfig = false) {
+    const entry = findWorkflowModel(models.value, target)
+    const name = entry?.name || target.model
+    if (target.modelPath || target.kind === 'custom') {
+      const result = await invoke<{ resolution?: unknown }>('get_model_info', { payload: {
+        inferenceTarget: {
+          modelType: target.modelType || entry?.modelType,
+          ...(target.modelPath ? { modelPath: target.modelPath, configPath: target.configPath } : { modelName: name }),
+        },
+      } })
+      return { resolution: normalizeResolutionMetadata(result.resolution), missingCatalogConfig: false }
+    }
+    const settings = useSettingsStore()
+    const source = target.downloadSource || settings.downloadSource
+    const currentModelDir = settings.modelDir || null
+    const modelDir = target.modelDir || (directory === undefined ? currentModelDir : directory)
+    const info = modelDir !== currentModelDir
+      ? await invoke<ModelEntry>('get_model_info', { payload: { model: name, modelDir,
+        ...(fetchMissingConfig ? { fetchMissingConfig, source } : {}),
+      } })
+      : await ensureModelMetadata(name, fetchMissingConfig || isTauriRuntime(), fetchMissingConfig, source)
+    return {
+      resolution: normalizeResolutionMetadata(info.inferenceParamMeta?.resolution),
+      missingCatalogConfig: info.source !== 'user' && Boolean(info.configPath && info.missingPaths?.includes(info.configPath)),
+    }
   }
 
   function selectModel(modelOrName: string | ModelEntry) {
@@ -1790,6 +1863,8 @@ export const useModelStore = defineStore('model', () => {
     loadModels,
     selectModel,
     ensureModelMetadata,
+    getWorkflowParameterMetadata,
+    refreshInferencePreferences,
     setModelInferenceOverrides,
     resetModelInferenceOverrides,
     getModelInferenceOverrides,

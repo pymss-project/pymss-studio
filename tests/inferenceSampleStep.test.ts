@@ -5,12 +5,22 @@ import {
   normalizeInferenceParamMeta,
   resolveInferenceSampleStep,
   resolveInferenceChunkStep,
+  workflowNumberStep,
   inferenceChunkSizeIssue,
 } from '../src/features/inference/sampleStep.ts'
 import { applyLibraryIntent, createInferenceSnapshot, nearestLegalChunk, normalizeCustomParameterIntent, resolveParameters, type ParameterResolutionMetadata } from '../src/features/inference/parameters.ts'
 
 describe('inference sample-step metadata', () => {
   const mdx = { recommendedSampleStep: 1024, chunkSizeConstraint: { step: 32768, offset: 31744, min: 31744 } }
+
+  it('picks the native increment for each workflow numeric field', () => {
+    assert.equal(workflowNumberStep('batch_size').step, 1)
+    assert.equal(workflowNumberStep('post_process_threshold').step, 0.01)
+    assert.deepEqual(workflowNumberStep('overlap_size', undefined, mdx), { step: 10240, alignmentStep: 1024 })
+    assert.deepEqual(workflowNumberStep('chunk_size', undefined, mdx), { step: 32768, alignmentStep: 32768, alignmentOffset: 31744, alignmentMin: 31744 })
+    assert.deepEqual(workflowNumberStep('window_size', { kind: 'lattice', min: 144, step: 16, offset: 0 }),
+      { step: 16, alignmentStep: 16, alignmentOffset: 0, alignmentMin: 144 })
+  })
 
   it('preserves MDX chunk constraints separately from overlap steps', () => {
     assert.deepEqual(normalizeInferenceParamMeta(mdx), mdx)

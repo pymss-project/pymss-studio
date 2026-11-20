@@ -5,13 +5,13 @@ import { invoke } from '@tauri-apps/api/core'
 import i18n from '@/i18n'
 import { isTauriRuntime, loadAppStore, saveAppStore } from '@/utils/appStore'
 import { useSettingsStore } from '@/stores/settings'
-import { useModelStore, type ModelDefaultInferenceParams } from '@/stores/model'
+import { useModelStore, type ModelDefaultInferenceParams, type ModelEntry } from '@/stores/model'
 import { useAppStore } from '@/stores/app'
 import type { WorkflowEntry } from '@/stores/workflow'
 import { useWorkflowNodeStore } from '@/stores/workflowNodes'
 import { appendWorkflowNodeLogs, type WorkflowNodeLogs } from '@/workflows/nodeLogs'
 import { normalizeLogRecord, workerLogRecord, localLogRecord, type LogEntry } from '@/utils/logRecord'
-import { detectWorkflowFormat, WORKFLOW_FORMAT_VERSION } from '@/workflows/formats'
+import { detectWorkflowFormat, normalizeGraphWorkflowDefinition, WORKFLOW_FORMAT_VERSION } from '@/workflows/formats'
 import {
   countWorkflowSaveOutputs,
   getWorkflowDefinitionIssue,
@@ -36,8 +36,11 @@ import { runtimeErrorSummary } from '@/utils/runtimeErrors'
 import { activeRuntimeEnvironment } from '@/utils/runtime'
 import { cloneWorkflow, prepareWorkbenchRun, workflowInputNodes, type WorkflowRuntimeBindings, type WorkflowWorkbenchSnapshot, type WorkflowNodeState } from '@/workflows/workbench'
 import { SEPARATE_MODEL_PAGE_SIZES, normalizePageSize } from '@/utils/pagination'
-import { createInferenceSnapshot, normalizeCustomParameterIntent, resolveParameters, type CustomParameterIntent, type ParameterMode, type ParameterResolutionMetadata, type ResolvedInferenceSnapshot } from '@/features/inference/parameters'
+import { createInferenceSnapshot, effectiveTtaOverride, normalizeCustomParameterIntent, resolveParameters, type CustomParameterIntent, type ParameterMode, type ParameterResolutionMetadata, type ResolvedInferenceSnapshot } from '@/features/inference/parameters'
 import { selectTrackLanguage, trackLanguageStates } from '@/utils/audioTracks'
+import { emit } from '@tauri-apps/api/event'
+import { findWorkflowModel, replayWorkflowParameters, resolveWorkflowNode, workflowParameterTargets, type WorkflowParameterContext, type WorkflowParameterPlan, type WorkflowObservedParameters } from '@/workflows/inferencePolicy'
+import type { ComfyExportParameterPlan } from '@/workflows/comfyExport'
 
 const studioLog = createLogger('ui.stores.task')
 
@@ -76,6 +79,7 @@ export type SeparationRunConfig = {
   inferenceParams: Record<string, unknown>
   resolvedInference?: ResolvedInferenceSnapshot
   resolvedInferences?: Record<string, ResolvedInferenceSnapshot>
+  workflowParameters?: WorkflowParameterPlan
 }
 
 
@@ -129,6 +133,7 @@ export type SeparationTask = {
   runConfig?: SeparationRunConfig
   nodeStates?: Record<string, WorkflowNodeState>
   nodeExecutionOrder?: string[]
+  workflowParameterResults?: Record<string, WorkflowObservedParameters>
   currentNodeId?: string
   taskHidden?: boolean
   resultHidden?: boolean
@@ -187,6 +192,7 @@ type PersistedSeparateState = {
   modelListSortMode?: ModelListSortMode
   modelListPageSize?: number
   useTta?: boolean
+  ttaOverride?: boolean | null
   inferenceParamsByModel?: Record<string, PersistedSeparateModelState>
   parameterMode?: ParameterMode
   customParameterIntent?: CustomParameterIntent
@@ -479,6 +485,7 @@ function normalizeTask(task: Partial<SeparationTask>, windows = /^[A-Za-z]:|^\\\
     files: normalizedFiles,
     outputs: normalizedOutputs,
     nodeValues: normalizeNodeValues(task.nodeValues),
+    workflowParameterResults: task.workflowParameterResults,
     logs: interrupted
       ? [...(task.logs || []), `${new Date().toLocaleTimeString()} 应用关闭或重启，任务已标记为中断。`].slice(-300)
       : (task.logs || []),
@@ -506,6 +513,19 @@ function normalizeRunConfig(runConfig?: SeparationRunConfig): SeparationRunConfi
       : [],
     audioParams: { ...(runConfig.audioParams || {}) },
     inferenceParams: { ...(runConfig.inferenceParams || {}) },
+  }
+  const plan = next.workflowParameters
+  if (next.workflowDefinition && plan?.version === 1 && plan.nodes
+    && Object.values(plan.nodes).some(node => node?.downloadMissing === undefined)) {
+    const nodes = { ...plan.nodes }
+    for (const target of workflowParameterTargets(next.workflowDefinition)) {
+      const node = Object.hasOwn(nodes, target.id) ? nodes[target.id] : undefined
+      if (node && node.downloadMissing === undefined) {
+        nodes[target.id] = { ...node, downloadMissing: target.downloadMissing }
+      }
+    }
+    next.workflowDefinition = normalizeGraphWorkflowDefinition(next.workflowDefinition)
+    next.workflowParameters = { ...plan, nodes }
   }
   const version = next.inferenceParamsVersion || 0
   if (version >= CURRENT_INFERENCE_PARAMS_VERSION) {
@@ -656,7 +676,7 @@ export const useTaskStore = defineStore('task', () => {
   const modelListViewMode = ref<'card' | 'list'>('card')
   const modelListSortMode = ref<ModelListSortMode>('usage')
   const modelListPageSize = ref(12)
-  const useTta = ref(false)
+  const ttaOverride = ref<boolean>()
   const batch_size = ref<number | null>(1)
   const overlap_size = ref<number | null>(0)
   const num_overlap = ref<number | null>(0)
@@ -675,7 +695,11 @@ export const useTaskStore = defineStore('task', () => {
   const selectedModelType = ref<string | null>(null)
   const selectedStemsCleared = ref(false)
   const parameterMode = ref<ParameterMode>('model')
+  const useTta = computed(() => effectiveTtaOverride(parameterMode.value, ttaOverride.value) ?? false)
   const customParameterIntent = ref<CustomParameterIntent>({})
+  const parameterContext = computed<WorkflowParameterContext>(() => ({
+    mode: parameterMode.value, intent: customParameterIntent.value, ttaOverride: ttaOverride.value,
+  }))
   const selectedParameterMetadata = ref<ParameterResolutionMetadata>()
   const legacyParameterBackup = ref<Record<string, PersistedSeparateModelState>>({})
   const legacyParameterChoices = ref<Record<string, 'keep' | 'import'>>({})
@@ -720,7 +744,7 @@ export const useTaskStore = defineStore('task', () => {
       modelListViewMode: modelListViewMode.value,
       modelListSortMode: modelListSortMode.value,
       modelListPageSize: modelListPageSize.value,
-      useTta: useTta.value,
+      ttaOverride: ttaOverride.value ?? null,
       inferenceParamsByModel: JSON.parse(JSON.stringify(persistedSeparateModelState.value)),
       parameterMode: parameterMode.value,
       customParameterIntent: JSON.parse(JSON.stringify(customParameterIntent.value)),
@@ -730,7 +754,7 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   function persistSeparateState() {
-    if (!initialized.value) return
+    if (!initialized.value || !isMainTaskOwner()) return
     void saveAppStore('separate-state', separateStateSnapshot()).catch((error) => {
       studioLog.warn('Failed to persist separate settings', error)
     })
@@ -899,9 +923,7 @@ export const useTaskStore = defineStore('task', () => {
       ? separateStored?.modelListSortMode as ModelListSortMode
       : 'usage'
     modelListPageSize.value = normalizePageSize(separateStored?.modelListPageSize, SEPARATE_MODEL_PAGE_SIZES, 12)
-    useTta.value = separateStored?.useTta === true
-    parameterMode.value = separateStored?.parameterMode === 'custom' ? 'custom' : 'model'
-    customParameterIntent.value = normalizeCustomParameterIntent(separateStored?.customParameterIntent)
+    restoreParameterPreferences(separateStored)
     legacyParameterBackup.value = Object.fromEntries(Object.entries(separateStored?.legacyParameterBackup || {}).map(([name, value]) => [name, normalizePersistedModelState(value)]))
     legacyParameterChoices.value = Object.fromEntries(Object.entries(separateStored?.legacyParameterChoices || {}).filter(([, value]) => value === 'keep' || value === 'import'))
     if ((separateStored?.version || 1) < 2) {
@@ -928,7 +950,7 @@ export const useTaskStore = defineStore('task', () => {
 
   watch(
     [separateRunMode, ensembleEnabled, ensembleModels, ensembleStem, ensembleModelStems, ensembleType, ensembleWeights,
-      separateOutputLayout, separateOutputNamingTemplate, separateCustomStemOrder, modelListViewMode, modelListSortMode, modelListPageSize, useTta],
+      separateOutputLayout, separateOutputNamingTemplate, separateCustomStemOrder, modelListViewMode, modelListSortMode, modelListPageSize],
     () => {
       if (applyingModelDefaults) return
       queueSeparateStatePersist()
@@ -998,23 +1020,49 @@ export const useTaskStore = defineStore('task', () => {
   }
   watch(selectedParameterResolution, syncResolvedParameterInputs, { deep: true })
 
-  async function applyParameterSettings(mode: ParameterMode, intent: CustomParameterIntent, tta = useTta.value) {
+  function restoreParameterPreferences(stored: PersistedSeparateState | null) {
+    parameterMode.value = stored?.parameterMode === 'custom' ? 'custom' : 'model'
+    customParameterIntent.value = normalizeCustomParameterIntent(stored?.customParameterIntent)
+    // Migrate a legacy enabled setting into the custom profile only.
+    ttaOverride.value = typeof stored?.ttaOverride === 'boolean' ? stored.ttaOverride
+      : stored?.ttaOverride === undefined && stored?.useTta ? true : undefined
+  }
+
+  let preferenceRefresh = 0
+  async function refreshParameterPreferences() {
+    if (isMainTaskOwner()) return
+    const request = ++preferenceRefresh
+    const stored = await loadAppStore<PersistedSeparateState>('separate-state')
+    if (request !== preferenceRefresh) return
+    restoreParameterPreferences(stored)
+    await useModelStore().refreshInferencePreferences()
+  }
+
+  async function applyParameterSettings(mode: ParameterMode, intent: CustomParameterIntent, tta?: boolean) {
     const candidate = JSON.parse(JSON.stringify(intent)) as CustomParameterIntent
-    const store = useModelStore()
-    const resolutions = ensembleEnabled.value ? ensembleModels.value.map(name => {
-      const entry = store.selectedInfo?.name === name ? store.selectedInfo : store.models.find(item => item.name === name)
-      return resolveParameters(entry?.inferenceParamMeta?.resolution, store.getModelInferenceOverrides(name), mode, candidate)
-    }) : [resolveParameters(selectedParameterMetadata.value, selectedModelOverrides.value, mode, candidate)]
-    if (!resolutions.length) throw new Error(i18n.global.t('parameterEditor.metadataUnavailable'))
-    for (const resolution of resolutions) {
-      if (resolution.issues.length) throw new Error(i18n.global.t(`parameterEditor.error.${resolution.issues[0]!.code}`, { field: resolution.issues[0]!.key }))
+    if (separateRunMode.value === 'model') {
+      const store = useModelStore()
+      const resolutions = ensembleEnabled.value ? ensembleModels.value.map(name => {
+        const entry = store.selectedInfo?.name === name ? store.selectedInfo : store.models.find(item => item.name === name)
+        return resolveParameters(entry?.inferenceParamMeta?.resolution, store.getModelInferenceOverrides(name), mode, candidate)
+      }) : [resolveParameters(selectedParameterMetadata.value, selectedModelOverrides.value, mode, candidate)]
+      const hasTarget = ensembleEnabled.value ? ensembleModels.value.length > 0 : Boolean(store.selectedModel)
+      for (const resolution of resolutions) {
+        const issue = resolution.issues.find(item => hasTarget || item.code !== 'metadataUnavailable')
+        if (issue) throw new Error(i18n.global.t(`parameterEditor.error.${issue.code}`, { field: issue.key }))
+      }
     }
-    const previousMode = parameterMode.value, previousIntent = customParameterIntent.value, previousTta = useTta.value
+    const previous = separateStateSnapshot()
     parameterMode.value = mode
     customParameterIntent.value = normalizeCustomParameterIntent(candidate)
-    useTta.value = tta
-    try { await saveAppStore('separate-state', separateStateSnapshot()) }
-    catch (error) { parameterMode.value = previousMode; customParameterIntent.value = previousIntent; useTta.value = previousTta; throw error }
+    ttaOverride.value = tta
+    try {
+      await saveAppStore('separate-state', separateStateSnapshot())
+    } catch (error) {
+      restoreParameterPreferences(previous)
+      throw error
+    }
+    if (isTauriRuntime()) void emit('pymss://inference-preferences-changed').catch(error => studioLog.warn('Failed to broadcast inference preferences', error))
   }
 
   function pendingLegacyParameters(name: string) {
@@ -1062,11 +1110,12 @@ export const useTaskStore = defineStore('task', () => {
     catch (error) { legacyParameterChoices.value = previous; throw error }
   }
 
-  async function prepareInferenceSnapshot(name: string, context = { mode: parameterMode.value, intent: JSON.parse(JSON.stringify(customParameterIntent.value)) as CustomParameterIntent, useTta: useTta.value }): Promise<ResolvedInferenceSnapshot> {
+  async function prepareInferenceSnapshot(name: string, context = cloneWorkflow(parameterContext.value)): Promise<ResolvedInferenceSnapshot> {
     if (pendingLegacyParameters(name)) throw new Error(i18n.global.t('parameterEditor.migrationRequired'))
     const store = useModelStore()
     const revision = store.modelInferenceRevision
-    const { mode, intent, useTta: tta } = context
+    const { mode, intent } = context
+    const tta = effectiveTtaOverride(mode, context.ttaOverride)
     const library = JSON.parse(JSON.stringify(store.getModelInferenceOverrides(name) || {})) as ModelDefaultInferenceParams
     const info = await store.ensureModelMetadata(name, true)
     if (revision !== store.modelInferenceRevision) throw new Error(i18n.global.t('parameterEditor.parametersChanged'))
@@ -1074,12 +1123,14 @@ export const useTaskStore = defineStore('task', () => {
     if (!meta) throw new Error(i18n.global.t('parameterEditor.metadataUnavailable'))
     const resolved = resolveParameters(meta, library, mode, intent)
     if (resolved.issues.length) throw new Error(i18n.global.t(`parameterEditor.error.${resolved.issues[0]!.code}`, { field: resolved.issues[0]!.key }))
-    return createInferenceSnapshot(meta, resolved, mode, intent, tta)
+    const snapshot = createInferenceSnapshot(meta, resolved, mode, intent, tta ?? false)
+    snapshot.sources.enable_tta = tta !== undefined ? 'custom' : 'runtime-default'
+    return snapshot
   }
 
   async function prepareInferenceSnapshots(names: string[]) {
     const revision = useModelStore().modelInferenceRevision
-    const context = { mode: parameterMode.value, intent: JSON.parse(JSON.stringify(customParameterIntent.value)) as CustomParameterIntent, useTta: useTta.value }
+    const context = cloneWorkflow(parameterContext.value)
     const result: Record<string, ResolvedInferenceSnapshot> = {}
     for (let index = 0; index < names.length; index += 4) {
       const group = await Promise.all(names.slice(index, index + 4).map(async name => [name, await prepareInferenceSnapshot(name, context)] as const))
@@ -1248,6 +1299,70 @@ export const useTaskStore = defineStore('task', () => {
     }
   }
 
+  async function prepareWorkflowParameterPlan(
+    targets: ReturnType<typeof workflowParameterTargets>,
+    { modelDir, downloadMethod, downloadSource }: Pick<SeparationRunConfig, 'modelDir' | 'downloadMethod' | 'downloadSource'>,
+    purpose: 'run' | 'comfy-export' = 'run',
+  ) {
+    if (!targets.length) return undefined
+    const store = useModelStore()
+    const revision = store.modelInferenceRevision
+    const portable = purpose === 'comfy-export'
+    const context: WorkflowParameterContext = portable ? { mode: 'model', intent: {} } : cloneWorkflow(parameterContext.value)
+    const plan: ComfyExportParameterPlan = { version: 1, context, nodes: Object.create(null) }
+    const byModel = new Map<string, { entry: ModelEntry | undefined; targets: typeof targets }>()
+    for (const target of targets) {
+      const entry = findWorkflowModel(store.models, target)
+      const identity = JSON.stringify([entry?.name || target.model, target.modelPath, target.configPath, target.modelType, target.modelDir || modelDir])
+      const group = byModel.get(identity)
+      if (group) group.targets.push(target)
+      else byModel.set(identity, { entry, targets: [target] })
+    }
+    const groups = [...byModel.values()]
+    for (let index = 0; index < groups.length; index += 4) {
+      await Promise.all(groups.slice(index, index + 4).map(async ({ entry, targets: modelTargets }) => {
+        const first = modelTargets[0]!
+        const name = entry?.name || first.model
+        const library = portable ? undefined : store.getModelInferenceOverrides(name)
+        let metadata = await store.getWorkflowParameterMetadata(first, modelDir)
+        if (portable && metadata.missingCatalogConfig) {
+          throw new Error(`${first.label || first.id} · ${name}: ${i18n.global.t('workflows.comfyExportMissingConfig')}`)
+        }
+        const canDownload = downloadMethod && downloadMethod !== 'never'
+        const downloadable = metadata.missingCatalogConfig && canDownload
+          ? modelTargets.find(target => target.downloadMissing) : undefined
+        if (downloadable) {
+          try {
+            metadata = await store.getWorkflowParameterMetadata({
+              ...downloadable, downloadSource: downloadable.downloadSource || downloadSource,
+            }, modelDir, true)
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            throw new Error(`${downloadable.label || downloadable.id} · ${name}: ${message}`)
+          }
+        }
+        for (const target of modelTargets) {
+          const node = resolveWorkflowNode(target, metadata.resolution, library, context)
+          const issue = node.issues[0]
+          if (issue) throw new Error(`${node.label || node.id} · ${name}: ${i18n.global.t(`parameterEditor.error.${issue.code}`, { field: issue.key })}`)
+          const modelDefaultOverlap = metadata.resolution?.defaults.overlap_size
+          plan.nodes[node.id] = portable && typeof modelDefaultOverlap === 'number' ? { ...node, modelDefaultOverlap } : node
+        }
+      }))
+    }
+    if (!portable && revision !== store.modelInferenceRevision) throw new Error(i18n.global.t('parameterEditor.parametersChanged'))
+    return plan
+  }
+
+  async function prepareComfyExportParameters(definition: Record<string, unknown>) {
+    const settings = useSettingsStore()
+    const targets = workflowParameterTargets(definition).filter(target => Object.keys(target.overrides).length > 0)
+    const { modelDir } = resolveWorkflowRuntimeDefaults(definition, {
+      modelDir: settings.modelDir || null, device: 'auto', outputFormat: settings.defaultFormat,
+    })
+    return prepareWorkflowParameterPlan(targets, { modelDir, downloadMethod: 'never', downloadSource: settings.downloadSource }, 'comfy-export')
+  }
+
   function resolveTaskOutputPath(jobOutput: string, input: string, resultId: string, outputLayout: OutputLayout) {
     return outputLayout === 'flat'
       ? jobOutput
@@ -1287,7 +1402,7 @@ export const useTaskStore = defineStore('task', () => {
     return task
   }
 
-  function createQueuedWorkflowTask(input: string, workflow: WorkflowEntry, jobId?: string, jobOutput?: string, outputLayout: OutputLayout = 'folders', outputNaming?: OutputNamingConfig, batchIndex?: number) {
+  function createQueuedWorkflowTask(input: string, workflow: WorkflowEntry, jobId?: string, jobOutput?: string, outputLayout: OutputLayout = 'folders', outputNaming?: OutputNamingConfig, batchIndex?: number, preparedConfig?: SeparationRunConfig) {
     const settings = useSettingsStore()
     const id = createRunId('wf')
     const resultId = createRunId('result')
@@ -1310,7 +1425,7 @@ export const useTaskStore = defineStore('task', () => {
       files: [],
       outputs: [],
       logs: [localLogRecord(`Queued workflow: ${workflow.name}`, 'task.queued', 'info', { taskId: id })],
-      runConfig: buildWorkflowRunConfig(workflow, outputLayout, outputNaming),
+      runConfig: preparedConfig ? cloneWorkflow(preparedConfig) : buildWorkflowRunConfig(workflow, outputLayout, outputNaming),
     }
     tasks.value.unshift(task)
     rememberSessionTasks([task])
@@ -1325,6 +1440,7 @@ export const useTaskStore = defineStore('task', () => {
     rememberSessionTasks([task])
     const settings = useSettingsStore()
     const config = task.runConfig || buildRunConfig({})
+    const { modelDir = settings.modelDir || null } = config
     setTaskStatus(task.id, 'preparing', 'Preparing task')
     try {
       if ((config.inferenceParamsVersion || 0) > RESOLVED_INFERENCE_PARAMS_VERSION) throw new Error(i18n.global.t('parameterEditor.futureProtocol'))
@@ -1342,10 +1458,11 @@ export const useTaskStore = defineStore('task', () => {
             workflowName: config.workflowName || task.model,
             workflow: config.workflowDefinition || {},
             resolvedInferences: config.resolvedInferences,
+            workflowParameters: config.workflowParameters,
             input: task.input || null,
             ...(config.workbench && !config.workbench.nativeGraph ? { workbench: true, inputs: config.workbench.inputs, workbenchOutputs: config.workbench.outputs } : {}),
             output: config.outputLayout === 'folders' ? (task.jobOutput || task.output) : task.output,
-            modelDir: config.modelDir ?? (settings.modelDir || null),
+            modelDir,
             source: config.downloadSource || settings.downloadSource,
             downloadMethod: config.downloadMethod || settings.downloadMethod,
             device: config.device,
@@ -1367,7 +1484,7 @@ export const useTaskStore = defineStore('task', () => {
           input: task.input,
           audioTracks: task.audioTracks,
           output: config.outputLayout === 'folders' ? (task.jobOutput || task.output) : task.output,
-          modelDir: config.modelDir ?? (settings.modelDir || null),
+          modelDir,
           download: true,
           source: config.downloadSource || settings.downloadSource,
           downloadMethod: config.downloadMethod || settings.downloadMethod,
@@ -1408,6 +1525,7 @@ export const useTaskStore = defineStore('task', () => {
     const settings = useSettingsStore()
     const primary = batchTasks[0]
     const config = primary.runConfig || buildRunConfig({})
+    const { modelDir = settings.modelDir || null } = config
     batchTasks.forEach((task) => {
       setTaskStatus(task.id, 'preparing', 'Preparing batch task')
     })
@@ -1424,7 +1542,7 @@ export const useTaskStore = defineStore('task', () => {
             inputIndex: index + 1,
             audioTracks: task.audioTracks,
           })),
-          modelDir: config.modelDir ?? (settings.modelDir || null),
+          modelDir,
           download: true,
           source: config.downloadSource || settings.downloadSource,
           downloadMethod: config.downloadMethod || settings.downloadMethod,
@@ -1467,6 +1585,7 @@ export const useTaskStore = defineStore('task', () => {
     const settings = useSettingsStore()
     const primary = batchTasks[0]
     const config = primary.runConfig || buildRunConfig({})
+    const { modelDir = settings.modelDir || null } = config
     batchTasks.forEach((task) => {
       setTaskStatus(task.id, 'preparing', 'Preparing workflow batch task')
     })
@@ -1491,6 +1610,7 @@ export const useTaskStore = defineStore('task', () => {
           workflowName: config.workflowName || primary.model,
           workflow: config.workflowDefinition || {},
           resolvedInferences: config.resolvedInferences,
+          workflowParameters: config.workflowParameters,
           output: primary.jobOutput || primary.output,
           ...(config.workbench && !config.workbench.nativeGraph ? { workbench: true } : {}),
           tasks: batchTasks.map((task, index) => ({
@@ -1500,7 +1620,7 @@ export const useTaskStore = defineStore('task', () => {
             inputIndex: index + 1,
             ...(task.runConfig?.workbench && !task.runConfig.workbench.nativeGraph ? { inputs: task.runConfig.workbench.inputs, workbenchOutputs: task.runConfig.workbench.outputs } : {}),
           })),
-          modelDir: config.modelDir ?? (settings.modelDir || null),
+          modelDir,
           source: config.downloadSource || settings.downloadSource,
           downloadMethod: config.downloadMethod || settings.downloadMethod,
           device: config.device,
@@ -1606,6 +1726,15 @@ export const useTaskStore = defineStore('task', () => {
     } else if (event.type === 'task_stage') {
       const stage = normalizeStatus(event.payload?.stage)
       setTaskStatus(taskId, stage, event.payload?.message || STAGE_META[stage].label, event.payload?.progress)
+    } else if (event.type === 'workflow_node_parameters') {
+      const actual = event.payload
+      if (!actual || !Object.hasOwn(task.runConfig?.workflowParameters?.nodes || {}, actual.nodeId)
+        || !actual.parameters || !actual.sources || typeof actual.useTta !== 'boolean') return
+      task.workflowParameterResults = { ...task.workflowParameterResults,
+        [actual.nodeId]: { parameters: actual.parameters, sources: actual.sources, useTta: actual.useTta,
+          ...(typeof actual.fingerprint === 'string' ? { fingerprint: actual.fingerprint } : {}),
+          ...(actual.nativeExtras ? { nativeExtras: actual.nativeExtras } : {}) } }
+      queueProgressPersist()
     } else if (event.type === 'workflow_execution') {
       // Native graph execution supplies explicit lifecycle events. Do not infer
       // node completion from a progress fraction: output collection still runs
@@ -2406,6 +2535,7 @@ export const useTaskStore = defineStore('task', () => {
     if (!workflow?.id) {
       throw new Error('Workflow is required')
     }
+    workflow = cloneWorkflow(workflow)
     const targets = [...(options.inputFiles ?? inputFiles.value)]
     if (!targets.length) {
       throw new Error(i18n.global.t('separate.startHintNoInput'))
@@ -2418,6 +2548,9 @@ export const useTaskStore = defineStore('task', () => {
     const outputLayout = normalizeOutputLayout(options.outputLayout)
     const jobOutput = resolveOutputDirectory(options.outputDir, separateOutputDir.value, windowsPaths.value)
     const outputNaming = normalizeOutputNaming(options.outputNaming)
+    const config = buildWorkflowRunConfig(workflow, outputLayout, outputNaming)
+    if (options.resolvedInferences) config.resolvedInferences = cloneWorkflow(options.resolvedInferences)
+    else config.workflowParameters = await prepareWorkflowParameterPlan(workflowParameterTargets(workflow.definition), config)
     const createdTasks = targets.map((input, batchIndex) => createQueuedWorkflowTask(
       input,
       workflow,
@@ -2426,17 +2559,15 @@ export const useTaskStore = defineStore('task', () => {
       outputLayout,
       outputNaming,
       batchIndex,
+      config,
     ))
-    if (options.resolvedInferences) {
-      for (const created of createdTasks) {
-        created.runConfig!.resolvedInferences = JSON.parse(JSON.stringify(options.resolvedInferences))
-      }
-    }
     scheduleQueue()
     return { succeeded: targets.length, failed: 0, total: targets.length, jobId, tasks: createdTasks }
   }
   async function startWorkbenchInference(workflow: WorkflowEntry, bindings: WorkflowRuntimeBindings) {
     if (!isMainTaskOwner()) throw new Error('workbench.mainWindowOnly')
+    workflow = cloneWorkflow(workflow)
+    bindings = cloneWorkflow(bindings)
     if (detectWorkflowFormat(workflow.definition) === 'graph' && !countWorkflowSaveOutputs(workflow.definition)) await useWorkflowNodeStore().load()
     const validationError = workflowDefinitionValidationError(workflow.definition)
     if (validationError) throw new Error(validationError)
@@ -2445,11 +2576,13 @@ export const useTaskStore = defineStore('task', () => {
     const prepared = prepareWorkbenchRun(workflow.definition, bindings, directory, windowsPaths.value)
     const jobId = createRunId('job')
     const runtimeEntry = { ...workflow, definition: prepared.definition }
+    const layout = nativeGraph ? 'flat' : bindings.outputLayout
+    const base = buildWorkflowRunConfig(runtimeEntry, layout)
+    if (nativeGraph) base.workflowDefinition = normalizeGraphWorkflowDefinition(cloneWorkflow(workflow.definition))
+    base.workflowParameters = await prepareWorkflowParameterPlan(workflowParameterTargets(workflow.definition), base)
     const createdTasks = prepared.runs.map((run, batchIndex) => {
-      const created = createQueuedWorkflowTask(run.input, runtimeEntry, jobId, directory, nativeGraph ? 'flat' : bindings.outputLayout, undefined, batchIndex)
+      const created = createQueuedWorkflowTask(run.input, runtimeEntry, jobId, directory, layout, undefined, batchIndex, base)
       const config = tasks.value.find(task => task.id === created.id)!.runConfig!
-      config.useTta = false
-      if (nativeGraph) config.workflowDefinition = cloneWorkflow(workflow.definition)
       config.workbench = {
         version: 1, ...(nativeGraph ? { nativeGraph: true as const } : {}), sourceUpdatedAt: workflow.updatedAt,
         sourceDefinition: cloneWorkflow(workflow.definition), bindings: cloneWorkflow(bindings),
@@ -2467,14 +2600,14 @@ export const useTaskStore = defineStore('task', () => {
     if (!existing) return
     if (existing.runConfig?.workbench && existing.runConfig.workflowDefinition) {
       const config = cloneWorkflow(existing.runConfig)
+      if (config.workflowParameters) config.workflowParameters = replayWorkflowParameters(config.workflowParameters, existing.workflowParameterResults)
       const snapshot = config.workbench!
       const created = createQueuedWorkflowTask(existing.input, {
         id: config.workflowId!, name: config.workflowName || existing.model, description: '',
         definition: snapshot.sourceDefinition, format: detectWorkflowFormat(snapshot.sourceDefinition),
         formatVersion: WORKFLOW_FORMAT_VERSION, createdAt: existing.createdAt, updatedAt: snapshot.sourceUpdatedAt,
-      }, undefined, existing.jobOutput || existing.output, config.outputLayout, config.outputNaming)
+      }, undefined, existing.jobOutput || existing.output, config.outputLayout, config.outputNaming, undefined, config)
       const queued = tasks.value.find(task => task.id === created.id)!
-      queued.runConfig = config
       queued.output = existing.output
       scheduleQueue()
       return created
@@ -2501,6 +2634,8 @@ export const useTaskStore = defineStore('task', () => {
     }
     if (existing.runConfig?.runMode === 'workflow' && existing.runConfig.workflowId && existing.runConfig.workflowName && existing.runConfig.workflowDefinition) {
       validateSeparateWorkflowInput(existing.runConfig.workflowDefinition)
+      const config = cloneWorkflow(existing.runConfig)
+      if (config.workflowParameters) config.workflowParameters = replayWorkflowParameters(config.workflowParameters, existing.workflowParameterResults)
       const task = createQueuedWorkflowTask(existing.input, {
         id: existing.runConfig.workflowId,
         name: existing.runConfig.workflowName,
@@ -2510,8 +2645,7 @@ export const useTaskStore = defineStore('task', () => {
         formatVersion: WORKFLOW_FORMAT_VERSION,
         createdAt: existing.createdAt,
         updatedAt: existing.updatedAt,
-      }, undefined, jobOutput, outputLayout, existing.runConfig.outputNaming)
-      task.runConfig = JSON.parse(JSON.stringify(existing.runConfig))
+      }, undefined, jobOutput, outputLayout, config.outputNaming, undefined, config)
       scheduleQueue()
       return task
     }
@@ -2587,6 +2721,9 @@ export const useTaskStore = defineStore('task', () => {
     modelListSortMode,
     modelListPageSize,
     useTta,
+    ttaOverride,
+    parameterContext,
+    refreshParameterPreferences,
     parameterMode,
     customParameterIntent,
     selectedParameterResolution,
@@ -2597,6 +2734,7 @@ export const useTaskStore = defineStore('task', () => {
     resolveLegacyParameters,
     applyParameterSettings,
     prepareInferenceSnapshots,
+    prepareComfyExportParameters,
     batch_size,
     overlap_size,
     num_overlap,

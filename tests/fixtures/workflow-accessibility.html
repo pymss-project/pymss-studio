@@ -31,7 +31,8 @@ const app=createApp({render:()=>h(NConfigProvider,{themeOverrides:getThemeOverri
   state.mode==='simple' ? h(WorkflowSimpleNodeEditor, { draft:state.draft, name:state.name, models, readonly:state.readonly,
     'onUpdate:draft':value=>state.draft=value,'onUpdate:name':value=>state.name=value }) : null,
   state.mode==='bindings' ? h('main',{style:'padding:32px;max-width:600px'},[h(WorkflowNodeBindings,{workflowKey:'a11y',definition:state.definition,mode:'inputs'})]) : null,
-  state.mode==='advanced' ? h(WorkflowNodeEditorLite,{definition:{},models,modelOptions:[],createStarter:false}) : null,
+  state.mode==='advanced' ? h(WorkflowNodeEditorLite,{definition:state.advancedDefinition ?? {},models,modelOptions:[],createStarter:true,
+    'onUpdate:definition':value=>state.advancedDefinition=value}) : null,
 ]})})})})
 app.use(pinia)
 app.use(createI18n({legacy:false,locale:'zh-CN',messages:{en,'zh-CN':zh}}))

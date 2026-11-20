@@ -7,7 +7,9 @@
  */
 import { LiteGraph, LGraphNode, LGraphCanvas, type LGraphNode as LGraphNodeType } from '@comfyorg/litegraph'
 import { NODE_SPECS, BUILTIN_SPECS, NodeSpec, WidgetSpec, PORT } from './nodeSpecs'
-import { isWorkflowSeparationNodeType } from '../workflows/formats'
+import { comfySeparationNodeType, isWorkflowSeparationNodeType } from '../workflows/formats'
+import { isWorkflowInferenceConsumer, workflowModelName } from '../workflows/inferencePolicy'
+import { setGraphNodeInferenceOverrides } from './graphAdapter'
 import {
   setNodeTranslator,
   translateAdvancedEditorText,
@@ -100,8 +102,12 @@ if (typeof window !== 'undefined') {
 
 function widgetCallback(node: AnyNode, spec: WidgetSpec) {
   return (v: any) => {
+    const previous = node.properties[spec.name]
     node.properties[spec.name] = v
     if (spec.name === 'model_name') {
+      if (isWorkflowInferenceConsumer(node.type) && workflowModelName(previous, node.type) !== workflowModelName(v, node.type)) {
+        setGraphNodeInferenceOverrides(node, {})
+      }
       node.onModelNameChanged?.(v)
     }
     if (node.type === 'pymss_audio_ensemble' && spec.name === 'input_count') {
@@ -450,7 +456,7 @@ function specForNode(node: AnyNode): NodeSpec | undefined {
   return NODE_SPECS[type]
     || BUILTIN_SPECS[type]
     || PLUGIN_NODE_SPECS[type]
-    || NODE_SPECS[type.replace(/^pymss_/, '')]
+    || NODE_SPECS[comfySeparationNodeType(type)]
 }
 
 function captureOriginalSlotMetadata(slot: AnyNode) {
@@ -654,7 +660,7 @@ export function allNodeTypes(): string[] {
   const types = new Set<string>()
   for (const spec of Object.values(NODE_SPECS)) {
     types.add(spec.type)
-    if (isWorkflowSeparationNodeType(spec.type)) types.add(`pymss_${spec.type}`)
+    if (isWorkflowSeparationNodeType(spec.type)) types.add(spec.type.slice('pymss_'.length))
   }
   for (const spec of Object.values(BUILTIN_SPECS)) types.add(spec.type)
   for (const spec of Object.values(PLUGIN_NODE_SPECS)) types.add(spec.type)
@@ -679,10 +685,9 @@ export function registerPymssNodes(translator?: NodeTranslator) {
   }
   for (const spec of Object.values(NODE_SPECS)) {
     register(spec)
-    // pymss registers `pymss_mss_separate` etc. as aliases of the bare names;
-    // register the same class under the prefixed name so imported graphs load.
+    // Studio graphs saved before the Comfy-MSS rename use bare node IDs.
     if (isWorkflowSeparationNodeType(spec.type)) {
-      register(spec, `pymss_${spec.type}`)
+      register({ ...spec, hidden: true }, spec.type.slice('pymss_'.length))
     }
   }
   for (const spec of Object.values(BUILTIN_SPECS)) {

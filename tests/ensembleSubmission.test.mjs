@@ -84,7 +84,7 @@ test('changing ensemble selection and configuration during preparation cannot al
   assert.equal((await pending).jobId, 'ensemble-job')
   const { workflow, options } = h.submitted()
   const nodes = workflow.definition.nodes
-  const separate = nodes.filter(node => node.type === 'mss_separate')
+  const separate = nodes.filter(node => node.type === 'pymss_mss_separate')
   assert.deepEqual(separate.map(node => node.widgets_values[0]), ['A', 'B'])
   assert.deepEqual(Object.keys(options.resolvedInferences), ['A', 'B'])
   assert.deepEqual(separate.map(node => node.outputs[0].name), ['vocals (Audio)', 'instrumental (Audio)'])

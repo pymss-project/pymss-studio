@@ -147,7 +147,10 @@ onBeforeUnmount(() => observer?.disconnect())
           <rect :width="node.width" :height="node.height" rx="10" />
           <foreignObject x="16" y="13" :width="node.width - 32" :height="node.height - 22">
             <div xmlns="http://www.w3.org/1999/xhtml" class="workflow-preview__node-copy">
-              <span class="workflow-preview__node-kind">{{ t(kindLabels[node.kind]) }}</span>
+              <span class="workflow-preview__node-kind">{{ t(kindLabels[node.kind]) }}
+                <i v-if="node.customParameters" class="workflow-preview__parameter-dot" role="img"
+                  :title="t('workflows.inferenceWorkflowCustom')" :aria-label="t('workflows.inferenceWorkflowCustom')" />
+              </span>
               <strong>{{ node.title }}</strong>
               <span class="workflow-preview__node-detail">{{ node.detail }}</span>
             </div>
@@ -166,6 +169,7 @@ onBeforeUnmount(() => observer?.disconnect())
 </template>
 
 <style scoped>
+.workflow-preview__parameter-dot { display: inline-block; width: 7px; height: 7px; margin-inline-start: 3px; vertical-align: middle; border-radius: 50%; background: var(--primary); }
 .workflow-preview { display: flex; flex-direction: column; min-height: 300px; flex: 1; border: 1px solid var(--outline); border-radius: 12px; overflow: hidden; }
 .workflow-preview__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; background: var(--surface-1); border-bottom: 1px solid var(--outline); }
 .workflow-preview__heading { min-width: 0; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }

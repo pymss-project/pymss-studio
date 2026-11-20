@@ -26,7 +26,9 @@ import {
   NODE_SPECS,
   BUILTIN_SPECS,
 } from '@/litegraph/registerNodes'
-import { litegraphToComfy, comfyToLitegraph } from '@/litegraph/graphAdapter'
+import WorkflowInferenceParameters from '@/components/workflow/WorkflowInferenceParameters.vue'
+import type { NativeParameters } from '@/features/inference/parameters'
+import { litegraphToComfy, comfyToLitegraph, setGraphNodeInferenceOverrides } from '@/litegraph/graphAdapter'
 import { installCanvasDpi } from '@/litegraph/canvasDpi'
 import {
   createWorkflowHistory,
@@ -40,8 +42,10 @@ import { parseModelStems } from '@/utils/workflowSimple'
 import type { ModelEntry } from '@/stores/model'
 import { pluginNodeSpec, type NodeSpec } from '@/litegraph/nodeSpecs'
 import { translateNodeCategory, translateNodeTitle, type NodeTranslator } from '@/litegraph/nodeLocalization'
-import { isGraphWorkflowDefinition } from '@/workflows/formats'
+import { comfySeparationNodeType, isGraphWorkflowDefinition } from '@/workflows/formats'
+import { graphNodeHasCustomParameters, isWorkflowInferenceConsumer, isWorkflowParameterNode, workflowModelName, workflowParameterTargets, type WorkflowParameterTarget } from '@/workflows/inferencePolicy'
 import { applyGraphDefaultWidgets, type GraphDefaults } from '@/workflows/graphDefaults'
+import { resolveWorkflowRuntimeDefaults } from '@/workflows/runtimeDefinition'
 import { registerPluginNodeSpecs } from '@/litegraph/registerNodes'
 import { pluginRevision } from '@/features/plugin-marketplace/composable'
 import { useWorkflowNodeStore } from '@/stores/workflowNodes'
@@ -152,7 +156,7 @@ const emit = defineEmits<{
 }>()
 defineExpose({ snapshotDefinition })
 
-const { t, locale } = useI18n()
+const { t, locale } = useI18n({ useScope: 'global' })
 const canvasHelpId = useId()
 const message = useMessage()
 const nodeTranslator = t as unknown as NodeTranslator
@@ -166,6 +170,40 @@ const paletteList = ref<HTMLElement | null>(null)
 const paletteIndex = ref(0)
 const loadError = ref('')
 const ready = ref(false)
+const inferenceEditor = shallowRef<{ node: LGraphNode; target: WorkflowParameterTarget }>()
+const inferenceNodes = new WeakSet<LGraphNode>()
+function openInferenceEditor(id: string | number) {
+  const graph = graphRef.value
+  if (!graph || props.readonly || !ready.value) return
+  const node = graph.nodes.find(item => String(item.id) === String(id))
+  if (!node) return
+  const current = litegraphToComfy(graph.serialize()) as unknown as Record<string, unknown>
+  const target = workflowParameterTargets(current).find(item => item.id === String(id))
+  if (!target) return
+  const { modelDir } = resolveWorkflowRuntimeDefaults(current, {
+    device: props.defaultDevice, outputFormat: props.defaultFormat, modelDir: null,
+  })
+  inferenceEditor.value = { node, target: { ...target, modelDir: target.modelDir || modelDir || undefined } }
+}
+
+function closeInferenceEditor() {
+  inferenceEditor.value = undefined
+}
+
+function saveInferenceEditor(overrides: NativeParameters) {
+  const node = inferenceEditor.value?.node
+  const graph = graphRef.value
+  if (!graph || !node || graph.getNodeById(node.id) !== node || props.readonly) return
+  if (pendingSnap) flushGraphSnapshot()
+  graph.beforeChange(node)
+  setGraphNodeInferenceOverrides(node, overrides)
+  graph.afterChange(node)
+  node.setDirtyCanvas(true, false)
+  flushGraphSnapshot()
+  closeInferenceEditor()
+}
+
+
 function drawRunningNodes(ctx: CanvasRenderingContext2D) {
   const canvas = canvasRef.value
   const ids = props.runningNodeIds
@@ -303,10 +341,7 @@ function applyTheme() {
 }
 
 // --- model -> stems lookup for separate nodes ------------------------------
-function stemsForModel(modelNameRaw: string): string[] {
-  // comfy-mss serializes model widgets as "[category] filename" — strip the
-  // annotation prefix before matching against the catalog.
-  const modelName = modelNameRaw.replace(/^\[[^\]]*\]\s*/, '').trim()
+function stemsForModel(modelName: string): string[] {
   const m = props.models.find((x) => x.name === modelName || x.aliases?.includes(modelName))
   if (!m) return []
   const parsed = parseModelStems(m.configInstruments || m.configTargetInstrument || m.targetStem)
@@ -319,11 +354,10 @@ function stemsForModel(modelNameRaw: string): string[] {
 }
 
 function syncSeparateNodeStems(node: LGraphNode) {
-  const spec = ALL_SPECS[String(node.type)] || ALL_SPECS[String(node.type).replace(/^pymss_/, '')]
+  const spec = ALL_SPECS[comfySeparationNodeType(String(node.type))]
   if (!spec?.dynamicStems) return
-  const modelName = String((node as any).properties?.model_name
-    || (node as any).widgets?.find((w: any) => w.name === 'model_name')?.value
-    || '')
+  const modelName = workflowModelName(node.properties?.model_name
+    || node.widgets?.find(w => w.name === 'model_name')?.value, node.type)
   const stems = stemsForModel(modelName)
   if (!stems.length) return
 
@@ -633,9 +667,7 @@ function seedStarterGraph() {
   if (!graph) return
   const load = LiteGraph.createNode('pymss_load_audio'); if (!load) return
   load.pos = [80, 200]; graph.add(load)
-  const params = LiteGraph.createNode('pymss_mss_params'); if (!params) return
-  params.pos = [80, 400]; graph.add(params)
-  const sep = LiteGraph.createNode('mss_separate'); if (!sep) return
+  const sep = LiteGraph.createNode('pymss_mss_separate'); if (!sep) return
   sep.pos = [460, 280]; graph.add(sep)
   const save = LiteGraph.createNode('pymss_save_audio'); if (!save) return
   save.pos = [840, 280]; graph.add(save)
@@ -644,7 +676,6 @@ function seedStarterGraph() {
     outputFormat: props.defaultFormat,
   }, { device: true, outputFormat: true })
   load.connect(0, sep, 0)
-  params.connect(0, sep, 1)
   sep.connect(0, save, 0)
 }
 
@@ -677,11 +708,15 @@ function scheduleSnap() {
   if (props.readonly || loadError.value) return
   if (pendingSnap) return
   pendingSnap = requestAnimationFrame(() => {
-    pendingSnap = 0
-    if (loadError.value) return
-    definition.value = snapshotDefinition()
-    snapshotForHistory()
+    flushGraphSnapshot()
   })
+}
+function flushGraphSnapshot() {
+  if (pendingSnap) cancelAnimationFrame(pendingSnap)
+  pendingSnap = 0
+  if (loadError.value) return
+  definition.value = snapshotDefinition()
+  snapshotForHistory()
 }
 watch(ready, (v) => {
   if (!v || !graphRef.value) return
@@ -708,7 +743,41 @@ function updatePathPickerLabel(node: LGraphNode) {
   if (picker) picker.label = t(node.type === 'pymss_load_audio_batch' ? 'workbench.chooseFolder' : 'workflows.advancedEditor.chooseAudioFile')
 }
 
+function configureInferenceHeader(node: LGraphNode) {
+  const consumer = isWorkflowInferenceConsumer(node.type)
+  if ((!consumer && !isWorkflowParameterNode(node.type)) || inferenceNodes.has(node)) return
+  inferenceNodes.add(node)
+  const previousTitle = node.onDrawTitle
+  node.onDrawTitle = ctx => {
+    previousTitle?.call(node, ctx)
+    if (!graphNodeHasCustomParameters(node.type, node.properties.studioInferenceOverrides, i => node.widgets?.[i]?.value)) return
+    const inset = consumer && !props.readonly && !node.collapsed ? 34 : 12
+    const radius = Math.min(7, Math.max(4, 2.5 / (canvasRef.value?.ds.scale || 1)))
+    ctx.save()
+    ctx.fillStyle = '#87b7ff'
+    ctx.beginPath()
+    ctx.arc(node.renderingSize[0] - inset, -LiteGraph.NODE_TITLE_HEIGHT / 2, radius, 0, 2 * Math.PI)
+    ctx.fill()
+    ctx.restore()
+  }
+  if (consumer && !props.readonly) {
+    const settings = node.addTitleButton({ name: 'studio-inference', text: '⚙', fontSize: 18, height: 22, xOffset: -6 })
+    const previousClick = node.onTitleButtonClick
+    node.onTitleButtonClick = (button, canvas) => {
+      if (button === settings) openInferenceEditor(node.id)
+      else previousClick.call(node, button, canvas)
+    }
+    const extraMenu = node.getExtraMenuOptions
+    node.getExtraMenuOptions = (canvas, options) => {
+      const extra = extraMenu?.call(node, canvas, options) ?? []
+      if (props.readonly) return extra
+      return [{ content: t('workflows.stepInferenceParams'), callback: () => openInferenceEditor(node.id) }, ...extra]
+    }
+  }
+}
+
 function configureGraphNode(node: LGraphNode) {
+  configureInferenceHeader(node)
   ;(node as any).onModelNameChanged = () => {
     syncSeparateNodeStems(node)
     ;(canvasRef.value as any)?.setDirty(true, true)
@@ -798,6 +867,8 @@ function configureGraphNode(node: LGraphNode) {
         </n-result>
       </div>
     </div>
+    <WorkflowInferenceParameters v-if="inferenceEditor" :key="inferenceEditor.target.id" :target="inferenceEditor.target"
+      @close="closeInferenceEditor" @save="saveInferenceEditor" />
   </div>
 </template>
 

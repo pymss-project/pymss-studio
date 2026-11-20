@@ -2,7 +2,8 @@ import { hydrateSimpleWorkflow, isSimpleAudioOperation } from '../utils/workflow
 import { comfyLinksToLitegraph } from '../litegraph/graphAdapter'
 import { BUILTIN_SPECS, NODE_SPECS } from '../litegraph/nodeSpecs'
 import { translateNodeTitle } from '../litegraph/nodeLocalization'
-import { isGraphWorkflowDefinition, isSimpleWorkflowDefinition, isWorkflowSaveNodeType, isWorkflowSeparationNodeType } from './formats'
+import { graphNodeHasCustomParameters, simpleStepHasCustomParameters } from './inferencePolicy'
+import { comfySeparationNodeType, isGraphWorkflowDefinition, isSimpleWorkflowDefinition, isWorkflowSaveNodeType, isWorkflowSeparationNodeType } from './formats'
 
 export type PreviewNodeKind = 'input' | 'separate' | 'process' | 'output' | 'other'
 export type WorkflowPreviewNode = {
@@ -10,6 +11,7 @@ export type WorkflowPreviewNode = {
   title: string
   detail: string
   kind: PreviewNodeKind
+  customParameters?: boolean
   x: number
   y: number
   width: number
@@ -84,6 +86,7 @@ function buildSimplePreview(definition: Record<string, unknown>, t: Translate): 
   const saved: string[] = []
   for (const step of draft.steps) {
     const node = makeNode(`step:${step.id}`, step.model || t('workflows.previewModelUnassigned'), step.stems.join(' · '), 'separate')
+    if (simpleStepHasCustomParameters(step.inferenceParams, draft.ui.nativeInferenceSteps?.includes(step.id))) node.customParameters = true
     node.inputs = 1
     node.outputs = step.stems.length
     graph.nodes.push(node)
@@ -136,7 +139,8 @@ function buildGraphPreview(definition: Record<string, unknown>, t: Translate): W
     if (!isRecord(raw) || !['string', 'number'].includes(typeof raw.id) || typeof raw.type !== 'string') continue
     const id = String(raw.id)
     if (nodes.has(id)) continue
-    const spec = Object.hasOwn(NODE_SPECS, raw.type) ? NODE_SPECS[raw.type]
+    const specType = comfySeparationNodeType(raw.type)
+    const spec = Object.hasOwn(NODE_SPECS, specType) ? NODE_SPECS[specType]
       : Object.hasOwn(BUILTIN_SPECS, raw.type) ? BUILTIN_SPECS[raw.type] : undefined
     const title = typeof raw.title === 'string' && raw.title.trim()
       ? raw.title : spec ? translateNodeTitle(spec, t) : raw.type
@@ -148,6 +152,9 @@ function buildGraphPreview(definition: Record<string, unknown>, t: Translate): W
     const modelIndex = spec?.widgets.findIndex(widget => widget.name === 'model_name') ?? -1
     const detail = modelIndex >= 0 && typeof widgets[modelIndex] === 'string' ? String(widgets[modelIndex]) : raw.type
     const node = makeNode(id, title, detail, kind)
+    if (graphNodeHasCustomParameters(raw.type, isRecord(raw.properties) ? raw.properties.studioInferenceOverrides : undefined, i => widgets[i])) {
+      node.customParameters = true
+    }
     node.inputs = Array.isArray(raw.inputs) ? raw.inputs.length : 0
     node.outputs = Array.isArray(raw.outputs) ? raw.outputs.length : 0
     const point = raw.pos
