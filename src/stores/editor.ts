@@ -8,6 +8,7 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import i18n, { getCurrentLocale } from '@/i18n'
 import {
+  clipsForTrack,
   overwriteClipsInRange,
   syncSingleClipFadeCompatibility,
   timelineDuration,
@@ -552,21 +553,7 @@ function runLimited<T>(items: T[], limit: number, runner: (item: T) => Promise<v
   return Promise.all(workers)
 }
 
-function trackToExportTrack(track: EditorTrack, source?: EditorSource) {
-  const clips = track.clips?.length
-    ? track.clips.map((clip) => ({ ...clip }))
-    : [{
-        id: `clip_${track.id}`,
-        assetId: track.sourceId,
-        start: 0,
-        offset: 0,
-        duration: source?.duration || 0,
-        volume: 1,
-        fadeIn: track.fadeIn,
-        fadeOut: track.fadeOut,
-        muted: false,
-        locked: false,
-      }]
+function trackToExportTrack(track: EditorTrack, sources: Map<string, EditorSource>) {
   return {
     id: track.id,
     sourceId: track.sourceId,
@@ -576,7 +563,7 @@ function trackToExportTrack(track: EditorTrack, source?: EditorSource) {
     pan: track.pan,
     muted: track.muted,
     solo: track.solo,
-    clips,
+    clips: clipsForTrack(track, sources),
   }
 }
 
@@ -594,6 +581,7 @@ export const useEditorStore = defineStore('editor', () => {
   const pluginStateUnavailable = ref(false)
   const selectedTrackId = ref<string | null>(null)
   const selectedClipId = ref<string | null>(null)
+  const clipClipboard = ref<EditorClip | null>(null)
   const pixelsPerSecond = ref(96)
   const exportFormat = ref<EditorExportFormat>('wav')
   const projectSummaries = ref<EditorProjectSummary[]>([])
@@ -632,6 +620,13 @@ export const useEditorStore = defineStore('editor', () => {
     if (!track || !selectedClipId.value) return null
     return track.clips?.find((clip) => clip.id === selectedClipId.value) || null
   })
+
+  const canCopyClip = computed(() => !!selectedClip.value && !interactionDepth.value)
+  const canCutClip = computed(() => canCopyClip.value && !selectedClip.value?.locked)
+  const canPasteClip = computed(() => (
+    interactionDepth.value === 0 && selectedTrack.value !== null
+    && clipClipboard.value !== null && sourceMap.value.has(clipClipboard.value.assetId)
+  ))
 
   const selectedSource = computed(() => {
     const track = selectedTrack.value
@@ -839,6 +834,7 @@ export const useEditorStore = defineStore('editor', () => {
       schedulePluginStateSave(host.project)
     }
   })
+  watch(() => session.value?.id, () => { clipClipboard.value = null }, { flush: 'sync' })
   watch(() => session.value?.id, () => {
     pendingDialogMessage = null
     if (pluginSaveTimer) clearTimeout(pluginSaveTimer)
@@ -983,10 +979,12 @@ export const useEditorStore = defineStore('editor', () => {
     if (exporting.value) await cancelExport()
   }, 100))
 
-  function selectTrack(trackId: string | null) {
+  function selectTrack(trackId: string | null, selectFirstClip = true) {
     selectedTrackId.value = trackId
     const track = session.value?.tracks.find((item) => item.id === trackId)
-    if (!track?.clips?.some((clip) => clip.id === selectedClipId.value)) {
+    if (!selectFirstClip) {
+      selectedClipId.value = null
+    } else if (!track?.clips?.some((clip) => clip.id === selectedClipId.value)) {
       selectedClipId.value = track?.clips?.[0]?.id || null
     }
   }
@@ -1857,27 +1855,81 @@ export const useEditorStore = defineStore('editor', () => {
     scheduleSave()
   }
 
-  function removeClip(trackId: string, clipId: string) {
-    const track = session.value?.tracks.find((item) => item.id === trackId)
-    const clipIndex = track?.clips?.findIndex((item) => item.id === clipId) ?? -1
-    if (!track || clipIndex < 0) return false
+  function deleteSelectedClip() {
+    const track = selectedTrack.value
+    const clip = selectedClip.value
+    if (!track?.clips || !clip || !canCutClip.value) return
 
     pushHistory()
-    const removedClip = track.clips![clipIndex]
-    const nextClips = track.clips!.filter((item) => item.id !== clipId)
-    track.clips = nextClips
+    const remaining = track.clips.filter((item) => item.id !== clip.id)
+    track.clips = remaining
+    // Empty legacy tracks fall back to sourceId in playback, export and reload.
+    if (!remaining.some((item) => item.assetId === track.sourceId)) {
+      track.sourceId = remaining.at(-1)?.assetId || ''
+    }
     syncSingleClipFadeCompatibility(track)
-
-    if (track.sourceId === removedClip.assetId && !nextClips.some((item) => item.assetId === removedClip.assetId)) {
-      track.sourceId = nextClips[nextClips.length - 1]?.assetId || ''
-    }
-
-    if (selectedTrackId.value === trackId && selectedClipId.value === clipId) {
-      selectedClipId.value = nextClips[Math.min(clipIndex, nextClips.length - 1)]?.id || null
-    }
-
+    selectedClipId.value = null
     scheduleSave()
-    return true
+  }
+
+  function copySelectedClip() {
+    const clip = selectedClip.value
+    if (clip && canCopyClip.value) clipClipboard.value = { ...clip }
+  }
+
+  function cutSelectedClip() {
+    if (!canCutClip.value) return
+    copySelectedClip()
+    deleteSelectedClip()
+  }
+
+  function pasteClipAt(time: number) {
+    const track = selectedTrack.value
+    const copied = clipClipboard.value
+    if (!track || !copied || !canPasteClip.value || !Number.isFinite(time) || time < 0) return null
+
+    const clip = { ...copied, id: makeId('clip'), start: time }
+    pushHistory()
+    track.clips = [...clipsForTrack(track, sourceMap.value), clip].sort((a, b) => a.start - b.start)
+    if (!track.sourceId) track.sourceId = clip.assetId
+    syncSingleClipFadeCompatibility(track)
+    selectClip(track.id, clip.id)
+    scheduleSave()
+    return clip
+  }
+
+  function canSplitClipAt(time: number) {
+    const clip = selectedClip.value
+    if (!clip || !canCutClip.value) return false
+    // Each half must contain at least one source sample.
+    const sample = 1 / (sourceMap.value.get(clip.assetId)?.sampleRate || 48000)
+    return time - clip.start >= sample && clip.start + clip.duration - time >= sample
+  }
+
+  function splitSelectedClipAt(time: number) {
+    const track = selectedTrack.value
+    const clip = selectedClip.value
+    if (!track?.clips || !clip || !canSplitClipAt(time)) return
+
+    const leftDuration = time - clip.start
+    const rightDuration = clip.duration - leftDuration
+    const right = {
+      ...clip,
+      id: makeId('clip'),
+      start: time,
+      offset: clip.offset + leftDuration,
+      duration: rightDuration,
+      fadeIn: 0,
+      fadeOut: Math.min(clip.fadeOut, rightDuration),
+    }
+
+    pushHistory()
+    clip.duration = leftDuration
+    clip.fadeIn = Math.min(clip.fadeIn, leftDuration)
+    clip.fadeOut = 0
+    track.clips = [...track.clips, right].sort((a, b) => a.start - b.start)
+    selectClip(track.id, right.id)
+    scheduleSave()
   }
 
   function removeSource(sourceId: string) {
@@ -2035,6 +2087,7 @@ export const useEditorStore = defineStore('editor', () => {
       exportRenderController = null
       if (exportCancelRequested) throw new EditorExportCancelledError()
       const project = prepared.session
+      const exportSources = new Map(project.sources.map(source => [source.id, source]))
       const completion = new Promise<ExportResult>((resolve, reject) => {
         pendingExport = {
           id: taskId,
@@ -2059,7 +2112,7 @@ export const useEditorStore = defineStore('editor', () => {
             masterPan: project.masterPan,
             sourceSampleRate: prepared.sourceSampleRate,
             assets: project.sources.map(sourceToExportAsset),
-            tracks: project.tracks.map((track) => trackToExportTrack(track, project.sources.find(source => source.id === track.sourceId))),
+            tracks: project.tracks.map((track) => trackToExportTrack(track, exportSources)),
           },
         },
       }).then(() => undefined)
@@ -2271,7 +2324,15 @@ export const useEditorStore = defineStore('editor', () => {
     setMasterPan,
     setMasterLimiter,
     removeTrack,
-    removeClip,
+    canCopyClip,
+    canCutClip,
+    canPasteClip,
+    canSplitClipAt,
+    copySelectedClip,
+    cutSelectedClip,
+    deleteSelectedClip,
+    pasteClipAt,
+    splitSelectedClipAt,
     removeSource,
     exportMix,
     cancelExport,

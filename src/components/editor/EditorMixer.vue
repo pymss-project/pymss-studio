@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, h, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { EllipsisHorizontal } from '@vicons/ionicons5'
 import type { DropdownOption } from 'naive-ui'
 import type { EditorClip, EditorSource, EditorTrack } from '@/types/editor'
 import EditorWaveform from '@/components/editor/EditorWaveform.vue'
+import { editorClipShortcutLabel, type EditorClipCommand } from '@/utils/editorClipShortcuts'
 import { formatTime, formatTimecode } from '@/utils/editorTime'
 import {
   clipsForTrack as resolveTrackClips,
@@ -21,6 +22,7 @@ const props = defineProps<{
   duration: number
   pixelsPerSecond: number
   trackLevels: Record<string, [number, number]>
+  clipCommandState: Record<EditorClipCommand, boolean>
   editingDisabled?: boolean
   externalDragging?: boolean
   externalImporting?: boolean
@@ -38,7 +40,7 @@ const emit = defineEmits<{
   toggleSolo: [trackId: string]
   seek: [time: number]
   removeTrack: [trackId: string]
-  removeClip: [payload: { trackId: string; clipId: string }]
+  clipCommand: [command: EditorClipCommand]
   revealTrack: [trackId: string]
   showInspector: []
   contextMute: [trackId: string]
@@ -117,10 +119,29 @@ type ClipEditState = {
 }
 let clipEditState: ClipEditState | null = null
 
+const isMac = /Mac/i.test(navigator.platform)
+const clipCommandLabels = {
+  cut: 'editor.cutClip', copy: 'editor.copyClip', paste: 'editor.pasteClip',
+  split: 'editor.splitClip', delete: 'editor.removeClip',
+} as const
+
+function clipMenuItem(command: EditorClipCommand): DropdownOption {
+  return {
+    key: command,
+    disabled: !props.clipCommandState[command],
+    label: () => h('span', { class: 'editor-clip-command' }, [
+      t(clipCommandLabels[command]),
+      h('kbd', editorClipShortcutLabel(command, isMac)),
+    ]),
+  }
+}
+
 const trackMenuOptions = computed<DropdownOption[]>(() => {
   const track = contextTrack.value
   if (!track) return []
   return [
+    clipMenuItem('paste'),
+    { type: 'divider', key: 'track-divider' },
     {
       key: 'inspect',
       label: t('editor.menuTrackParams'),
@@ -138,15 +159,13 @@ const trackMenuOptions = computed<DropdownOption[]>(() => {
 })
 
 const clipMenuOptions = computed<DropdownOption[]>(() => [
-  {
-    key: 'inspect',
-    label: t('editor.menuClipParams'),
-  },
-  {
-    key: 'remove',
-    label: t('editor.removeClip'),
-    disabled: Boolean(props.editingDisabled),
-  },
+  clipMenuItem('cut'),
+  clipMenuItem('copy'),
+  clipMenuItem('paste'),
+  clipMenuItem('split'),
+  clipMenuItem('delete'),
+  { type: 'divider', key: 'clip-divider' },
+  { key: 'inspect', label: t('editor.menuClipParams') },
 ])
 
 const rulerStep = computed(() => {
@@ -223,10 +242,12 @@ function recordingPreviewStyle() {
 }
 
 function beginClipPointer(event: PointerEvent, track: EditorTrack, clip: EditorClip, mode: ClipTimingEditMode) {
-  if (event.button !== 0 || clip.locked || props.editingDisabled) return
+  if (event.button !== 0) return
   event.preventDefault()
   event.stopPropagation()
+  focusTimeline()
   emit('selectClip', { trackId: track.id, clipId: clip.id })
+  if (clip.locked || props.editingDisabled) return
   const source = sourceForClip(clip)
   clipEditState = {
     pointerId: event.pointerId,
@@ -309,6 +330,7 @@ function trackMetaLabel(track: EditorTrack) {
 }
 
 function seekFromEvent(event: MouseEvent) {
+  focusTimeline()
   const element = event.currentTarget as HTMLElement
   const rect = element.getBoundingClientRect()
   const x = event.clientX - rect.left + element.scrollLeft
@@ -385,7 +407,17 @@ function containsPoint(x: number, y: number) {
   return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
 }
 
+function focusTimeline() {
+  mixerRootEl.value?.focus({ preventScroll: true })
+}
+
+function selectTrackRow(event: MouseEvent, trackId: string) {
+  if (event.target instanceof Element && !event.target.closest('button')) focusTimeline()
+  emit('selectTrack', trackId)
+}
+
 function openTrackContextMenu(event: MouseEvent, track: EditorTrack) {
+  focusTimeline()
   emit('selectTrack', track.id)
   contextTrack.value = track
   contextClip.value = null
@@ -398,6 +430,7 @@ function openTrackContextMenu(event: MouseEvent, track: EditorTrack) {
 }
 
 function openClipContextMenu(event: MouseEvent, track: EditorTrack, clip: EditorClip) {
+  focusTimeline()
   emit('selectClip', { trackId: track.id, clipId: clip.id })
   contextTrack.value = null
   contextClip.value = { track, clip }
@@ -409,36 +442,23 @@ function openClipContextMenu(event: MouseEvent, track: EditorTrack, clip: Editor
   })
 }
 
-function handleTrackMenuSelect(key: string | number) {
-  const track = contextTrack.value
+function handleContextMenuSelect(key: string | number) {
   showTrackMenu.value = false
-  if (!track) return
-
+  focusTimeline()
+  if (Object.hasOwn(clipCommandLabels, key)) {
+    const command = key as EditorClipCommand
+    if (props.clipCommandState[command]) emit('clipCommand', command)
+    return
+  }
   if (key === 'inspect') emit('showInspector')
+  const track = contextTrack.value
+  if (!track) return
   if (key === 'reveal') emit('revealTrack', track.id)
   if (key === 'remove' && !props.editingDisabled) emit('removeTrack', track.id)
 }
 
-function handleClipMenuSelect(key: string | number) {
-  const target = contextClip.value
-  showTrackMenu.value = false
-  if (!target) return
-
-  if (key === 'inspect') emit('showInspector')
-  if (key === 'remove' && !props.editingDisabled) {
-    emit('removeClip', { trackId: target.track.id, clipId: target.clip.id })
-  }
-}
-
-function handleContextMenuSelect(key: string | number) {
-  if (contextClip.value) {
-    handleClipMenuSelect(key)
-    return
-  }
-  handleTrackMenuSelect(key)
-}
-
 defineExpose({
+  focusTimeline,
   setDraggingAssetSourceId,
   setDropTargetTrackId,
   containsPoint,
@@ -447,7 +467,7 @@ defineExpose({
 </script>
 
 <template>
-  <section ref="mixerRootEl" class="editor-mixer" :class="{ 'editor-mixer--external-drop': externalDragging }">
+  <section ref="mixerRootEl" class="editor-mixer" tabindex="0" :aria-label="t('editor.timeline')" :class="{ 'editor-mixer--external-drop': externalDragging }">
     <div v-if="externalDragging || externalImporting" class="external-drop-hint" role="status">
       <n-spin v-if="externalImporting" size="small" />
       <span>{{ t(externalImporting ? 'editor.importingAudio' : 'editor.dropImportsTracks') }}</span>
@@ -479,7 +499,7 @@ defineExpose({
           class="track-row"
           :data-track-id="track.id"
           :class="rowClass(track)"
-          @mousedown="emit('selectTrack', track.id)"
+          @mousedown.left="selectTrackRow($event, track.id)"
           @contextmenu.stop.prevent="openTrackContextMenu($event, track)"
           @mouseenter="allowAssetDrop(track.id)"
         >
@@ -543,7 +563,11 @@ defineExpose({
                   'track-wave__clip--editing': clip.id === activeClipEditId,
                 }"
                 :style="clipStyle(clip)"
+                tabindex="0"
+                role="group"
+                :aria-label="sourceForClip(clip)?.name || track.name"
                 :title="sourceForClip(clip)?.name || track.name"
+                @focusin="emit('selectClip', { trackId: track.id, clipId: clip.id })"
                 @pointerdown="beginClipPointer($event, track, clip, 'move')"
                 @click.stop
                 @contextmenu.stop.prevent="openClipContextMenu($event, track, clip)"
@@ -634,6 +658,26 @@ defineExpose({
 </template>
 
 <style scoped>
+:global(.editor-clip-command) {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+:global(.editor-clip-command kbd) {
+  color: var(--on-surface-muted);
+  font-family: inherit;
+  font-size: 0.85em;
+}
+
+.editor-mixer:focus-visible,
+.track-wave__clip:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+
 .editor-mixer {
   position: relative;
   min-width: 0;

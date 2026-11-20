@@ -23,6 +23,7 @@ import { useEditorPlayback } from '@/composables/useEditorPlayback'
 import { useEditorProjectBridge } from '@/composables/useEditorProjectBridge'
 import { useEditorRecording } from '@/composables/useEditorRecording'
 import { useDiagnosticWindowState } from '@/features/diagnostics/windowState'
+import type { EditorClipCommand } from '@/utils/editorClipShortcuts'
 import { useEditorShortcuts } from '@/composables/useEditorShortcuts'
 
 const route = useRoute()
@@ -317,19 +318,45 @@ function toggleSelectedTrackFlag(flag: 'muted' | 'solo') {
   editor.toggleTrackFlag(editor.selectedTrackId, flag)
 }
 
-function removeSelectedTrack() {
-  if (recordingBusy.value || !editor.selectedTrackId) return
-  editor.removeTrack(editor.selectedTrackId)
+const clipCommandState = computed(() => {
+  const ready = !recordingBusy.value && !editor.loading && !showExportDialog.value
+  return {
+    cut: ready && editor.canCutClip,
+    copy: ready && editor.canCopyClip,
+    paste: ready && editor.canPasteClip,
+    split: ready && editor.canSplitClipAt(playbackCurrentTime.value),
+    delete: ready && editor.canCutClip,
+  }
+})
+
+function runClipCommand(command: EditorClipCommand) {
+  if (!clipCommandState.value[command]) return
+  switch (command) {
+    case 'copy':
+      editor.copySelectedClip()
+      break
+    case 'cut':
+      mixerRef.value?.focusTimeline()
+      editor.cutSelectedClip()
+      break
+    case 'delete':
+      mixerRef.value?.focusTimeline()
+      editor.deleteSelectedClip()
+      break
+    case 'split':
+      editor.splitSelectedClipAt(playbackCurrentTime.value)
+      break
+    case 'paste': {
+      const clip = editor.pasteClipAt(playbackCurrentTime.value)
+      if (clip && playback.intent.value === 'pause') seekTimeline(clip.start + clip.duration)
+      break
+    }
+  }
 }
 
 function removeTrack(trackId: string) {
   if (recordingBusy.value) return
   editor.removeTrack(trackId)
-}
-
-function removeClip(payload: { trackId: string; clipId: string }) {
-  if (recordingBusy.value) return
-  editor.removeClip(payload.trackId, payload.clipId)
 }
 
 function undoEditor() {
@@ -430,7 +457,7 @@ onBeforeRouteLeave(async () => {
   }
 })
 
-useEditorShortcuts({
+const { onTimelineKeydown } = useEditorShortcuts({
   togglePlay: togglePlayback,
   stop: stopPlayback,
   undo: undoEditor,
@@ -442,7 +469,7 @@ useEditorShortcuts({
   seek: seekBy,
   toggleMute: () => toggleSelectedTrackFlag('muted'),
   toggleSolo: () => toggleSelectedTrackFlag('solo'),
-  removeTrack: removeSelectedTrack,
+  clipCommand: runClipCommand,
 })
 
 watch(() => editor.session?.id, stopPlaybackAndReset)
@@ -576,7 +603,7 @@ watch(
           <span />
         </div>
 
-        <div class="editor-shell__center">
+        <div class="editor-shell__center" @keydown="onTimelineKeydown">
           <EditorMixer data-guide="demo-editor-mixer"
             ref="mixerRef"
             :tracks="session.tracks"
@@ -587,12 +614,13 @@ watch(
             :duration="displayedTimelineDuration"
             :pixels-per-second="editor.pixelsPerSecond"
             :track-levels="trackLevels"
+            :clip-command-state="clipCommandState"
             :editing-disabled="recordingBusy"
             :external-dragging="isDraggingExternalOnMixer"
             :external-importing="isImportingExternal"
             :recording-preview="recordingPreview"
             @scroll-ready="handleMixerScrollReady"
-            @select-track="editor.selectTrack"
+            @select-track="(id) => editor.selectTrack(id, false)"
             @select-clip="handleSelectClip"
             @begin-clip-edit="editor.beginInteraction"
             @update-clip-timing="handleClipTiming"
@@ -603,7 +631,7 @@ watch(
             @context-solo="handleTrackSoloRequest"
             @seek="seekTimeline"
             @remove-track="removeTrack"
-            @remove-clip="removeClip"
+            @clip-command="runClipCommand"
             @reveal-track="revealTrackSource"
             @zoom-in="editor.zoomIn"
             @zoom-out="editor.zoomOut"

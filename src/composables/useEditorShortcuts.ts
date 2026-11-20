@@ -1,3 +1,4 @@
+import { matchEditorClipShortcut, type EditorClipCommand } from '@/utils/editorClipShortcuts'
 import { onBeforeUnmount, onMounted } from 'vue'
 
 export type EditorShortcutHandlers = {
@@ -12,27 +13,30 @@ export type EditorShortcutHandlers = {
   seek: (deltaSeconds: number) => void
   toggleMute: () => void
   toggleSolo: () => void
-  removeTrack: () => void
+  clipCommand: (command: EditorClipCommand) => void
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false
-  const tag = target.tagName
-  return (
-    tag === 'INPUT' ||
-    tag === 'TEXTAREA' ||
-    tag === 'SELECT' ||
-    Boolean(target.closest('[role="combobox"], [role="listbox"], [role="option"]')) ||
-    target.isContentEditable
-  )
+  if (!(target instanceof Element)) return false
+  return Boolean(target.closest(
+    'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], '
+    + '[role="combobox"], [role="listbox"], [role="option"], [role="slider"], [role="spinbutton"]',
+  ))
 }
 
-/**
- * 编辑器（Stem 混音器）全局键盘快捷键。输入框聚焦时自动忽略（除保存 / 撤销 / 重做）。
- */
 export function useEditorShortcuts(handlers: EditorShortcutHandlers) {
+  // Clip edits belong to the focused timeline. Dialogs and other panels own their clipboard.
+  function onTimelineKeydown(event: KeyboardEvent) {
+    if (event.defaultPrevented || event.isComposing || isEditableTarget(event.target)) return
+    const command = matchEditorClipShortcut(event)
+    if (!command || document.querySelector('[aria-modal="true"], .n-modal-mask')) return
+    event.preventDefault()
+    if (!event.repeat) handlers.clipCommand(command)
+  }
+
   function onKeydown(event: KeyboardEvent) {
     if (event.defaultPrevented || event.isComposing) return
+    if (event.target instanceof Element && event.target.closest('[role="dialog"], [role="alertdialog"]')) return
     const mod = event.ctrlKey || event.metaKey
     const editable = isEditableTarget(event.target)
 
@@ -68,11 +72,6 @@ export function useEditorShortcuts(handlers: EditorShortcutHandlers) {
         break
       case 'Escape':
         handlers.stop()
-        break
-      case 'Delete':
-      case 'Backspace':
-        event.preventDefault()
-        handlers.removeTrack()
         break
       case 'm':
       case 'M':
@@ -111,4 +110,5 @@ export function useEditorShortcuts(handlers: EditorShortcutHandlers) {
 
   onMounted(() => window.addEventListener('keydown', onKeydown))
   onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+  return { onTimelineKeydown }
 }
