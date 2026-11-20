@@ -13,6 +13,7 @@ import EditorAssetPanel from '@/components/editor/EditorAssetPanel.vue'
 import EditorExportDialog from '@/components/editor/EditorExportDialog.vue'
 import EditorInspectorPanel from '@/components/editor/EditorInspectorPanel.vue'
 import EditorMixer from '@/components/editor/EditorMixer.vue'
+import EditorStatusToasts from '@/components/editor/EditorStatusToasts.vue'
 import EditorTransportBar from '@/components/editor/EditorTransportBar.vue'
 import { useEditorAssetDrag } from '@/composables/useEditorAssetDrag'
 import { useEditorAssets } from '@/composables/useEditorAssets'
@@ -24,7 +25,7 @@ import { useEditorProjectBridge } from '@/composables/useEditorProjectBridge'
 import { useEditorRecording } from '@/composables/useEditorRecording'
 import { useDiagnosticWindowState } from '@/features/diagnostics/windowState'
 import { adjacentClipEdge, timelineClipEdges } from '@/utils/editorClips'
-import type { EditorClipDrop, EditorTimelineTool } from '@/types/editor'
+import type { EditorClipDrop, EditorMasterLimiter, EditorTimelineTool } from '@/types/editor'
 import type { EditorClipCommand } from '@/utils/editorClipShortcuts'
 import { useEditorShortcuts } from '@/composables/useEditorShortcuts'
 
@@ -47,6 +48,7 @@ const shellEl = ref<HTMLElement | null>(null)
 const mixerScrollEl = ref<HTMLElement | null>(null)
 const assetPanelEl = ref<HTMLElement | null>(null)
 const mixerRef = ref<InstanceType<typeof EditorMixer> | null>(null)
+const statusToasts = ref<InstanceType<typeof EditorStatusToasts> | null>(null)
 
 const session = computed(() => editor.session)
 const routeProjectId = computed(() => String(route.query.projectId || ''))
@@ -307,17 +309,33 @@ function handleAddRecordingTrack() {
   message.success(t('editor.recordingTrackAdded', { name: track.name }))
 }
 
-function handleTrackMuteRequest(trackId: string) {
-  editor.toggleTrackFlag(trackId, 'muted')
-}
-
-function handleTrackSoloRequest(trackId: string) {
-  editor.toggleTrackFlag(trackId, 'solo')
+function toggleTrackFlag(trackId: string, flag: 'muted' | 'solo') {
+  const track = session.value?.tracks.find((item) => item.id === trackId)
+  if (!track) return
+  editor.toggleTrackFlag(trackId, flag)
+  const enabled = track[flag]
+  const key = flag === 'muted'
+    ? (enabled ? 'editor.status.trackMuted' : 'editor.status.trackUnmuted')
+    : (enabled ? 'editor.status.trackSolo' : 'editor.status.trackUnsolo')
+  statusToasts.value?.show(t(key, { name: track.name }), enabled)
 }
 
 function toggleSelectedTrackFlag(flag: 'muted' | 'solo') {
-  if (!editor.selectedTrackId) return
-  editor.toggleTrackFlag(editor.selectedTrackId, flag)
+  if (editor.selectedTrackId) toggleTrackFlag(editor.selectedTrackId, flag)
+}
+
+function setPlaybackLoop(enabled: boolean) {
+  if (playbackLoop.value === enabled) return
+  updatePlaybackLoop(enabled)
+  statusToasts.value?.show(t(enabled ? 'editor.status.loopOn' : 'editor.status.loopOff'), enabled)
+}
+
+function setMasterLimiter(patch: Partial<EditorMasterLimiter>) {
+  const wasEnabled = session.value?.masterLimiter?.enabled === true
+  editor.setMasterLimiter(patch)
+  const enabled = session.value?.masterLimiter?.enabled === true
+  if (enabled === wasEnabled) return
+  statusToasts.value?.show(t(enabled ? 'editor.status.limiterOn' : 'editor.status.limiterOff'), enabled)
 }
 
 const timelineTool = ref<EditorTimelineTool>('selection')
@@ -326,22 +344,33 @@ const clipEdges = computed(() => timelineClipEdges(session.value?.tracks ?? [], 
 
 function toggleSnapping() {
   snappingEnabled.value = !snappingEnabled.value
+  statusToasts.value?.show(t(snappingEnabled.value ? 'editor.status.snapOn' : 'editor.status.snapOff'), snappingEnabled.value)
 }
 
 function seekClipEdge(direction: -1 | 1) {
   if (recordingBusy.value) return
   const edge = adjacentClipEdge(clipEdges.value, playbackCurrentTime.value, direction)
-  if (edge === null) return
+  if (edge === null) {
+    statusToasts.value?.show(t(direction < 0 ? 'editor.status.noPreviousEdge' : 'editor.status.noNextEdge'))
+    return
+  }
   seekTimeline(edge)
   if (playback.intent.value === 'pause') playbackFollowPlayhead('seek')
 }
 
 function setTimelineTool(tool: EditorTimelineTool) {
   timelineTool.value = tool
+  const label = t(tool === 'selection' ? 'editor.selectionTool' : 'editor.razorTool')
+  statusToasts.value?.show(label)
 }
 
 function splitAtPointer(time: number) {
-  if (!recordingBusy.value) editor.splitSelectedClipAt(time)
+  if (recordingBusy.value) return
+  if (!editor.canSplitClipAt(time)) {
+    statusToasts.value?.show(t(editor.selectedClip?.locked ? 'editor.status.clipLocked' : 'editor.status.splitInsideClip'))
+    return
+  }
+  editor.splitSelectedClipAt(time)
 }
 
 function dropClip(drop: EditorClipDrop) {
@@ -360,11 +389,31 @@ const clipCommandState = computed(() => {
   }
 })
 
+function showUnavailableClipCommand(command: EditorClipCommand) {
+  if (recordingBusy.value) {
+    statusToasts.value?.show(t('editor.status.recordingEditsUnavailable'))
+  } else if (command === 'splitAll') {
+    statusToasts.value?.show(t('editor.status.noClipsAtPlayhead'))
+  } else if (command === 'paste') {
+    statusToasts.value?.show(t(editor.selectedTrackId ? 'editor.status.clipboardEmpty' : 'editor.status.selectTrackToPaste'))
+  } else if (!editor.selectedClip) {
+    statusToasts.value?.show(t('editor.status.selectClipToEdit'))
+  } else if (editor.selectedClip.locked) {
+    statusToasts.value?.show(t('editor.status.clipLocked'))
+  } else if (command === 'split') {
+    statusToasts.value?.show(t('editor.status.splitInsideClip'))
+  }
+}
+
 function runClipCommand(command: EditorClipCommand) {
-  if (!clipCommandState.value[command]) return
+  if (!clipCommandState.value[command]) {
+    showUnavailableClipCommand(command)
+    return
+  }
   switch (command) {
     case 'copy':
       editor.copySelectedClip()
+      statusToasts.value?.show(t('editor.status.clipCopied'))
       break
     case 'cut':
       mixerRef.value?.focusTimeline()
@@ -491,7 +540,8 @@ onBeforeRouteLeave(async () => {
   }
 })
 
-const { onTimelineKeydown } = useEditorShortcuts({
+useEditorShortcuts({
+  canUseTimeline: () => Boolean(session.value) && !editor.loading && !showExportDialog.value,
   togglePlay: togglePlayback,
   stop: stopPlayback,
   undo: undoEditor,
@@ -509,7 +559,10 @@ const { onTimelineKeydown } = useEditorShortcuts({
   seekClipEdge,
 })
 
-watch(() => editor.session?.id, stopPlaybackAndReset)
+watch(() => editor.session?.id, () => {
+  stopPlaybackAndReset()
+  statusToasts.value?.clear()
+})
 watch(locale, () => editor.localizeDefaultTrackNames(), { immediate: true })
 watch(routeProjectId, (value) => {
   if (!value) {
@@ -564,7 +617,7 @@ watch(
         @reset="resetPlayhead"
         @stop="stopPlaybackAndReset"
         @toggle-transport="handleTransportToggleRequest"
-        @update:loop="updatePlaybackLoop"
+        @update:loop="setPlaybackLoop"
         @update:master-volume="setMasterVolume"
         @begin-master-volume="editor.beginInteraction"
         @commit-master-volume="editor.commitInteraction"
@@ -640,7 +693,7 @@ watch(
           <span />
         </div>
 
-        <div class="editor-shell__center" @keydown="onTimelineKeydown">
+        <div class="editor-shell__center">
           <EditorMixer data-guide="demo-editor-mixer"
             ref="mixerRef"
             :tracks="session.tracks"
@@ -664,10 +717,8 @@ watch(
             @begin-clip-edit="editor.beginInteraction"
             @update-clip-timing="handleClipTiming"
             @commit-clip-edit="editor.commitInteraction"
-            @toggle-mute="handleTrackMuteRequest"
-            @toggle-solo="handleTrackSoloRequest"
-            @context-mute="handleTrackMuteRequest"
-            @context-solo="handleTrackSoloRequest"
+            @toggle-mute="(id) => toggleTrackFlag(id, 'muted')"
+            @toggle-solo="(id) => toggleTrackFlag(id, 'solo')"
             @seek="seekTimeline"
             @remove-track="removeTrack"
             @clip-command="runClipCommand"
@@ -721,7 +772,7 @@ watch(
               @toggle-playback="togglePlayback"
               @set-master-volume="setMasterVolume"
               @set-master-pan="setMasterPan"
-              @set-master-limiter="editor.setMasterLimiter"
+              @set-master-limiter="setMasterLimiter"
               @begin-master-limiter="editor.beginInteraction"
               @commit-master-limiter="editor.commitInteraction"
               @begin-master-volume="editor.beginInteraction"
@@ -729,7 +780,7 @@ watch(
               @begin-master-pan="editor.beginInteraction"
               @commit-master-pan="editor.commitInteraction"
               @rename-track="editor.renameTrack"
-              @toggle-track-flag="(trackId, flag) => editor.toggleTrackFlag(trackId, flag)"
+              @toggle-track-flag="toggleTrackFlag"
               @set-track-volume="setTrackVolume"
               @set-track-pan="setTrackPan"
               @begin-track-volume="editor.beginInteraction"
@@ -754,6 +805,8 @@ watch(
     >
       {{ draggingSourceName }}
     </div>
+
+    <EditorStatusToasts ref="statusToasts" :animate="settings.animationsEnabled" />
 
     <EditorExportDialog
       :show="showExportDialog"

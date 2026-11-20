@@ -14,6 +14,7 @@ export type EditorShortcutHandlers = {
   seek: (deltaSeconds: number) => void
   toggleMute: () => void
   toggleSolo: () => void
+  canUseTimeline: () => boolean
   clipCommand: (command: EditorClipCommand) => void
   setTimelineTool: (tool: EditorTimelineTool) => void
   toggleSnapping: () => void
@@ -29,10 +30,10 @@ function isEditableTarget(target: EventTarget | null): boolean {
 }
 
 export function useEditorShortcuts(handlers: EditorShortcutHandlers) {
-  // Clip edits belong to the focused timeline. Dialogs and other panels own their clipboard.
   function onTimelineKeydown(event: KeyboardEvent) {
-    if (event.defaultPrevented || event.isComposing || isEditableTarget(event.target)) return
+    if (!handlers.canUseTimeline()) return
     if (document.querySelector('[aria-modal="true"], .n-modal-mask')) return
+    if (event.target instanceof Element && event.target.closest('.n-popover, .n-dropdown-menu, [role="menu"]')) return
     const command = matchEditorClipShortcut(event)
     if (command) {
       event.preventDefault()
@@ -59,6 +60,10 @@ export function useEditorShortcuts(handlers: EditorShortcutHandlers) {
     if (event.target instanceof Element && event.target.closest('[role="dialog"], [role="alertdialog"]')) return
     const mod = event.ctrlKey || event.metaKey
     const editable = isEditableTarget(event.target)
+    if (!editable) {
+      onTimelineKeydown(event)
+      if (event.defaultPrevented) return
+    }
 
     // Ctrl/Cmd 组合键：即便在输入框内也允许保存
     if (mod) {
@@ -130,5 +135,4 @@ export function useEditorShortcuts(handlers: EditorShortcutHandlers) {
 
   onMounted(() => window.addEventListener('keydown', onKeydown))
   onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
-  return { onTimelineKeydown }
 }

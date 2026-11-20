@@ -50,8 +50,6 @@ const emit = defineEmits<{
   dropClip: [drop: EditorClipDrop]
   revealTrack: [trackId: string]
   showInspector: []
-  contextMute: [trackId: string]
-  contextSolo: [trackId: string]
   zoomAt: [payload: { direction?: 'in' | 'out'; anchorRatio: number; deltaY?: number }]
   'scroll-ready': [element: HTMLElement]
   addTrackFromAsset: [sourceId: string]
@@ -271,7 +269,7 @@ function beginClipPointer(event: PointerEvent, track: EditorTrack, clip: EditorC
   if (props.editingDisabled) return
 
   if (props.timelineTool === 'razor') {
-    if (clip.locked || mode !== 'move') return
+    if (mode !== 'move') return
     const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect()
     emit('splitAt', clip.start + (event.clientX - bounds.left) / props.pixelsPerSecond)
     return
