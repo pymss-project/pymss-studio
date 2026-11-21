@@ -1,15 +1,24 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, h, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { EllipsisHorizontal } from '@vicons/ionicons5'
+import { Cut, EllipsisHorizontal, LockClosedOutline, Magnet, Navigate } from '@vicons/ionicons5'
 import type { DropdownOption } from 'naive-ui'
-import type { EditorClip, EditorSource, EditorTrack } from '@/types/editor'
+import type { EditorClip, EditorClipDrop, EditorSource, EditorTimelineTool, EditorTrack } from '@/types/editor'
 import EditorWaveform from '@/components/editor/EditorWaveform.vue'
+import { editorClipShortcutLabel, type EditorClipCommand } from '@/utils/editorClipShortcuts'
 import { formatTime, formatTimecode } from '@/utils/editorTime'
 import {
+  clipColor,
+  clipTrimBounds,
   clipsForTrack as resolveTrackClips,
+  hasLockedClipInRange,
+  overlappingClipRanges,
   resolveClipTimingEdit,
+  resolveSnappedClipTimingEdit,
+  resolveSnappedSplitTime,
+  timelineClipEdges,
   type ClipTimingEditMode,
+  type ClipTrimBounds,
 } from '@/utils/editorClips'
 
 const props = defineProps<{
@@ -21,6 +30,9 @@ const props = defineProps<{
   duration: number
   pixelsPerSecond: number
   trackLevels: Record<string, [number, number]>
+  clipCommandState: Record<EditorClipCommand, boolean>
+  timelineTool: EditorTimelineTool
+  snappingEnabled: boolean
   editingDisabled?: boolean
   externalDragging?: boolean
   externalImporting?: boolean
@@ -38,11 +50,14 @@ const emit = defineEmits<{
   toggleSolo: [trackId: string]
   seek: [time: number]
   removeTrack: [trackId: string]
-  removeClip: [payload: { trackId: string; clipId: string }]
+  clipCommand: [command: EditorClipCommand]
+  setClipLocked: [trackId: string, clipId: string, locked: boolean]
+  setTool: [tool: EditorTimelineTool]
+  toggleSnapping: []
+  splitAt: [time: number]
+  dropClip: [drop: EditorClipDrop]
   revealTrack: [trackId: string]
   showInspector: []
-  contextMute: [trackId: string]
-  contextSolo: [trackId: string]
   zoomAt: [payload: { direction?: 'in' | 'out'; anchorRatio: number; deltaY?: number }]
   'scroll-ready': [element: HTMLElement]
   addTrackFromAsset: [sourceId: string]
@@ -52,11 +67,15 @@ const emit = defineEmits<{
     clipId: string
     patch: Partial<Pick<EditorClip, 'start' | 'offset' | 'duration'>>
   }]
-  commitClipEdit: []
+  commitClipEdit: [cancelled: boolean]
 }>()
 
 const { t } = useI18n()
 const HEADER_WIDTH = 180
+const SNAP_DISTANCE_PX = 7
+const EDGE_SCROLL_ZONE_PX = 40
+const EDGE_SCROLL_SPEED_PX = 750
+const CLIP_LABEL_HEIGHT = 15
 const scrollEl = ref<HTMLElement | null>(null)
 const scrollViewportWidth = ref(0)
 let resizeObserver: ResizeObserver | null = null
@@ -103,24 +122,61 @@ const contextTrack = ref<EditorTrack | null>(null)
 const contextClip = ref<{ track: EditorTrack; clip: EditorClip } | null>(null)
 const mixerRootEl = ref<HTMLElement | null>(null)
 const activeClipEditId = ref<string | null>(null)
+const clipSnapTime = ref<number | null>(null)
+const clipDropPreview = ref<{ drop: EditorClipDrop; clip: EditorClip; color: string; blocked: boolean } | null>(null)
+const clipDropPreviewSource = computed(() => clipDropPreview.value && sourceForClip(clipDropPreview.value.clip))
 type ClipEditState = {
   pointerId: number
+  captureTarget: HTMLElement
   trackId: string
-  clipId: string
   mode: ClipTimingEditMode
+  clip: EditorClip
+  color: string
+  copy: boolean
   clientX: number
+  clientY: number
+  scrollLeft: number
   start: number
   offset: number
   duration: number
   sourceDuration: number
+  trimBounds?: ClipTrimBounds
+  snapTargets: number[]
   begun: boolean
 }
 let clipEditState: ClipEditState | null = null
+let latestClipPointer: PointerEvent | null = null
+let clipScrollFrame: number | null = null
+let lastClipScrollTime = 0
+
+const isMac = /Mac/i.test(navigator.platform)
+const timelineTools = [
+  { id: 'selection', label: 'editor.selectionTool', icon: Navigate, shortcut: 'V' },
+  { id: 'razor', label: 'editor.razorTool', icon: Cut, shortcut: 'C' },
+] as const
+const clipCommandLabels = {
+  cut: 'editor.cutClip', copy: 'editor.copyClip', paste: 'editor.pasteClip',
+  split: 'editor.splitClip', splitAll: 'editor.splitAllClips', delete: 'editor.removeClip',
+} as const
+
+function clipMenuItem(command: EditorClipCommand): DropdownOption {
+  return {
+    key: command,
+    disabled: !props.clipCommandState[command],
+    label: () => h('span', { class: 'editor-clip-command' }, [
+      t(clipCommandLabels[command]),
+      h('kbd', editorClipShortcutLabel(command, isMac)),
+    ]),
+  }
+}
 
 const trackMenuOptions = computed<DropdownOption[]>(() => {
   const track = contextTrack.value
   if (!track) return []
   return [
+    clipMenuItem('paste'),
+    clipMenuItem('splitAll'),
+    { type: 'divider', key: 'track-divider' },
     {
       key: 'inspect',
       label: t('editor.menuTrackParams'),
@@ -138,15 +194,19 @@ const trackMenuOptions = computed<DropdownOption[]>(() => {
 })
 
 const clipMenuOptions = computed<DropdownOption[]>(() => [
+  clipMenuItem('cut'),
+  clipMenuItem('copy'),
+  clipMenuItem('paste'),
+  clipMenuItem('split'),
+  clipMenuItem('splitAll'),
+  clipMenuItem('delete'),
   {
-    key: 'inspect',
-    label: t('editor.menuClipParams'),
-  },
-  {
-    key: 'remove',
-    label: t('editor.removeClip'),
+    key: 'toggle-lock',
+    label: t(contextClip.value?.clip.locked ? 'editor.unlockClip' : 'editor.lockClip'),
     disabled: Boolean(props.editingDisabled),
   },
+  { type: 'divider', key: 'clip-divider' },
+  { key: 'inspect', label: t('editor.menuClipParams') },
 ])
 
 const rulerStep = computed(() => {
@@ -182,8 +242,29 @@ function clipsForTrack(track: EditorTrack) {
   return resolveTrackClips(track, props.sourceMap)
 }
 
+const selectedClip = computed(() => {
+  const track = props.tracks.find(item => item.id === props.selectedTrackId)
+  return track && clipsForTrack(track).find(clip => clip.id === props.selectedClipId)
+})
+
+const overlapRangesByTrack = computed(() => {
+  const preview = clipDropPreview.value
+  return new Map(props.tracks.map((track) => {
+    const trackClips = clipsForTrack(track)
+    const clips = preview && !preview.blocked && !preview.drop.copy && preview.drop.fromTrackId === track.id
+      ? trackClips.filter(item => item.id !== preview.drop.clipId)
+      : trackClips
+    return [track.id, overlappingClipRanges(clips)] as const
+  }))
+})
+
 function sourceForClip(clip: EditorClip) {
   return props.sourceMap.get(clip.assetId) || null
+}
+
+function clipAccessibleName(clip: EditorClip, track: EditorTrack) {
+  const name = sourceForClip(clip)?.name || track.name
+  return clip.locked ? t('editor.lockedClipName', { name }) : name
 }
 
 function sourceMissing(track: EditorTrack) {
@@ -199,17 +280,17 @@ function trackChannels(track: EditorTrack) {
 }
 
 function trackWaveHeight(track: EditorTrack) {
-  return trackChannels(track) >= 2 ? 64 : 42
+  return (trackChannels(track) >= 2 ? 61 : 41) - CLIP_LABEL_HEIGHT
 }
 
 function clipWaveWidth(clip: EditorClip) {
   return Math.max(1, Math.ceil(clip.duration * props.pixelsPerSecond))
 }
 
-function clipStyle(clip: EditorClip) {
+function clipStyle(clip: EditorClip, start = clip.start) {
   return {
-    width: `${Math.max(1, Math.min(laneWidth.value, clipWaveWidth(clip)))}px`,
-    transform: `translateX(${Math.max(0, clip.start * props.pixelsPerSecond)}px)`,
+    width: `${Math.max(1, Math.min(laneWidth.value, clip.duration * props.pixelsPerSecond))}px`,
+    transform: `translateX(${Math.max(0, start * props.pixelsPerSecond)}px)`,
   }
 }
 
@@ -223,52 +304,213 @@ function recordingPreviewStyle() {
 }
 
 function beginClipPointer(event: PointerEvent, track: EditorTrack, clip: EditorClip, mode: ClipTimingEditMode) {
-  if (event.button !== 0 || clip.locked || props.editingDisabled) return
+  if (event.button !== 0) return
   event.preventDefault()
   event.stopPropagation()
+  if (clipEditState) return
+  focusTimeline()
   emit('selectClip', { trackId: track.id, clipId: clip.id })
-  const source = sourceForClip(clip)
+  if (props.editingDisabled) return
+
+  if (props.timelineTool === 'razor') {
+    if (mode !== 'move') return
+    emit('splitAt', razorPointerTime(event, clip).time)
+    return
+  }
+
+  const copy = mode === 'move' && event.altKey
+  if (clip.locked && !copy) return
+  const captureTarget = event.currentTarget as HTMLElement
+  captureTarget.setPointerCapture(event.pointerId)
   clipEditState = {
     pointerId: event.pointerId,
+    captureTarget,
     trackId: track.id,
-    clipId: clip.id,
     mode,
+    clip,
+    color: clipColor(clip, track),
+    copy,
     clientX: event.clientX,
+    clientY: event.clientY,
+    scrollLeft: scrollEl.value?.scrollLeft ?? 0,
     start: clip.start,
     offset: clip.offset,
     duration: clip.duration,
-    sourceDuration: Math.max(0, Number(source?.duration || 0)),
+    sourceDuration: Math.max(0, Number(sourceForClip(clip)?.duration || 0)),
+    trimBounds: mode === 'move' ? undefined : clipTrimBounds(clip, clipsForTrack(track)),
+    snapTargets: [props.currentTime, ...timelineClipEdges(props.tracks, props.sourceMap, copy ? undefined : clip.id)],
     begun: false,
   }
   activeClipEditId.value = clip.id
   window.addEventListener('pointermove', handleClipPointerMove)
   window.addEventListener('pointerup', finishClipPointer)
   window.addEventListener('pointercancel', finishClipPointer)
+  window.addEventListener('blur', cancelClipPointer)
+}
+
+const razorSnapTargets = computed(() => timelineClipEdges(props.tracks, props.sourceMap))
+
+function razorPointerTime(event: PointerEvent, clip: EditorClip) {
+  const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  const time = clip.start + (event.clientX - bounds.left) / props.pixelsPerSecond
+  const snapped = props.snappingEnabled
+    ? resolveSnappedSplitTime(clip, time, 1 / (sourceForClip(clip)?.sampleRate || 48000),
+      [props.currentTime, ...razorSnapTargets.value], SNAP_DISTANCE_PX / props.pixelsPerSecond)
+    : time
+  return { time: snapped, snapTime: snapped === time ? null : snapped }
+}
+
+function updateRazorGuide(event: PointerEvent, clip: EditorClip) {
+  if (props.timelineTool !== 'razor' || props.editingDisabled || clip.locked) return
+  clipSnapTime.value = razorPointerTime(event, clip).snapTime
+}
+
+function clearRazorGuide() {
+  if (!clipEditState) clipSnapTime.value = null
+}
+
+function timingAtPointer(event: PointerEvent, active: ClipEditState) {
+  const scrollDelta = (scrollEl.value?.scrollLeft ?? 0) - active.scrollLeft
+  const delta = (event.clientX - active.clientX + scrollDelta) / props.pixelsPerSecond
+  const useSnap = props.snappingEnabled && (active.mode !== 'move' || delta !== 0)
+  const { patch, snapTime } = resolveSnappedClipTimingEdit(
+    active, active.mode, delta, active.sourceDuration, useSnap ? active.snapTargets : [],
+    SNAP_DISTANCE_PX / props.pixelsPerSecond,
+    active.trimBounds,
+  )
+  clipSnapTime.value = snapTime
+  return patch
+}
+
+function clipDropAt(event: PointerEvent, active: ClipEditState): EditorClipDrop | null {
+  const lane = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('[data-clip-lane]')
+  if (!lane || !mixerRootEl.value?.contains(lane) || !lane.dataset.clipLane) {
+    clipSnapTime.value = null
+    return null
+  }
+  const { start = active.start } = timingAtPointer(event, active)
+  if (!active.copy && lane.dataset.clipLane === active.trackId && start === active.start) return null
+  return {
+    clipId: active.clip.id,
+    fromTrackId: active.trackId,
+    toTrackId: lane.dataset.clipLane,
+    start,
+    copy: active.copy,
+  }
 }
 
 function handleClipPointerMove(event: PointerEvent) {
   const active = clipEditState
   if (!active || event.pointerId !== active.pointerId) return
   const deltaPx = event.clientX - active.clientX
-  if (!active.begun && Math.abs(deltaPx) < 2) return
   if (!active.begun) {
+    const distance = active.mode === 'move' ? Math.hypot(deltaPx, event.clientY - active.clientY) : Math.abs(deltaPx)
+    if (distance < 3) return
     active.begun = true
-    emit('beginClipEdit')
+    if (active.mode !== 'move') emit('beginClipEdit')
   }
-  const delta = deltaPx / Math.max(1, props.pixelsPerSecond)
-  const patch = resolveClipTimingEdit(active, active.mode, delta, active.sourceDuration)
-  emit('updateClipTiming', { trackId: active.trackId, clipId: active.clipId, patch })
+  latestClipPointer = event
+  updateClipPreview(event, active)
+  if (clipScrollFrame === null) {
+    lastClipScrollTime = performance.now()
+    clipScrollFrame = requestAnimationFrame(scrollAtClipPointer)
+  }
+}
+
+function updateClipPreview(event: PointerEvent, active: ClipEditState) {
+  if (active.mode === 'move') {
+    const drop = clipDropAt(event, active)
+    const track = drop && props.tracks.find(item => item.id === drop.toTrackId)
+    clipDropPreview.value = drop && track ? {
+      drop,
+      clip: active.clip,
+      color: active.color,
+      blocked: hasLockedClipInRange(clipsForTrack(track), drop.start, active.clip.duration),
+    } : null
+    return
+  }
+  emit('updateClipTiming', { trackId: active.trackId, clipId: active.clip.id, patch: timingAtPointer(event, active) })
+}
+
+function nudgeTrimEdge(event: KeyboardEvent, track: EditorTrack, clip: EditorClip, mode: 'trim-start' | 'trim-end') {
+  if (props.editingDisabled || clip.locked || clipEditState || showTrackMenu.value
+    || event.ctrlKey || event.metaKey || event.altKey) return
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+  event.preventDefault()
+  event.stopPropagation()
+  const step = event.shiftKey ? 0.1 : 0.01
+  const delta = event.key === 'ArrowLeft' ? -step : step
+  const patch = resolveClipTimingEdit(
+    clip, mode, delta, sourceForClip(clip)?.duration || 0, clipTrimBounds(clip, clipsForTrack(track)),
+  )
+  emit('updateClipTiming', { trackId: track.id, clipId: clip.id, patch })
+}
+
+function edgeScrollRate(position: number, start: number, end: number) {
+  const zone = Math.min(EDGE_SCROLL_ZONE_PX, (end - start) / 2)
+  if (zone <= 0 || position < start || position > end) return 0
+  return (Math.max(0, zone - (end - position)) - Math.max(0, zone - (position - start))) / zone
+}
+
+function scrollAtClipPointer(now: number) {
+  clipScrollFrame = null
+  const pointer = latestClipPointer
+  const active = clipEditState
+  const element = scrollEl.value
+  if (!active || !pointer || !element) return
+  const bounds = element.getBoundingClientRect()
+  const left = bounds.left + HEADER_WIDTH
+  const right = bounds.left + element.clientWidth
+  const bottom = bounds.top + element.clientHeight
+  if (pointer.clientX < left || pointer.clientX > right
+    || pointer.clientY < bounds.top || pointer.clientY > bottom) return
+
+  const speed = EDGE_SCROLL_SPEED_PX * Math.min(now - lastClipScrollTime, 50) / 1000
+  const dx = edgeScrollRate(pointer.clientX, left, right)
+  const dy = active.mode === 'move' ? edgeScrollRate(pointer.clientY, bounds.top, bottom) : 0
+  const previousX = element.scrollLeft
+  const previousY = element.scrollTop
+  if (dx) element.scrollLeft += Math.sign(dx) * Math.max(1, Math.round(Math.abs(dx) * speed))
+  if (dy) element.scrollTop += Math.sign(dy) * Math.max(1, Math.round(Math.abs(dy) * speed))
+  if (element.scrollLeft === previousX && element.scrollTop === previousY) return
+
+  updateClipPreview(pointer, active)
+  lastClipScrollTime = now
+  clipScrollFrame = requestAnimationFrame(scrollAtClipPointer)
+}
+
+function cancelClipPointer() {
+  clearClipPointer(true)
+}
+
+function clearClipPointer(cancelled: boolean) {
+  const active = clipEditState
+  if (!active) return
+  window.removeEventListener('pointermove', handleClipPointerMove)
+  window.removeEventListener('pointerup', finishClipPointer)
+  window.removeEventListener('pointercancel', finishClipPointer)
+  window.removeEventListener('blur', cancelClipPointer)
+  clipEditState = null
+  latestClipPointer = null
+  if (clipScrollFrame !== null) cancelAnimationFrame(clipScrollFrame)
+  clipScrollFrame = null
+  if (active.captureTarget.hasPointerCapture(active.pointerId)) {
+    active.captureTarget.releasePointerCapture(active.pointerId)
+  }
+  activeClipEditId.value = null
+  clipDropPreview.value = null
+  clipSnapTime.value = null
+  if (active.begun && active.mode !== 'move') emit('commitClipEdit', cancelled)
 }
 
 function finishClipPointer(event: PointerEvent) {
   const active = clipEditState
   if (!active || event.pointerId !== active.pointerId) return
-  window.removeEventListener('pointermove', handleClipPointerMove)
-  window.removeEventListener('pointerup', finishClipPointer)
-  window.removeEventListener('pointercancel', finishClipPointer)
-  clipEditState = null
-  activeClipEditId.value = null
-  if (active.begun) emit('commitClipEdit')
+  const canCommit = event.type === 'pointerup' && !props.editingDisabled
+  const drop = active.begun && active.mode === 'move' && canCommit
+    ? clipDropAt(event, active) : null
+  clearClipPointer(!canCommit)
+  if (drop) emit('dropClip', drop)
 }
 
 function trackLevel(trackId: string) {
@@ -309,6 +551,7 @@ function trackMetaLabel(track: EditorTrack) {
 }
 
 function seekFromEvent(event: MouseEvent) {
+  focusTimeline()
   const element = event.currentTarget as HTMLElement
   const rect = element.getBoundingClientRect()
   const x = event.clientX - rect.left + element.scrollLeft
@@ -343,12 +586,13 @@ function handleTimelineWheel(event: WheelEvent) {
 onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   resizeObserver = null
-  window.removeEventListener('pointermove', handleClipPointerMove)
-  window.removeEventListener('pointerup', finishClipPointer)
-  window.removeEventListener('pointercancel', finishClipPointer)
-  if (clipEditState?.begun) emit('commitClipEdit')
-  clipEditState = null
+  cancelClipPointer()
 })
+
+watch(() => props.editingDisabled, (disabled) => {
+  if (disabled) cancelClipPointer()
+})
+watch(() => [props.timelineTool, props.snappingEnabled], clearRazorGuide)
 
 function allowAssetDrop(trackId?: string | null) {
   if (!fallbackDropSourceId.value) return
@@ -385,7 +629,27 @@ function containsPoint(x: number, y: number) {
   return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
 }
 
+function toggleTimelineSnapping() {
+  focusTimeline()
+  emit('toggleSnapping')
+}
+
+function useTimelineTool(tool: EditorTimelineTool) {
+  focusTimeline()
+  emit('setTool', tool)
+}
+
+function focusTimeline() {
+  mixerRootEl.value?.focus({ preventScroll: true })
+}
+
+function selectTrackRow(event: MouseEvent, trackId: string) {
+  if (event.target instanceof Element && !event.target.closest('button')) focusTimeline()
+  emit('selectTrack', trackId)
+}
+
 function openTrackContextMenu(event: MouseEvent, track: EditorTrack) {
+  focusTimeline()
   emit('selectTrack', track.id)
   contextTrack.value = track
   contextClip.value = null
@@ -398,6 +662,7 @@ function openTrackContextMenu(event: MouseEvent, track: EditorTrack) {
 }
 
 function openClipContextMenu(event: MouseEvent, track: EditorTrack, clip: EditorClip) {
+  focusTimeline()
   emit('selectClip', { trackId: track.id, clipId: clip.id })
   contextTrack.value = null
   contextClip.value = { track, clip }
@@ -409,36 +674,43 @@ function openClipContextMenu(event: MouseEvent, track: EditorTrack, clip: Editor
   })
 }
 
-function handleTrackMenuSelect(key: string | number) {
-  const track = contextTrack.value
+function handleContextMenuSelect(key: string | number) {
   showTrackMenu.value = false
-  if (!track) return
-
+  focusTimeline()
+  if (Object.hasOwn(clipCommandLabels, key)) {
+    const command = key as EditorClipCommand
+    if (props.clipCommandState[command]) emit('clipCommand', command)
+    return
+  }
   if (key === 'inspect') emit('showInspector')
+  if (key === 'toggle-lock' && contextClip.value && !props.editingDisabled) {
+    const { track, clip } = contextClip.value
+    emit('setClipLocked', track.id, clip.id, !clip.locked)
+  }
+  const track = contextTrack.value
+  if (!track) return
   if (key === 'reveal') emit('revealTrack', track.id)
   if (key === 'remove' && !props.editingDisabled) emit('removeTrack', track.id)
 }
 
-function handleClipMenuSelect(key: string | number) {
-  const target = contextClip.value
-  showTrackMenu.value = false
-  if (!target) return
-
-  if (key === 'inspect') emit('showInspector')
-  if (key === 'remove' && !props.editingDisabled) {
-    emit('removeClip', { trackId: target.track.id, clipId: target.clip.id })
+function interceptKeydown(event: KeyboardEvent) {
+  if (clipEditState) {
+    if (event.key === 'Escape') cancelClipPointer()
+    event.preventDefault()
+    return true
   }
-}
-
-function handleContextMenuSelect(key: string | number) {
-  if (contextClip.value) {
-    handleClipMenuSelect(key)
-    return
+  if (!showTrackMenu.value) return false
+  if (event.key === 'Escape' || event.key === 'Tab') {
+    showTrackMenu.value = false
+    if (event.key === 'Escape') focusTimeline()
   }
-  handleTrackMenuSelect(key)
+  if (event.key === 'Escape' || event.key === 'Delete' || event.key === 'Backspace') event.preventDefault()
+  return true
 }
 
 defineExpose({
+  focusTimeline,
+  interceptKeydown,
   setDraggingAssetSourceId,
   setDropTargetTrackId,
   containsPoint,
@@ -447,7 +719,16 @@ defineExpose({
 </script>
 
 <template>
-  <section ref="mixerRootEl" class="editor-mixer" :class="{ 'editor-mixer--external-drop': externalDragging }">
+  <section
+    ref="mixerRootEl"
+    class="editor-mixer"
+    tabindex="0"
+    :aria-label="t('editor.timeline')"
+    :class="{
+      'editor-mixer--external-drop': externalDragging,
+      'editor-mixer--razor': timelineTool === 'razor' && !editingDisabled,
+    }"
+  >
     <div v-if="externalDragging || externalImporting" class="external-drop-hint" role="status">
       <n-spin v-if="externalImporting" size="small" />
       <span>{{ t(externalImporting ? 'editor.importingAudio' : 'editor.dropImportsTracks') }}</span>
@@ -455,12 +736,45 @@ defineExpose({
     <div
       ref="scrollEl"
       class="editor-mixer__scroll"
-      :style="{ '--lane-width': `${laneWidth}px`, '--lane-step': `${laneStepPx}px` }"
+      :style="{
+        '--lane-width': `${laneWidth}px`,
+        '--lane-step': `${laneStepPx}px`,
+        '--clip-label-height': `${CLIP_LABEL_HEIGHT}px`,
+      }"
       @wheel="handleTimelineWheel"
     >
       <div class="ruler">
         <div class="ruler__head">
           <span>{{ t('editor.tracks') }}</span>
+          <div class="ruler__tools">
+            <button
+              v-for="tool in timelineTools"
+              :key="tool.id"
+              type="button"
+              class="ruler__tool"
+              :class="{ 'ruler__tool--selection': tool.id === 'selection' }"
+              :aria-pressed="tool.id === timelineTool"
+              :aria-label="t(tool.label)"
+              :aria-keyshortcuts="tool.shortcut"
+              :title="t(tool.label) + ' (' + tool.shortcut + ')'"
+              @keydown.space.stop
+              @click="useTimelineTool(tool.id)"
+            >
+              <n-icon :component="tool.icon" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              class="ruler__tool ruler__tool--snap"
+              :aria-pressed="snappingEnabled"
+              :aria-label="t('editor.snapToEdges')"
+              aria-keyshortcuts="S"
+              :title="t('editor.snapToEdges') + ' (S)'"
+              @keydown.space.stop
+              @click="toggleTimelineSnapping"
+            >
+              <n-icon :component="Magnet" aria-hidden="true" />
+            </button>
+          </div>
           <small>{{ tracks.length }}</small>
         </div>
         <div class="ruler__track" :style="{ width: `${laneWidth}px` }" @click="seekFromEvent">
@@ -479,7 +793,7 @@ defineExpose({
           class="track-row"
           :data-track-id="track.id"
           :class="rowClass(track)"
-          @mousedown="emit('selectTrack', track.id)"
+          @mousedown.left="selectTrackRow($event, track.id)"
           @contextmenu.stop.prevent="openTrackContextMenu($event, track)"
           @mouseenter="allowAssetDrop(track.id)"
         >
@@ -530,7 +844,7 @@ defineExpose({
             </div>
           </div>
 
-          <div class="track-row__lane" @click="seekFromEvent">
+          <div class="track-row__lane" :data-clip-lane="track.id" @click="seekFromEvent">
             <div class="track-wave" :style="{ width: `${laneWidth}px`, '--track-color': track.color || '#7aa2ff' }">
               <div
                 v-for="clip in clipsForTrack(track)"
@@ -541,49 +855,122 @@ defineExpose({
                   'track-wave__clip--muted': clip.muted,
                   'track-wave__clip--selected': clip.id === selectedClipId,
                   'track-wave__clip--editing': clip.id === activeClipEditId,
+                  'track-wave__clip--locked': clip.locked,
+                  'track-wave__clip--moving': clipDropPreview?.drop.clipId === clip.id
+                    && !clipDropPreview.drop.copy && !clipDropPreview.blocked,
                 }"
-                :style="clipStyle(clip)"
-                :title="sourceForClip(clip)?.name || track.name"
+                :style="{ ...clipStyle(clip), '--clip-color': clip.color }"
+                tabindex="0"
+                role="group"
+                :aria-label="clipAccessibleName(clip, track)"
+                :title="clipAccessibleName(clip, track)"
+                @focusin="emit('selectClip', { trackId: track.id, clipId: clip.id })"
                 @pointerdown="beginClipPointer($event, track, clip, 'move')"
+                @pointermove="updateRazorGuide($event, clip)"
+                @pointerleave="clearRazorGuide"
+                @lostpointercapture="finishClipPointer"
                 @click.stop
                 @contextmenu.stop.prevent="openClipContextMenu($event, track, clip)"
               >
                 <button
+                  v-if="timelineTool === 'selection'"
                   class="track-wave__trim track-wave__trim--start"
                   type="button"
+                  :disabled="clip.locked || editingDisabled"
                   :aria-label="t('editor.clipTrimStart')"
                   :title="t('editor.clipTrimStart')"
+                  aria-keyshortcuts="ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight"
+                  @keydown="nudgeTrimEdge($event, track, clip, 'trim-start')"
                   @pointerdown.stop="beginClipPointer($event, track, clip, 'trim-start')"
                   @click.stop
                 />
-                <EditorWaveform
-                  v-if="sourceForClip(clip) && !sourceForClip(clip)?.missing"
-                  :peaks="sourceForClip(clip)?.peaks || []"
-                  :channel-peaks="sourceForClip(clip)?.channelPeaks || []"
-                  :channels="sourceForClip(clip)?.channels || 1"
-                  :asset-duration="sourceForClip(clip)?.duration || clip.duration"
-                  :offset="clip.offset"
-                  :duration="clip.duration"
-                  :width="clipWaveWidth(clip)"
-                  :height="trackWaveHeight(track)"
-                  :fade-in="clip.fadeIn"
-                  :fade-out="clip.fadeOut"
-                  :color="track.color || '#7aa2ff'"
-                />
-                <div v-else-if="sourceForClip(clip)?.missing" class="track-wave__offline">
-                  <strong>{{ t('editor.laneAudioOffline') }}</strong>
-                  <span>{{ t('editor.assetMissingHint') }}</span>
+                <div v-if="!sourceForClip(clip)?.missing" class="track-wave__label" aria-hidden="true">
+                  <n-icon v-if="clip.locked" :component="LockClosedOutline" class="track-wave__lock" />
+                  <span v-if="clipWaveWidth(clip) >= 96">{{ sourceForClip(clip)?.name || track.name }}</span>
                 </div>
-                <div v-else class="track-wave__empty">{{ t('editor.laneNoAudio') }}</div>
+                <div class="track-wave__content">
+                  <EditorWaveform
+                    v-if="sourceForClip(clip) && !sourceForClip(clip)?.missing"
+                    :peaks="sourceForClip(clip)?.peaks || []"
+                    :channel-peaks="sourceForClip(clip)?.channelPeaks || []"
+                    :channels="sourceForClip(clip)?.channels || 1"
+                    :asset-duration="sourceForClip(clip)?.duration || clip.duration"
+                    :offset="clip.offset"
+                    :duration="clip.duration"
+                    :width="clipWaveWidth(clip)"
+                    :height="trackWaveHeight(track)"
+                    :fade-in="clip.fadeIn"
+                    :fade-out="clip.fadeOut"
+                    :color="clipColor(clip, track)"
+                  />
+                  <div v-else-if="sourceForClip(clip)?.missing" class="track-wave__offline">
+                    <strong>{{ t('editor.laneAudioOffline') }}</strong>
+                    <span>{{ t('editor.assetMissingHint') }}</span>
+                  </div>
+                  <div v-else class="track-wave__empty">{{ t('editor.laneNoAudio') }}</div>
+                </div>
                 <button
+                  v-if="timelineTool === 'selection'"
                   class="track-wave__trim track-wave__trim--end"
                   type="button"
+                  :disabled="clip.locked || editingDisabled"
                   :aria-label="t('editor.clipTrimEnd')"
                   :title="t('editor.clipTrimEnd')"
+                  aria-keyshortcuts="ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight"
+                  @keydown="nudgeTrimEdge($event, track, clip, 'trim-end')"
                   @pointerdown.stop="beginClipPointer($event, track, clip, 'trim-end')"
                   @click.stop
                 />
               </div>
+              <div
+                v-if="clipDropPreview?.drop.toTrackId === track.id"
+                class="track-wave__clip track-wave__drop-preview"
+                :class="{
+                  'track-wave__clip--muted': clipDropPreview.clip.muted,
+                  'track-wave__drop-preview--blocked': clipDropPreview.blocked,
+                }"
+                :style="{ ...clipStyle(clipDropPreview.clip, clipDropPreview.drop.start), '--clip-color': clipDropPreview.color }"
+                aria-hidden="true"
+              >
+                <template v-if="!clipDropPreview.blocked">
+                  <div class="track-wave__label">
+                    <span v-if="clipDropPreview.drop.copy || clipWaveWidth(clipDropPreview.clip) >= 96">
+                      {{ clipDropPreview.drop.copy ? '+ ' : '' }}{{ clipWaveWidth(clipDropPreview.clip) >= 96 ? clipDropPreviewSource?.name || track.name : '' }}
+                    </span>
+                  </div>
+                  <div v-if="clipDropPreviewSource && !clipDropPreviewSource.missing" class="track-wave__content">
+                    <EditorWaveform
+                      :peaks="clipDropPreviewSource.peaks || []"
+                      :channel-peaks="clipDropPreviewSource.channelPeaks || []"
+                      :channels="clipDropPreviewSource.channels"
+                      :asset-duration="clipDropPreviewSource.duration"
+                      :offset="clipDropPreview.clip.offset"
+                      :duration="clipDropPreview.clip.duration"
+                      :width="clipWaveWidth(clipDropPreview.clip)"
+                      :height="trackWaveHeight(track)"
+                      :fade-in="clipDropPreview.clip.fadeIn"
+                      :fade-out="clipDropPreview.clip.fadeOut"
+                      :color="clipDropPreview.color"
+                    />
+                  </div>
+                </template>
+              </div>
+              <div
+                v-for="range in overlapRangesByTrack.get(track.id)"
+                :key="range.start"
+                class="track-wave__overlap"
+                :style="{
+                  left: `${range.start * pixelsPerSecond}px`,
+                  width: `${(range.end - range.start) * pixelsPerSecond}px`,
+                }"
+                aria-hidden="true"
+              />
+              <div
+                v-if="track.id === selectedTrackId && selectedClip && !clipDropPreview"
+                class="track-wave__selection"
+                :style="clipStyle(selectedClip)"
+                aria-hidden="true"
+              />
               <div
                 v-if="recordingPreview?.trackId === track.id"
                 class="track-wave__recording"
@@ -601,6 +988,12 @@ defineExpose({
             </div>
           </div>
         </div>
+        <span
+          v-if="snappingEnabled && clipSnapTime !== null"
+          class="clip-snap-line"
+          aria-hidden="true"
+          :style="{ transform: `translateX(${HEADER_WIDTH + clipSnapTime * pixelsPerSecond}px)` }"
+        />
       </div>
 
       <div
@@ -634,7 +1027,28 @@ defineExpose({
 </template>
 
 <style scoped>
+:global(.editor-clip-command) {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+:global(.editor-clip-command kbd) {
+  color: var(--on-surface-muted);
+  font-family: inherit;
+  font-size: 0.85em;
+}
+
+.editor-mixer:focus-visible,
+.track-wave__clip:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+
 .editor-mixer {
+  --ruler-height: 34px;
   position: relative;
   min-width: 0;
   min-height: 0;
@@ -714,7 +1128,7 @@ defineExpose({
   grid-template-columns: 180px auto;
   width: max-content;
   min-width: 100%;
-  height: 28px;
+  height: var(--ruler-height);
   border-bottom: 1px solid var(--outline);
   background: color-mix(in srgb, var(--surface) 84%, var(--surface-1));
 }
@@ -740,6 +1154,51 @@ defineExpose({
   text-transform: uppercase;
 }
 
+.ruler__tools {
+  display: flex;
+  gap: 3px;
+  margin-left: auto;
+  margin-right: 7px;
+}
+
+.ruler__tool {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--outline-strong);
+  border-radius: 5px;
+  background: var(--surface-1);
+  color: var(--on-surface);
+  font-size: 19px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ruler__tool:hover {
+  background: var(--surface-2);
+}
+
+.ruler__tool[aria-pressed='true'] {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 19%, var(--surface-1));
+  color: var(--primary-strong);
+}
+
+.ruler__tool:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.ruler__tool--selection :deep(svg) {
+  transform: rotate(-90deg);
+}
+
+.ruler__tool--snap {
+  margin-inline-start: 4px;
+}
+
 .ruler__grid {
   position: relative;
   width: 100%;
@@ -755,7 +1214,7 @@ defineExpose({
   position: absolute;
   top: 0;
   left: 0;
-  padding: 7px 0 0 4px;
+  padding: 10px 0 0 4px;
   border-left: 1px solid var(--outline);
   color: var(--on-surface-muted);
   font-size: 10px;
@@ -780,7 +1239,7 @@ defineExpose({
   position: relative;
   width: max-content;
   min-width: 100%;
-  min-height: calc(100% - 28px);
+  min-height: calc(100% - var(--ruler-height));
   background-image:
     linear-gradient(90deg, transparent 179px, color-mix(in srgb, var(--outline) 82%, transparent) 179px 180px, transparent 180px),
     linear-gradient(90deg, transparent 0 calc(var(--lane-step) - 1px), color-mix(in srgb, var(--outline) 18%, transparent) calc(var(--lane-step) - 1px) var(--lane-step));
@@ -797,8 +1256,8 @@ defineExpose({
   background: color-mix(in srgb, var(--warning) 5%, transparent);
 }
 
-.track-row--dimmed .track-row__lane {
-  opacity: 0.46;
+.track-row--dimmed {
+  --track-content-opacity: 0.46;
 }
 
 .track-row__head {
@@ -978,16 +1437,8 @@ defineExpose({
   z-index: 0;
   width: var(--lane-width);
   overflow: hidden;
-  background: color-mix(in srgb, var(--surface) 76%, var(--surface-1));
+  background: color-mix(in srgb, var(--surface) 84%, var(--surface-3));
   border-left: 1px solid color-mix(in srgb, var(--outline) 44%, transparent);
-}
-
-.track-row--offline .track-row__lane {
-  background: color-mix(in srgb, var(--warning) 4%, var(--surface));
-}
-
-.track-row--selected .track-row__lane {
-  background: color-mix(in srgb, var(--primary-soft) 16%, transparent);
 }
 
 .track-wave {
@@ -997,6 +1448,9 @@ defineExpose({
 }
 
 .track-wave__clip {
+  --clip-opacity: calc(var(--track-content-opacity, 1) * var(--clip-content-opacity, 1));
+  --clip-tint: color-mix(in srgb, var(--clip-color, var(--track-color)) calc(100% * var(--clip-opacity)), var(--surface-2));
+  --clip-border: color-mix(in srgb, var(--on-surface) 32%, var(--clip-tint));
   position: absolute;
   top: 4px;
   left: 0;
@@ -1006,40 +1460,126 @@ defineExpose({
   min-width: 1px;
   overflow: hidden;
   border-radius: 2px;
-  border-top: 1px solid color-mix(in srgb, var(--track-color, var(--on-surface-muted)) 22%, transparent);
-  border-right: 1px solid color-mix(in srgb, var(--track-color, var(--on-surface-muted)) 22%, transparent);
-  border-bottom: 1px solid color-mix(in srgb, var(--track-color, var(--on-surface-muted)) 22%, transparent);
-  border-left: 1px solid color-mix(in srgb, var(--track-color, var(--on-surface-muted)) 22%, transparent);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--track-color, #7aa2ff) 22%, color-mix(in srgb, var(--surface-1) 52%, var(--surface-2))),
-      color-mix(in srgb, var(--track-color, #7aa2ff) 13%, color-mix(in srgb, var(--surface-1) 52%, var(--surface-2)))
-    );
-  box-shadow: none;
+  background: color-mix(in srgb, var(--clip-tint) 32%, var(--surface-1));
   cursor: grab;
   touch-action: none;
 }
 
+.track-wave__clip::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px var(--clip-border);
+  pointer-events: none;
+}
+
+.track-wave__label {
+  height: var(--clip-label-height);
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--clip-tint) 46%, var(--surface-2));
+  color: color-mix(in srgb, var(--primary-strong) 52%, var(--clip-label-contrast, var(--on-surface)));
+  font-size: 10px;
+  font-weight: 600;
+  line-height: var(--clip-label-height);
+}
+
+.track-wave__lock {
+  flex: none;
+  margin-inline-start: 5px;
+}
+
+:global(.dark-theme) .editor-mixer {
+  --clip-label-contrast: #fff;
+}
+
+.track-wave__label span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  padding-inline: 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.track-wave__content {
+  height: calc(100% - var(--clip-label-height));
+  opacity: var(--clip-opacity);
+}
+
+.editor-mixer--razor .track-wave__clip {
+  cursor: crosshair;
+}
+
+.editor-mixer--razor .track-wave__clip--locked {
+  cursor: not-allowed;
+}
+
+.track-wave__clip--moving {
+  background: transparent;
+}
+
+.track-wave__clip--moving::after {
+  border: 1px dashed var(--clip-border);
+  box-shadow: none;
+}
+
+.track-wave__clip--moving > * {
+  opacity: 0;
+}
+
+.track-wave__drop-preview {
+  z-index: 6;
+  pointer-events: none;
+}
+
+.track-wave__drop-preview::after {
+  box-shadow: inset 0 0 0 1px var(--primary-strong);
+}
+
+.track-wave__drop-preview--blocked {
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+}
+
+.track-wave__drop-preview--blocked::after {
+  box-shadow: inset 0 0 0 1px var(--danger);
+}
+
+.track-wave__overlap {
+  --overlap-edge: color-mix(in srgb, var(--track-color) 52%, var(--on-surface));
+  --overlap-shade: color-mix(in srgb, var(--track-color) 22%, black);
+  position: absolute;
+  z-index: 5;
+  top: 4px;
+  bottom: 4px;
+  min-width: 2px;
+  box-shadow: inset 1px 0 var(--overlap-edge), inset -1px 0 var(--overlap-edge);
+  background: color-mix(in srgb, var(--overlap-shade) 26%, transparent);
+  pointer-events: none;
+}
+
 .track-wave__clip--muted {
-  opacity: 0.46;
+  --clip-content-opacity: 0.46;
 }
 
 .track-wave__clip--editing {
   cursor: grabbing;
 }
 
-.track-wave__clip--selected {
-  border-color: color-mix(in srgb, var(--track-color, var(--primary)) 58%, var(--outline));
-}
-
-.track-wave__clip--selected::before {
-  background: color-mix(in srgb, var(--track-color, var(--primary)) 76%, transparent);
+.track-wave__selection {
+  position: absolute;
+  z-index: 6;
+  inset: 4px auto 4px 0;
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 2px var(--primary-strong);
+  pointer-events: none;
 }
 
 .track-wave__recording {
   position: absolute;
-  z-index: 5;
+  z-index: 7;
   top: 4px;
   left: 0;
   bottom: 4px;
@@ -1069,7 +1609,7 @@ defineExpose({
   top: 0;
   bottom: 0;
   z-index: 4;
-  width: 7px;
+  width: min(7px, 25%);
   padding: 0;
   border: 0;
   background: transparent;
@@ -1086,8 +1626,8 @@ defineExpose({
   right: 0;
 }
 
-.track-wave__clip:hover .track-wave__trim,
-.track-wave__clip--selected .track-wave__trim {
+.track-wave__trim:hover,
+.track-wave__trim:focus-visible {
   opacity: 1;
 }
 
@@ -1096,16 +1636,19 @@ defineExpose({
   position: absolute;
   top: 28%;
   bottom: 28%;
-  left: 3px;
+  left: 50%;
   width: 1px;
+  transform: translateX(-50%);
   border-radius: 999px;
   background: color-mix(in srgb, var(--on-surface) 68%, transparent);
 }
 
 .track-wave__clip--offline {
-  border-top-color: color-mix(in srgb, var(--warning) 28%, transparent);
-  border-right-color: color-mix(in srgb, var(--warning) 28%, transparent);
-  border-bottom-color: color-mix(in srgb, var(--warning) 28%, transparent);
+  --clip-border: color-mix(in srgb, var(--on-surface) 40%, var(--warning));
+}
+
+.track-wave__clip--offline .track-wave__content {
+  height: 100%;
   background:
     repeating-linear-gradient(
       135deg,
@@ -1117,31 +1660,6 @@ defineExpose({
       color-mix(in srgb, var(--warning) 10%, color-mix(in srgb, var(--surface-1) 52%, var(--surface-2))),
       color-mix(in srgb, var(--warning) 4%, color-mix(in srgb, var(--surface-1) 52%, var(--surface-2)))
     );
-}
-
-/* Explicit end-cap so the clip terminus is clearly pinned to the right edge. */
-.track-wave__clip::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  right: 0;
-  width: 3px;
-  background: color-mix(in srgb, var(--track-color, #7aa2ff) 44%, transparent);
-  pointer-events: none;
-}
-
-.track-wave__clip::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 50%;
-  height: 1px;
-  transform: translateY(-50%);
-  background: color-mix(in srgb, var(--track-color, #7aa2ff) 30%, transparent);
-  opacity: 0.62;
-  pointer-events: none;
 }
 
 .track-wave__empty {
@@ -1213,6 +1731,14 @@ defineExpose({
   color: var(--primary-strong);
   background: color-mix(in srgb, var(--primary-soft) 44%, var(--surface-1));
   font-size: 12px;
+}
+
+.clip-snap-line {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 2;
+  border-left: 1px solid var(--primary-strong);
+  pointer-events: none;
 }
 
 .global-playhead {

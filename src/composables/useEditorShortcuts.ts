@@ -1,6 +1,9 @@
+import type { EditorTimelineTool } from '@/types/editor'
+import { matchEditorClipShortcut, type EditorClipCommand } from '@/utils/editorClipShortcuts'
 import { onBeforeUnmount, onMounted } from 'vue'
 
 export type EditorShortcutHandlers = {
+  interceptKeydown?: (event: KeyboardEvent) => boolean
   togglePlay: () => void
   stop: () => void
   undo: () => void
@@ -12,29 +15,57 @@ export type EditorShortcutHandlers = {
   seek: (deltaSeconds: number) => void
   toggleMute: () => void
   toggleSolo: () => void
-  removeTrack: () => void
+  canUseTimeline: () => boolean
+  clipCommand: (command: EditorClipCommand) => void
+  setTimelineTool: (tool: EditorTimelineTool) => void
+  toggleSnapping: () => void
+  seekClipEdge: (direction: -1 | 1) => void
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false
-  const tag = target.tagName
-  return (
-    tag === 'INPUT' ||
-    tag === 'TEXTAREA' ||
-    tag === 'SELECT' ||
-    Boolean(target.closest('[role="combobox"], [role="listbox"], [role="option"]')) ||
-    target.isContentEditable
-  )
+  if (!(target instanceof Element)) return false
+  return Boolean(target.closest(
+    'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], '
+    + '[role="combobox"], [role="listbox"], [role="option"], [role="slider"], [role="spinbutton"]',
+  ))
 }
 
-/**
- * 编辑器（Stem 混音器）全局键盘快捷键。输入框聚焦时自动忽略（除保存 / 撤销 / 重做）。
- */
 export function useEditorShortcuts(handlers: EditorShortcutHandlers) {
+  function onTimelineKeydown(event: KeyboardEvent) {
+    if (!handlers.canUseTimeline()) return
+    if (document.querySelector('[aria-modal="true"], .n-modal-mask')) return
+    if (event.target instanceof Element && event.target.closest('.n-popover, .n-dropdown-menu, [role="menu"]')) return
+    const command = matchEditorClipShortcut(event)
+    if (command) {
+      event.preventDefault()
+      if (!event.repeat) handlers.clipCommand(command)
+      return
+    }
+    if (event.altKey || event.shiftKey) return
+    if (event.ctrlKey !== event.metaKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+      event.preventDefault()
+      handlers.seekClipEdge(event.key === 'ArrowLeft' ? -1 : 1)
+      return
+    }
+    if (event.ctrlKey || event.metaKey) return
+    const key = event.key.toLowerCase()
+    if (key !== 'v' && key !== 'c' && key !== 's') return
+    event.preventDefault()
+    if (event.repeat) return
+    if (key === 's') handlers.toggleSnapping()
+    else handlers.setTimelineTool(key === 'v' ? 'selection' : 'razor')
+  }
+
   function onKeydown(event: KeyboardEvent) {
     if (event.defaultPrevented || event.isComposing) return
+    if (handlers.interceptKeydown?.(event)) return
+    if (event.target instanceof Element && event.target.closest('[role="dialog"], [role="alertdialog"]')) return
     const mod = event.ctrlKey || event.metaKey
     const editable = isEditableTarget(event.target)
+    if (!editable) {
+      onTimelineKeydown(event)
+      if (event.defaultPrevented) return
+    }
 
     // Ctrl/Cmd 组合键：即便在输入框内也允许保存
     if (mod) {
@@ -68,11 +99,6 @@ export function useEditorShortcuts(handlers: EditorShortcutHandlers) {
         break
       case 'Escape':
         handlers.stop()
-        break
-      case 'Delete':
-      case 'Backspace':
-        event.preventDefault()
-        handlers.removeTrack()
         break
       case 'm':
       case 'M':

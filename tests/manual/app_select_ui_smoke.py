@@ -274,6 +274,16 @@ with sync_playwright() as p:
         page.evaluate("window.dispatchEvent(new KeyboardEvent('keydown', {key:' ', bubbles:true}))")
         assert page.evaluate('selectFixture.shortcuts.togglePlay') == 1
         results.append('real editor shortcuts ignore dropdown navigation and still work outside controls')
+        page.evaluate("window.dispatchEvent(new KeyboardEvent('keydown', {key:'s', bubbles:true}))")
+        assert page.evaluate('selectFixture.shortcuts.toggleSnapping || 0') == 0
+        page.evaluate('selectFixture.state.exportOpen = false')
+        expect(modal).to_be_hidden()
+        page.locator('#search').press('s')
+        assert page.evaluate('selectFixture.shortcuts.toggleSnapping || 0') == 0
+        page.locator('#open-export').focus()
+        page.keyboard.press('s')
+        assert page.evaluate('selectFixture.shortcuts.toggleSnapping') == 1
+        results.append('timeline shortcuts work outside the timeline and respect search fields and export modals')
         page.goto(args.base_url + '/', wait_until='networkidle')
         page.evaluate("""async () => {
           const [{useSettingsStore}, {useBeginnerGuideStore}, {useModelStore}, {useTaskStore}, {createDemoModels}, {useAppStore}] = await Promise.all([

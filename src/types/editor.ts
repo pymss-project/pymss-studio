@@ -21,6 +21,7 @@ export type EditorSource = {
 export type EditorClip = {
   id: string
   assetId: string
+  color?: string
   start: number
   offset: number
   duration: number
@@ -29,6 +30,16 @@ export type EditorClip = {
   fadeOut: number
   muted: boolean
   locked: boolean
+}
+
+export type EditorTimelineTool = 'selection' | 'razor'
+
+export type EditorClipDrop = {
+  clipId: string
+  fromTrackId: string
+  toTrackId: string
+  start: number
+  copy: boolean
 }
 
 /** Persist unknown formats and opaque state references so projects remain recoverable. */

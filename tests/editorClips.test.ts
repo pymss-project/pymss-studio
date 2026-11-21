@@ -1,12 +1,18 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import {
+  adjacentClipEdge,
   clipIsActive,
   clipMediaTime,
+  clipTrimBounds,
   clipsForTrack,
+  overlappingClipRanges,
   overwriteClipsInRange,
   resolveClipTimingEdit,
+  resolveSnappedClipTimingEdit,
+  resolveSnappedSplitTime,
   syncSingleClipFadeCompatibility,
+  timelineClipEdges,
   timelineDuration,
 } from '../src/utils/editorClips.ts'
 import type { EditorClip, EditorSource, EditorTrack } from '../src/types/editor.ts'
@@ -118,6 +124,98 @@ describe('editor clip timeline helpers', () => {
     })
     assert.deepEqual(resolveClipTimingEdit(timing, 'trim-end', 9, 6), { duration: 5 })
     assert.deepEqual(resolveClipTimingEdit(timing, 'trim-end', -9, 6), { duration: 0.05 })
+  })
+
+  it('stops either trim edge at the nearest same-track neighbor and rejects snap targets beyond it', () => {
+    const clip = { id: 'selected', start: 5, offset: 3, duration: 2 }
+    const bounds = clipTrimBounds(clip, [
+      { id: 'far-right', start: 12, duration: 1 },
+      { id: 'left', start: 3, duration: 1 },
+      clip,
+      { id: 'right', start: 8, duration: 2 },
+    ])
+    assert.deepEqual(bounds, { start: 4, end: 8 })
+    assert.deepEqual(resolveClipTimingEdit(clip, 'trim-start', -3, 20, bounds), {
+      start: 4, offset: 2, duration: 3,
+    })
+    assert.deepEqual(resolveClipTimingEdit(clip, 'trim-end', 3, 20, bounds), { duration: 3 })
+    assert.deepEqual(resolveSnappedClipTimingEdit(clip, 'trim-end', 1.04, 20, [8.04, 8], 0.08, bounds), {
+      patch: { duration: 3 }, snapTime: 8,
+    })
+  })
+
+  it('allows shrinking a clip with existing overlaps without extending either overlap', () => {
+    const clip = { id: 'selected', start: 5, offset: 3, duration: 2 }
+    const bounds = clipTrimBounds(clip, [
+      { id: 'left', start: 3, duration: 3 },
+      { id: 'right', start: 6, duration: 3 },
+    ])
+    assert.deepEqual(bounds, { start: 5, end: 7 })
+    assert.deepEqual(resolveClipTimingEdit(clip, 'trim-end', 3, 20, bounds), { duration: 2 })
+    assert.deepEqual(resolveClipTimingEdit(clip, 'trim-end', -1, 20, bounds), { duration: 1 })
+    assert.deepEqual(resolveClipTimingEdit(clip, 'trim-start', 1, 20, bounds), {
+      start: 6, offset: 4, duration: 1,
+    })
+  })
+
+  it('navigates unique clip boundaries and skips the current cut', () => {
+    const sources = new Map([[source.id, source]])
+    const firstClip = clipsForTrack(track, sources)[0]
+    const secondTrack = { ...track, id: 'second', clips: [{ ...firstClip, id: 'second', start: 4, duration: 3 }] }
+    const edges = timelineClipEdges([track, secondTrack], sources)
+    assert.deepEqual(edges, [0, 4, 7])
+    assert.equal(adjacentClipEdge(edges, 4, -1), 0)
+    assert.equal(adjacentClipEdge(edges, 4, 1), 7)
+    assert.equal(adjacentClipEdge(edges, 5, -1), 4)
+    assert.equal(adjacentClipEdge(edges, 7, 1), null)
+    assert.deepEqual(timelineClipEdges([track, secondTrack], sources, 'second'), [0, 4])
+  })
+
+  it('marks only regions shared by multiple clips and merges nested or contiguous overlaps', () => {
+    assert.deepEqual(overlappingClipRanges([
+      { start: 10, duration: 2 },
+      { start: 3, duration: 3 },
+      { start: 0, duration: 5 },
+      { start: 2, duration: 2 },
+      { start: 4.5, duration: 0.25 },
+      { start: 11, duration: 2 },
+    ]), [{ start: 2, end: 5 }, { start: 11, end: 12 }])
+
+    assert.deepEqual(overlappingClipRanges([
+      { start: 0.1, duration: 0.2 },
+      { start: 0.3, duration: 0.2 },
+      { start: 0.5, duration: 0.5 },
+    ]), [])
+  })
+
+  it('snaps razor cuts to the nearest reachable interior point', () => {
+    const clip = { start: 3, duration: 2 }
+    const targets = [3, 4, 4.25, 5]
+    assert.equal(resolveSnappedSplitTime(clip, 4.2, 1 / 48_000, targets, 0.3), 4.25)
+    assert.equal(resolveSnappedSplitTime(clip, 3.05, 1 / 48_000, targets, 0.3), 3.05)
+    assert.equal(resolveSnappedSplitTime(clip, 4.98, 1 / 48_000, targets, 0.3), 4.98)
+  })
+
+  it('snaps either moving edge without rounding target times', () => {
+    const timing = { start: 3, offset: 1, duration: 2 }
+    const target = 7 + 1 / 48000
+    const moved = resolveSnappedClipTimingEdit(timing, 'move', 1.97, 8, [target], 0.08)
+    assert.equal(moved.snapTime, target)
+    assert.ok(Math.abs(moved.patch.start! + timing.duration - target) < 1e-10)
+    const start = resolveSnappedClipTimingEdit(timing, 'move', 0.97, 8, [4], 0.08)
+    assert.deepEqual(start, { patch: { start: 4 }, snapTime: 4 })
+  })
+
+  it('snaps trim edges within the source and skips unreachable targets', () => {
+    const timing = { start: 3, offset: 1, duration: 2 }
+    assert.deepEqual(resolveSnappedClipTimingEdit(timing, 'trim-start', -0.97, 4, [1.99, 2], 0.08), {
+      patch: { start: 2, offset: 0, duration: 3 }, snapTime: 2,
+    })
+    assert.deepEqual(resolveSnappedClipTimingEdit(timing, 'trim-end', 0.99, 4, [6.01], 0.08), {
+      patch: { duration: 2.99 }, snapTime: null,
+    })
+    const short = { start: 1, offset: 0, duration: 1 / 48000 }
+    assert.equal(resolveClipTimingEdit(short, 'trim-end', -1, 4).duration, short.duration)
   })
 
   it('keeps both sides of a clip when punch-in recording overwrites its middle', () => {

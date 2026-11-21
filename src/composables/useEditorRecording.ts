@@ -30,6 +30,8 @@ type RecordingResult = {
   channels: number
 }
 
+type CompletedRecording = RecordingResult & { lockedOverlap: boolean }
+
 type RecordingState = 'idle' | 'preparing' | 'recording' | 'stopping'
 
 class RecordingStartCancelled extends Error {}
@@ -88,7 +90,7 @@ export function useEditorRecording(options: RecordingOptions) {
   let appendError: unknown = null
   let lifecycleGeneration = 0
   let allocationPromise: Promise<RecordingHandle> | null = null
-  let stopTask: Promise<RecordingResult | null> | null = null
+  let stopTask: Promise<CompletedRecording | null> | null = null
   let cancelTask: Promise<void> | null = null
   let recordingSession: EditorSession | null = null
   let nativeRecording = false
@@ -440,12 +442,12 @@ export function useEditorRecording(options: RecordingOptions) {
       const targetStillCurrent = editor.session === recordingSession && editor.session?.id === projectId
         && editor.session.tracks.some((track) => track.id === targetId)
       if (!targetStillCurrent) throw new Error(message('editor.recordingTargetMissing'))
-      await editor.addRecordingClip(targetId, result, startTime.value)
+      const { lockedOverlap } = await editor.addRecordingClip(targetId, result, startTime.value)
       attached = true
       await editor.flushSave()
       playback.setCurrentTime(startTime.value + result.duration)
       error.value = null
-      return result
+      return { ...result, lockedOverlap }
     } catch (cause) {
       if (finalized && !attached) await discardFinalized(projectId, activeRecordingId)
       else if (!finalized) await cleanupPartial(projectId, activeRecordingId)
@@ -523,11 +525,6 @@ export function useEditorRecording(options: RecordingOptions) {
     if (cancelTask) await cancelTask
   }
 
-  async function toggleRecording() {
-    if (state.value === 'recording') return Boolean(await stopRecording())
-    return startRecording()
-  }
-
   const handleDeviceChange = () => void refreshDevices(false)
   if (typeof navigator !== 'undefined' && navigator.mediaDevices?.addEventListener) {
     navigator.mediaDevices.addEventListener('devicechange', handleDeviceChange)
@@ -572,6 +569,5 @@ export function useEditorRecording(options: RecordingOptions) {
     startRecording,
     stopRecording,
     cancelRecording,
-    toggleRecording,
   }
 }

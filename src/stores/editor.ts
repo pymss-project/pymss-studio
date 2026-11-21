@@ -8,6 +8,9 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import i18n, { getCurrentLocale } from '@/i18n'
 import {
+  clipColor,
+  clipsForTrack,
+  hasLockedClipInRange,
   overwriteClipsInRange,
   syncSingleClipFadeCompatibility,
   timelineDuration,
@@ -26,6 +29,7 @@ import type {
   EditorSource,
   EditorSourceRole,
   EditorClip,
+  EditorClipDrop,
   EditorTrack,
   EditorAssetTreeNode,
 } from '@/types/editor'
@@ -402,6 +406,7 @@ function normalizeClip(clip: Partial<EditorClip>, source?: EditorSource): Editor
   return {
     id: String(clip.id || makeId('clip')),
     assetId: String(clip.assetId || source?.id || ''),
+    ...(typeof clip.color === 'string' && clip.color.trim() ? { color: clip.color.trim() } : {}),
     start: Math.max(0, Number(clip.start || 0)),
     offset,
     duration,
@@ -552,21 +557,7 @@ function runLimited<T>(items: T[], limit: number, runner: (item: T) => Promise<v
   return Promise.all(workers)
 }
 
-function trackToExportTrack(track: EditorTrack, source?: EditorSource) {
-  const clips = track.clips?.length
-    ? track.clips.map((clip) => ({ ...clip }))
-    : [{
-        id: `clip_${track.id}`,
-        assetId: track.sourceId,
-        start: 0,
-        offset: 0,
-        duration: source?.duration || 0,
-        volume: 1,
-        fadeIn: track.fadeIn,
-        fadeOut: track.fadeOut,
-        muted: false,
-        locked: false,
-      }]
+function trackToExportTrack(track: EditorTrack, sources: Map<string, EditorSource>) {
   return {
     id: track.id,
     sourceId: track.sourceId,
@@ -576,7 +567,7 @@ function trackToExportTrack(track: EditorTrack, source?: EditorSource) {
     pan: track.pan,
     muted: track.muted,
     solo: track.solo,
-    clips,
+    clips: clipsForTrack(track, sources),
   }
 }
 
@@ -594,6 +585,7 @@ export const useEditorStore = defineStore('editor', () => {
   const pluginStateUnavailable = ref(false)
   const selectedTrackId = ref<string | null>(null)
   const selectedClipId = ref<string | null>(null)
+  const clipClipboard = ref<EditorClip | null>(null)
   const pixelsPerSecond = ref(96)
   const exportFormat = ref<EditorExportFormat>('wav')
   const projectSummaries = ref<EditorProjectSummary[]>([])
@@ -601,6 +593,7 @@ export const useEditorStore = defineStore('editor', () => {
   const undoStack = ref<HistorySnapshot[]>([])
   const redoStack = ref<HistorySnapshot[]>([])
   const interactionDepth = ref(0)
+  let interactionStart: HistorySnapshot | null = null
   const pendingPeaks = new Map<string, Promise<EditorSource | null>>()
   let pendingExport: PendingEditorExport | null = null
   let exportUnlisten: UnlistenFn | null = null
@@ -611,8 +604,8 @@ export const useEditorStore = defineStore('editor', () => {
   let exportRequestSequence = 0
   let nativeRenderTaskId: string | null = null
 
-  const canUndo = computed(() => undoStack.value.length > 0)
-  const canRedo = computed(() => redoStack.value.length > 0)
+  const canUndo = computed(() => interactionDepth.value === 0 && undoStack.value.length > 0)
+  const canRedo = computed(() => interactionDepth.value === 0 && redoStack.value.length > 0)
   const masterVolume = computed(() => session.value?.masterVolume ?? 1)
   const masterPan = computed(() => session.value?.masterPan ?? 0)
 
@@ -632,6 +625,13 @@ export const useEditorStore = defineStore('editor', () => {
     if (!track || !selectedClipId.value) return null
     return track.clips?.find((clip) => clip.id === selectedClipId.value) || null
   })
+
+  const canCopyClip = computed(() => !!selectedClip.value && !interactionDepth.value)
+  const canCutClip = computed(() => canCopyClip.value && !selectedClip.value?.locked)
+  const canPasteClip = computed(() => (
+    interactionDepth.value === 0 && selectedTrack.value !== null
+    && clipClipboard.value !== null && sourceMap.value.has(clipClipboard.value.assetId)
+  ))
 
   const selectedSource = computed(() => {
     const track = selectedTrack.value
@@ -726,17 +726,20 @@ export const useEditorStore = defineStore('editor', () => {
     selectedClipId.value = next.selectedClipId
   }
 
-  function pushHistory() {
-    if (interactionDepth.value > 0) return
-    const snap = snapshot()
-    if (!snap) return
-    undoStack.value.push(snap)
+  function recordHistory(previous: HistorySnapshot) {
+    undoStack.value.push(previous)
     if (undoStack.value.length > HISTORY_LIMIT) undoStack.value.shift()
     redoStack.value = []
   }
 
+  function pushHistory() {
+    if (interactionDepth.value > 0) return
+    const previous = snapshot()
+    if (previous) recordHistory(previous)
+  }
+
   function undo() {
-    if (!session.value || !undoStack.value.length) return
+    if (!session.value || !canUndo.value) return
     const current = snapshot()
     const previous = undoStack.value.pop()!
     if (current) redoStack.value.push(current)
@@ -745,7 +748,7 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   function redo() {
-    if (!session.value || !redoStack.value.length) return
+    if (!session.value || !canRedo.value) return
     const current = snapshot()
     const next = redoStack.value.pop()!
     if (current) undoStack.value.push(current)
@@ -754,19 +757,34 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   function beginInteraction() {
-    if (interactionDepth.value === 0) pushHistory()
+    if (!session.value) return
+    if (interactionDepth.value === 0) interactionStart = snapshot()
     interactionDepth.value += 1
   }
 
-  function commitInteraction() {
-    if (interactionDepth.value > 0) interactionDepth.value -= 1
-    if (interactionDepth.value === 0) scheduleSave()
+  function commitInteraction(cancelled = false) {
+    if (!interactionDepth.value) return
+    interactionDepth.value -= 1
+    if (interactionDepth.value > 0) return
+
+    const previous = interactionStart
+    interactionStart = null
+    const current = snapshot()
+    if (!previous || !current) return
+    current.selectedTrackId = previous.selectedTrackId
+    current.selectedClipId = previous.selectedClipId
+    if (JSON.stringify(current) === JSON.stringify(previous)) return
+
+    if (cancelled) applySnapshot(previous)
+    else recordHistory(previous)
+    scheduleSave()
   }
 
   function clearHistory() {
     undoStack.value = []
     redoStack.value = []
     interactionDepth.value = 0
+    interactionStart = null
   }
 
   let pluginSaveTimer: ReturnType<typeof setTimeout> | null = null
@@ -839,6 +857,7 @@ export const useEditorStore = defineStore('editor', () => {
       schedulePluginStateSave(host.project)
     }
   })
+  watch(() => session.value?.id, () => { clipClipboard.value = null }, { flush: 'sync' })
   watch(() => session.value?.id, () => {
     pendingDialogMessage = null
     if (pluginSaveTimer) clearTimeout(pluginSaveTimer)
@@ -983,10 +1002,12 @@ export const useEditorStore = defineStore('editor', () => {
     if (exporting.value) await cancelExport()
   }, 100))
 
-  function selectTrack(trackId: string | null) {
+  function selectTrack(trackId: string | null, selectFirstClip = true) {
     selectedTrackId.value = trackId
     const track = session.value?.tracks.find((item) => item.id === trackId)
-    if (!track?.clips?.some((clip) => clip.id === selectedClipId.value)) {
+    if (!selectFirstClip) {
+      selectedClipId.value = null
+    } else if (!track?.clips?.some((clip) => clip.id === selectedClipId.value)) {
       selectedClipId.value = track?.clips?.[0]?.id || null
     }
   }
@@ -1514,11 +1535,9 @@ export const useEditorStore = defineStore('editor', () => {
     return track
   }
 
-  function addRecordingTrack() {
-    if (!session.value) throw new Error('Editor session is not loaded')
-    pushHistory()
-    const index = session.value.tracks.filter((track) => track.role === 'recording').length + 1
-    const track: EditorTrack = {
+  function newRecordingTrack(tracks: readonly EditorTrack[]): EditorTrack {
+    const index = tracks.filter(track => track.role === 'recording').length + 1
+    return {
       id: makeId('track'),
       sourceId: '',
       role: 'recording',
@@ -1534,6 +1553,12 @@ export const useEditorStore = defineStore('editor', () => {
       fadeOut: 0,
       clips: [],
     }
+  }
+
+  function addRecordingTrack() {
+    if (!session.value) throw new Error('Editor session is not loaded')
+    pushHistory()
+    const track = newRecordingTrack(session.value.tracks)
     session.value.tracks.push(track)
     selectTrack(track.id)
     scheduleSave()
@@ -1546,28 +1571,6 @@ export const useEditorStore = defineStore('editor', () => {
     start: number,
   ) {
     if (!session.value) throw new Error('Editor session is not loaded')
-    pushHistory()
-    let track = session.value.tracks.find((item) => item.id === trackId)
-    if (!track) {
-      const index = session.value.tracks.filter((item) => item.role === 'recording').length + 1
-      track = {
-        id: makeId('track'),
-        sourceId: '',
-        role: 'recording',
-        type: 'recording',
-        name: String(i18n.global.t('editor.recordingTrackName', { index })),
-        autoName: true,
-        color: trackColor('recording'),
-        volume: 1,
-        pan: 0,
-        muted: false,
-        solo: false,
-        fadeIn: 0,
-        fadeOut: 0,
-        clips: [],
-      }
-      session.value.tracks.push(track)
-    }
     const source: EditorSource = {
       id: makeId('source'),
       role: 'recording',
@@ -1584,16 +1587,24 @@ export const useEditorStore = defineStore('editor', () => {
       relativePath: `recordings/${recording.name || fileName(recording.path)}`,
       missing: false,
     }
-    session.value.sources.push(source)
-    track.role = 'recording'
-    track.type = 'recording'
-    track.sourceId = source.id
     const clip = normalizeClip({
       id: makeId('clip'),
       assetId: source.id,
       start: Math.max(0, Number(start || 0)),
       duration: source.duration,
     }, source)
+    const target = session.value.tracks.find(item => item.id === trackId)
+    const lockedOverlap = hasLockedClipInRange(target?.clips || [], clip.start, clip.duration)
+    pushHistory()
+    let track = target
+    if (!track || lockedOverlap) {
+      track = newRecordingTrack(session.value.tracks)
+      session.value.tracks.push(track)
+    }
+    session.value.sources.push(source)
+    track.role = 'recording'
+    track.type = 'recording'
+    track.sourceId = source.id
     const currentClips = track.clips || []
     track.clips = [
       ...overwriteClipsInRange(currentClips, clip.start, clip.duration, () => makeId('clip')),
@@ -1603,7 +1614,7 @@ export const useEditorStore = defineStore('editor', () => {
     selectClip(track.id, clip.id)
     scheduleSave()
     ensurePeaksInBackground(source.id)
-    return source
+    return { source, lockedOverlap }
   }
 
   async function scanAssets(paths: string[], options?: { addTracks?: boolean }) {
@@ -1790,7 +1801,7 @@ export const useEditorStore = defineStore('editor', () => {
   ) {
     const track = session.value?.tracks.find((item) => item.id === trackId)
     const clip = track?.clips?.find((item) => item.id === clipId)
-    if (!track || !clip) return
+    if (!track || !clip || clip.locked) return
     const maxDuration = Math.max(0, Number(clip.duration || 0))
     pushHistory()
     if (patch.fadeIn !== undefined) clip.fadeIn = clamp(Number(patch.fadeIn || 0), 0, maxDuration)
@@ -1806,19 +1817,28 @@ export const useEditorStore = defineStore('editor', () => {
   ) {
     const track = session.value?.tracks.find((item) => item.id === trackId)
     const clip = track?.clips?.find((item) => item.id === clipId)
-    if (!track || !clip) return
+    if (!track || !clip || clip.locked) return
     const source = sourceMap.value.get(clip.assetId)
     const sourceDuration = Math.max(0, Number(source?.duration || 0))
-    const maxOffset = sourceDuration > 0 ? Math.max(0, sourceDuration - 0.01) : Number.MAX_SAFE_INTEGER
+    const minDuration = Math.min(1 / (source?.sampleRate || 48000), clip.duration)
+    const maxOffset = sourceDuration > 0 ? Math.max(0, sourceDuration - minDuration) : Number.MAX_SAFE_INTEGER
     const nextOffset = clamp(Number(patch.offset ?? clip.offset), 0, maxOffset)
     const availableDuration = sourceDuration > 0
-      ? Math.max(0.01, sourceDuration - nextOffset)
+      ? Math.max(minDuration, sourceDuration - nextOffset)
       : Number.MAX_SAFE_INTEGER
-    clip.start = Math.max(0, Number(patch.start ?? clip.start))
+    const nextStart = Math.max(0, Number(patch.start ?? clip.start))
+    const nextDuration = clamp(Number(patch.duration ?? clip.duration), minDuration, availableDuration)
+    const original = interactionStart?.tracks.find(item => item.id === trackId)?.clips?.find(item => item.id === clipId)
+    const nextFadeIn = clamp(original?.fadeIn ?? clip.fadeIn, 0, nextDuration)
+    const nextFadeOut = clamp(original?.fadeOut ?? clip.fadeOut, 0, nextDuration)
+    if (nextStart === clip.start && nextOffset === clip.offset && nextDuration === clip.duration
+      && nextFadeIn === clip.fadeIn && nextFadeOut === clip.fadeOut) return
+    pushHistory()
+    clip.start = nextStart
     clip.offset = nextOffset
-    clip.duration = clamp(Number(patch.duration ?? clip.duration), 0.01, availableDuration)
-    clip.fadeIn = clamp(clip.fadeIn, 0, clip.duration)
-    clip.fadeOut = clamp(clip.fadeOut, 0, clip.duration)
+    clip.duration = nextDuration
+    clip.fadeIn = nextFadeIn
+    clip.fadeOut = nextFadeOut
     syncSingleClipFadeCompatibility(track)
     if (interactionDepth.value === 0) scheduleSave()
   }
@@ -1857,27 +1877,154 @@ export const useEditorStore = defineStore('editor', () => {
     scheduleSave()
   }
 
-  function removeClip(trackId: string, clipId: string) {
-    const track = session.value?.tracks.find((item) => item.id === trackId)
-    const clipIndex = track?.clips?.findIndex((item) => item.id === clipId) ?? -1
-    if (!track || clipIndex < 0) return false
+  function replaceTrackClips(track: EditorTrack, clips: EditorClip[]) {
+    track.clips = clips
+    // Empty legacy tracks fall back to sourceId in playback, export and reload.
+    if (!clips.some((clip) => clip.assetId === track.sourceId)) {
+      track.sourceId = clips.at(-1)?.assetId || ''
+    }
+    syncSingleClipFadeCompatibility(track)
+  }
+
+  function dropClip(drop: EditorClipDrop) {
+    if (!session.value || interactionDepth.value || !Number.isFinite(drop.start) || drop.start < 0) return
+    const origin = session.value.tracks.find((track) => track.id === drop.fromTrackId)
+    const destination = session.value.tracks.find((track) => track.id === drop.toTrackId)
+    const clip = origin?.clips?.find((item) => item.id === drop.clipId)
+    if (!origin?.clips || !destination || !clip || !sourceMap.value.has(clip.assetId)) return
+    if (!drop.copy && (clip.locked || (origin === destination && clip.start === drop.start))) return
+
+    const destinationClips = clipsForTrack(destination, sourceMap.value).filter(
+      (item) => drop.copy || item.id !== clip.id,
+    )
+    if (hasLockedClipInRange(destinationClips, drop.start, clip.duration)) return 'locked'
+
+    const moved = {
+      ...clip,
+      id: drop.copy ? makeId('clip') : clip.id,
+      start: drop.start,
+      locked: !drop.copy && clip.locked,
+    }
+    if (origin !== destination) moved.color = clipColor(clip, origin)
+    const remaining = overwriteClipsInRange(destinationClips, moved.start, moved.duration, () => makeId('clip'), 0)
+    pushHistory()
+    if (!drop.copy && origin !== destination) {
+      replaceTrackClips(origin, origin.clips.filter((item) => item.id !== clip.id))
+    }
+    replaceTrackClips(destination, [...remaining, moved].sort((a, b) => a.start - b.start))
+    selectClip(destination.id, moved.id)
+    scheduleSave()
+  }
+
+  function setClipLocked(trackId: string, clipId: string, locked: boolean) {
+    if (interactionDepth.value) return
+    const track = session.value?.tracks.find(item => item.id === trackId)
+    const clip = track?.clips?.find(item => item.id === clipId)
+    if (!clip || clip.locked === locked) return
 
     pushHistory()
-    const removedClip = track.clips![clipIndex]
-    const nextClips = track.clips!.filter((item) => item.id !== clipId)
-    track.clips = nextClips
-    syncSingleClipFadeCompatibility(track)
-
-    if (track.sourceId === removedClip.assetId && !nextClips.some((item) => item.assetId === removedClip.assetId)) {
-      track.sourceId = nextClips[nextClips.length - 1]?.assetId || ''
-    }
-
-    if (selectedTrackId.value === trackId && selectedClipId.value === clipId) {
-      selectedClipId.value = nextClips[Math.min(clipIndex, nextClips.length - 1)]?.id || null
-    }
-
+    clip.locked = locked
     scheduleSave()
-    return true
+  }
+
+  function deleteSelectedClip() {
+    const track = selectedTrack.value
+    const clip = selectedClip.value
+    if (!track?.clips || !clip || !canCutClip.value) return
+
+    pushHistory()
+    replaceTrackClips(track, track.clips.filter((item) => item.id !== clip.id))
+    selectedClipId.value = null
+    scheduleSave()
+  }
+
+  function copySelectedClip() {
+    const clip = selectedClip.value
+    if (clip && canCopyClip.value) clipClipboard.value = { ...clip, locked: false }
+  }
+
+  function cutSelectedClip() {
+    if (!canCutClip.value) return
+    copySelectedClip()
+    deleteSelectedClip()
+  }
+
+  function pasteClipAt(time: number) {
+    const track = selectedTrack.value
+    const copied = clipClipboard.value
+    if (!track || !copied || !canPasteClip.value || !Number.isFinite(time) || time < 0) return null
+
+    const clip = { ...copied, id: makeId('clip'), start: time }
+    pushHistory()
+    replaceTrackClips(track, [...clipsForTrack(track, sourceMap.value), clip].sort((a, b) => a.start - b.start))
+    selectClip(track.id, clip.id)
+    scheduleSave()
+    return clip
+  }
+
+  function clipCanSplitAt(clip: EditorClip, time: number) {
+    if (clip.locked) return false
+    // Each half must contain at least one source sample.
+    const sample = 1 / (sourceMap.value.get(clip.assetId)?.sampleRate || 48000)
+    return time - clip.start >= sample && clip.start + clip.duration - time >= sample
+  }
+
+  function canSplitClipAt(time: number) {
+    const clip = selectedClip.value
+    return clip !== null && !interactionDepth.value && clipCanSplitAt(clip, time)
+  }
+
+  function canSplitAllClipsAt(time: number) {
+    return !interactionDepth.value && Boolean(session.value?.tracks.some((track) =>
+      clipsForTrack(track, sourceMap.value).some((clip) => clipCanSplitAt(clip, time)),
+    ))
+  }
+
+  function splitClipsAt(time: number, tracks: EditorTrack[], onlyClipId?: string) {
+    if (interactionDepth.value) return
+    let nextSelectedClipId = selectedClipId.value
+    const changes: { track: EditorTrack; clips: EditorClip[] }[] = []
+
+    for (const track of tracks) {
+      let changed = false
+      const clips = clipsForTrack(track, sourceMap.value).flatMap((clip) => {
+        if ((onlyClipId && clip.id !== onlyClipId) || !clipCanSplitAt(clip, time)) return [clip]
+
+        const leftDuration = time - clip.start
+        const rightDuration = clip.duration - leftDuration
+        const right: EditorClip = {
+          ...clip,
+          id: makeId('clip'),
+          start: time,
+          offset: clip.offset + leftDuration,
+          duration: rightDuration,
+          fadeIn: 0,
+          fadeOut: Math.min(clip.fadeOut, rightDuration),
+        }
+        if (track.id === selectedTrackId.value && clip.id === selectedClipId.value) nextSelectedClipId = right.id
+        changed = true
+        return [
+          { ...clip, duration: leftDuration, fadeIn: Math.min(clip.fadeIn, leftDuration), fadeOut: 0 },
+          right,
+        ]
+      })
+      if (changed) changes.push({ track, clips: clips.sort((a, b) => a.start - b.start) })
+    }
+
+    if (!changes.length) return
+    pushHistory()
+    for (const { track, clips } of changes) replaceTrackClips(track, clips)
+    selectedClipId.value = nextSelectedClipId
+    scheduleSave()
+  }
+
+  function splitSelectedClipAt(time: number) {
+    if (!selectedTrack.value || !selectedClip.value) return
+    splitClipsAt(time, [selectedTrack.value], selectedClip.value.id)
+  }
+
+  function splitAllClipsAt(time: number) {
+    if (session.value) splitClipsAt(time, session.value.tracks)
   }
 
   function removeSource(sourceId: string) {
@@ -2035,6 +2182,7 @@ export const useEditorStore = defineStore('editor', () => {
       exportRenderController = null
       if (exportCancelRequested) throw new EditorExportCancelledError()
       const project = prepared.session
+      const exportSources = new Map(project.sources.map(source => [source.id, source]))
       const completion = new Promise<ExportResult>((resolve, reject) => {
         pendingExport = {
           id: taskId,
@@ -2059,7 +2207,7 @@ export const useEditorStore = defineStore('editor', () => {
             masterPan: project.masterPan,
             sourceSampleRate: prepared.sourceSampleRate,
             assets: project.sources.map(sourceToExportAsset),
-            tracks: project.tracks.map((track) => trackToExportTrack(track, project.sources.find(source => source.id === track.sourceId))),
+            tracks: project.tracks.map((track) => trackToExportTrack(track, exportSources)),
           },
         },
       }).then(() => undefined)
@@ -2267,11 +2415,23 @@ export const useEditorStore = defineStore('editor', () => {
     setTrackPan,
     setClipFades,
     setClipTiming,
+    setClipLocked,
     setMasterVolume,
     setMasterPan,
     setMasterLimiter,
     removeTrack,
-    removeClip,
+    canCopyClip,
+    canCutClip,
+    canPasteClip,
+    canSplitClipAt,
+    canSplitAllClipsAt,
+    copySelectedClip,
+    cutSelectedClip,
+    deleteSelectedClip,
+    dropClip,
+    pasteClipAt,
+    splitSelectedClipAt,
+    splitAllClipsAt,
     removeSource,
     exportMix,
     cancelExport,

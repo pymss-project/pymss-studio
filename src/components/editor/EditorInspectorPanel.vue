@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import type { InputInst } from 'naive-ui'
+import type { InputInst, InputNumberInst } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useNumberInputAccessibility } from '@/composables/useNumberInputAccessibility'
 import { PencilOutline } from '@vicons/ionicons5'
 import { useEditorPlaybackStore } from '@/stores/editorPlayback'
 import type { EditorClip, EditorMasterLimiter as MasterLimiterSettings, EditorSession, EditorSource } from '@/types/editor'
 import { formatTime } from '@/utils/editorTime'
+import { clipTrimBounds } from '@/utils/editorClips'
 import EditorMasterLimiter from '@/components/editor/EditorMasterLimiter.vue'
 import EditorParameterSlider from '@/components/editor/EditorParameterSlider.vue'
 import EditorPluginPanel from '@/components/editor/EditorPluginPanel.vue'
@@ -51,6 +52,7 @@ const emit = defineEmits<{
     clipId: string
     patch: Partial<Pick<EditorClip, 'start' | 'offset' | 'duration'>>
   }]
+  moveClip: [payload: { trackId: string; clipId: string; start: number }]
   beginClipTiming: []
   commitClipTiming: []
   openLocation: []
@@ -60,6 +62,7 @@ const emit = defineEmits<{
 const { t } = useI18n()
 const vNumberA11y = useNumberInputAccessibility()
 const playback = useEditorPlaybackStore()
+const CLIP_START_STEP = 0.01
 
 const selectedTrack = computed(() => props.session.tracks.find((track) => track.id === props.selectedTrackId) || null)
 const channelOptions = computed(() => [
@@ -78,6 +81,8 @@ const channelPeak = computed(() => Math.max(...channelLevels.value))
 const selectedClip = computed(() => (
   selectedTrack.value?.clips?.find((clip) => clip.id === props.selectedClipId) || null
 ))
+const clipStartInput = ref<InputNumberInst | null>(null)
+let cancellingClipStart = false
 const renameDraft = ref('')
 const editingTrackId = ref<string | null>(null)
 const renameInput = ref<InputInst | null>(null)
@@ -231,7 +236,16 @@ const usesTrackFadeLabel = computed(() => (selectedTrack.value?.clips?.length ||
 const fadeInValue = computed(() => selectedClip.value?.fadeIn || 0)
 const fadeOutValue = computed(() => selectedClip.value?.fadeOut || 0)
 const clipOffsetMax = computed(() => Math.max(0, Number(props.selectedSource?.duration || 0) - Number(selectedClip.value?.duration || 0)))
-const clipDurationMax = computed(() => Math.max(0.01, Number(props.selectedSource?.duration || 0) - Number(selectedClip.value?.offset || 0)))
+const clipDurationMin = computed(() => Math.min(0.01, selectedClip.value?.duration ?? 0.01))
+const clipDurationMax = computed(() => {
+  const clip = selectedClip.value
+  if (!clip) return clipDurationMin.value
+  const { end } = clipTrimBounds(clip, selectedTrack.value?.clips || [])
+  const sourceDuration = props.selectedSource?.duration || 0
+  const availableDuration = sourceDuration > 0 ? sourceDuration - clip.offset : Infinity
+  const remaining = Math.min(availableDuration, end - clip.start)
+  return Number.isFinite(remaining) ? Math.max(clipDurationMin.value, remaining) : undefined
+})
 
 function updateClipTiming(patch: Partial<Pick<EditorClip, 'start' | 'offset' | 'duration'>>) {
   if (!selectedTrack.value || !selectedClip.value) return
@@ -239,6 +253,57 @@ function updateClipTiming(patch: Partial<Pick<EditorClip, 'start' | 'offset' | '
     trackId: selectedTrack.value.id,
     clipId: selectedClip.value.id,
     patch,
+  })
+}
+
+function updateClipDuration(value: number | null) {
+  const duration = Math.max(clipDurationMin.value, Math.min(clipDurationMax.value ?? Infinity, numberOrZero(value)))
+  updateClipTiming({ duration })
+}
+
+function moveClip(start: number | null) {
+  if (cancellingClipStart || !selectedTrack.value || !selectedClip.value || start === null) return
+  emit('moveClip', { trackId: selectedTrack.value.id, clipId: selectedClip.value.id, start })
+}
+
+function discardClipStartInput() {
+  cancellingClipStart = true
+  try {
+    clipStartInput.value?.blur()
+  } finally {
+    cancellingClipStart = false
+  }
+}
+
+function handleClipStartKeydown(event: KeyboardEvent) {
+  if (event.isComposing) return
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    discardClipStartInput()
+    return
+  }
+  if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+  const clip = selectedClip.value
+  if (!clip || clip.locked) return
+  event.preventDefault()
+  event.stopPropagation()
+  const draft = event.target instanceof HTMLInputElement ? event.target.value.trim() : ''
+  const base = draft ? Number(draft) : clip.start
+  if (!Number.isFinite(base)) return
+  const step = event.key === 'ArrowUp' ? CLIP_START_STEP : -CLIP_START_STEP
+  const start = Math.max(0, Number((base + step).toPrecision(15)))
+  if (start === clip.start && base === clip.start) return
+
+  const input = clipStartInput.value
+  const unchanged = start === clip.start
+  moveClip(start)
+  void nextTick(() => {
+    if (clipStartInput.value !== input || selectedClip.value?.id !== clip.id) return
+    if (unchanged || selectedClip.value.start !== start) {
+      discardClipStartInput()
+      input?.focus()
+    }
   })
 }
 
@@ -341,26 +406,29 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
             <label class="panel-field panel-field--compact">
               <span class="panel-field__label">{{ t('editor.clipStart') }}</span>
               <n-input-number v-number-a11y="t('editor.clipStart') + ' (s)'"
+                ref="clipStartInput"
                 :value="selectedClip.start"
+                :disabled="selectedClip.locked"
                 :min="0"
-                :step="0.01"
+                :step="CLIP_START_STEP"
+                :update-value-on-input="false"
                 size="small"
-                @focus="emit('beginClipTiming')"
-                @blur="emit('commitClipTiming')"
-                @update:value="(value: number | null) => updateClipTiming({ start: numberOrZero(value) })"
+                @keydown.capture="handleClipStartKeydown"
+                @update:value="moveClip"
               />
             </label>
             <label class="panel-field panel-field--compact">
               <span class="panel-field__label">{{ t('editor.clipDuration') }}</span>
               <n-input-number v-number-a11y="t('editor.clipDuration') + ' (s)'"
                 :value="selectedClip.duration"
-                :min="0.01"
+                :disabled="selectedClip.locked"
+                :min="clipDurationMin"
                 :max="clipDurationMax"
                 :step="0.01"
                 size="small"
                 @focus="emit('beginClipTiming')"
                 @blur="emit('commitClipTiming')"
-                @update:value="(value: number | null) => updateClipTiming({ duration: Math.max(0.01, numberOrZero(value)) })"
+                @update:value="updateClipDuration"
               />
             </label>
           </div>
@@ -368,6 +436,7 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
             <span class="panel-field__label">{{ t('editor.clipSourceOffset') }}</span>
             <n-input-number v-number-a11y="t('editor.clipSourceOffset') + ' (s)'"
               :value="selectedClip.offset"
+              :disabled="selectedClip.locked"
               :min="0"
               :max="clipOffsetMax"
               :step="0.01"
@@ -392,6 +461,7 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
               <span class="panel-field__label">{{ t('editor.fieldFadeIn') }}</span>
               <n-input-number v-number-a11y="t('editor.fieldFadeIn') + ' (s)'"
                 :value="fadeInValue"
+                :disabled="selectedClip.locked"
                 :min="0"
                 :max="fadeMax"
                 :step="0.1"
@@ -403,6 +473,7 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
               <span class="panel-field__label">{{ t('editor.fieldFadeOut') }}</span>
               <n-input-number v-number-a11y="t('editor.fieldFadeOut') + ' (s)'"
                 :value="fadeOutValue"
+                :disabled="selectedClip.locked"
                 :min="0"
                 :max="fadeMax"
                 :step="0.1"
