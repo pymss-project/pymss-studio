@@ -162,7 +162,7 @@ struct MigrationSessionState {
 
 #[derive(Debug, Default)]
 pub struct ModelDirMigrationSession {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     _cli_access: Option<std::fs::File>,
     state: Mutex<MigrationSessionState>,
     condvar: Condvar,
@@ -812,7 +812,7 @@ pub fn start_model_dir_migration(
         .clone()
         .unwrap_or_else(|| format!("model_dir_migration_{}", chrono_like_timestamp()));
     let session = Arc::new(ModelDirMigrationSession {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
         _cli_access: Some(crate::cli_access::resource(&crate::storage::settings_dir(&app)?, crate::cli_access::MIGRATION, true)?),
         ..Default::default()
     });

@@ -51,7 +51,9 @@ mod platform {
     use crate::{
         python::worker, storage, update_manager, update_sources, update_startup as startup,
     };
-    use std::ffi::{CString, OsStr};
+    use std::ffi::CString;
+    #[cfg(test)]
+    use std::ffi::OsStr;
     use std::io::Write;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -220,25 +222,20 @@ mod platform {
         Ok(())
     }
 
-    fn extracted_mount(mount: Option<&OsStr>) -> bool {
-        mount
-            .and_then(|path| Path::new(path).file_name())
-            .is_some_and(|name| name.as_bytes().starts_with(b"appimage_extracted_"))
-    }
-
     fn launch(
         target: &Path,
         request: &startup::Request,
         log: &Path,
         data_root: &Path,
+        extraction_root: Option<&Path>,
     ) -> AppResult<Child> {
         let mut command = Command::new(target);
         let mount = std::env::var_os("APPDIR");
         clean_environment(&mut command, mount.as_deref());
-        // The runtime consumes the CLI extraction switch without exporting it.
-        // Keep this mode when a FUSE-less installation restarts into the update.
-        if extracted_mount(mount.as_deref()) {
-            command.env("APPIMAGE_EXTRACT_AND_RUN", "1");
+        if let Some(root) = extraction_root {
+            command
+                .env("APPIMAGE_EXTRACT_AND_RUN", "1")
+                .env("PYMSS_STUDIO_UPDATE_EXTRACTION_ROOT", root);
         }
         command
             .args(["--pymss-update-startup", &request.token])
@@ -317,6 +314,7 @@ mod platform {
         }
         let target = current_image()?;
         check_location(&target)?;
+        drop(crate::cli_access::installed_application(&target, true)?);
         let original = identity(&target)?;
         let stage = tempfile::Builder::new()
             .prefix(".pymss-studio-update-")
@@ -350,6 +348,7 @@ mod platform {
         let version = update.version.clone();
         tauri::async_runtime::spawn_blocking(move || -> AppResult<()> {
             let _workers = worker::acquire_application_update()?;
+            let _cli = crate::cli_access::installed_application(&target, true)?;
             if app.webview_windows().keys().any(|label| label != "main") { return Err(failure("Close additional editor windows before installing the application update")); }
             let state = app.state::<crate::state::AppState>();
             if !state.tasks.lock().map_err(|_| failure("Task registry lock poisoned"))?.is_empty()
@@ -361,6 +360,13 @@ mod platform {
             fs::set_permissions(&image, fs::Permissions::from_mode(mode | 0o100))?;
             let root = storage::temp_dir(&app)?;
             fs::create_dir_all(&root)?;
+            let extraction = if crate::studio_paths::appimage_extract_and_run() {
+                // Keep this workspace under updater ownership until startup succeeds.
+                let temp = std::path::absolute(std::env::temp_dir())?;
+                Some(startup::create_directory(&temp, "pymss-update-extract-")?)
+            } else {
+                None
+            };
             let startup_directory = startup::create_directory(&root, "linux-update-startup-")?;
             let request = startup::Request { token: startup_directory.path().file_name().unwrap().to_str().unwrap().into(), target: target.clone(), version: version.clone(), privileged: false };
             startup::save_request(startup_directory.path(), &request)?;
@@ -372,14 +378,30 @@ mod platform {
             let mut child = None;
             let started = (|| -> AppResult<()> {
                 fs::File::open(target.parent().unwrap())?.sync_all()?;
-                child = Some(launch(&target, &request, &log, &storage::data_root_dir(&app)?.canonicalize()?)?);
+                child = Some(launch(
+                    &target,
+                    &request,
+                    &log,
+                    &storage::data_root_dir(&app)?.canonicalize()?,
+                    extraction.as_ref().map(tempfile::TempDir::path),
+                )?);
                 startup::wait_for_acknowledgement(child.as_mut().unwrap(), startup_directory.path(), &request, Duration::from_secs(60))
             })();
             if let Err(error) = started {
                 if let Some(child) = child.as_mut() {
                     if let Err(stop) = stop_replacement(child) {
+                        if let Some(extraction) = extraction {
+                            extraction.keep();
+                        }
                         let kept = stage.keep();
                         return Err(failure(format!("Application startup failed: {error}. Unable to stop the replacement: {stop}. Previous AppImage preserved at {}", kept.join("previous.AppImage").display())));
+                    }
+                }
+                if let Some(extraction) = extraction {
+                    if let Err(error) = extraction.close() {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            crate::session_log::early("WARN", "update.diagnostic", &format!("Unable to clean the AppImage extraction directory: {error}"));
+                        }
                     }
                 }
                 if let Err(restore) = restore_image(&target, &backup) {
@@ -387,6 +409,12 @@ mod platform {
                     return Err(failure(format!("Application startup failed: {error}. Restoration failed: {restore}. Previous AppImage preserved at {}", kept.join("previous.AppImage").display())));
                 }
                 return Err(failure(format!("Application startup failed: {error}. The previous version has been restored. See {} for details.", log.display())));
+            }
+            if let Some(extraction) = extraction {
+                // The AppImage runtime removes the workspace after the new app exits.
+                let path = extraction.keep();
+                // A runtime that ignores the workspace option leaves it empty.
+                let _ = fs::remove_dir(path);
             }
             crate::session_log::append(&app, "INFO", "update.restart", vec![("version", version)]);
             if let Err(error) = stage.close() { crate::session_log::early("WARN", "update.diagnostic", &format!("Unable to clean the AppImage update directory: {error}")); }
@@ -444,6 +472,7 @@ mod platform {
 
         #[test]
         fn linux_update_retains_cli_extract_and_run_mode() {
+            use crate::studio_paths::extracted_appimage_mount as extracted_mount;
             assert!(extracted_mount(Some(OsStr::new(
                 "/tmp/appimage_extracted_123456"
             ))));

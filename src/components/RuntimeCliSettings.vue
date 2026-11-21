@@ -4,12 +4,17 @@ import { useI18n } from 'vue-i18n'
 import { useMessage } from 'naive-ui'
 import { invoke } from '@tauri-apps/api/core'
 
-const props = defineProps<{ launcher: string }>()
+const props = defineProps<{
+  launcher: string
+  platform?: 'windows' | 'macos' | 'linux' | null
+  extractAndRun?: boolean
+  compact?: boolean
+}>()
 const { t } = useI18n()
 const message = useMessage()
 type Action = 'status' | 'enable' | 'disable'
 interface Registration {
-  status: 'available' | 'enabled' | 'conflict' | 'moved'
+  status: 'available' | 'enabled' | 'registered' | 'conflict' | 'moved'
   owned: boolean
   path: string | null
   changed: boolean
@@ -17,13 +22,15 @@ interface Registration {
 const registration = ref<Registration | null>(null)
 const pending = ref<Action | null>(null)
 const error = ref('')
+const isUnix = computed(() => props.platform === 'macos' || props.platform === 'linux')
 const description = computed(() => {
   const state = registration.value
   if (!state) return ''
   switch (state.status) {
-    case 'available': return t('settings.cliPathAvailable')
+    case 'available': return t(isUnix.value ? 'settings.cliShellAvailable' : 'settings.cliPathAvailable')
     case 'enabled': return t(state.owned ? 'settings.cliPathEnabled' : 'settings.cliPathExternal')
-    case 'conflict': return t('settings.cliPathConflict')
+    case 'registered': return t('settings.cliShellRegistered')
+    case 'conflict': return t(isUnix.value ? 'settings.cliShellConflict' : 'settings.cliPathConflict')
     case 'moved': return t('settings.cliPathMoved')
   }
 })
@@ -35,7 +42,7 @@ async function update(action: Action) {
   try {
     const state = await invoke<Registration>('manage_cli_path', { action })
     registration.value = state
-    if (state.changed) message.success(t('settings.cliPathChanged'))
+    if (state.changed) message.success(t(isUnix.value ? 'settings.cliEntryChanged' : 'settings.cliPathChanged'))
   } catch (reason) {
     registration.value = null
     error.value = String(reason)
@@ -46,7 +53,15 @@ async function update(action: Action) {
 
 async function copyCommand() {
   try {
-    await navigator.clipboard.writeText("& '" + props.launcher.replaceAll("'", "''") + "' --help")
+    let command = isUnix.value
+      ? "'" + props.launcher.replaceAll("'", "'\"'\"'") + "'"
+      : "& '" + props.launcher.replaceAll("'", "''") + "'"
+    if (props.platform === 'linux') {
+      if (props.extractAndRun) command += ' --appimage-extract-and-run'
+      command += ' --studio-cli'
+    }
+    command += ' --help'
+    await navigator.clipboard.writeText(command)
     message.success(t('common.copied'))
   } catch {
     message.error(t('common.copyFailed'))
@@ -57,7 +72,7 @@ onMounted(() => { void update('status') })
 
 <template>
   <div class="runtime-cli">
-    <div class="runtime-cli__launcher">
+    <div v-if="!compact" class="runtime-cli__launcher">
       <span>{{ t('settings.cliLauncherPath') }}</span>
       <code>{{ launcher }}</code>
     </div>
@@ -83,7 +98,7 @@ onMounted(() => { void update('status') })
           :disabled="!!pending" @click="update('status')">
           {{ t('common.refresh') }}
         </n-button>
-        <n-button size="small" secondary @click="copyCommand">{{ t('settings.copyCliCommand') }}</n-button>
+        <n-button size="small" secondary @click="copyCommand">{{ t(isUnix ? 'settings.copyTerminalCommand' : 'settings.copyCliCommand') }}</n-button>
       </div>
     </div>
   </div>

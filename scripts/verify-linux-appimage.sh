@@ -116,6 +116,7 @@ export PYMSS_STUDIO_BOOTSTRAP_PYTHON="$PY"
 "$PY" "$RESOURCES/python/worker.py" install_runtime --payload '{"backend":"cpu","mirror":"pypi","locale":"en"}'
 ENV_PY="$PYMSS_STUDIO_RUNTIME_ENVS_DIR/cpu/bin/python"
 "$ENV_PY" -c 'import sys, pymss, pymss_core, torch; assert sys.prefix != sys.base_prefix; assert torch.version.cuda is None; print(torch.__version__)'
+"$ENV_PY" scripts/verify-unix-cli.py "$IMAGE" --appimage --data-root "$PYMSS_STUDIO_DATA_ROOT"
 "$ENV_PY" "$RESOURCES/python/worker.py" env_info
 "$ENV_PY" "$RESOURCES/python/worker.py" list_models --payload '{}'
 "$ENV_PY" "$RESOURCES/python/runtime_audio_probe.py" --check-core

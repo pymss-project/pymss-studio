@@ -1,4 +1,5 @@
 use crate::error::{AppError, AppResult};
+use crate::studio_paths::macos_bundle_from_executable as bundle_from_executable;
 #[cfg(target_os = "macos")]
 mod authorized;
 #[cfg(target_os = "macos")]
@@ -30,16 +31,6 @@ fn legacy_previous_bundle(target: &Path) -> PathBuf {
         .parent()
         .unwrap()
         .join(format!(".pymss-studio-previous-{identity}.app"))
-}
-
-fn bundle_from_executable(executable: &Path) -> Option<PathBuf> {
-    let macos = executable.parent()?;
-    let contents = macos.parent()?;
-    let bundle = contents.parent()?;
-    (macos.file_name()? == "MacOS"
-        && contents.file_name()? == "Contents"
-        && bundle.extension()? == "app")
-        .then(|| bundle.to_path_buf())
 }
 
 fn location_problem(bundle: &Path, read_only: bool) -> Option<&'static str> {
@@ -674,6 +665,7 @@ mod platform {
         }
         let target = current_bundle()?;
         check_location(&target)?;
+        drop(crate::cli_access::installed_application(&target, true)?);
         validate_installed_bundle(&target, env!("CARGO_PKG_VERSION"))?;
         let repairing = update.version == env!("CARGO_PKG_VERSION");
         if !repairing { check_runtime_contract(app, &update.raw_json)?; }
@@ -710,6 +702,7 @@ mod platform {
         let version = update.version.clone();
         tauri::async_runtime::spawn_blocking(move || -> AppResult<()> {
             let _workers = worker::acquire_application_update()?;
+            let _cli = crate::cli_access::installed_application(&target, true)?;
             if app.webview_windows().keys().any(|label| label != "main") {
                 return Err(failure("Close additional editor windows before installing the application update"));
             }

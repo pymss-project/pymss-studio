@@ -7,7 +7,7 @@ static CACHE_LOCK: Mutex<()> = Mutex::new(());
 
 // AppImage mount points change on every launch. Venvs must refer to an interpreter
 // outside the mount, and older interpreters must remain available after an update.
-pub(super) fn cached_python(source: &Path, data_root: &Path, version: &str) -> io::Result<PathBuf> {
+pub(crate) fn cached_python(source: &Path, data_root: &Path, version: &str) -> io::Result<PathBuf> {
     let _lock = CACHE_LOCK
         .lock()
         .map_err(|_| io::Error::other("Bootstrap cache lock poisoned"))?;

@@ -145,7 +145,7 @@ def _serialized_runtime_command(command: Callable[..., int], *, query: bool = Fa
                 if not query:
                     return command(payload)
                 with ExitStack() as leases:
-                    if writable and os.name == "nt":
+                    if writable and sys.platform in {"win32", "darwin", "linux"}:
                         # The console may be importing this interpreter. Keep inventory
                         # available while deferring repairs until the last CLI exits.
                         try:

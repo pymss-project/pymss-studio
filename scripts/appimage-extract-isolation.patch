@@ -1,0 +1,208 @@
+diff --git a/src/runtime/runtime.c b/src/runtime/runtime.c
+index 2ebb3c8..b9a8bbc 100644
+--- a/src/runtime/runtime.c
++++ b/src/runtime/runtime.c
+@@ -946,5 +946,5 @@ int rm_recursive_callback(const char* path, const struct stat* stat, const int t
+             if (remove(path) != 0) {
+                 fprintf(stderr, "Failed to remove %s: %s\n", path, strerror(errno));
+-                return false;
++                return 1;
+             }
+             break;
+@@ -954,5 +954,5 @@ int rm_recursive_callback(const char* path, const struct stat* stat, const int t
+             if (rmdir(path) != 0) {
+                 fprintf(stderr, "Failed to remove directory %s: %s\n", path, strerror(errno));
+-                return false;
++                return 1;
+             }
+             break;
+@@ -971,9 +971,16 @@ bool rm_recursive(const char* const path) {
+     // FTW_PHYS: do not follow symlinks, but report symlinks as such; this way, the symlink targets, which might point
+     //           to locations outside path will not be deleted accidentally (attackers might abuse this)
+-    int rv = nftw(path, &rm_recursive_callback, 0, FTW_DEPTH | FTW_MOUNT | FTW_PHYS);
++    // musl skips traversal entirely when the descriptor limit is zero.
++    int rv = nftw(path, &rm_recursive_callback, 64, FTW_DEPTH | FTW_MOUNT | FTW_PHYS);
+
+     return rv == 0;
+ }
+
++static bool cleanup_extraction(const char* prefix, const char* update_root) {
++    // Only the private directory created by the updater may be removed here,
++    // and only after our own extraction directory has been removed.
++    return rm_recursive(prefix) && (update_root == NULL || rmdir(update_root) == 0);
++}
++
+ void build_mount_point(char* mount_dir, const char* const argv0, const char* const temp_base, const size_t templen) {
+     const size_t maxnamelen = 6;
+@@ -1579,9 +1586,55 @@ int main(int argc, char* argv[]) {
+
+     if (getenv("APPIMAGE_EXTRACT_AND_RUN") != NULL || (arg && strcmp(arg, "appimage-extract-and-run") == 0)) {
+-        char* hexlified_digest = NULL;
++        // Wait for both the child and cancellation signals in the same loop.
++        // Keep cancellation pending through extraction and directory cleanup.
++        sigset_t signals, previous_mask;
++        if (sigprocmask(SIG_SETMASK, NULL, &previous_mask) == -1) {
++            die("Could not read the AppImage signal mask");
++        }
++        sigemptyset(&signals);
++        sigaddset(&signals, SIGCHLD);
++        const int cancellation_signals[] = { SIGHUP, SIGINT, SIGQUIT, SIGTERM };
++        for (size_t i = 0; i < sizeof(cancellation_signals) / sizeof(cancellation_signals[0]); ++i) {
++            int signo = cancellation_signals[i];
++            struct sigaction inherited;
++            if (sigaction(signo, NULL, &inherited) == -1) {
++                die("Could not read the AppImage signal disposition");
++            }
++            if (inherited.sa_handler != SIG_IGN && sigismember(&previous_mask, signo) == 0) {
++                sigaddset(&signals, signo);
++            }
++        }
++        if (sigprocmask(SIG_BLOCK, &signals, NULL) == -1) {
++            die("Could not block AppImage signals");
++        }
++
++        // Explicitly ignoring SIGCHLD auto-reaps AppRun without notifying us.
++        struct sigaction waitable_child = { .sa_handler = SIG_DFL };
++        struct sigaction previous_sigchld;
++        sigemptyset(&waitable_child.sa_mask);
++        if (sigaction(SIGCHLD, &waitable_child, &previous_sigchld) == -1) {
++            die("Could not configure AppImage child exit notification");
++        }
+
+-        // calculate MD5 hash of file, and use it to make extracted directory name "content-aware"
+-        // see https://github.com/AppImage/AppImageKit/issues/841 for more information
+-        {
++        const char* update_root = getenv("PYMSS_STUDIO_UPDATE_EXTRACTION_ROOT");
++        if (update_root != NULL) {
++            const char* name = strrchr(update_root, '/');
++            const char workspace_prefix[] = "pymss-update-extract-";
++            struct stat workspace;
++            if (update_root[0] != '/' || strncmp(name + 1, workspace_prefix, sizeof(workspace_prefix) - 1) != 0 ||
++                    lstat(update_root, &workspace) == -1 || !S_ISDIR(workspace.st_mode) ||
++                    workspace.st_uid != geteuid() || (workspace.st_mode & 0077) != 0) {
++                die("Invalid AppImage update extraction workspace");
++            }
++        }
++        const bool cleanup = update_root != NULL || getenv("NO_CLEANUP") == NULL;
++        char prefix[PATH_MAX];
++        int prefix_len;
++        if (cleanup) {
++            // Separate GUI and CLI invocations before extracting any files.
++            prefix_len = snprintf(prefix, sizeof(prefix), "%s/appimage_extracted_XXXXXX",
++                                  update_root != NULL ? update_root : temp_base);
++        } else {
++            // The opt-in persistent cache still uses the content digest.
+             FILE* f = fopen(appimage_path, "rb");
+             if (f == NULL) {
+@@ -1602,14 +1655,20 @@ int main(int argc, char* argv[]) {
+             Md5Finalise(&ctx, &digest);
+
+-            hexlified_digest = appimage_hexlify((const char*)digest.bytes, sizeof(digest.bytes));
++            char* hexlified_digest = appimage_hexlify((const char*)digest.bytes, sizeof(digest.bytes));
++            prefix_len = snprintf(prefix, sizeof(prefix), "%s/appimage_extracted_%s", temp_base, hexlified_digest);
++            free(hexlified_digest);
++        }
++        if (prefix_len < 0 || (size_t)prefix_len >= sizeof(prefix)) {
++            die("AppImage extraction directory path is too long");
++        }
++        if (cleanup && mkdtemp(prefix) == NULL) {
++            perror("Failed to create AppImage extraction directory");
++            exit(EXIT_EXECERROR);
+         }
+-
+-        char* prefix = malloc(strlen(temp_base) + 20 + strlen(hexlified_digest) + 2);
+-        strcpy(prefix, temp_base);
+-        strcat(prefix, "/appimage_extracted_");
+-        strcat(prefix, hexlified_digest);
+-        free(hexlified_digest);
+
+         if (!extract_appimage(appimage_path, prefix, NULL, false, verbose)) {
++            if (cleanup) {
++                cleanup_extraction(prefix, update_root);
++            }
+             fprintf(stderr, "Failed to extract AppImage\n");
+             exit(EXIT_EXECERROR);
+@@ -1619,7 +1678,14 @@ int main(int argc, char* argv[]) {
+         if ((pid = fork()) == -1) {
+             int error = errno;
++            if (cleanup) {
++                cleanup_extraction(prefix, update_root);
++            }
+             fprintf(stderr, "fork() failed: %s\n", strerror(error));
+             exit(EXIT_EXECERROR);
+         } else if (pid == 0) {
++            if (sigaction(SIGCHLD, &previous_sigchld, NULL) == -1 ||
++                    sigprocmask(SIG_SETMASK, &previous_mask, NULL) == -1) {
++                die("Could not restore AppRun signal handling");
++            }
+             const char apprun_fname[] = "AppRun";
+             char* apprun_path = malloc(strlen(prefix) + 1 + strlen(apprun_fname) + 1);
+@@ -1643,4 +1709,5 @@ int main(int argc, char* argv[]) {
+             setenv("ARGV0", argv0_path, 1);
+             setenv("APPDIR", prefix, 1);
++            unsetenv("PYMSS_STUDIO_UPDATE_EXTRACTION_ROOT");
+
+             set_portable_home_and_config(fullpath);
+@@ -1656,9 +1723,43 @@ int main(int argc, char* argv[]) {
+
+         int status = 0;
+-        int rv = waitpid(pid, &status, 0);
+-        status = rv > 0 && WIFEXITED (status) ? WEXITSTATUS (status) : EXIT_EXECERROR;
++        int cancelled_by = 0;
++        pid_t rv;
++        for (;;) {
++            rv = waitpid(pid, &status, WNOHANG);
++            if (rv < 0 && errno == EINTR) {
++                continue;
++            }
++            if (rv != 0) {
++                break;
++            }
++            siginfo_t event;
++            int signo = sigwaitinfo(&signals, &event);
++            if (signo < 0) {
++                if (errno == EINTR) {
++                    continue;
++                }
++                perror("Could not wait for AppImage signals");
++                kill(pid, SIGKILL);
++                while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
++                }
++                rv = -1;
++                break;
++            }
++            if (signo != SIGCHLD) {
++                if (cancelled_by == 0) {
++                    cancelled_by = signo;
++                }
++                // The terminal already sent Ctrl+C to AppRun when it is in
++                // our foreground group. Relay directly addressed signals.
++                if (signo != SIGINT || event.si_code != SI_KERNEL || getpgid(pid) != getpgrp()) {
++                    kill(pid, signo);
++                    kill(pid, SIGCONT);
++                }
++            }
++        }
++        status = rv > 0 && WIFEXITED(status) ? WEXITSTATUS(status) : EXIT_EXECERROR;
+
+-        if (getenv("NO_CLEANUP") == NULL) {
+-            if (!rm_recursive(prefix)) {
++        if (cleanup) {
++            if (!cleanup_extraction(prefix, update_root)) {
+                 fprintf(stderr, "Failed to clean up cache directory\n");
+                 if (status == 0)        /* avoid messing existing failure exit status */
+@@ -1667,7 +1768,11 @@ int main(int argc, char* argv[]) {
+         }
+
+-        // template == prefix, must be freed only once
+-        free(prefix);
+-
++        if (cancelled_by != 0) {
++            signal(cancelled_by, SIG_DFL);
++            raise(cancelled_by);
++        }
++        if (sigprocmask(SIG_SETMASK, &previous_mask, NULL) == -1) {
++            die("Could not restore the AppImage signal mask");
++        }
+         exit(status);
+     }

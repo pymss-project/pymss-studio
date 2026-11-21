@@ -643,7 +643,8 @@ interface CliPathDetails {
 }
 
 const showCliPathDiagnostics = computed(() => developerMode.value
-  && activeTab.value === 'runtime' && !!settings.appPaths?.cliPathSupported && isTauriRuntime())
+  && activeTab.value === 'runtime' && !!settings.appPaths?.cliPathSupported
+  && (settings.appPaths.cliPlatform ?? 'windows') === 'windows' && isTauriRuntime())
 const cliPathDetails = ref<CliPathDetails | null>(null)
 const cliPathLoading = ref(false)
 const cliPathError = ref('')

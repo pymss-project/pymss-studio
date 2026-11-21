@@ -64,6 +64,20 @@ jobs:
           rsync -a --exclude '__pycache__' --exclude '*.pyc' python/ src-tauri/resources/python/
           cp -a python-runtime src-tauri/resources/python-runtime
           bash scripts/prepare-linux-bundled-tools.sh src-tauri/resources/bin
+      - name: Build AppImage runtime with isolated extraction
+        run: |
+          runtime_rev=dd6cebedcbddde9c82f89b011e8e1d40b6e43868
+          runtime_source="$RUNNER_TEMP/type2-runtime"
+          runtime_output="$RUNNER_TEMP/pymss-appimage-runtime"
+          git init "$runtime_source"
+          git -C "$runtime_source" fetch --depth 1 https://github.com/AppImage/type2-runtime.git "$runtime_rev"
+          git -C "$runtime_source" checkout --detach FETCH_HEAD
+          git -C "$runtime_source" apply "$GITHUB_WORKSPACE/scripts/appimage-extract-isolation.patch"
+          printf '%s-pymss-studio\n' "$runtime_rev" > "$runtime_source/src/runtime/version"
+          mkdir -p "$runtime_output"
+          (cd "$runtime_output" && ARCH=x86_64 bash "$runtime_source/scripts/docker/build-with-docker.sh")
+          test -x "$runtime_output/runtime-x86_64"
+          printf 'LDAI_RUNTIME_FILE=%s/runtime-x86_64\n' "$runtime_output" >> "$GITHUB_ENV"
       - name: Build AppImage
         env:
           # linuxdeploy's bundled strip can reject modern ELF relocation sections.
@@ -108,6 +122,7 @@ jobs:
       - name: Verify packaged interpreter, tools, and first environment installation
         run: |
           bash scripts/verify-linux-appimage.sh
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --bin pymss-studio unix
       - name: Package release artifact
         run: |
           mkdir -p artifacts

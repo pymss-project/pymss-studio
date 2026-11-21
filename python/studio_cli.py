@@ -4,6 +4,8 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import runpy
+import signal
 import sys
 from pathlib import Path
 
@@ -46,9 +48,32 @@ def prepare() -> int:
         return result
     if candidates:
         raise ValueError("检测到多个运行环境。请在 Pymss Studio 的设置 → 环境管理中选择一个环境。")
-    if ACTIVE_RUNTIME_FILE.exists() or any((RUNTIME_ENVS_DIR / name / "pyvenv.cfg").exists() for name in ("cpu", "cuda", "rocm")):
+    if ACTIVE_RUNTIME_FILE.exists() or any((RUNTIME_ENVS_DIR / name / "pyvenv.cfg").exists() for name in ("cpu", "cuda", "rocm", "mlx")):
         raise ValueError("运行环境不可用。请在 Pymss Studio 的设置 → 环境管理中修复或重新选择环境。")
     raise ValueError("请在 Pymss Studio 的设置 → 环境管理中安装运行环境，然后重新执行命令。")
+
+
+def run_cli(args: list[str]) -> None:
+    interrupted = False
+
+    def interrupt(signum, frame):
+        nonlocal interrupted
+        interrupted = True
+        signal.default_int_handler(signum, frame)
+
+    previous = signal.signal(signal.SIGINT, interrupt)
+    sys.argv[:] = ["pymss", *args]
+    try:
+        runpy.run_module("pymss", run_name="__main__", alter_sys=True)
+    except SystemExit as error:
+        # pymss translates KeyboardInterrupt into 130. Preserve SIGINT when
+        # that result came from a signal, including for shells waiting on us.
+        if interrupted and error.code == 128 + signal.SIGINT:
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            signal.raise_signal(signal.SIGINT)
+        raise
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 def main() -> int:
@@ -82,6 +107,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["run"]:
+        run_cli(sys.argv[2:])
+        raise SystemExit(0)
     try:
         raise SystemExit(main())
     except (OSError, ValueError, RuntimeError, ImportError) as exc:

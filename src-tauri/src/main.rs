@@ -30,8 +30,10 @@ mod single_instance;
 mod state;
 mod storage;
 mod studio_paths;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod cli_access;
+#[cfg(all(target_os = "linux", not(feature = "vst-lab")))]
+mod studio_cli;
 mod terminal;
 mod update_manager;
 mod update_sources;
@@ -42,6 +44,14 @@ use tauri::{Emitter, Manager};
 
 
 fn main() {
+    let context = tauri::generate_context!();
+    #[cfg(all(target_os = "linux", not(feature = "vst-lab")))]
+    {
+        let mut args = std::env::args_os().skip(1);
+        if args.next().is_some_and(|arg| arg == "--studio-cli") {
+            studio_cli::exit_linux(args.collect(), context.package_info());
+        }
+    }
     if let Some(code) = commands::plugin_host::run_capabilities_cli() {
         std::process::exit(code);
     }
@@ -285,7 +295,7 @@ fn main() {
             commands::app_cmd::delete_runtime,
             commands::app_cmd::worker_health,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building Pymss Studio")
         .run(|app, event| match event {
             tauri::RunEvent::WindowEvent {

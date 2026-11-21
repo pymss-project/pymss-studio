@@ -7,6 +7,7 @@ import { useRouter } from 'vue-router'
 import { open } from '@tauri-apps/plugin-shell'
 import { ArrowForwardOutline, CheckmarkOutline, ColorPaletteOutline, FolderOpenOutline, HardwareChipOutline, LogoGithub, MusicalNotesOutline, OpenOutline, RefreshOutline } from '@vicons/ionicons5'
 import AppBrandMark from '@/components/AppBrandMark.vue'
+import RuntimeCliSettings from '@/components/RuntimeCliSettings.vue'
 import { SYSTEM_LOCALE, setLocale, type LocaleSetting } from '@/i18n'
 import { useSettingsStore } from '@/stores/settings'
 import { useAppStore, type RuntimeBackend } from '@/stores/app'
@@ -513,6 +514,12 @@ onMounted(() => {
               <p v-if="app.runtimeGpuProbeStatus === 'error'" class="onboarding-runtime-error">{{ runtimeErrorSummary(app.runtimeGpuProbeError, t) }}</p>
             </div>
 
+            <section v-if="settings.appPaths?.cliPath" class="onboarding-cli" aria-labelledby="onboarding-cli-title">
+              <h3 id="onboarding-cli-title">{{ t('settings.cliOnboarding') }}</h3>
+              <RuntimeCliSettings :launcher="settings.appPaths.cliPath" :platform="settings.appPaths.cliPlatform"
+                :extract-and-run="settings.appPaths.cliExtractAndRun" compact />
+            </section>
+
             <p v-if="!selectedBackendReady && !runtimeBusy" class="onboarding-hint">{{ t(app.runtimeManagementSupported ? 'onboarding.runtimeManageHint' : 'onboarding.runtimeReadOnlyHint') }}</p>
             <n-alert v-if="runtimeError" type="error" :show-icon="true"><template #header>{{ t('onboarding.runtimeFailed') }}</template><p class="onboarding-runtime-error">{{ runtimeError }}</p></n-alert>
           </section>
@@ -785,6 +792,8 @@ onMounted(() => {
 .onboarding-directory p { margin: 5px 0 0; font-size: 12px; line-height: 1.6; color: var(--on-surface-muted); }
 .onboarding-directory code { grid-column: 2 / -1; min-width: 0; padding: 10px 12px; background: var(--surface-2); border-radius: 6px; font-size: 12px; overflow-wrap: anywhere; }
 .onboarding-runtime-section { display: grid; gap: 18px; }
+.onboarding-cli { display: grid; gap: 8px; padding: 0 4px; }
+.onboarding-cli h3 { margin: 0; font-size: 13px; }
 .onboarding-runtime-status { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 16px 18px; border: 1px solid var(--outline); border-radius: 12px; background: var(--surface-2); }
 .onboarding-runtime-status.is-ready { border-color: color-mix(in srgb, var(--success) 30%, var(--outline)); }
 .onboarding-runtime-status.is-ready > .n-icon { color: var(--success); }

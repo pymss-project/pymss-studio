@@ -4,6 +4,7 @@ use crate::python::protocol::WorkerEnvelope;
 use crate::session_log;
 use crate::state::AppState;
 use crate::storage;
+use crate::studio_paths::{bundled_bin_candidates, embedded_python_from};
 #[path = "runtime_selection.rs"]
 mod runtime_selection;
 use runtime_selection::*;
@@ -244,7 +245,7 @@ impl RuntimeAccess {
 }
 
 struct RuntimeAccessGuard<'a> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     external: Vec<Arc<std::fs::File>>,
     access: &'a Mutex<RuntimeAccess>,
     updating: bool,
@@ -339,7 +340,7 @@ fn acquire_runtime_access<'a>(
     } else {
         state.users += 1;
     }
-    Ok(Some(RuntimeAccessGuard { access, updating, installing_plugins, #[cfg(windows)] external: Vec::new() }))
+    Ok(Some(RuntimeAccessGuard { access, updating, installing_plugins, #[cfg(any(windows, target_os = "macos", target_os = "linux"))] external: Vec::new() }))
 }
 
 fn worker_scratch(command: &str, payload: &Value) -> std::io::Result<Option<tempfile::TempDir>> {
@@ -421,7 +422,7 @@ fn acquire_worker_runtime_access(app: &AppHandle, command: &str, payload: &Value
         "recover_runtime"
     } else { runtime_access_command(command, payload) };
     let guard = acquire_runtime_access(&RUNTIME_ACCESS, access_command)?;
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     let guard = if let Some(mut guard) = guard {
         use crate::cli_access::{resource, RUNTIME, MODELS};
         let root = storage::runtime_envs_dir(app)?;
@@ -513,33 +514,6 @@ fn embedded_python_path(app: &AppHandle) -> AppResult<Option<PathBuf>> {
     ))
 }
 
-fn embedded_python_from(resource: Option<&Path>, exe_dir: &Path, windows: bool) -> Option<PathBuf> {
-    let mut runtime_dirs: Vec<_> = resource
-        .into_iter()
-        .flat_map(storage::resource_roots)
-        .map(|root| root.join("python-runtime"))
-        .collect();
-    runtime_dirs.push(exe_dir.join("python-runtime"));
-
-    for runtime in runtime_dirs {
-        let candidates = if windows {
-            vec![
-                runtime.join("python.exe"),
-                runtime.join("Scripts").join("python.exe"),
-            ]
-        } else {
-            vec![
-                runtime.join("bin").join("python3"),
-                runtime.join("bin").join("python"),
-            ]
-        };
-        if let Some(path) = candidates.into_iter().find(|candidate| candidate.is_file()) {
-            return Some(path);
-        }
-    }
-    None
-}
-
 fn bootstrap_python_path(app: &AppHandle) -> AppResult<String> {
     if let Ok(value) = std::env::var("PYMSS_STUDIO_PYTHON") {
         let path = PathBuf::from(&value);
@@ -597,29 +571,6 @@ pub(crate) fn bundled_bin_dirs(app: &AppHandle) -> AppResult<Vec<PathBuf>> {
         .into_iter()
         .filter(|dir| dir.is_dir())
         .collect())
-}
-
-fn bundled_bin_candidates(resource: Option<&Path>, exe_dir: &Path) -> Vec<PathBuf> {
-    let mut dirs: Vec<_> = resource
-        .into_iter()
-        .flat_map(storage::resource_roots)
-        .map(|root| root.join("bin"))
-        .collect();
-    dirs.push(exe_dir.join("bin"));
-    dirs
-}
-
-#[cfg(target_os = "macos")]
-fn bundled_openssl_env(app: &AppHandle) -> AppResult<Option<(PathBuf, PathBuf)>> {
-    for bin_dir in bundled_bin_dirs(app)? {
-        let openssl_dir = bin_dir.join("openssl");
-        let openssl_conf = openssl_dir.join("openssl.cnf");
-        let openssl_modules = openssl_dir.join("ossl-modules");
-        if openssl_conf.is_file() && openssl_modules.is_dir() {
-            return Ok(Some((openssl_conf, openssl_modules)));
-        }
-    }
-    Ok(None)
 }
 
 fn default_output_dir(app: &AppHandle) -> AppResult<PathBuf> {
@@ -766,24 +717,13 @@ fn build_worker_command(
         cmd.env("PATH", path);
     }
     #[cfg(target_os = "macos")]
-    if python == bootstrap_python {
+    {
         let embedded = embedded_python_path(app)?;
-        if let Some(embedded) = embedded {
-            if let Some(runtime_root) = embedded.parent().and_then(|path| path.parent()) {
-                cmd.env("PYTHONHOME", runtime_root.to_string_lossy().to_string());
-            }
+        crate::studio_paths::apply_macos_python_home(&mut cmd, Path::new(&python), embedded.as_deref());
+        if let Some((conf, modules)) = crate::studio_paths::bundled_openssl_paths(&bundled_bin_dirs(app)?) {
+            cmd.env("PYMSS_STUDIO_OPENSSL_CONF", conf)
+                .env("PYMSS_STUDIO_OPENSSL_MODULES", modules);
         }
-    }
-    #[cfg(target_os = "macos")]
-    if let Some((openssl_conf, openssl_modules)) = bundled_openssl_env(app)? {
-        cmd.env(
-            "PYMSS_STUDIO_OPENSSL_CONF",
-            openssl_conf.to_string_lossy().to_string(),
-        );
-        cmd.env(
-            "PYMSS_STUDIO_OPENSSL_MODULES",
-            openssl_modules.to_string_lossy().to_string(),
-        );
     }
     if let Ok(models_dir) = storage::models_dir(app) {
         cmd.env("PYMSS_MODEL_DIR", models_dir.to_string_lossy().to_string());

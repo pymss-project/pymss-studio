@@ -34,6 +34,8 @@ const studioLog = createLogger('ui.stores.settings')
 
 type AppPathsPayload = {
   cliPath?: string
+  cliPlatform?: 'windows' | 'macos' | 'linux' | null
+  cliExtractAndRun?: boolean
   cliPathSupported?: boolean
   dataRoot: string
   settingsDir: string

@@ -30,6 +30,9 @@ pub struct AppPathsPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cli_path: Option<String>,
     pub cli_path_supported: bool,
+    pub cli_platform: Option<&'static str>,
+    #[cfg(target_os = "linux")]
+    pub cli_extract_and_run: bool,
     pub data_root: String,
     pub settings_dir: String,
     pub models_dir: String,
@@ -132,9 +135,20 @@ pub fn ensure_app_directories(app: &AppHandle) -> AppResult<()> {
 }
 
 pub(crate) fn cli_launcher_path() -> AppResult<Option<PathBuf>> {
-    if cfg!(all(windows, not(feature = "vst-lab"))) {
-        return Ok(std::env::current_exe()?.parent().map(|dir| dir.join("pymss.exe")));
-    }
+    #[cfg(all(windows, not(feature = "vst-lab")))]
+    return Ok(std::env::current_exe()?.parent().map(|dir| dir.join("pymss.exe")));
+
+    #[cfg(all(target_os = "macos", not(feature = "vst-lab")))]
+    return Ok(crate::studio_paths::macos_bundle_from_executable(&std::env::current_exe()?)
+        .map(|bundle| bundle.join("Contents/MacOS/pymss")));
+
+    #[cfg(all(target_os = "linux", not(feature = "vst-lab")))]
+    return match std::env::var_os("APPIMAGE") {
+        Some(_) => Ok(crate::linux_update::current_image().ok()),
+        None => Ok(None),
+    };
+
+    #[cfg(any(feature = "vst-lab", not(any(windows, target_os = "macos", target_os = "linux"))))]
     Ok(None)
 }
 
@@ -147,6 +161,9 @@ pub fn app_paths_payload(app: &AppHandle) -> AppResult<AppPathsPayload> {
     Ok(AppPathsPayload {
         cli_path,
         cli_path_supported: cli_launcher.is_some(),
+        cli_platform: cli_launcher.as_ref().map(|_| std::env::consts::OS),
+        #[cfg(target_os = "linux")]
+        cli_extract_and_run: cli_launcher.is_some() && crate::studio_paths::appimage_extract_and_run(),
         data_root: data_root_dir(app)?.to_string_lossy().to_string(),
         settings_dir: settings_dir(app)?.to_string_lossy().to_string(),
         models_dir: models_dir(app)?.to_string_lossy().to_string(),

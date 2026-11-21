@@ -6,6 +6,20 @@ use std::{io::Write, sync::OnceLock};
 const DATA_ROOT_ENV: &str = "PYMSS_STUDIO_DATA_ROOT";
 const DATA_ROOT_DIR_NAME: &str = ".pymss-studio";
 const LOCAL_DATA_ROOT_DIR_NAME: &str = "data";
+
+#[cfg(target_os = "linux")]
+pub(crate) fn extracted_appimage_mount(mount: Option<&std::ffi::OsStr>) -> bool {
+    mount
+        .and_then(|path| Path::new(path).file_name())
+        .is_some_and(|name| name.as_encoded_bytes().starts_with(b"appimage_extracted_"))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn appimage_extract_and_run() -> bool {
+    extracted_appimage_mount(std::env::var_os("APPDIR").as_deref())
+        || std::env::var_os("APPIMAGE_EXTRACT_AND_RUN").is_some()
+}
+
 #[cfg(windows)]
 const PORTABLE_MARKER_FILE_NAME: &str = "pymss-studio.portable";
 #[cfg(windows)]
@@ -151,6 +165,89 @@ pub(crate) fn bundled_runtime_envs_from(
         .collect();
     candidates.push(exe_dir.join("python-runtime").join("runtime-envs"));
     candidates.into_iter().find(|path| path.is_dir())
+}
+
+pub(crate) fn embedded_python_from(resource: Option<&Path>, exe_dir: &Path, windows: bool) -> Option<PathBuf> {
+    let mut runtime_dirs: Vec<_> = resource
+        .into_iter()
+        .flat_map(resource_roots)
+        .map(|root| root.join("python-runtime"))
+        .collect();
+    runtime_dirs.push(exe_dir.join("python-runtime"));
+
+    for runtime in runtime_dirs {
+        let candidates = if windows {
+            vec![
+                runtime.join("python.exe"),
+                runtime.join("Scripts").join("python.exe"),
+            ]
+        } else {
+            vec![
+                runtime.join("bin").join("python3"),
+                runtime.join("bin").join("python"),
+            ]
+        };
+        if let Some(path) = candidates.into_iter().find(|candidate| candidate.is_file()) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+pub(crate) fn bundled_bin_candidates(resource: Option<&Path>, exe_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<_> = resource
+        .into_iter()
+        .flat_map(resource_roots)
+        .map(|root| root.join("bin"))
+        .collect();
+    dirs.push(exe_dir.join("bin"));
+    dirs
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn macos_bundle_from_executable(executable: &Path) -> Option<PathBuf> {
+    let macos = executable.parent()?;
+    let contents = macos.parent()?;
+    let bundle = contents.parent()?;
+    (macos.file_name()? == "MacOS"
+        && contents.file_name()? == "Contents"
+        && bundle.extension()? == "app")
+        .then(|| bundle.to_path_buf())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn apply_macos_python_home(
+    command: &mut std::process::Command,
+    python: &Path,
+    embedded: Option<&Path>,
+) {
+    if let Some(embedded) = embedded {
+        // Keep the executable component. Resolving the venv symlink would
+        // make it look like the embedded interpreter and bypass pyvenv.cfg.
+        if let (Some(parent), Some(name), Some(embedded_parent)) =
+            (python.parent(), python.file_name(), embedded.parent())
+        {
+            if Some(name) == embedded.file_name()
+                && (parent == embedded_parent
+                    || parent.canonicalize().ok().zip(embedded_parent.canonicalize().ok())
+                        .is_some_and(|(a, b)| a == b))
+            {
+                if let Some(root) = embedded_parent.parent() {
+                    command.env("PYTHONHOME", root);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn bundled_openssl_paths(bin_dirs: &[PathBuf]) -> Option<(PathBuf, PathBuf)> {
+    bin_dirs.iter().find_map(|bin| {
+        let dir = bin.join("openssl");
+        let conf = dir.join("openssl.cnf");
+        let modules = dir.join("ossl-modules");
+        (conf.is_file() && modules.is_dir()).then_some((conf, modules))
+    })
 }
 
 #[cfg(windows)]

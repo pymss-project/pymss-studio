@@ -152,6 +152,7 @@ jobs:
           }))
           PY
           pnpm plugins:build --bundles app --config src-tauri/tauri.bundle.resources.json
+          cargo build --locked --release --manifest-path src-tauri/Cargo.toml --no-default-features --features studio-cli --bin pymss
 
       - name: Re-sign bundled macOS app after embedding runtime
         run: |
@@ -174,7 +175,9 @@ jobs:
             echo "Bundled MLX active runtime does not point to the bootstrap Python"
             exit 1
           fi
+          install -m 0755 src-tauri/target/release/pymss "$APP/Contents/MacOS/pymss"
           bash scripts/resign-macos-app.sh "$APP"
+          python3 scripts/verify-unix-cli.py "$APP/Contents/MacOS/pymss"
 
       - name: Verify bundled macOS resources
         run: |
@@ -288,6 +291,8 @@ jobs:
         run: |
           python3 -m unittest discover -s tests/python -t tests -p 'test_macos_update_release.py'
           cargo test --manifest-path src-tauri/Cargo.toml macos_update
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --bin pymss-studio cli_path::unix
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --features studio-cli --bin pymss unix
 
       - name: Build DMG with hdiutil
         run: |

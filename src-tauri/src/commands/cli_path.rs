@@ -1,6 +1,9 @@
 use crate::error::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 
+#[cfg(all(unix, not(feature = "vst-lab")))]
+mod unix;
+
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CliPathAction {
@@ -15,6 +18,8 @@ pub enum CliPathAction {
 enum Registration {
     Available,
     Enabled,
+    #[cfg(unix)]
+    Registered,
     Conflict,
     Moved,
 }
@@ -71,11 +76,28 @@ pub async fn manage_cli_path(
         .await
         .map_err(|e| AppError::Worker(e.to_string()))?
     }
-    #[cfg(not(all(windows, not(feature = "vst-lab"))))]
+    #[cfg(all(unix, not(feature = "vst-lab")))]
+    {
+        #[cfg(not(target_os = "linux"))]
+        use tauri::Manager;
+        tauri::async_runtime::spawn_blocking(move || {
+            let launcher = crate::storage::cli_launcher_path()?.ok_or_else(|| {
+                AppError::Worker("The Studio command-line launcher is unavailable.".into())
+            })?;
+            #[cfg(target_os = "linux")]
+            let home = unix::account_home()?;
+            #[cfg(not(target_os = "linux"))]
+            let home = crate::storage::home_dir(window.app_handle())?;
+            unix::apply(&home, &launcher, action)
+        })
+        .await
+        .map_err(|error| AppError::Worker(error.to_string()))?
+    }
+    #[cfg(any(feature = "vst-lab", not(any(windows, unix))))]
     {
         let _ = action;
         Err(AppError::Worker(
-            "CLI PATH registration is available in Pymss Studio for Windows.".into(),
+            "CLI registration is unavailable in this build.".into(),
         ))
     }
 }

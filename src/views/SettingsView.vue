@@ -2222,7 +2222,8 @@ onMounted(async () => {
               </span>
               {{ t('settings.cliLauncher') }}
             </h2>
-            <RuntimeCliSettings :launcher="settings.appPaths.cliPath" />
+            <RuntimeCliSettings :launcher="settings.appPaths.cliPath" :platform="settings.appPaths.cliPlatform"
+              :extract-and-run="settings.appPaths.cliExtractAndRun" />
           </article>
         </section>
 

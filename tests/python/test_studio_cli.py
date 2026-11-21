@@ -1,7 +1,10 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
+import signal
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -76,6 +79,39 @@ class CliStartupTests(unittest.TestCase):
         home = config.read_text(encoding="utf-8").splitlines()[0].removeprefix("home = ")
         self.assertTrue(Path(home).samefile(bootstrap.parent))
         self.assertFalse((self.root / ".runtime-management.lock").exists())
+
+    def test_run_preserves_the_upstream_entry_point_arguments_and_exit_code(self):
+        package = self.root / "pymss"
+        package.mkdir()
+        (package / "__init__.py").touch()
+        (package / "__main__.py").write_text(
+            "import sys\nassert sys.argv[1:] == ['one two', '', '--option']\nraise SystemExit(130)\n",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [sys.executable, "-P", studio_cli.__file__, "run", "one two", "", "--option"],
+            env={**os.environ, "PYTHONPATH": str(self.root)},
+            capture_output=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 130, result.stderr)
+
+    @unittest.skipIf(sys.platform == "win32", "Unix process wait status")
+    def test_run_preserves_sigint_caught_by_the_upstream_entry_point(self):
+        package = self.root / "pymss"
+        package.mkdir()
+        (package / "__init__.py").touch()
+        (package / "__main__.py").write_text(
+            "import signal\n"
+            "try:\n    signal.raise_signal(signal.SIGINT)\n"
+            "except KeyboardInterrupt:\n    raise SystemExit(130)\n",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [sys.executable, "-P", studio_cli.__file__, "run"],
+            env={**os.environ, "PYTHONPATH": str(self.root)},
+            capture_output=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, -signal.SIGINT, result.stderr)
 
 
 if __name__ == "__main__":
