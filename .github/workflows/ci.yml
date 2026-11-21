@@ -149,13 +149,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The Python suite also invokes the Tauri CLI to verify the plugin build entry point.
       - uses: pnpm/action-setup@v4
-        if: needs.scope.outputs.frontend != 'false'
         with:
           version: 10.33.2
 
       - uses: actions/setup-node@v4
-        if: needs.scope.outputs.frontend != 'false'
         with:
           node-version: 22
           cache: pnpm
@@ -168,8 +167,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         if: needs.scope.outputs.backend != 'false'
 
-      - name: Install frontend dependencies
-        if: needs.scope.outputs.frontend != 'false'
+      - name: Install Node dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Install Python test dependencies

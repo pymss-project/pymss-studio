@@ -106,7 +106,7 @@ pub(super) fn status(command: &mut Command) -> io::Result<ExitStatus> {
 
     // The leader still reserves the process group ID here, including when it
     // has already exited. Finish the group before reaping it.
-    signal_group(pid, libc::SIGKILL)?;
+    signal_worker_group(pid, libc::SIGKILL)?;
     let status = child.wait()?;
     while worker_tools_running(pid)? {
         thread::sleep(POLL_INTERVAL);
@@ -117,8 +117,8 @@ pub(super) fn status(command: &mut Command) -> io::Result<ExitStatus> {
 fn supervise(pid: libc::pid_t, tty: &Terminal) -> io::Result<Option<i32>> {
     loop {
         if let Some(signal) = pending_signal() {
-            signal_group(pid, signal)?;
-            signal_group(pid, libc::SIGCONT)?;
+            signal_worker_group(pid, signal)?;
+            signal_worker_group(pid, libc::SIGCONT)?;
             return Ok(Some(allow_cleanup(tty, signal)));
         }
 
@@ -140,7 +140,7 @@ fn supervise(pid: libc::pid_t, tty: &Terminal) -> io::Result<Option<i32>> {
                         && !suspend
                     {
                         // The worker tried using the terminal before handoff.
-                        signal_group(pid, libc::SIGCONT)?;
+                        signal_worker_group(pid, libc::SIGCONT)?;
                     } else {
                         tty.suspend_job()?;
                     }
@@ -189,9 +189,19 @@ fn signal_group(pid: libc::pid_t, signal: libc::c_int) -> io::Result<bool> {
     let error = io::Error::last_os_error();
     match error.raw_os_error() {
         Some(libc::ESRCH) => Ok(false),
-        Some(libc::EPERM) if signal == 0 => Ok(true),
         _ => Err(error),
     }
+}
+
+fn signal_worker_group(pid: libc::pid_t, signal: libc::c_int) -> io::Result<bool> {
+    let result = signal_group(pid, signal);
+    // Darwin reports EPERM when a group exists but has no signalable
+    // members. This private group runs under the launcher's credentials.
+    #[cfg(target_os = "macos")]
+    if matches!(&result, Err(error) if error.raw_os_error() == Some(libc::EPERM)) {
+        return Ok(false);
+    }
+    result
 }
 
 struct Terminal {
@@ -262,7 +272,7 @@ impl Terminal {
 
     fn suspend_job(&self) -> io::Result<()> {
         let worker_was_foreground = self.worker_has_terminal();
-        signal_group(self.worker, libc::SIGSTOP)?;
+        signal_worker_group(self.worker, libc::SIGSTOP)?;
         self.restore();
         if self.owns_job_group {
             signal_group(self.job, libc::SIGSTOP)?;
@@ -281,7 +291,7 @@ impl Terminal {
             return Err(io::Error::last_os_error());
         }
         self.give_to_worker();
-        signal_group(self.worker, libc::SIGCONT)?;
+        signal_worker_group(self.worker, libc::SIGCONT)?;
         Ok(())
     }
 }
@@ -315,5 +325,16 @@ fn worker_tools_running(pid: libc::pid_t) -> io::Result<bool> {
 
 #[cfg(target_os = "macos")]
 fn worker_tools_running(pid: libc::pid_t) -> io::Result<bool> {
-    signal_group(pid, 0)
+    signal_worker_group(pid, 0)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_exit_status_when_the_worker_group_has_already_exited() {
+        let exit = status(Command::new("/bin/sh").args(["-c", "exit 23"])).unwrap();
+        assert_eq!(exit.code(), Some(23));
+    }
 }
