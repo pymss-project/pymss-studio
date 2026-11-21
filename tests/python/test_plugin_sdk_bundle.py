@@ -52,7 +52,7 @@ class PluginSdkBundleTests(unittest.TestCase):
 
     def test_linux_release_maps_the_sdk_and_checks_the_finished_appimage(self):
         workflow = (ROOT / ".github/workflows/release-linux.yml").read_text(encoding="utf-8")
-        step = workflow.split("- name: Build AppImage", 1)[1].split("- name:", 1)[0]
+        step = workflow.split("\n      - name: Build AppImage\n", 1)[1].split("\n      - ", 1)[0]
         generator = step.split("<<'PY'", 1)[1].split("\n", 1)[1].split("\n          PY", 1)[0]
         generator = "\n".join(line[10:] if line.startswith(" " * 10) else line for line in generator.splitlines())
         with tempfile.TemporaryDirectory() as directory, contextlib.chdir(directory):
