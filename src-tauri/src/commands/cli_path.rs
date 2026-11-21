@@ -198,7 +198,13 @@ mod windows {
             assert!(!state.changed && !state.owned);
             assert!(!matches!(state.status, Registration::Enabled));
             let details = state.diagnostics.unwrap();
-            assert_eq!(Path::new(&details.launcher), root.path().join("pymss.exe"));
+            let launcher = Path::new(&details.launcher);
+            assert_eq!(launcher.file_name().unwrap(), "pymss.exe");
+            // The launcher is absent in this fixture, so resolve only its directory.
+            assert_eq!(
+                launcher.parent().unwrap().canonicalize().unwrap(),
+                root.path().canonicalize().unwrap(),
+            );
             assert!(!details.launcher_exists);
             assert!(!details.user_path_contains_studio && !details.system_path_contains_studio);
         }
