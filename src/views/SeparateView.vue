@@ -9,6 +9,7 @@ import { useNumberInputAccessibility } from '@/composables/useNumberInputAccessi
 import { useRoute, useRouter } from 'vue-router'
 import { useDialog, useMessage, type DropdownOption } from 'naive-ui'
 import { convertFileSrc } from '@tauri-apps/api/core'
+import { mediaSourceUrl, needsBlobMediaSource, releaseMediaSourceUrl } from '@/utils/mediaSource'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import {
@@ -312,6 +313,7 @@ const submittingJob = ref(false)
 const cancellingTaskId = ref<string | null>(null)
 const cancellingQueueJobId = ref<string | null>(null)
 const audioElements = new Map<string, HTMLAudioElement>()
+const audioBlobUrls = new WeakMap<HTMLAudioElement, string>()
 const audioAccessOrder: string[] = []
 const playingOutputPath = ref('')
 const outputPlayback = ref<Record<string, { currentTime: number; duration: number }>>({})
@@ -1234,6 +1236,11 @@ function releasePreviewAudio(path: string) {
   const audio = audioElements.get(path)
   if (audio) {
     audioElements.delete(path)
+    const blobUrl = audioBlobUrls.get(audio)
+    if (blobUrl) {
+      releaseMediaSourceUrl(blobUrl)
+      audioBlobUrls.delete(audio)
+    }
     audio.pause()
     audio.removeAttribute('src')
     audio.load()
@@ -1265,7 +1272,10 @@ function getAudio(path: string) {
 
   const audio = new Audio()
   audio.preload = 'metadata'
-  audio.src = convertFileSrc(path)
+  if (!needsBlobMediaSource()) {
+    audio.src = convertFileSrc(path)
+    audio.load()
+  }
   audio.addEventListener('loadedmetadata', () => {
     if (audioElements.get(path) !== audio) return
     setOutputPlayback(path, { duration: audio.duration || 0 })
@@ -1286,8 +1296,19 @@ function getAudio(path: string) {
   audioElements.set(path, audio)
   touchPreviewAudio(path)
   trimPreviewAudioCache(path)
-  audio.load()
   return audio
+}
+
+async function loadPreviewAudio(audio: HTMLAudioElement, path: string) {
+  if (audio.src) return
+  const url = await mediaSourceUrl(path)
+  if (audioElements.get(path) !== audio) {
+    releaseMediaSourceUrl(url)
+    return
+  }
+  audioBlobUrls.set(audio, url)
+  audio.src = url
+  audio.load()
 }
 
 function syncOutputPreviewAudio(outputs: StemOutput[]) {
@@ -1315,6 +1336,7 @@ async function toggleOutputPlayback(output: StemOutput) {
     if (path !== output.path) item.pause()
   })
   try {
+    await loadPreviewAudio(audio, output.path)
     await audio.play()
     playingOutputPath.value = output.path
   } catch (error) {

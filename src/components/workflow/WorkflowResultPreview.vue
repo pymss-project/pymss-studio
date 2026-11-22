@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { vSliderA11y } from '@/directives/sliderAccessibility'
 import { convertFileSrc } from '@tauri-apps/api/core'
+import { mediaSourceUrl, needsBlobMediaSource, releaseMediaSourceUrl } from '@/utils/mediaSource'
 import { FolderOutline, OpenOutline, PauseOutline, PlayOutline } from '@vicons/ionicons5'
 import { isTauriRuntime } from '@/utils/appStore'
 import type { StemOutput } from '@/stores/task'
@@ -23,6 +24,7 @@ const audioOutputs = computed(() => outputs.value.filter(isAudioOutput))
 const directories = computed(() => [...new Set((props.directories?.length ? props.directories : [props.outputDirectory || '']).filter(Boolean))])
 let audio: HTMLAudioElement | undefined
 let audioPath = ''
+let audioBlobUrl = ''
 let removeListeners: (() => void) | undefined
 let playGeneration = 0
 
@@ -41,6 +43,10 @@ function releaseAudio() {
   playGeneration++
   removeListeners?.()
   removeListeners = undefined
+  if (audioBlobUrl) {
+    releaseMediaSourceUrl(audioBlobUrl)
+    audioBlobUrl = ''
+  }
   if (audio) {
     audio.pause()
     audio.removeAttribute('src')
@@ -61,7 +67,7 @@ function prepareAudio(path: string) {
   audio = player
   audioPath = path
   player.preload = 'metadata'
-  update(path, { loading: true, failed: false })
+  update(path, { loading: !needsBlobMediaSource(), failed: false })
   const fail = () => {
     if (audio !== player) return
     playingPath.value = ''
@@ -85,10 +91,24 @@ function prepareAudio(path: string) {
     for (const [event, handler] of Object.entries(handlers)) player.removeEventListener(event, handler)
   }
   try {
-    player.src = convertFileSrc(path)
-    player.load()
+    if (!needsBlobMediaSource()) {
+      player.src = convertFileSrc(path)
+      player.load()
+    }
   } catch { fail() }
   return player
+}
+
+async function ensureAudioLoaded(player: HTMLAudioElement, path: string) {
+  if (player.src) return
+  const url = await mediaSourceUrl(path)
+  if (audio !== player) {
+    releaseMediaSourceUrl(url)
+    return
+  }
+  audioBlobUrl = url
+  player.src = url
+  player.load()
 }
 
 async function toggle(path: string) {
@@ -102,6 +122,7 @@ async function toggle(path: string) {
   }
   update(path, { loading: true, failed: false })
   try {
+    await ensureAudioLoaded(player, path)
     await player.play()
     if (audio === player && generation === playGeneration) {
       playingPath.value = path

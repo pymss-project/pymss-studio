@@ -274,6 +274,13 @@ def _studio_separator_type() -> type[Any]:
             if isinstance(getattr(model, "use_amp", None), bool):
                 amp = model.use_amp
             self._studio_rocm_checks = model_native_checks(model, use_amp=bool(amp), device=getattr(self, "device", kwargs.get("device", "auto")))
+            from worker_infer_accel import optimize_separator_inference
+            self._studio_accel = optimize_separator_inference(
+                self,
+                explicit_params=params,
+                amp_enabled=bool(amp),
+                logger=getattr(self, "logger", kwargs.get("logger")),
+            )
             self._studio_naming = _normalize_output_naming(output_naming)
             self._studio_output_model = output_model
             self._studio_output_lock = Lock()
