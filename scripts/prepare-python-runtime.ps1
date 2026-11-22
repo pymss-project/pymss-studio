@@ -572,8 +572,28 @@ except Exception:
 try:
     import torch
     result['torchVersion'] = torch.__version__
-    result['torchBackend'] = 'rocm' if getattr(torch.version, 'hip', None) else 'cuda' if getattr(torch.version, 'cuda', None) else 'cpu'
-    result['acceleratorAvailable'] = torch.cuda.is_available()
+    hip = getattr(torch.version, 'hip', None)
+    cuda = getattr(torch.version, 'cuda', None)
+    xpu_version = getattr(torch.version, 'xpu', None)
+    package = str(getattr(torch, '__version__', '') or '')
+    if isinstance(hip, str) and hip:
+        result['torchBackend'] = 'rocm'
+    elif isinstance(cuda, str) and cuda:
+        result['torchBackend'] = 'cuda'
+    elif (isinstance(xpu_version, str) and xpu_version) or '+xpu' in package:
+        result['torchBackend'] = 'xpu'
+    else:
+        result['torchBackend'] = 'cpu'
+    result['acceleratorAvailable'] = False
+    if result['torchBackend'] == 'xpu':
+        xpu = getattr(torch, 'xpu', None)
+        is_available = getattr(xpu, 'is_available', None)
+        try:
+            result['acceleratorAvailable'] = bool(callable(is_available) and is_available() is True)
+        except Exception:
+            result['acceleratorAvailable'] = False
+    else:
+        result['acceleratorAvailable'] = bool(torch.cuda.is_available())
 except Exception as exc:
     result['torchBackend'] = 'error:' + str(exc)
 print(json.dumps(result))

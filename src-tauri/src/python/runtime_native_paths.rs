@@ -213,7 +213,7 @@ pub(super) fn reject_managed_bootstrap(python: &Path, managed_roots: &[PathBuf])
     for root in managed_roots {
         let root = root.canonicalize().unwrap_or_else(|_| root.clone());
         if environments.iter().any(|environment| {
-            ["cpu", "cuda", "rocm", "mlx"]
+            ["cpu", "cuda", "xpu", "rocm", "mlx"]
                 .iter()
                 .any(|backend| environment == &root.join(backend))
         }) {

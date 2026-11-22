@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 
-from worker_protocol import debug_log, emit_error, load_payload, protocol_logging
+from worker_protocol import debug_log, emit, emit_error, load_payload, protocol_logging
 from worker_proxy import ProxyConfigError, configure_process_proxy, load_proxy_config, parse_proxy_config
 from worker_rocm import RocmWorkerAbort, rocm_worker_poisoned
 
@@ -176,7 +178,44 @@ def run_command(command: str, payload: dict) -> int:
     return emit_error("UNKNOWN_COMMAND", f"Unknown command: {command}")
 
 
+def serve() -> int:
+    """Run inference commands from stdin and keep the loaded model resident."""
+    os.environ["PYMSS_STUDIO_KEEP_MODEL"] = "1"
+    debug_log("worker.serve", command="serve")
+    while True:
+        line = sys.stdin.readline()
+        if line == "":
+            return 0
+        if not line.strip():
+            continue
+        command = "serve"
+        payload: dict = {}
+        try:
+            message = json.loads(line)
+            command = str(message.get("command") or "")
+            raw_payload = message.get("payload")
+            payload = raw_payload if isinstance(raw_payload, dict) else {}
+            if command == "shutdown":
+                from worker_infer import release_cached_separator
+                release_cached_separator()
+                emit("command_finished", {"code": 0})
+                return 0
+            code = run_command(command, payload)
+        except RocmWorkerAbort as aborted:
+            emit_error(getattr(aborted.error, "code", "ROCM_CONTEXT_LOST"), str(aborted.error),
+                       task_id=payload.get("taskId"), extra={"workerRestartRequired": True})
+            emit("command_finished", {"code": 1})
+            return 1
+        except Exception as exc:
+            import traceback
+            debug_log("worker.exception", command=command, error=str(exc), detail=traceback.format_exc())
+            code = emit_error("UNKNOWN_ERROR", str(exc), traceback.format_exc(), task_id=payload.get("taskId"))
+        emit("command_finished", {"code": code})
+
+
 def main(argv: list[str]) -> int:
+    if len(argv) > 1 and argv[1] == "serve":
+        return serve()
     args = parse_args(argv)
     debug_log("worker.start", command=args.command)
     try:

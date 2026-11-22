@@ -374,6 +374,7 @@ const runtimeRecommendedBackend = computed(() => recommendedRuntimeBackend(app.r
 const RUNTIME_BACKEND_DESC_KEYS: Record<RuntimeBackend, string> = {
   cpu: 'onboarding.runtimeCpu',
   cuda: 'onboarding.runtimeCuda',
+  xpu: 'onboarding.runtimeXpu',
   rocm: 'onboarding.runtimeRocm',
   mlx: 'onboarding.runtimeMlx',
 }
@@ -389,7 +390,7 @@ type BackendCardBase = { backend: RuntimeBackend; label: string; description: st
 const runtimeBackendCatalog = computed<BackendCardBase[]>(() => {
   const { isMac } = runtimePlatform.value
   const backends: RuntimeBackend[] = isMac ? ['mlx'] : ['cpu']
-  if (!isMac) backends.push('cuda', 'rocm')
+  if (!isMac) backends.push('cuda', 'xpu', 'rocm')
   return backends.map((backend) => ({
     backend,
     label: runtimeBackendName(backend),
@@ -439,7 +440,7 @@ const runtimeBackendCards = computed(() => {
       const coreUpdateAvailable = app.runtimeCoreUpdateSupported && isActive && env?.coreUpdateSupported !== false && (
         runtimeCoreUpdateAvailable(env, app.runtimeCoreVersions, app.runtimeInfo?.manifestVersion)
       )
-      const gpuBackend = item.backend === 'cuda' || item.backend === 'rocm' || item.backend === 'mlx'
+      const gpuBackend = item.backend === 'cuda' || item.backend === 'xpu' || item.backend === 'rocm' || item.backend === 'mlx'
       // A cancelled or failed install leaves its venv behind without an install state, so the
       // backend reads as not installed while still holding gigabytes. Surface it so the space
       // can be reclaimed instead of being stranded.

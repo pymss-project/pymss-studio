@@ -637,6 +637,13 @@ fn build_worker_command(
     let active_overlay = active_runtime_python
         .as_deref()
         .and_then(|python| active_overlay(&root, bundled.as_deref(), python));
+    let xpu_amp = xpu_fp16_amp(
+        active_runtime_python
+            .as_deref()
+            .and_then(interpreter_backend_name)
+            .as_deref(),
+        std::env::var("PYMSS_AMP").ok().as_deref(),
+    );
     let python = select_worker_python(command, &bootstrap_python, active_runtime_python)?;
     let mut managed_roots = vec![root];
     managed_roots.extend(bundled);
@@ -671,7 +678,11 @@ fn build_worker_command(
             },
         )
         .env("PYMSS_STUDIO_BOOTSTRAP_PYTHON", &bootstrap_python)
-        .env("PYMSS_STUDIO_ALLOW_DEBUG_RUNTIME_OVERRIDE", if developer_mode { "1" } else { "0" })
+        .env("PYMSS_STUDIO_ALLOW_DEBUG_RUNTIME_OVERRIDE", if developer_mode { "1" } else { "0" });
+    if let Some(value) = xpu_amp {
+        cmd.env("PYMSS_AMP", value);
+    }
+    cmd
         .env(
             "PYMSS_STUDIO_DEFAULT_OUTPUT_DIR",
             default_output_dir(app)?.to_string_lossy().to_string(),
@@ -1642,6 +1653,9 @@ pub fn spawn_worker_background(
     result
 }
 
+#[path = "warm_infer.rs"]
+mod warm_infer;
+
 fn spawn_worker_background_inner(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1650,6 +1664,9 @@ fn spawn_worker_background_inner(
     mut payload: Value,
     operation_id: String,
 ) -> AppResult<()> {
+    if command == "infer" {
+        return warm_infer::spawn_background(app, state, task_id, payload, operation_id);
+    }
     let mut application_access = Some(acquire_application_operation()?);
     let mut runtime_access = acquire_worker_runtime_access(&app, command, &payload)?;
     let release_event = runtime_access.as_ref().and_then(|_| runtime_release_event(command, &payload));
@@ -3402,6 +3419,32 @@ trigger_worker_native_fault()
             &active,
             &python.to_string_lossy()
         ));
+
+        let xpu = root
+            .join("runtime-envs")
+            .join("xpu")
+            .join("Scripts")
+            .join("python.exe");
+        fs::create_dir_all(xpu.parent().unwrap()).unwrap();
+        fs::write(&xpu, "stub").unwrap();
+        let xpu = fs::canonicalize(xpu).unwrap();
+        fs::write(
+            &active,
+            serde_json::to_vec(&json!({"backend": "xpu", "pythonPath": xpu.to_string_lossy()}))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(super::active_path_backend_matches(
+            &active,
+            &xpu.to_string_lossy()
+        ));
+        assert_eq!(
+            super::xpu_fp16_amp(super::interpreter_backend_name(&xpu.to_string_lossy()).as_deref(), None),
+            Some("1")
+        );
+        assert_eq!(super::xpu_fp16_amp(Some("xpu"), Some("0")), None);
+        assert_eq!(super::xpu_fp16_amp(Some("cuda"), None), None);
+        assert_eq!(super::xpu_fp16_amp(Some("cpu"), None), None);
 
         fs::write(
             &active,

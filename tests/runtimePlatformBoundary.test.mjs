@@ -98,8 +98,8 @@ for (const [platform, machine, expected] of [
   ['darwin', 'aarch64', ['mlx']],
   ['darwin', 'x86_64', ['mlx']],
   ['darwin', '', ['mlx']],
-  ['win32', 'AMD64', ['cpu', 'cuda', 'rocm']],
-  ['linux', 'x86_64', ['cpu', 'cuda', 'rocm']],
+  ['win32', 'AMD64', ['cpu', 'cuda', 'xpu', 'rocm']],
+  ['linux', 'x86_64', ['cpu', 'cuda', 'xpu', 'rocm']],
 ]) {
   test(`${platform}/${machine} settings and onboarding offer the intended runtime environments`, () => {
     const scope = {

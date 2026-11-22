@@ -48,7 +48,7 @@ def prepare() -> int:
         return result
     if candidates:
         raise ValueError("检测到多个运行环境。请在 Pymss Studio 的设置 → 环境管理中选择一个环境。")
-    if ACTIVE_RUNTIME_FILE.exists() or any((RUNTIME_ENVS_DIR / name / "pyvenv.cfg").exists() for name in ("cpu", "cuda", "rocm", "mlx")):
+    if ACTIVE_RUNTIME_FILE.exists() or any((RUNTIME_ENVS_DIR / name / "pyvenv.cfg").exists() for name in ("cpu", "cuda", "xpu", "rocm", "mlx")):
         raise ValueError("运行环境不可用。请在 Pymss Studio 的设置 → 环境管理中修复或重新选择环境。")
     raise ValueError("请在 Pymss Studio 的设置 → 环境管理中安装运行环境，然后重新执行命令。")
 

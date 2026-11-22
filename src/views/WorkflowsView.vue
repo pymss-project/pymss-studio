@@ -116,6 +116,7 @@ const deviceOptions = [
   { label: 'Auto', value: 'auto' },
   { label: 'CPU', value: 'cpu' },
   { label: 'CUDA', value: 'cuda' },
+  { label: 'XPU', value: 'xpu' },
   { label: 'MPS', value: 'mps' },
   { label: 'MLX', value: 'mlx' },
 ]

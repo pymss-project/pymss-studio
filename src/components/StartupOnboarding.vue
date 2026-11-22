@@ -81,6 +81,7 @@ const runtimeBackendChoices = computed(() => {
   if (!isMac) {
     items.push(
       { value: 'cuda', label: runtimeBackendName('cuda'), hint: t('onboarding.runtimeCuda') },
+      { value: 'xpu', label: runtimeBackendName('xpu'), hint: t('onboarding.runtimeXpu') },
       { value: 'rocm', label: runtimeBackendName('rocm'), hint: t(app.runtimeInfo?.platform === 'linux' ? 'onboarding.runtimeRocmLinux' : 'onboarding.runtimeRocm') },
     )
   }
@@ -131,6 +132,7 @@ const runtimeRecommendationKey = computed(() => {
   if (selectedBackendReady.value) return 'onboarding.runtimeReadyHint'
   if (selectedBackendInstalled.value) return 'onboarding.runtimeSwitchHint'
   if (runtimeRecommendedBackend.value === 'cuda') return 'onboarding.runtimeNvidiaHint'
+  if (runtimeRecommendedBackend.value === 'xpu') return 'onboarding.runtimeIntelHint'
   if (runtimeRecommendedBackend.value === 'rocm') return 'onboarding.runtimeAmdHint'
   return 'onboarding.runtimeChooseHint'
 })
@@ -799,7 +801,7 @@ onMounted(() => {
 .onboarding-runtime-status.is-ready > .n-icon { color: var(--success); }
 .onboarding-runtime-status strong { color: var(--on-surface-heading); font-size: 14px; }
 .onboarding-runtime-status p { margin: 5px 0 0; color: var(--on-surface-muted); line-height: 1.65; font-size: 12px; }
-.onboarding-runtime-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.onboarding-runtime-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 10px; }
 .onboarding-runtime-card { display: flex; flex-direction: column; align-items: start; gap: 10px; min-width: 0; padding: 16px 14px; border: 1px solid var(--outline); border-radius: 10px; background: transparent; color: var(--on-surface); text-align: left; cursor: pointer; transition: border-color 160ms, background 160ms; }
 .onboarding-runtime-card:disabled { opacity: 0.6; cursor: default; }
 .onboarding-runtime-card strong { font-size: 13px; }

@@ -80,6 +80,27 @@ pub(super) fn distinct_bundled_runtime_env(
     bundled.filter(|path| path.canonicalize().ok() != user_runtime)
 }
 
+/// FP16 autocast for an Intel XPU worker. An explicit `PYMSS_AMP` value wins,
+/// so CPU and CUDA processes are left untouched and a user can turn this off.
+pub(super) fn xpu_fp16_amp(backend: Option<&str>, existing: Option<&str>) -> Option<&'static str> {
+    if !backend.is_some_and(|value| value.eq_ignore_ascii_case("xpu")) {
+        return None;
+    }
+    match existing.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(_) => None,
+        None => Some("1"),
+    }
+}
+
+pub(super) fn interpreter_backend_name(python: &str) -> Option<String> {
+    Path::new(python)
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase())
+}
+
 pub(super) fn active_python(
     root: &Path,
     bundled: Option<&Path>,
@@ -163,7 +184,7 @@ pub(super) fn is_bundled_runtime_python_path(file: &Path, python_path: &str) -> 
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase();
-    if !matches!(backend.as_str(), "cpu" | "cuda" | "rocm" | "mlx") {
+    if !matches!(backend.as_str(), "cpu" | "cuda" | "xpu" | "rocm" | "mlx") {
         return Ok(false);
     }
     let Some(envs_dir) = file.parent() else {
@@ -209,7 +230,7 @@ pub(super) fn active_path_backend_matches(file: &Path, python_path: &str) -> boo
     };
     if !matches!(
         backend.trim().to_ascii_lowercase().as_str(),
-        "cpu" | "cuda" | "rocm" | "mlx"
+        "cpu" | "cuda" | "xpu" | "rocm" | "mlx"
     ) {
         return false;
     }

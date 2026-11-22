@@ -961,6 +961,79 @@ def cmd_health() -> int:
     return 0
 
 
+def _version_marker(value: Any) -> str:
+    """Return a real version string. Test doubles must not look like a GPU build."""
+    return value if isinstance(value, str) and value.strip() else ""
+
+
+def _torch_backend_name(torch_module: Any) -> str:
+    """Classify the installed PyTorch build. XPU wheels use a ``+xpu`` version."""
+    version = getattr(torch_module, "version", None)
+    if _version_marker(getattr(version, "hip", None)):
+        return "rocm"
+    if _version_marker(getattr(version, "cuda", None)):
+        return "cuda"
+    package = getattr(torch_module, "__version__", "")
+    package_text = package if isinstance(package, str) else ""
+    if _version_marker(getattr(version, "xpu", None)) or "+xpu" in package_text:
+        return "xpu"
+    return "cpu"
+
+
+def _xpu_env_fields(torch_module: Any) -> dict[str, Any]:
+    """Report Intel XPU devices without changing the runtime installer's identity.
+
+    ``is_available()`` must return the real boolean ``True``. A missing backend
+    or a test double must not look like a GPU.
+    """
+    fields: dict[str, Any] = {
+        "xpuAvailable": False,
+        "xpuAvailableError": None,
+        "xpuDeviceCount": 0,
+        "xpuDevices": [],
+        "xpuDeviceCountError": None,
+        "xpuDeviceNamesError": None,
+    }
+    xpu = getattr(torch_module, "xpu", None)
+    is_available = getattr(xpu, "is_available", None)
+    if not callable(is_available):
+        return fields
+    try:
+        available = is_available()
+    except Exception as exc:
+        fields["xpuAvailableError"] = str(exc)
+        return fields
+    if available is not True:
+        return fields
+    fields["xpuAvailable"] = True
+    try:
+        device_count = max(0, int(xpu.device_count()))
+    except Exception as exc:
+        fields["xpuDeviceCountError"] = str(exc)
+        return fields
+    fields["xpuDeviceCount"] = device_count
+    devices: list[dict[str, Any]] = []
+    name_errors: list[str] = []
+    for index in range(device_count):
+        try:
+            item: dict[str, Any] = {"id": index, "name": str(xpu.get_device_name(index))}
+        except Exception as exc:
+            name_errors.append(f"device {index}: {exc}")
+            continue
+        try:
+            props = xpu.get_device_properties(index)
+            total = int(getattr(props, "total_memory", 0) or 0)
+            if total > 0:
+                item["totalMemoryBytes"] = total
+        except Exception:
+            pass
+        devices.append(item)
+    if name_errors:
+        fields["xpuDeviceNamesError"] = "; ".join(name_errors)
+    fields["xpuDevices"] = devices
+    return fields
+
+
 def cmd_env_info() -> int:
     payload: dict[str, Any] = {
         "pythonVersion": sys.version.split()[0],
@@ -984,6 +1057,12 @@ def cmd_env_info() -> int:
         "cudaDeviceCountError": None,
         "cudaDeviceNamesError": None,
         "mpsAvailable": False,
+        "xpuAvailable": False,
+        "xpuAvailableError": None,
+        "xpuDeviceCount": 0,
+        "xpuDevices": [],
+        "xpuDeviceCountError": None,
+        "xpuDeviceNamesError": None,
         "mlxAvailable": import_available("mlx"),
         "avAvailable": import_available("av"),
         "librosaAvailable": import_available("librosa"),
@@ -1004,7 +1083,7 @@ def cmd_env_info() -> int:
         payload["torchAvailable"] = True
         payload["torchVersion"] = getattr(torch, "__version__", None)
         payload["hipVersion"] = getattr(torch.version, "hip", None)
-        payload["torchBackend"] = "rocm" if payload["hipVersion"] else "cuda" if getattr(torch.version, "cuda", None) else "cpu"
+        payload["torchBackend"] = _torch_backend_name(torch)
         try:
             payload["cudaAvailable"] = bool(torch.cuda.is_available())
         except Exception as exc:
@@ -1036,6 +1115,7 @@ def cmd_env_info() -> int:
         payload["cudaDevices"] = cuda_devices
         mps = getattr(torch.backends, "mps", None)
         payload["mpsAvailable"] = bool(mps and mps.is_available())
+        payload.update(_xpu_env_fields(torch))
     except Exception as exc:
         payload["torchError"] = str(exc)
 
