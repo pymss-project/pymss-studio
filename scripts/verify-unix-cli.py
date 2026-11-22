@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 from pathlib import Path
 
@@ -177,6 +178,13 @@ def run_terminal_job(command: list[str], environment: dict[str, str], work: Path
     if appimage:
         # Make the AppImage extractor a member of a shell wrapper's job group.
         args = ["/bin/sh", "-c", '"$@"; exit "$?"', "appimage", *args]
+    # Give the PTY the keyboard and signal settings the test exercises.
+    attributes = termios.tcgetattr(0)
+    attributes[3] |= termios.ICANON | termios.ISIG
+    attributes[6][termios.VINTR] = b"\x03"
+    attributes[6][termios.VSUSP] = b"\x1a"
+    termios.tcsetattr(0, termios.TCSANOW, attributes)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT, signal.SIGTSTP})
     process = subprocess.Popen(args, cwd=work, env=environment, preexec_fn=os.setpgrp)
     signal.signal(signal.SIGTTOU, signal.SIG_IGN)
     try:
@@ -195,7 +203,14 @@ def run_terminal_job(command: list[str], environment: dict[str, str], work: Path
         os.tcsetpgrp(0, process.pid)
         (sandbox / "foreground").touch()
         print("cli-foreground", flush=True)
-        status = process.wait(timeout=15)
+        try:
+            status = process.wait(timeout=15)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(
+                f"Ctrl+C did not stop launcher {process.pid}. "
+                f"Terminal foreground group: {os.tcgetpgrp(0)}. "
+                f"Worker received SIGINT: {(sandbox / 'interrupted').is_file()}."
+            ) from error
         expected = 128 + signal.SIGINT if appimage else -signal.SIGINT
         if status != expected:
             raise RuntimeError(f"Ctrl+C exited with {status}, expected {expected}")
@@ -252,6 +267,7 @@ def main():
         time.sleep(60)
     except KeyboardInterrupt:
         # The upstream CLI translates KeyboardInterrupt into 130.
+        (root / "interrupted").touch()
         return 130
     return 0
 
@@ -264,6 +280,7 @@ raise SystemExit(main())
         except Exception as error:
             print(f"CLI terminal test: {error}", flush=True)
             os._exit(1)
+        print("cli-terminal-complete", flush=True)
         os._exit(0)
 
     reaped = False
@@ -276,7 +293,10 @@ raise SystemExit(main())
         os.write(fd, b"continue\n")
         expect_terminal(fd, b"cli-read:continue", timeout=10)
         os.write(fd, b"\x03")
-        status = os.waitstatus_to_exitcode(wait_for_job(pid, 0, timeout=15))
+        # The controller owns the 15-second exit deadline and can report the
+        # failure after cleaning up. Keep reading its output until then.
+        expect_terminal(fd, b"cli-terminal-complete", timeout=25)
+        status = os.waitstatus_to_exitcode(wait_for_job(pid, 0, timeout=5))
         reaped = True
         if status:
             raise RuntimeError(f"The terminal controller exited with {status}")
