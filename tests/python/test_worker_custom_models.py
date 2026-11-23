@@ -32,12 +32,13 @@ class FakeRegisteredEntry:
     Not a Mock: `name` is a reserved constructor argument on Mock, so `entry.name` would come
     back as a Mock and fail to serialise into the emitted event."""
 
-    def __init__(self, name, model_type, model_path, config_path=None, aliases=()):
+    def __init__(self, name, model_type, model_path, config_path=None, aliases=(), inference_params=None):
         self.name = name
         self.model_type = model_type
         self.model_path = model_path
         self.config_path = config_path
         self.aliases = tuple(aliases)
+        self.inference_params = inference_params
 
 # The registrable architectures, as pymss defines them. Mirrored here so the detection tests do
 # not depend on pymss being importable by whatever interpreter runs the suite.
@@ -617,10 +618,12 @@ class UnregisterTests(unittest.TestCase):
     def _sidecar(self, models):
         self.sidecar.write_text(json.dumps({"version": 1, "models": models}), encoding="utf-8")
 
-    def _run(self, payload):
+    def _run(self, payload, model_path=None):
         def unregister_model(name):
             self.unregistered.append(name)
-            return FakeRegisteredEntry(name, "mel_band_roformer", "")
+            directory = Path(payload.get("modelDir") or self.root)
+            weights = model_path or directory / "custom" / name / "w.ckpt"
+            return FakeRegisteredEntry(name, "mel_band_roformer", str(weights))
 
         with mock.patch.dict(os_environ_target, {"PYMSS_STUDIO_CUSTOM_MODEL_META": str(self.sidecar), "PYMSS_MODEL_DIR": str(self.root)}, clear=False), \
              mock.patch.dict("sys.modules", {
@@ -664,6 +667,20 @@ class UnregisterTests(unittest.TestCase):
         self.assertIs(payload["deletedFiles"], False)
         # Still reported as eligible, so the UI can offer the choice next time.
         self.assertIs(payload["fileDeletionSupported"], True)
+
+    def test_stale_ownership_cannot_delete_a_folder_the_model_no_longer_uses(self):
+        old_managed = self.root / "custom" / "my_model"
+        old_managed.mkdir(parents=True)
+        file_to_keep = old_managed / "keep.ckpt"
+        file_to_keep.write_bytes(b"unrelated")
+        self._sidecar({"my_model": {"importMode": "copy", "managedDir": str(old_managed)}})
+        code, payload = self._run(
+            {"name": "my_model", "deleteFiles": True},
+            model_path=self.root / "migrated" / "w.ckpt",
+        )
+        self.assertEqual(code, 0)
+        self.assertFalse(payload["fileDeletionSupported"])
+        self.assertEqual(file_to_keep.read_bytes(), b"unrelated")
 
     def test_a_model_registered_outside_the_app_is_treated_as_a_reference(self):
         # `pymss register` on the command line leaves no side-car; assuming 'copy' would risk
@@ -834,109 +851,198 @@ class PathRemapTests(unittest.TestCase):
 
 class RemapCommandTests(unittest.TestCase):
     def setUp(self):
-        self.root = Path(tempfile.mkdtemp())
+        self.root = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.root, True)
         self.old_root = self.root / "old-models"
         self.new_root = self.root / "new-models"
         self.sidecar = self.root / "meta.json"
+        self.registry = self.root / "user_models.json"
         self.stdout = io.StringIO()
         self.registered: list[dict] = []
 
     def _entry(self, name, model_path, config_path=None):
-        return FakeRegisteredEntry(name, "mel_band_roformer", str(model_path),
-                                   str(config_path) if config_path else None)
+        return {"name": name, "model_type": "mel_band_roformer", "model_path": str(model_path),
+                "config_path": str(config_path) if config_path else None}
 
-    def _run(self, payload, entries, register_error=None):
-        def register_model(name, model_type, model_path, **kwargs):
-            if register_error:
-                raise register_error
-            self.registered.append({"name": name, "model_path": model_path, **kwargs})
-            return FakeRegisteredEntry(name, model_type, model_path, kwargs.get("config_path"))
-
-        with mock.patch.dict(os_environ_target, {"PYMSS_STUDIO_CUSTOM_MODEL_META": str(self.sidecar)}, clear=False), \
-             mock.patch.dict("sys.modules", {
-                 "pymss": mock.Mock(),
-                 "pymss.model_registry": mock.Mock(register_model=register_model),
-                 "pymss.user_models": mock.Mock(list_user_models=mock.Mock(return_value=entries)),
-             }), \
+    def _run(self, payload, entries=None):
+        if entries is not None:
+            self.registry.write_text(json.dumps({"version": 1, "models": entries}), encoding="utf-8")
+        with mock.patch.dict(os_environ_target, {
+            "PYMSS_USER_MODELS": str(self.registry),
+            "PYMSS_STUDIO_CUSTOM_MODEL_META": str(self.sidecar),
+        }), \
              redirect_stdout(self.stdout):
             code = ccm.cmd_remap_custom_model_paths(payload)
+        self.registered = ccm.read_custom_model_registry(self.registry)["models"]
         events = [json.loads(line) for line in self.stdout.getvalue().strip().splitlines() if line.strip()]
         return code, events[-1]["payload"]
 
-    def _payload(self):
-        return {"fromRoot": str(self.old_root), "toRoot": str(self.new_root)}
+    def _payload(self, *migrated_files):
+        for relative in migrated_files:
+            destination = self.new_root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(b"migrated file")
+        return {"fromRoot": str(self.old_root), "toRoot": str(self.new_root),
+                "copiedFiles": list(migrated_files)}
 
     def test_a_copied_model_follows_the_model_directory(self):
         entry = self._entry("copied", self.old_root / "custom" / "copied" / "w.ckpt",
                             self.old_root / "custom" / "copied" / "w.yaml")
-        code, payload = self._run(self._payload(), [entry])
+        entry["inference_params"] = {"normalize": True}
+        entry["aliases"] = ["copied_alias"]
+        entry["target_stem"] = "vocals"
+        code, payload = self._run(self._payload("custom/copied/w.ckpt", "custom/copied/w.yaml"), [entry])
         self.assertEqual(code, 0)
         self.assertEqual(payload["count"], 1)
         self.assertEqual(Path(self.registered[0]["model_path"]),
                          self.new_root / "custom" / "copied" / "w.ckpt")
         self.assertEqual(Path(self.registered[0]["config_path"]),
                          self.new_root / "custom" / "copied" / "w.yaml")
-        # Must overwrite the existing registration rather than colliding with it.
-        self.assertIs(self.registered[0]["force"], True)
+        self.assertEqual(self.registered[0]["inference_params"], {"normalize": True})
+        self.assertEqual(self.registered[0]["aliases"], ["copied_alias"])
+        self.assertEqual(self.registered[0]["target_stem"], "vocals")
 
     def test_a_model_referenced_from_outside_is_untouched(self):
         entry = self._entry("outside", self.root / "downloads" / "w.ckpt")
-        code, payload = self._run(self._payload(), [entry])
+        code, payload = self._run(self._payload("downloads/w.ckpt"), [entry])
         self.assertEqual(code, 0)
         self.assertEqual(payload["count"], 0)
-        self.assertEqual(self.registered, [])
+        self.assertEqual(self.registered, [entry])
 
     def test_a_referenced_model_that_lived_inside_the_model_dir_is_remapped_too(self):
-        # Matching is by path prefix, not by import mode: the migration moved this file as well.
         entry = self._entry("inside", self.old_root / "loose" / "w.ckpt")
-        code, payload = self._run(self._payload(), [entry])
+        code, payload = self._run(self._payload("loose/w.ckpt"), [entry])
         self.assertEqual(code, 0)
         self.assertEqual(payload["count"], 1)
         self.assertEqual(Path(self.registered[0]["model_path"]), self.new_root / "loose" / "w.ckpt")
 
-    def test_paths_are_rewritten_even_when_the_file_is_not_there_yet(self):
-        # The old location is cleaned up by the migration, so the new path is the truthful answer
-        # either way; the UI surfaces a missing file with a relink action.
-        entry = self._entry("gone", self.old_root / "custom" / "gone" / "w.ckpt")
-        _, payload = self._run(self._payload(), [entry])
-        self.assertEqual(payload["count"], 1)
-        self.assertIs(payload["remapped"][0]["exists"], False)
-        self.assertIs(self.registered[0]["require_exists"], False)
+    def test_a_skipped_weight_and_its_ownership_remain_at_the_source(self):
+        source = self.old_root / "custom" / "skipped" / "w.ckpt"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"registered model")
+        self.sidecar.write_text(json.dumps({"version": 1, "models": {
+            "skipped": {"importMode": "copy", "managedDir": str(source.parent)},
+        }}), encoding="utf-8")
+        request = self._payload("another.ckpt")
+        destination = self.new_root / "custom" / "skipped" / "w.ckpt"
+        destination.parent.mkdir(parents=True)
+        destination.write_bytes(b"unrelated model")
+
+        _, payload = self._run(request, [self._entry("skipped", source)])
+
+        self.assertEqual(payload["count"], 0)
+        self.assertEqual(Path(self.registered[0]["model_path"]), source)
+        meta = json.loads(self.sidecar.read_text(encoding="utf-8"))["models"]["skipped"]
+        self.assertEqual(Path(meta["managedDir"]), source.parent)
+        self.assertEqual(destination.read_bytes(), b"unrelated model")
 
     def test_the_sidecar_managed_directory_follows_along(self):
         self.sidecar.write_text(json.dumps({"version": 1, "models": {
             "copied": {"importMode": "copy", "managedDir": str(self.old_root / "custom" / "copied")},
         }}), encoding="utf-8")
         entry = self._entry("copied", self.old_root / "custom" / "copied" / "w.ckpt")
-        self._run(self._payload(), [entry])
+        self._run(self._payload("custom/copied/w.ckpt"), [entry])
         with mock.patch.dict(os_environ_target, {"PYMSS_STUDIO_CUSTOM_MODEL_META": str(self.sidecar)}, clear=False):
             meta = ccm.sidecar_entry("copied")
         self.assertEqual(Path(meta["managedDir"]), self.new_root / "custom" / "copied")
 
+    def test_a_retained_config_stays_in_place_when_its_weight_moves(self):
+        source_dir = self.old_root / "custom" / "copied"
+        config = source_dir / "w.yaml"
+        source_dir.mkdir(parents=True)
+        config.write_bytes(b"registered config")
+        self.sidecar.write_text(json.dumps({"version": 1, "models": {
+            "copied": {"importMode": "copy", "managedDir": str(source_dir)},
+        }}), encoding="utf-8")
+        request = self._payload("custom/copied/w.ckpt")
+        destination = self.new_root / "custom" / "copied"
+        (destination / "w.yaml").write_bytes(b"unrelated config")
+
+        _, payload = self._run(request, [self._entry("copied", source_dir / "w.ckpt", config)])
+
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(Path(self.registered[0]["model_path"]), destination / "w.ckpt")
+        self.assertEqual(Path(self.registered[0]["config_path"]), config)
+        meta = json.loads(self.sidecar.read_text(encoding="utf-8"))["models"]["copied"]
+        self.assertEqual(meta, {"importMode": "reference", "managedDir": None})
+
+    def test_a_destination_with_other_files_is_never_marked_as_managed(self):
+        source_dir = self.old_root / "custom" / "copied"
+        self.sidecar.write_text(json.dumps({"version": 1, "models": {
+            "copied": {"importMode": "copy", "managedDir": str(source_dir)},
+        }}), encoding="utf-8")
+        request = self._payload("custom/copied/w.ckpt")
+        (self.new_root / "custom" / "copied" / "keep.dat").write_bytes(b"unrelated data")
+
+        _, payload = self._run(request, [self._entry("copied", source_dir / "w.ckpt")])
+
+        self.assertEqual(payload["count"], 1)
+        meta = json.loads(self.sidecar.read_text(encoding="utf-8"))["models"]["copied"]
+        self.assertEqual(meta, {"importMode": "reference", "managedDir": None})
+
     def test_remapping_onto_the_same_root_does_nothing(self):
+        entry = self._entry("x", self.old_root / "w.ckpt")
         code, payload = self._run({"fromRoot": str(self.old_root), "toRoot": str(self.old_root)},
-                                  [self._entry("x", self.old_root / "w.ckpt")])
+                                  [entry])
         self.assertEqual(code, 0)
         self.assertIs(payload["unchanged"], True)
-        self.assertEqual(self.registered, [])
+        self.assertEqual(self.registered, [entry])
 
-    def test_an_old_pymss_without_a_registry_is_not_an_error(self):
-        # Remapping runs as part of a completed migration; it must never fail one.
-        with mock.patch.dict("sys.modules", {"pymss": mock.Mock(), "pymss.user_models": None}), \
-             redirect_stdout(self.stdout):
-            code = ccm.cmd_remap_custom_model_paths(self._payload())
+    def test_no_registry_requires_no_write(self):
+        code, payload = self._run(self._payload("model.ckpt"))
         self.assertEqual(code, 0)
-        payload = json.loads(self.stdout.getvalue().strip().splitlines()[-1])["payload"]
-        self.assertIs(payload["unavailable"], True)
+        self.assertEqual(payload, {"committed": True, "count": 0, "ownershipUpdateFailed": False})
+        self.assertFalse(self.registry.exists())
 
-    def test_one_failing_model_does_not_abort_the_others(self):
-        code, payload = self._run(self._payload(), [self._entry("a", self.old_root / "a.ckpt")],
-                                  register_error=ValueError("boom"))
+    def test_an_ownership_write_failure_keeps_the_model_usable_and_reports_the_warning(self):
+        from worker_models import _user_model_import_mode
+
+        copied = "custom/copied/w.ckpt"
+        source = self.old_root / copied
+        self.sidecar.write_text(json.dumps({"version": 1, "models": {
+            "copied": {"importMode": "copy", "managedDir": str(source.parent)},
+        }}), encoding="utf-8")
+        original_sidecar = self.sidecar.read_bytes()
+        replace = ccm.os.replace
+
+        def replace_writable_file(staged, destination):
+            if destination == self.sidecar:
+                raise PermissionError("ownership metadata is read-only")
+            replace(staged, destination)
+
+        with mock.patch.object(ccm.os, "replace", side_effect=replace_writable_file):
+            code, payload = self._run(self._payload(copied), [self._entry("copied", source)])
+
         self.assertEqual(code, 0)
-        self.assertEqual(payload["count"], 0)
-        self.assertEqual(len(payload["errors"]), 1)
-        self.assertIn("boom", payload["errors"][0])
+        self.assertEqual(payload, {"committed": True, "count": 1, "ownershipUpdateFailed": True})
+        self.assertEqual(Path(self.registered[0]["model_path"]), self.new_root / copied)
+        self.assertEqual(self.sidecar.read_bytes(), original_sidecar)
+        model = FakeRegisteredEntry("copied", "mel_band_roformer", str(self.new_root / copied))
+        model.source = "user"
+        with mock.patch.dict(os_environ_target, {"PYMSS_STUDIO_CUSTOM_MODEL_META": str(self.sidecar)}):
+            self.assertEqual(_user_model_import_mode(model, str(self.new_root)), "reference")
+
+    def test_an_unsuccessful_commit_preserves_all_registry_and_sidecar_entries(self):
+        entries = [self._entry(name, self.old_root / f"{name}.ckpt") for name in ("a", "b")]
+        self.sidecar.write_text(json.dumps({"version": 1, "models": {"a": {"importMode": "reference"}}}), encoding="utf-8")
+        original_sidecar = self.sidecar.read_bytes()
+        with mock.patch.object(ccm.os, "replace", side_effect=PermissionError("registry is read-only")):
+            code, payload = self._run(self._payload("a.ckpt", "b.ckpt"), entries)
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["code"], "CUSTOM_MODEL_REMAP_FAILED")
+        self.assertIn("registry is read-only", payload["message"])
+        self.assertEqual(self.registered, entries)
+        self.assertEqual(self.sidecar.read_bytes(), original_sidecar)
+        self.assertEqual(list(self.root.glob(".user_models.json.*.tmp")), [])
+
+    def test_a_missing_destination_prevents_the_entire_registry_update(self):
+        entries = [self._entry(name, self.old_root / f"{name}.ckpt") for name in ("a", "b")]
+        request = self._payload("a.ckpt", "b.ckpt")
+        (self.new_root / "b.ckpt").unlink()
+        code, payload = self._run(request, entries)
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["code"], "CUSTOM_MODEL_REMAP_FAILED")
+        self.assertEqual(self.registered, entries)
 
     def test_missing_roots_are_rejected(self):
         with redirect_stdout(self.stdout):

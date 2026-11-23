@@ -3,7 +3,7 @@ import { describe, test } from 'node:test'
 import { buildModelCategoryOptionsFromModels, getModelCategoryLabel, hasModelCategoryOption, matchesModelCategory } from '../src/utils/modelCategory.ts'
 import { matchesModelQuery } from '../src/utils/modelSearch.ts'
 import { matchesModelSource, retainAvailableModelNames } from '../src/utils/modelSource.ts'
-import { compareModelDefaultOrder } from '../src/utils/modelSort.ts'
+import { compareModelDefaultOrder, compareModelPublicationOrder } from '../src/utils/modelSort.ts'
 
 describe('Model categories', () => {
   const vocal = { primaryCategory: 'vocal', primaryCategoryCn: '人声', secondaryCategory: 'duet', secondaryCategoryCn: '双人/二重唱分离' }
@@ -203,6 +203,24 @@ describe('Model sorting', () => {
   test('old kernels and imported models without sort metadata retain name ordering', () => {
     assert.ok(compareModelDefaultOrder({ name: 'model2' }, { name: 'model10', sortKey: '' }, compare) < 0)
     assert.equal(compareModelDefaultOrder({ name: 'same', sortKey: null }, { name: 'same' }, compare), 0)
+  })
+
+  test('release date sorting is chronological in both directions with undated models last', () => {
+    const old = { ...full, publishDate: '2024-12-31' }
+    const oldChild = { ...child, publishDate: old.publishDate }
+    const recent = { name: 'recent', publishDate: '2025-01-01' }
+    const missing = { name: 'imported' }
+    const rows = [missing, oldChild, recent, old]
+    assert.deepEqual([...rows].sort((a, b) => compareModelPublicationOrder(a, b, 'publish-date-asc', compare)), [old, oldChild, recent, missing])
+    assert.deepEqual([...rows].sort((a, b) => compareModelPublicationOrder(a, b, 'publish-date-desc', compare)), [recent, old, oldChild, missing])
+  })
+
+  test('author sorting uses locale ordering and places blank authors last', () => {
+    const earlier = { name: 'z-model', author: ' studio2 ' }
+    const later = { name: 'b-model', author: 'Studio10' }
+    const missing = { name: 'a-model', author: ' ' }
+    const rows = [missing, later, earlier]
+    assert.deepEqual(rows.sort((a, b) => compareModelPublicationOrder(a, b, 'author', compare)), [earlier, later, missing])
   })
 
   test('the mixed-family ordering is deterministic, antisymmetric and transitive', () => {

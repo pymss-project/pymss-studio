@@ -283,6 +283,7 @@ fn requires_bootstrap_python(command: &str) -> bool {
             | "activate_runtime"
             | "delete_runtime"
             | "update_runtime_core"
+            | "remap_custom_model_paths"
     )
 }
 
@@ -438,7 +439,11 @@ fn acquire_worker_runtime_access(app: &AppHandle, command: &str, payload: &Value
             }
         } else { Arc::new(resource(&root, RUNTIME, guard.updating)?) };
         guard.external.push(lease);
-        if matches!(command, "import_custom_model" | "unregister_custom_model" | "relink_custom_model" | "remap_custom_model_paths") {
+        if matches!(
+            command,
+            "import_custom_model" | "unregister_custom_model" | "relink_custom_model"
+                | "remap_custom_model_paths" | "cleanup_model_residual_files"
+        ) {
             guard.external.push(Arc::new(resource(&storage::settings_dir(app)?, MODELS, true)?));
         }
         Some(guard)

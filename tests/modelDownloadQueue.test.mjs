@@ -12,7 +12,7 @@ const source = ts.createSourceFile('model.ts', readFileSync(new URL('../src/stor
 const declaration = source.statements.find(statement => ts.isVariableStatement(statement)
   && statement.declarationList.declarations.some(item => item.name.getText(source) === 'useModelStore'))
 const body = declaration.declarationList.declarations[0].initializer.arguments[1].body
-const names = new Set(['handleWorkerEvent', 'downloadModel', 'cancelDownload', 'deleteModel', 'deleteStorageModels', 'isDeleteTaskTerminal', 'isModelDeletionPending', 'canQueueDownload',
+const names = new Set(['handleWorkerEvent', 'downloadModel', 'cancelDownload', 'deleteModel', 'deleteStorageModels', 'deleteToolModel', 'updateStorageSummaryAfterDelete', 'isDeleteTaskTerminal', 'isModelDeletionPending', 'canQueueDownload',
   'pumpDownloadQueue', 'enqueueBatchDownload', 'removeQueuedDownload', 'clearDownloadQueue'])
 const functions = body.statements.filter(statement => ts.isFunctionDeclaration(statement) && names.has(statement.name?.text))
 assert.equal(functions.length, names.size)
@@ -41,6 +41,7 @@ function environment(t) {
     downloadTasks: ref({}), downloadQueue: ref([]), deleteTasks: ref({}), deleteTaskIndex: ref({}),
     downloadStates: ref({}), downloadErrors: ref({}), downloadTaskIndex: ref({}),
     batchDeleteState: ref({ active: false, totalModels: 0, completedModels: 0, currentModel: '', failedModels: [] }),
+    modelStorageSummary: ref(null), modelStorageSummaryLoadedAt: ref(0),
     residualCleanupState: ref({ active: false, taskId: '' }), customImportState: ref({ status: 'idle', taskId: '' }),
     isTauriRuntime: () => true,
     registerWindowCloseGuard(...args) { const stop = registerWindowCloseGuard(...args); stops.push(stop); return stop },
@@ -49,8 +50,7 @@ function environment(t) {
     watch(...args) { const stop = watch(...args); stops.push(stop); return stop },
     async invoke(command, args) { calls.push({ command, ...args }); return command === 'cancel_task' ? true : { started: true } },
     waitForDeleteTask: name => new Promise((resolve, reject) => waiting.set(name, { resolve, reject })),
-    finalizeDeletedModel() {}, clearDeleteTask: name => { delete state.deleteTasks.value[name] },
-    async deleteToolModel() {}, async loadModelStorageSummary() {},
+    watchSingleDeleteTask() {}, finalizeDeletedModel() {}, clearDeleteTask: name => { delete state.deleteTasks.value[name] },
     studioLog: { warn() {} }, appendLog: (logs, record) => [...logs, record],
   }
   const store = vm.runInNewContext(`${code}\n({${[...names].join(',')}})`, state)
@@ -97,6 +97,12 @@ test('deleting a queued model removes it before a slot can start another downloa
   assert.deepEqual(h.started(), ['a', 'b', 'd'])
 })
 
+test('model library deletion requests the library catalog', async t => {
+  const h = environment(t)
+  await h.store.deleteModel('c')
+  assert.equal(h.calls.find(call => call.command === 'start_model_delete').payload.catalog, 'library')
+})
+
 test('the scheduler rechecks deletions when a queued model reaches a free slot', async t => {
   const h = environment(t)
   h.store.enqueueBatchDownload(['a', 'b', 'c', 'd'])
@@ -114,6 +120,7 @@ test('batch deletion removes all targeted downloads before waiting for the first
   const deleting = h.store.deleteStorageModels(['c', 'd'].map(id => ({ kind: 'catalog', id, name: id })))
   await flush()
   assert.equal(h.state.deleteTasks.value.c.status, 'deleting')
+  assert.equal(h.calls.find(call => call.command === 'start_model_delete').payload.catalog, 'storage')
   assert.deepEqual(Array.from(h.state.downloadQueue.value), [])
   h.state.downloadTasks.value.a.status = 'done'
   await flush()
@@ -183,15 +190,40 @@ test('failed and cancelled deletions release their targets while later deletions
   assert.deepEqual(Array.from(h.state.batchDeleteState.value.failedModels), ['c', 'd'])
 })
 
-test('a failed storage refresh does not leave completed deletion targets reserved', async t => {
+test('batch deletion updates cached model rows without requiring a summary refresh', async t => {
   const h = environment(t)
-  h.state.loadModelStorageSummary = async () => { throw new Error('Refresh failed') }
+  h.state.modelStorageSummary.value = {
+    models: [{ name: 'c', downloaded: true, sizeBytes: 120, files: [{ path: 'c', sizeBytes: 120, exists: true }] }],
+    toolModels: [], totalBytes: 120, downloadedCount: 1,
+  }
   const deleting = h.store.deleteStorageModels([{ kind: 'catalog', id: 'c', name: 'c' }])
-  const rejected = assert.rejects(deleting, /Refresh failed/)
   await flush()
   h.finishDeletion('c')
-  await rejected
+  await deleting
   assert.equal(h.store.canQueueDownload('c'), true)
+  assert.equal(h.state.modelStorageSummary.value.models[0].downloaded, false)
+  assert.equal(h.state.modelStorageSummary.value.totalBytes, 0)
+  assert.equal(h.state.modelStorageSummary.value.downloadedCount, 0)
+  assert.equal(h.state.modelStorageSummary.value.models[0].files[0].exists, false)
+  assert.ok(!h.calls.some(call => call.command === 'get_model_storage_summary'))
+})
+
+test('tool deletion without a refreshed summary removes the row and updates the cached totals', async t => {
+  const h = environment(t)
+  h.state.modelStorageSummary.value = {
+    models: [], toolModels: [{ id: 'asr1', name: 'ASR', tool: 'asr', sizeBytes: 100 }],
+    totalBytes: 120, toolModelsBytes: 100, downloadedCount: 2,
+  }
+  h.state.modelStorageSummaryLoadedAt.value = Date.now()
+  await h.store.deleteStorageModels([{ kind: 'tool', id: 'asr1', name: 'ASR', tool: 'asr' }])
+  assert.deepEqual(h.calls.map(call => call.command), ['delete_tool_model'])
+  const summary = h.state.modelStorageSummary.value
+  assert.equal(summary.toolModels.length, 0)
+  assert.equal(summary.toolModelsBytes, 0)
+  assert.equal(summary.totalBytes, 20)
+  assert.equal(summary.downloadedCount, 1)
+  assert.equal(h.state.modelStorageSummaryLoadedAt.value, 0)
+  assert.equal(h.state.batchDeleteState.value.failedModels.length, 0)
 })
 
 for (const pause of [false, true]) {

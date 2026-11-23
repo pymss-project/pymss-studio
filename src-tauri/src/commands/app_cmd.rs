@@ -381,13 +381,6 @@ pub async fn relink_custom_model(app: AppHandle, payload: Value) -> AppResult<Va
     run_worker_with_payload(&app, "relink_custom_model", Some(payload))
 }
 
-/// Rebase custom model registrations after the model directory moved. Called once a migration
-/// finishes; the registry stores absolute paths and would otherwise point at the old location.
-#[tauri::command]
-pub async fn remap_custom_model_paths(app: AppHandle, payload: Value) -> AppResult<Value> {
-    run_worker_with_payload(&app, "remap_custom_model_paths", Some(payload))
-}
-
 #[tauri::command]
 pub async fn start_model_delete(
     app: AppHandle,

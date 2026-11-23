@@ -97,14 +97,17 @@ class WorkflowConfigDownloadTest(unittest.TestCase):
         def delete_while_downloading(*args, **kwargs):
             self.write_fixture(*args, **kwargs)
             with (
-                mock.patch("pymss.model_registry.get_model_entry", return_value=self.entry),
+                mock.patch("worker_models._library_model_for_delete", return_value=self.entry),
                 mock.patch("worker_models.model_path_for", return_value=self.weights),
                 mock.patch("worker_models.config_path_for", return_value=self.config),
                 mock.patch("worker_models.auxiliary_paths_for", return_value=[]),
                 mock.patch("worker_models.model_to_dict", return_value={}),
                 mock.patch("worker_models.emit") as emit,
             ):
-                self.assertEqual(cmd_delete_model({"model": self.entry.name, "taskId": "delete_model"}), 0)
+                self.assertEqual(cmd_delete_model({
+                    "model": self.entry.name, "modelDir": str(self.directory), "taskId": "delete_model",
+                    "catalog": "library",
+                }), 0)
                 self.assertEqual(emit.call_args.args[0], "model_delete_done")
 
         self.download.side_effect = delete_while_downloading

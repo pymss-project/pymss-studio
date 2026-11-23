@@ -882,6 +882,15 @@ export const useAppStore = defineStore('app', () => {
     return true
   }
 
+  async function refreshModelsAfterRuntimeChange() {
+    try {
+      const { useModelStore } = await import('@/stores/model')
+      await useModelStore().loadModels()
+    } catch (error) {
+      studioLog.warn('Failed to refresh models after a runtime change', error)
+    }
+  }
+
   async function activateRuntime(
     backend: RuntimeBackend,
     target: { pythonPath?: string; selectedDeviceIds?: string[] } = {},
@@ -898,6 +907,8 @@ export const useAppStore = defineStore('app', () => {
     runtimeGpuProbeReport.value = null
     const checks: Promise<unknown>[] = [checkRuntimeInfo(), checkEnv()]
     if (options.refreshCoreVersions !== false) checks.push(loadRuntimeCoreVersions())
+    // Startup activation already preloads models after checking the active environment.
+    if (!options.onlyIfNoActive) checks.push(refreshModelsAfterRuntimeChange())
     await Promise.all(checks)
   }
 
@@ -1061,9 +1072,7 @@ export const useAppStore = defineStore('app', () => {
         void checkRuntimeInfo().then(() => loadRuntimeCoreVersions()).catch((error) => {
           studioLog.warn('Failed to refresh runtime versions after a core update', error)
         })
-        void import('@/stores/model').then(({ useModelStore }) => useModelStore().loadModels()).catch((error) => {
-          studioLog.warn('Failed to refresh models after a runtime change', error)
-        })
+        void refreshModelsAfterRuntimeChange()
       } else if (event?.type === 'runtime_core_update_started') {
         const preparing = runtimeCoreUpdateStatus.value === 'preparing'
         if (!preparing) runtimeCoreUpdateStatus.value = 'updating'

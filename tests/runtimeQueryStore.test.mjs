@@ -26,7 +26,11 @@ const vite = await createServer({
     transform(_code, id) {
       const normalized = id.replaceAll('\\', '/')
       if (normalized.endsWith('/src/stores/model.ts')) {
-        return 'export function useModelStore() { return { loadModels: async () => undefined } }'
+        return `
+          let loadModels = async () => undefined
+          export function __setLoadModelsForTest(next) { loadModels = next }
+          export function useModelStore() { return { loadModels } }
+        `
       }
       if (!normalized.endsWith('/src/utils/events.ts')) return null
       return `
@@ -50,6 +54,7 @@ const { useAppStore } = await vite.ssrLoadModule('/src/stores/app.ts')
 const { buildDiagnosticChecks } = await vite.ssrLoadModule('/src/utils/diagnostics.ts')
 const { useSettingsStore } = await vite.ssrLoadModule('/src/stores/settings.ts')
 const { __setRegisterWorkerEventsForTest } = await vite.ssrLoadModule('/src/utils/events.ts')
+const { __setLoadModelsForTest } = await vite.ssrLoadModule('/src/stores/model.ts')
 
 function installTauriInvoke(invoke) {
   Object.defineProperty(globalThis, 'window', {
@@ -989,6 +994,28 @@ test('synchronous writes refresh outside their queue item and do not self-deadlo
   assert.equal(calls.filter(command => command === 'runtime_info').length, 2)
   assert.ok(calls.includes('get_env_info'))
   assert.ok(calls.indexOf('delete_runtime') > calls.indexOf('activate_runtime'))
+})
+
+test('explicit runtime activation refreshes models from the newly active environment', async () => {
+  let active = 'cpu'
+  const refreshedBackends = []
+  const app = appStore(async (command, args) => {
+    if (command === 'activate_runtime') {
+      active = args.payload.backend
+      return true
+    }
+    if (command === 'runtime_info' || command === 'get_env_info') return { platform: 'win32', backend: active }
+    throw new Error(`unexpected ${command}`)
+  })
+  __setLoadModelsForTest(async () => { refreshedBackends.push(active) })
+  try {
+    await app.activateRuntime('cuda', {}, { refreshCoreVersions: false })
+    await app.activateRuntime('cpu', {}, { refreshCoreVersions: false })
+    await app.activateRuntime('cpu', {}, { refreshCoreVersions: false, onlyIfNoActive: true })
+    assert.deepEqual(refreshedBackends, ['cuda', 'cpu'])
+  } finally {
+    __setLoadModelsForTest(async () => undefined)
+  }
 })
 
 test('runtime env-size scan prevents a queued write from starting', async () => {

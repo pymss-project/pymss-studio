@@ -40,7 +40,7 @@ import { useTaskStore } from '@/stores/task'
 import { useAppStore } from '@/stores/app'
 import { formatBytes, formatSpeedMBps } from '@/utils/format'
 import { buildModelCategoryOptionsFromModels, getModelCategoryLabel, hasModelCategoryOption } from '@/utils/modelCategory'
-import { compareModelDefaultOrder } from '@/utils/modelSort'
+import { compareModelDefaultOrder, compareModelPublicationOrder, type ModelPublicationSort } from '@/utils/modelSort'
 import { MODEL_LIBRARY_PAGE_SIZES } from '@/utils/pagination'
 import { BATCH_DOWNLOAD_CONCURRENCY } from '@/utils/downloadQueue'
 import {
@@ -100,7 +100,7 @@ const downloadDetailModel = ref<string>('')
 const downloadedOnly = ref(false)
 const page = ref(1)
 const pageSizeOptions = [...MODEL_LIBRARY_PAGE_SIZES]
-type ModelSort = 'default' | 'favorite' | 'name-asc' | 'name-desc' | 'size-desc' | 'size-asc' | 'category' | 'type' | 'downloaded'
+type ModelSort = 'default' | 'favorite' | 'name-asc' | 'name-desc' | 'size-desc' | 'size-asc' | 'category' | 'type' | 'downloaded' | ModelPublicationSort
 const modelSort = ref<ModelSort>('default')
 const showStorage = ref(false)
 const storageSearch = ref('')
@@ -223,17 +223,31 @@ const debugStatusText = computed(() => {
   return ''
 })
 
-const modelSortOptions = computed(() => [
-  { label: t('models.sortDefault'), value: 'default' },
-  { label: t('models.sortFavorite'), value: 'favorite' },
-  { label: t('models.sortNameAsc'), value: 'name-asc' },
-  { label: t('models.sortNameDesc'), value: 'name-desc' },
-  { label: t('models.sortSizeDesc'), value: 'size-desc' },
-  { label: t('models.sortSizeAsc'), value: 'size-asc' },
-  { label: t('models.sortCategory'), value: 'category' },
-  { label: t('models.sortType'), value: 'type' },
-  { label: t('models.sortDownloaded'), value: 'downloaded' },
-])
+const modelSortOptions = computed(() => {
+  const hasPublishDates = modelStore.models.some(model => model.publishDate?.trim())
+  const hasAuthors = modelStore.models.some(model => model.author?.trim())
+  return [
+    { label: t('models.sortDefault'), value: 'default' },
+    { label: t('models.sortFavorite'), value: 'favorite' },
+    { label: t('models.sortNameAsc'), value: 'name-asc' },
+    { label: t('models.sortNameDesc'), value: 'name-desc' },
+    ...(hasPublishDates ? [
+      { label: t('models.sortPublishDateDesc'), shortLabel: t('models.sortPublishDateDescShort'), value: 'publish-date-desc' },
+      { label: t('models.sortPublishDateAsc'), shortLabel: t('models.sortPublishDateAscShort'), value: 'publish-date-asc' },
+    ] : []),
+    ...(hasAuthors ? [{ label: t('models.sortAuthor'), value: 'author' }] : []),
+    { label: t('models.sortSizeDesc'), value: 'size-desc' },
+    { label: t('models.sortSizeAsc'), value: 'size-asc' },
+    { label: t('models.sortCategory'), value: 'category' },
+    { label: t('models.sortType'), value: 'type' },
+    { label: t('models.sortDownloaded'), value: 'downloaded' },
+  ]
+})
+const selectedSortOption = computed(() => modelSortOptions.value.find(option => option.value === modelSort.value))
+
+watch(selectedSortOption, option => {
+  if (!option) modelSort.value = 'default'
+})
 
 /** Whether anything is narrowing the list — decides "no matches" vs "nothing loaded yet". */
 const hasActiveFilter = computed(() =>
@@ -290,6 +304,10 @@ const sortedModels = computed(() => {
     switch (sort) {
       case 'name-desc':
         return compareModelName(b.model, a.model)
+      case 'author':
+      case 'publish-date-desc':
+      case 'publish-date-asc':
+        return compareModelPublicationOrder(a.model, b.model, sort, collator.value.compare)
       case 'size-desc':
         return b.model.sizeBytes - a.model.sizeBytes || compareModelName(a.model, b.model)
       case 'size-asc':
@@ -1870,7 +1888,7 @@ async function refreshStorage(force = true) {
   try {
     await modelStore.loadModelStorageSummary({ force })
   } catch (err) {
-    storageError.value = errorText(err)
+    storageError.value = t('models.storageRefreshFailed', { detail: errorText(err) })
   }
 }
 
@@ -1907,6 +1925,7 @@ function confirmBatchDelete() {
         } else {
           message.success(t('models.batchDeleteSuccess'))
         }
+        void refreshStorage()
       }).catch((err) => message.error(err instanceof Error ? err.message : String(err)))
     },
   })
@@ -1916,7 +1935,7 @@ function confirmCleanupResidual() {
   finishStorageDrag()
   if (storageBusy.value) return
   const summary = modelStorageSummary.value
-  if (!summary?.residualFiles.length) return
+  if (!summary?.residualFiles.length || summary.residualCleanupUnavailable) return
   dialog.warning({
     title: t('models.storageCleanupConfirmTitle'),
     content: t('models.storageCleanupConfirmContent', {
@@ -2085,7 +2104,11 @@ watch(() => route.query.parameters, async value => {
           size="small"
           class="sort-select"
           :consistent-menu-width="false"
-        />
+        >
+          <template #selected-value>
+            <span :title="selectedSortOption?.label">{{ selectedSortOption?.shortLabel ?? selectedSortOption?.label }}</span>
+          </template>
+        </AppSelect>
         <div class="toolbar-actions">
           <n-switch :aria-label="t('models.downloadedOnly')" v-model:value="downloadedOnly" size="small" />
           <span class="text-sm text-muted">{{ t('models.downloadedOnly') }}</span>
@@ -2689,6 +2712,14 @@ watch(() => route.query.parameters, async value => {
                 <span class="detail-label">{{ t('models.category') }}</span>
                 <span class="detail-val">{{ categoryLabel(selectedInfo) || '—' }}</span>
               </div>
+              <div v-if="selectedInfo.author" class="detail-row">
+                <span class="detail-label">{{ t('models.author') }}</span>
+                <span class="detail-val detail-val--wrap">{{ selectedInfo.author }}</span>
+              </div>
+              <div v-if="selectedInfo.publishDate" class="detail-row">
+                <span class="detail-label">{{ t('models.publishDate') }}</span>
+                <time class="detail-val" :datetime="selectedInfo.publishDate">{{ selectedInfo.publishDate }}</time>
+              </div>
               <div v-if="selectedInfo.aliases?.length" class="detail-row">
                 <span class="detail-label">{{ t('models.aliases') }}</span>
                 <span class="detail-val">{{ selectedInfo.aliases.join(', ') }}</span>
@@ -2844,9 +2875,10 @@ watch(() => route.query.parameters, async value => {
             <div class="storage-stat">
               <div class="storage-stat__heading">
                 <span>{{ t('models.storageResidual') }}</span>
-                <n-button text type="warning" size="tiny" :disabled="!modelStorageSummary?.residualFiles.length || storageBusy" @click="confirmCleanupResidual">{{ t('models.storageCleanup') }}</n-button>
+                <n-button text type="warning" size="tiny" :disabled="!modelStorageSummary?.residualFiles.length || modelStorageSummary.residualCleanupUnavailable || storageBusy" @click="confirmCleanupResidual">{{ t('models.storageCleanup') }}</n-button>
               </div>
-              <strong>{{ formatStorageBytes(modelStorageSummary?.residualBytes || 0) }}</strong>
+              <span v-if="modelStorageSummary?.residualCleanupUnavailable" class="text-muted">{{ t('models.storageCleanupUnavailable') }}</span>
+              <strong v-else>{{ formatStorageBytes(modelStorageSummary?.residualBytes || 0) }}</strong>
             </div>
           </div>
 
@@ -3956,6 +3988,11 @@ watch(() => route.query.parameters, async value => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.detail-val--wrap {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .detail-path {

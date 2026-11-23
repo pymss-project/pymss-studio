@@ -38,6 +38,8 @@ export type ModelEntry = {
   secondaryCategory: string
   secondaryCategoryCn: string
   sortKey?: string
+  author?: string
+  publishDate?: string
   targetStem: string
   configInstruments: string
   configTargetInstrument: string
@@ -232,6 +234,7 @@ export type ModelStorageSummary = {
   toolModels: ToolModelStorageItem[]
   residualFiles: ModelStorageFile[]
   residualBytes: number
+  residualCleanupUnavailable?: boolean
 }
 
 export type ModelPreference = {
@@ -1446,6 +1449,7 @@ export const useModelStore = defineStore('model', () => {
           taskId,
           model: name,
           modelDir: settings.modelDir || null,
+          catalog: source === 'batch' ? 'storage' : 'library',
         },
       })
       if (source === 'single') {
@@ -1556,6 +1560,35 @@ export const useModelStore = defineStore('model', () => {
     }
   }
 
+  function updateStorageSummaryAfterDelete(target: ModelStorageDeleteTarget) {
+    const summary = modelStorageSummary.value
+    if (!summary) return
+    if (target.kind === 'tool') {
+      const removed = summary.toolModels.find(item => item.id === target.id && item.tool === target.tool)
+      if (!removed) return
+      modelStorageSummary.value = {
+        ...summary,
+        toolModels: summary.toolModels.filter(item => item !== removed),
+        toolModelsBytes: summary.toolModelsBytes === undefined ? undefined : Math.max(0, summary.toolModelsBytes - removed.sizeBytes),
+        totalBytes: Math.max(0, summary.totalBytes - removed.sizeBytes),
+        downloadedCount: Math.max(0, summary.downloadedCount - 1),
+      }
+    } else {
+      const removed = summary.models.find(item => item.name === target.id)
+      if (!removed) return
+      modelStorageSummary.value = {
+        ...summary,
+        models: summary.models.map(item => item === removed ? {
+          ...item, downloaded: false, sizeBytes: 0,
+          files: item.files.map(file => ({ ...file, exists: false, sizeBytes: 0 })),
+        } : item),
+        totalBytes: Math.max(0, summary.totalBytes - removed.sizeBytes),
+        downloadedCount: Math.max(0, summary.downloadedCount - Number(removed.downloaded)),
+      }
+    }
+    modelStorageSummaryLoadedAt.value = 0
+  }
+
   async function deleteStorageModels(targets: ModelStorageDeleteTarget[]) {
     // Keep every target reserved until its deletion settles, including targets waiting their turn.
     for (const target of targets) {
@@ -1586,6 +1619,7 @@ export const useModelStore = defineStore('model', () => {
           finalizeDeletedModel(target.id, task.resultModelInfo ?? null)
           clearDeleteTask(target.id)
         }
+        updateStorageSummaryAfterDelete(target)
       } catch {
         batchDeleteState.value = {
           ...batchDeleteState.value,
@@ -1609,7 +1643,6 @@ export const useModelStore = defineStore('model', () => {
       active: false,
       currentModel: '',
     }
-    await loadModelStorageSummary({ force: true })
   }
 
   async function deleteModels(names: string[]) {

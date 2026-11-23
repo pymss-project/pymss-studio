@@ -86,6 +86,7 @@ export type ModelDirMigrationState = {
   skippedFiles: string[]
   overwrittenFiles: string[]
   cleanupFailedFiles: string[]
+  ownershipUpdateFailed: boolean
   conflict: ModelDirMigrationConflict | null
   error: string
   preparation: PrepareModelDirChangePayload | null
@@ -192,6 +193,7 @@ function createEmptyModelDirMigrationState(): ModelDirMigrationState {
     skippedFiles: [],
     overwrittenFiles: [],
     cleanupFailedFiles: [],
+    ownershipUpdateFailed: false,
     conflict: null,
     error: '',
     preparation: null,
@@ -739,7 +741,6 @@ export const useSettingsStore = defineStore('settings', () => {
     }
     modelDir.value = targetModelDir
     try {
-      await refreshModelDataAfterDirChange()
       await saveAppStore('app-settings', persistable.value)
       await invoke('confirm_model_dir_migration_switch', {
         payload: { taskId },
@@ -750,7 +751,6 @@ export const useSettingsStore = defineStore('settings', () => {
       await invoke('cancel_model_dir_migration', {
         payload: { taskId },
       }).catch(() => {})
-      await refreshModelDataAfterDirChange().catch(() => {})
       modelDirMigrationState.value = {
         ...modelDirMigrationState.value,
         status: 'failed',
@@ -862,21 +862,14 @@ export const useSettingsStore = defineStore('settings', () => {
         skippedFiles: Array.isArray(payload.skippedFiles) ? payload.skippedFiles : [],
         overwrittenFiles: Array.isArray(payload.overwrittenFiles) ? payload.overwrittenFiles : [],
         cleanupFailedFiles: Array.isArray(payload.cleanupFailedFiles) ? payload.cleanupFailedFiles : [],
+        ownershipUpdateFailed: payload.ownershipUpdateFailed === true,
         conflict: null,
         error: '',
         resolvingConflict: false,
       }
       modelDir.value = displayModelDirPath(payload.targetModelDir || modelDirMigrationState.value.targetModelDir)
-      // Custom model registrations store absolute paths, so anything that lived under the old
-      // model directory now points at files the migration has moved away. Rebase them.
-      // Fire-and-forget: a failure here leaves those models showing as missing with a relink
-      // action, which must not turn a completed migration into a failed one.
-      if (isMainTaskOwner() && payload.sourceModelDir && payload.targetModelDir) {
-        void invoke('remap_custom_model_paths', {
-          payload: { fromRoot: payload.sourceModelDir, toRoot: payload.targetModelDir },
-        }).then(() => import('@/stores/model'))
-          .then(({ useModelStore }) => useModelStore().loadModels())
-          .catch(() => {})
+      if (isMainTaskOwner()) {
+        await refreshModelDataAfterDirChange()
       }
       return
     }

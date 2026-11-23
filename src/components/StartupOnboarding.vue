@@ -663,6 +663,9 @@ onMounted(() => {
         <n-alert v-if="modelDirMigrationState.status === 'aborted'" type="default" :show-icon="true">
           {{ t('settings.modelDirMigrationAbortedHint') }}
         </n-alert>
+        <n-alert v-if="modelDirMigrationState.ownershipUpdateFailed" type="warning">
+          {{ t('settings.modelDirMigrationOwnershipWarning') }}
+        </n-alert>
       </div>
       <template #footer>
         <div class="migration-dialog__footer">

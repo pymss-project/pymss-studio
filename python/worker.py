@@ -79,6 +79,9 @@ def run_command(command: str, payload: dict) -> int:
     if command == "delete_runtime":
         from worker_bootstrap import cmd_delete_runtime
         return cmd_delete_runtime(payload)
+    if command == "remap_custom_model_paths":
+        from worker_custom_models import cmd_remap_custom_model_paths
+        return cmd_remap_custom_model_paths(payload)
     if command == "test_connection":
         configure_process_proxy(parse_proxy_config({
             "mode": payload.get("mode"),
@@ -128,9 +131,6 @@ def run_command(command: str, payload: dict) -> int:
     if command == "relink_custom_model":
         from worker_custom_models import cmd_relink_custom_model
         return cmd_relink_custom_model(payload)
-    if command == "remap_custom_model_paths":
-        from worker_custom_models import cmd_remap_custom_model_paths
-        return cmd_remap_custom_model_paths(payload)
     if command == "model_storage_summary":
         from worker_models import cmd_model_storage_summary
         return cmd_model_storage_summary(payload)

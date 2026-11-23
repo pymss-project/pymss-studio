@@ -504,6 +504,16 @@ a { color: inherit; text-decoration: none; }
   --modal-width-lg: min(calc(100vw - 2 * var(--modal-gutter)), clamp(720px, 72vw, 1040px));
 }
 
+:root {
+  --select-menu-radius: 11px;
+  --select-menu-padding: 4px;
+  --select-menu-max-height: 300px;
+  --select-option-radius: 7px;
+  --select-option-height: 32px;
+  --select-enter-motion: 140ms cubic-bezier(.2, .8, .2, 1);
+  --select-leave-motion: 80ms ease-out;
+}
+
 .page {
   max-width: var(--page-max-width);
   margin: 0 auto;

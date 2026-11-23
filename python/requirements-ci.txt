@@ -4,7 +4,7 @@
 librosa>=0.10.2,<0.11
 audioread>=3.0,<4
 numpy>=1.26,<3
-# Pin the released pymss 2.4.0 source, including audio-track and plugin APIs.
-pymss[proxy] @ git+https://github.com/pymss-project/pymss.git@c78bc27265d1d2bad20e429f615c063239837be2
+# Pin the released pymss 2.4.1 source, including model catalog metadata.
+pymss[proxy] @ git+https://github.com/pymss-project/pymss.git@e545e10a4a85306e9c78a9d64f91e0d43d170ad2
 requests[socks]>=2.32,<3
 pyyaml>=6.0.1,<7

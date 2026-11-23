@@ -18,13 +18,12 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-from worker_protocol import emit, emit_error
+from worker_protocol import debug_log, emit, emit_error
 
 # Weights are loaded with ``torch.load`` (see pymss_core/checkpoint.py), so only formats it reads
 # are offered. Notably absent: .safetensors — pymss has no safetensors path at all, and accepting
@@ -33,6 +32,22 @@ MODEL_FILE_EXTENSIONS = (".ckpt", ".pth", ".th", ".pt", ".bin")
 CONFIG_FILE_EXTENSIONS = (".yaml", ".yml")
 
 SIDECAR_FILENAME = "custom-models-meta.json"
+
+
+def custom_model_registry_path() -> Path:
+    return Path(
+        os.environ.get("PYMSS_USER_MODELS") or Path.home() / ".cache" / "pymss" / "user_models.json"
+    ).expanduser()
+
+
+def read_custom_model_registry(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"version": 1, "models": []}
+    if not isinstance(data, dict) or not isinstance(data.get("models"), list):
+        raise ValueError(f"Invalid user model registry: {path}")
+    return data
 
 
 def _sidecar_path() -> Path:
@@ -44,10 +59,7 @@ def _sidecar_path() -> Path:
     override = os.environ.get("PYMSS_STUDIO_CUSTOM_MODEL_META")
     if override:
         return Path(override)
-    registry = os.environ.get("PYMSS_USER_MODELS")
-    if registry:
-        return Path(registry).parent / SIDECAR_FILENAME
-    return Path.home() / ".cache" / "pymss" / SIDECAR_FILENAME
+    return custom_model_registry_path().parent / SIDECAR_FILENAME
 
 
 def _read_sidecar() -> dict[str, Any]:
@@ -60,17 +72,28 @@ def _read_sidecar() -> dict[str, Any]:
     return models if isinstance(models, dict) else {}
 
 
-def _write_sidecar(models: dict[str, Any]) -> None:
+def _write_atomic_json(path: Path, value: dict[str, Any]) -> None:
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _write_sidecar(models: dict[str, Any]) -> bool:
     path = _sidecar_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps({"version": 1, "models": models}, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
-    except Exception:
-        # The side-car is supplementary: losing it costs the "how it was imported" label, not the
-        # model. Failing the import over it would be worse than degrading.
-        pass
+        _write_atomic_json(path, {"version": 1, "models": models})
+    except OSError as error:
+        debug_log("custom_model.ownership_write_failed", errorType=type(error).__name__)
+        return False
+    return True
 
 
 def sidecar_entry(name: str) -> dict[str, Any]:
@@ -209,6 +232,8 @@ def _read_config(config_path: Path | None) -> dict[str, Any]:
     if not config_path or not config_path.is_file():
         return {}
     try:
+        import yaml
+
         with config_path.open(encoding="utf-8") as handle:
             data = yaml.load(handle, Loader=yaml.FullLoader)
         return data if isinstance(data, dict) else {}
@@ -350,6 +375,23 @@ def _managed_dir_for_name(model_dir: str | None, name: str) -> Path:
         if path.exists() and not path.is_dir():
             raise ValueError("The managed model path is not a directory")
     return target
+
+
+def owned_custom_model_directory(entry: Any, model_dir: str | None) -> Path | None:
+    meta = sidecar_entry(entry.name)
+    managed_dir = meta.get("managedDir")
+    if meta.get("importMode") != "copy" or not isinstance(managed_dir, str):
+        return None
+    try:
+        expected = _managed_dir_for_name(model_dir, entry.name)
+        registered = (entry.model_path, entry.config_path) if entry.config_path else (entry.model_path,)
+        if Path(managed_dir).expanduser().resolve() == expected and all(
+            path and Path(path).expanduser().parent.resolve() == expected for path in registered
+        ):
+            return expected
+    except (ValueError, OSError, RuntimeError):
+        return None
+    return None
 
 
 def _copy_with_progress(source: Path, target: Path, task_id: str | None, label: str) -> None:
@@ -591,19 +633,7 @@ def cmd_unregister_custom_model(payload: dict[str, Any]) -> int:
         return emit_error("CUSTOM_MODEL_INVALID", "Missing model name")
     delete_files = bool(payload.get("deleteFiles", False))
 
-    meta = sidecar_entry(name)
-    managed_dir_value = meta.get("managedDir")
-    # Only a directory this app created may be deleted. A referenced model's weights are the
-    # user's own file, frequently outside the app, and deleting it would be unrecoverable.
-    managed_dir = None
-    if str(meta.get("importMode") or "") == "copy" and managed_dir_value:
-        try:
-            expected = _managed_dir_for_name(str(payload.get("modelDir") or "").strip() or None, name)
-            if Path(str(managed_dir_value)).expanduser().resolve() == expected:
-                managed_dir = expected
-        except (ValueError, OSError, RuntimeError):
-            pass
-    is_managed = managed_dir is not None
+    model_dir = str(payload.get("modelDir") or "").strip() or None
 
     try:
         from pymss.model_registry import unregister_model  # type: ignore
@@ -613,9 +643,10 @@ def cmd_unregister_custom_model(payload: dict[str, Any]) -> int:
     except Exception as exc:
         return emit_error("CUSTOM_MODEL_REMOVE_FAILED", f"{type(exc).__name__}: {exc}")
 
+    managed_dir = owned_custom_model_directory(entry, model_dir)
     deleted: list[str] = []
     errors: list[str] = []
-    if delete_files and is_managed:
+    if delete_files and managed_dir is not None:
         try:
             if managed_dir.is_dir():
                 shutil.rmtree(managed_dir)
@@ -630,7 +661,7 @@ def cmd_unregister_custom_model(payload: dict[str, Any]) -> int:
         # True only when files were both requested and eligible, so the UI never claims to have
         # deleted a referenced model's weights.
         "deletedFiles": bool(deleted),
-        "fileDeletionSupported": is_managed,
+        "fileDeletionSupported": managed_dir is not None,
         "errors": errors,
     })
     return 0
@@ -709,78 +740,90 @@ def _remapped_path(path: str, from_root: str, to_root: str) -> str | None:
     return str(Path(to_root) / relative)
 
 
+def _migrated_managed_dir(name: str, managed_dir: str, from_root: str, to_root: str,
+                          paths: set[Path]) -> str | None:
+    moved_dir = _remapped_path(managed_dir, from_root, to_root)
+    if not moved_dir:
+        return None
+    try:
+        expected = _managed_dir_for_name(to_root, name)
+        # Unregistering a managed model removes the entire directory.
+        if Path(moved_dir) == expected and set(expected.iterdir()) == paths:
+            return str(expected)
+    except (ValueError, OSError, RuntimeError):
+        return None
+    return None
+
+
 def cmd_remap_custom_model_paths(payload: dict[str, Any]) -> int:
-    """Rebase registered custom models after the model directory moved.
-
-    The registry stores absolute paths, so a model copied under the old model directory would
-    silently break once its files were migrated. Matching is by path prefix rather than by import
-    mode on purpose: a model imported *by reference* from a file that happened to live inside the
-    model directory gets migrated too, and needs the same rewrite.
-
-    Paths are rewritten even when the file is not (yet) present at the destination: the old
-    location is cleaned up by the migration, so the new path is the more truthful answer either
-    way, and the UI already surfaces a missing file with a relink action."""
+    """Commit registered paths for verified copies before the source files are removed."""
     from_root = str(payload.get("fromRoot") or "").strip()
     to_root = str(payload.get("toRoot") or "").strip()
     if not from_root or not to_root:
         return emit_error("CUSTOM_MODEL_INVALID", "Missing fromRoot or toRoot")
     if _normalized(from_root) == _normalized(to_root):
-        emit("custom_models_remapped", {"remapped": [], "count": 0, "unchanged": True})
+        emit("custom_models_remapped", {"committed": True, "count": 0, "unchanged": True})
         return 0
+
+    copied_files = payload.get("copiedFiles")
+    if not isinstance(copied_files, list):
+        return emit_error("CUSTOM_MODEL_INVALID", "Expected a list of copied files")
+    moved_paths: dict[str, str] = {}
+    for value in copied_files:
+        if not isinstance(value, str):
+            return emit_error("CUSTOM_MODEL_INVALID", "Expected a relative migration path")
+        relative = Path(value)
+        if relative.anchor or not relative.parts or ".." in relative.parts:
+            return emit_error("CUSTOM_MODEL_INVALID", "Expected a relative migration path")
+        moved_paths[_normalized(str(Path(from_root) / relative))] = str(Path(to_root) / relative)
 
     try:
-        from pymss.model_registry import register_model  # type: ignore
-        from pymss.user_models import list_user_models  # type: ignore
-        entries = list(list_user_models())
-    except Exception:
-        # No registry (older pymss) means nothing to remap; migration must not fail over it.
-        emit("custom_models_remapped", {"remapped": [], "count": 0, "unavailable": True})
-        return 0
-
-    remapped: list[dict[str, Any]] = []
-    errors: list[str] = []
-    sidecar = _read_sidecar()
-    for entry in entries:
-        new_model_path = _remapped_path(str(entry.model_path), from_root, to_root)
-        new_config_path = (
-            _remapped_path(str(entry.config_path), from_root, to_root) if entry.config_path else None
-        )
-        if new_model_path is None and new_config_path is None:
-            continue
-        model_path = new_model_path or str(entry.model_path)
-        config_path = new_config_path or (str(entry.config_path) if entry.config_path else None)
-        try:
-            register_model(
-                entry.name,
-                entry.model_type,
-                model_path,
-                config_path=config_path,
-                aliases=list(entry.aliases) or None,
-                force=True,
-                # The files have just been moved by the migration; requiring them to exist would
-                # turn a partially-completed migration into a failed remap.
-                require_exists=False,
-            )
-        except Exception as exc:
-            errors.append(f"{entry.name}: {exc}")
-            continue
-        info = sidecar.get(entry.name)
-        if info and info.get("managedDir"):
-            moved_dir = _remapped_path(str(info["managedDir"]), from_root, to_root)
-            if moved_dir:
-                info["managedDir"] = moved_dir
-        remapped.append({
-            "name": entry.name,
-            "modelPath": model_path,
-            "configPath": config_path,
-            "exists": Path(model_path).is_file(),
-        })
-
-    if remapped:
-        _write_sidecar(sidecar)
+        count, ownership_update_failed = _remap_registered_models(from_root, to_root, moved_paths)
+    except (KeyError, OSError, RuntimeError, ValueError) as exc:
+        return emit_error("CUSTOM_MODEL_REMAP_FAILED", f"Could not update custom model paths: {exc}")
     emit("custom_models_remapped", {
-        "remapped": remapped,
-        "count": len(remapped),
-        "errors": errors,
+        "committed": True,
+        "count": count,
+        "ownershipUpdateFailed": ownership_update_failed,
     })
     return 0
+
+
+def _remap_registered_models(from_root: str, to_root: str, moved_paths: dict[str, str]) -> tuple[int, bool]:
+    registry = custom_model_registry_path()
+    data = read_custom_model_registry(registry)
+    sidecar = _read_sidecar()
+    updated = 0
+    ownership_changed = False
+    for entry in data["models"]:
+        if not isinstance(entry, dict):
+            raise ValueError("Invalid user model entry")
+        name, model_path, config_path = entry.get("name"), entry.get("model_path"), entry.get("config_path")
+        if not isinstance(name, str) or not isinstance(model_path, str) or (config_path is not None and not isinstance(config_path, str)):
+            raise ValueError("Invalid user model entry")
+        new_model_path = moved_paths.get(_normalized(os.path.expanduser(model_path)))
+        new_config_path = moved_paths.get(_normalized(os.path.expanduser(config_path))) if config_path else None
+        if new_model_path is None and new_config_path is None:
+            continue
+        paths = {Path(path) for path in (new_model_path, new_config_path) if path is not None}
+        for path in paths:
+            if not path.is_file():
+                raise FileNotFoundError(f"Copied model file is missing: {path}")
+        if new_model_path is not None:
+            entry["model_path"] = new_model_path
+        if new_config_path is not None:
+            entry["config_path"] = new_config_path
+        info = sidecar.get(name)
+        if isinstance(info, dict) and info.get("importMode") == "copy" and info.get("managedDir"):
+            moved_dir = None
+            if new_model_path is not None and (not config_path or new_config_path is not None):
+                moved_dir = _migrated_managed_dir(name, str(info["managedDir"]), from_root, to_root, paths)
+            info["managedDir"] = moved_dir
+            if moved_dir is None:
+                info["importMode"] = "reference"
+            ownership_changed = True
+        updated += 1
+
+    if updated:
+        _write_atomic_json(registry, data)
+    return updated, ownership_changed and not _write_sidecar(sidecar)

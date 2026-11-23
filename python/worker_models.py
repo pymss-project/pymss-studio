@@ -21,7 +21,7 @@ import yaml
 
 from worker_inference_constraints import InferenceParameterError, chunk_size_constraint
 from worker_inference_snapshot import build_parameter_resolution
-from worker_protocol import WORKER_VERSION, _as_bool, _as_float, _as_int, emit, emit_error, import_available
+from worker_protocol import WORKER_VERSION, _as_bool, _as_float, _as_int, debug_log, emit, emit_error, import_available
 from worker_runtime_lock import RuntimeLockBusy, runtime_lock
 
 CATALOG_CONFIG_STAGING_PREFIX = ".pymss-config-"
@@ -60,6 +60,8 @@ class ModelEntry:
     debug_source: str = ""
     target_instrument_override: str = ""
     sort_key: str = ""
+    author: str = ""
+    publish_date: str = ""
 
     @property
     def stem(self) -> str:
@@ -71,6 +73,8 @@ class ModelEntry:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ModelEntry":
+        author = data.get("author")
+        publish_date = data.get("publish_date")
         return cls(
             name=data["name"],
             aliases=tuple(data.get("aliases", ())),
@@ -92,6 +96,8 @@ class ModelEntry:
             config_target_instrument=data.get("config_target_instrument", ""),
             target_instrument_override=data.get("target_instrument_override", ""),
             sort_key=data.get("sort_key", ""),
+            author=author.strip() if isinstance(author, str) else "",
+            publish_date=publish_date.strip() if isinstance(publish_date, str) else "",
             classification_confidence=data.get("classification_confidence", ""),
             classification_basis=data.get("classification_basis", ""),
             debug_source=data.get("debug_source", ""),
@@ -549,14 +555,13 @@ def load_model_catalog() -> dict[str, Any]:
 
 @lru_cache(maxsize=1)
 def _model_index() -> dict[str, ModelEntry]:
+    entries = load_model_catalog()["models"]
     index: dict[str, ModelEntry] = {}
-    for entry in load_model_catalog()["models"]:
-        names = {entry.name, entry.stem, *entry.aliases}
-        for name in names:
-            key = str(name).strip().lower()
-            if key in index and index[key].name != entry.name:
-                continue
-            index[key] = entry
+    for entry in entries:
+        index.setdefault(entry.name.strip().lower(), entry)
+    for entry in entries:
+        for name in (entry.stem, *entry.aliases):
+            index.setdefault(str(name).strip().lower(), entry)
     return index
 
 
@@ -862,19 +867,12 @@ def resolve_config_stems(
     return config_instruments, str(target_instrument or "").strip()
 
 
-def _user_model_import_mode(entry: Any) -> str | None:
-    """How an imported model got here: 'copy' (the app holds the files) or 'reference'.
-
-    Carried on the model itself so the UI can say exactly what removing it will do. Models
-    registered outside the app (`pymss register`) have no record, and 'reference' is the safe
-    reading — it is the one under which no files are deleted."""
+def _user_model_import_mode(entry: Any, model_dir: str | None) -> str | None:
     if not is_user_model_entry(entry):
         return None
-    try:
-        from worker_custom_models import sidecar_entry
-        return str(sidecar_entry(str(entry.name)).get("importMode") or "reference")
-    except Exception:
-        return "reference"
+    from worker_custom_models import owned_custom_model_directory
+
+    return "copy" if owned_custom_model_directory(entry, model_dir) else "reference"
 
 
 def _entry_size_bytes(entry: Any, model_path: Path) -> int:
@@ -916,7 +914,7 @@ def model_to_dict(entry: Any, model_dir: str | None = None, include_local_state:
     default_inference_params = resolve_default_inference_params(entry, model_path, config_path, config_data)
     inference_param_meta = resolve_inference_param_meta(entry, config_path, config_data, model_path)
     default_inference_params_source = "config" if config_path and config_path.is_file() else "runtime_fallback"
-    return {
+    result = {
         "name": str(getattr(entry, "name", "") or ""),
         "aliases": list(getattr(entry, "aliases", ()) or ()),
         "modelType": getattr(entry, "model_type", None),
@@ -944,7 +942,7 @@ def model_to_dict(entry: Any, model_dir: str | None = None, include_local_state:
         # them outright), so the UI has to offer relink/remove instead of download/delete.
         "source": effective_source_for(entry),
         "baseConfigPath": str(base_config_path_for(entry, model_dir)) if base_config_path_for(entry, model_dir) else None,
-        "importMode": _user_model_import_mode(entry),
+        "importMode": _user_model_import_mode(entry, model_dir),
         "downloaded": downloaded,
         "missingPaths": missing_paths if include_local_state else [],
         "modelPath": str(model_path),
@@ -954,6 +952,11 @@ def model_to_dict(entry: Any, model_dir: str | None = None, include_local_state:
         "defaultInferenceParamsSource": default_inference_params_source,
         "inferenceParamMeta": inference_param_meta,
     }
+    if author := getattr(entry, "author", ""):
+        result["author"] = author
+    if publish_date := getattr(entry, "publish_date", ""):
+        result["publishDate"] = publish_date
+    return result
 
 
 def cmd_health() -> int:
@@ -1053,17 +1056,10 @@ def cmd_env_info() -> int:
 
 
 def _load_registered_user_models() -> list[RegisteredUserModelEntry]:
-    registry = Path(
-        os.environ.get("PYMSS_USER_MODELS")
-        or Path.home() / ".cache" / "pymss" / "user_models.json"
-    ).expanduser()
-    if not registry.is_file():
-        return []
-    data = json.loads(registry.read_text(encoding="utf-8"))
-    models = data.get("models") if isinstance(data, dict) else None
-    if not isinstance(models, list):
-        raise ValueError(f"Invalid user model registry: {registry}")
-    return [RegisteredUserModelEntry.from_dict(item) for item in models if isinstance(item, dict)]
+    from worker_custom_models import custom_model_registry_path, read_custom_model_registry
+
+    data = read_custom_model_registry(custom_model_registry_path())
+    return [RegisteredUserModelEntry.from_dict(item) for item in data["models"] if isinstance(item, dict)]
 
 
 def list_registered_user_models(category: str | None = None) -> list[Any]:
@@ -1334,6 +1330,15 @@ def cmd_model_info(payload: dict[str, Any]) -> int:
     return 0
 
 
+def _library_model_for_delete(model_name: str) -> Any:
+    from pymss.user_models import get_user_model_entry
+
+    try:
+        return get_user_model_entry(model_name)
+    except KeyError:
+        return get_catalog_model_entry(model_name)
+
+
 def cmd_delete_model(payload: dict[str, Any]) -> int:
     task_id = payload.get("taskId") or None
     model_name = payload.get("model")
@@ -1363,17 +1368,17 @@ def cmd_delete_model(payload: dict[str, Any]) -> int:
         }, task_id=task_id)
         return 1
 
-    # Deliberately NOT importing pymss's path helpers: they are catalog-only and would shadow
-    # the source-aware ones in this module. get_model_entry is imported for its user-model
-    # lookup, which is what lets the guard below recognise an imported model.
+    catalog = payload.get("catalog", "storage")
     try:
-        from pymss.model_registry import get_model_entry  # type: ignore
-    except Exception as exc:
-        return fail(str(exc))
+        if catalog == "library":
+            entry = _library_model_for_delete(model_name)
+        elif catalog == "storage":
+            from pymss.model_registry import get_model_entry
 
-    try:
-        entry = get_model_entry(model_name)
-    except KeyError as exc:
+            entry = get_model_entry(model_name)
+        else:
+            return fail("Invalid model catalog for deletion")
+    except Exception as exc:
         return fail(str(exc))
 
     # An imported model's weights are the user's own file, often outside the app entirely.
@@ -1384,21 +1389,35 @@ def cmd_delete_model(payload: dict[str, Any]) -> int:
             f"{model_name} is an imported custom model; remove it from the custom model list instead"
         )
 
+    info_entry = entry
+    if catalog == "storage" and "catalog" in payload:
+        # Storage lists base files. Refresh the library row from its effective catalog record.
+        try:
+            info_entry = next((model for model in list_catalog_models() if model.name == entry.name), entry)
+        except (KeyError, OSError, ValueError):
+            pass
+
+    root = model_root(model_dir)
     config_path = config_path_for(entry, model_dir)
+    paths = [model_path_for(entry, model_dir), *auxiliary_paths_for(entry, model_dir)]
+    if config_path is not None:
+        paths.insert(1, config_path)
     operation = catalog_config_operation(config_path) if config_path is not None else nullcontext()
     try:
+        resolved_root = root.resolve()
+        if any(not path.parent.resolve().is_relative_to(resolved_root) for path in paths):
+            return fail("Model file path is outside the model directory")
         with operation as revision:
             if revision is not None:
                 revision.write_text(uuid4().hex, encoding="utf-8")
-            return _delete_catalog_model_files(entry, model_dir, config_path, task_id)
+            return _delete_catalog_model_files(info_entry, model_dir, paths, resolved_root, task_id)
     except OSError as exc:
         return fail(str(exc))
 
 
-def _delete_catalog_model_files(entry: Any, model_dir: str | None, config_path: Path | None, task_id: str | None) -> int:
-    model_path = model_path_for(entry, model_dir)
-    auxiliary_paths = auxiliary_paths_for(entry, model_dir)
-
+def _delete_catalog_model_files(
+    info_entry: Any, model_dir: str | None, paths: list[Path], root: Path, task_id: str | None,
+) -> int:
     def expand_cleanup_paths(path: Path) -> list[Path]:
         part_path = path.with_name(path.name + ".part")
         return [
@@ -1408,9 +1427,8 @@ def _delete_catalog_model_files(entry: Any, model_dir: str | None, config_path: 
             Path(str(part_path) + ".aria2"),
         ]
 
-    candidate_roots = [model_path, *([config_path] if config_path is not None else []), *auxiliary_paths]
     all_paths: list[Path] = []
-    for path in candidate_roots:
+    for path in paths:
         for candidate in expand_cleanup_paths(path):
             if candidate not in all_paths:
                 all_paths.append(candidate)
@@ -1422,15 +1440,15 @@ def _delete_catalog_model_files(entry: Any, model_dir: str | None, config_path: 
             if not path.is_file():
                 continue
             try:
-                path.unlink()
+                _unlink_model_file(path, root)
                 deleted.append(str(path))
             except Exception as exc:
                 errors.append(f"{path}: {exc}")
         emit("model_deleted", {
-            "model": entry.name,
+            "model": info_entry.name,
             "deleted": deleted,
             "errors": errors,
-            "modelInfo": model_to_dict(entry, model_dir, include_local_state=True),
+            "modelInfo": model_to_dict(info_entry, model_dir, include_local_state=True),
         })
         return 0
 
@@ -1440,7 +1458,7 @@ def _delete_catalog_model_files(entry: Any, model_dir: str | None, config_path: 
     errors: list[str] = []
 
     emit("model_delete_started", {
-        "model": entry.name,
+        "model": info_entry.name,
         "totalFiles": total_files,
         "completedFiles": 0,
         "progress": 0,
@@ -1450,13 +1468,13 @@ def _delete_catalog_model_files(entry: Any, model_dir: str | None, config_path: 
     try:
         for index, path in enumerate(existing_paths, start=1):
             try:
-                path.unlink()
+                _unlink_model_file(path, root)
                 deleted.append(str(path))
             except Exception as exc:
                 detail = f"{path}: {exc}"
                 errors.append(detail)
                 emit("model_delete_failed", {
-                    "model": entry.name,
+                    "model": info_entry.name,
                     "deleted": deleted,
                     "errors": errors,
                     "path": str(path),
@@ -1464,12 +1482,12 @@ def _delete_catalog_model_files(entry: Any, model_dir: str | None, config_path: 
                     "totalFiles": total_files,
                     "progress": int((len(deleted) / total_files) * 100) if total_files > 0 else 0,
                     "message": str(exc),
-                    "modelInfo": model_to_dict(entry, model_dir, include_local_state=True),
+                    "modelInfo": model_to_dict(info_entry, model_dir, include_local_state=True),
                 }, task_id=task_id)
                 return 1
 
             emit("model_delete_progress", {
-                "model": entry.name,
+                "model": info_entry.name,
                 "path": str(path),
                 "completedFiles": index,
                 "totalFiles": total_files,
@@ -1478,27 +1496,27 @@ def _delete_catalog_model_files(entry: Any, model_dir: str | None, config_path: 
             }, task_id=task_id)
 
         emit("model_delete_done", {
-            "model": entry.name,
+            "model": info_entry.name,
             "deleted": deleted,
             "errors": errors,
             "completedFiles": total_files,
             "totalFiles": total_files,
             "progress": 100,
             "message": "Deleting model files",
-            "modelInfo": model_to_dict(entry, model_dir, include_local_state=True),
+            "modelInfo": model_to_dict(info_entry, model_dir, include_local_state=True),
         }, task_id=task_id)
         return 0
     except Exception as exc:
         errors.append(str(exc))
         emit("model_delete_failed", {
-            "model": entry.name,
+            "model": info_entry.name,
             "deleted": deleted,
             "errors": errors,
             "completedFiles": len(deleted),
             "totalFiles": total_files,
             "progress": int((len(deleted) / total_files) * 100) if total_files > 0 else 0,
             "message": str(exc),
-            "modelInfo": model_to_dict(entry, model_dir, include_local_state=True),
+            "modelInfo": model_to_dict(info_entry, model_dir, include_local_state=True),
         }, task_id=task_id)
         return 1
 
@@ -1515,15 +1533,42 @@ def _path_size(path: Path) -> int:
 
 
 def _normalized_path_key(path: Path) -> str:
-    return os.path.normcase(str(path.absolute()))
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _path_within_model_root(path: Path, resolved_root: Path) -> bool:
+    try:
+        return path.resolve().is_relative_to(resolved_root)
+    except (OSError, RuntimeError):
+        return False
+
+
+def _unlink_model_file(path: Path, resolved_root: Path) -> None:
+    parent = path.parent.resolve(strict=True)
+    if not parent.is_relative_to(resolved_root):
+        raise OSError("Model file path is outside the model directory")
+    (parent / path.name).unlink()
+
+
+def _walk_model_directories(root: Path, resolved_root: Path) -> Iterator[tuple[Path, list[str], list[str]]]:
+    for dirpath, dirnames, filenames in os.walk(root):
+        directory = Path(dirpath)
+        if not _path_within_model_root(directory, resolved_root):
+            dirnames.clear()
+            continue
+        # os.walk does not exclude Windows junctions when followlinks is false.
+        dirnames[:] = [name for name in dirnames if not (
+            (directory / name).is_symlink() or (directory / name).is_junction()
+        )]
+        yield directory, dirnames, filenames
 
 
 def _scan_root_file_sizes(root: Path) -> dict[str, tuple[Path, int]]:
     scanned: dict[str, tuple[Path, int]] = {}
     if not root.exists():
         return scanned
-    for dirpath, dirnames, filenames in os.walk(root):
-        base = Path(dirpath)
+    resolved_root = root.resolve()
+    for base, dirnames, filenames in _walk_model_directories(root, resolved_root):
         if base.name.startswith(CATALOG_CONFIG_STAGING_PREFIX):
             try:
                 with runtime_lock(catalog_config_staging_lock(base), timeout=0, create=False):
@@ -1537,6 +1582,8 @@ def _scan_root_file_sizes(root: Path) -> dict[str, tuple[Path, int]]:
             if filename.startswith(CATALOG_CONFIG_STAGING_PREFIX) and filename.endswith(".lock"):
                 continue
             file_path = base / filename
+            if not _path_within_model_root(file_path, resolved_root):
+                continue
             try:
                 size = int(file_path.stat().st_size)
             except Exception:
@@ -1557,21 +1604,22 @@ def _prune_empty_tool_model_cache_dirs(root: Path) -> None:
     """Remove empty managed tool-cache children while retaining each cache root."""
 
     tool_models_root = root / "_tool_models"
-    if not tool_models_root.is_dir():
+    if not tool_models_root.is_dir() or tool_models_root.resolve() != tool_models_root:
         return
     try:
         cache_roots = list(tool_models_root.glob("*/models"))
     except OSError:
         return
     for models_root in cache_roots:
-        if not models_root.is_dir():
+        if not models_root.is_dir() or models_root.resolve() != models_root:
             continue
-        for dirpath, _, _ in os.walk(models_root, topdown=False):
-            directory = Path(dirpath)
+        directories = [directory for directory, _, _ in _walk_model_directories(models_root, models_root)]
+        for directory in reversed(directories):
             if directory == models_root:
                 continue
             try:
-                directory.rmdir()
+                if directory.resolve() == directory:
+                    directory.rmdir()
             except OSError:
                 # Non-empty and concurrently used directories must remain untouched.
                 continue
@@ -1628,8 +1676,6 @@ def _tool_model_storage_items(
 
 
 def _required_model_paths(entry: Any, model_dir: str | None) -> list[Path]:
-    from pymss.model_registry import auxiliary_paths_for, config_path_for, model_path_for  # type: ignore
-
     paths = [model_path_for(entry, model_dir)]
     config = config_path_for(entry, model_dir)
     if config is not None:
@@ -1652,7 +1698,7 @@ def _storage_summary_payload(model_dir: str | None = None) -> dict[str, Any]:
     downloaded_count = 0
 
     for entry in list_models(supported=None):
-        required_paths = _required_model_paths(entry, model_dir)
+        required_paths = _required_model_paths(entry, str(root))
         files = []
         model_size = 0
         downloaded = True
@@ -1685,10 +1731,23 @@ def _storage_summary_payload(model_dir: str | None = None) -> dict[str, Any]:
             "files": files,
         })
 
+    # Cleanup also protects the paths shown in the model library, including local registrations.
+    cleanup_unavailable = False
+    try:
+        debug_entries = list_catalog_models() if _debug_catalog_path().is_file() else []
+        for entry in (*debug_entries, *_load_registered_user_models()):
+            known_file_keys.update(_normalized_path_key(path) for path in _required_model_paths(entry, model_dir))
+    except (OSError, ValueError, KeyError, TypeError):
+        cleanup_unavailable = True
+
+    # A registry path and a scanned path can refer to the same file through a link or junction.
+    known_targets = set()
+    if not cleanup_unavailable and scanned_files.keys() - known_file_keys:
+        known_targets = {os.path.normcase(os.path.realpath(key)) for key in known_file_keys}
     residual_files: list[dict[str, Any]] = []
     residual_bytes = 0
     for normalized_key, (file_path, size) in scanned_files.items():
-        if normalized_key in known_file_keys:
+        if normalized_key in known_file_keys or os.path.normcase(os.path.realpath(file_path)) in known_targets:
             continue
         # Tool-specific model caches share the configured model root so directory migration
         # and storage placement remain consistent. Complete caches are managed by their owning
@@ -1701,8 +1760,9 @@ def _storage_summary_payload(model_dir: str | None = None) -> dict[str, Any]:
             ):
                 tool_models_bytes += size
                 continue
-        residual_files.append({"path": str(file_path), "sizeBytes": size})
-        residual_bytes += size
+        if not cleanup_unavailable:
+            residual_files.append({"path": str(file_path), "sizeBytes": size})
+            residual_bytes += size
 
     residual_files.sort(key=lambda item: item["sizeBytes"], reverse=True)
     models.sort(key=lambda item: item["sizeBytes"], reverse=True)
@@ -1715,6 +1775,7 @@ def _storage_summary_payload(model_dir: str | None = None) -> dict[str, Any]:
         "toolModels": tool_models,
         "residualFiles": residual_files,
         "residualBytes": residual_bytes,
+        "residualCleanupUnavailable": cleanup_unavailable,
     }
 
 
@@ -1740,32 +1801,36 @@ def cmd_delete_tool_model(payload: dict[str, Any]) -> int:
 
         from pymss.model_registry import model_root  # type: ignore
 
-        root = model_root(model_dir)
-        models_root = (root / "_tool_models" / "asr" / "models").resolve()
-        target = (models_root / model_id).resolve()
-        if target.parent != models_root:
+        root = model_root(model_dir).resolve()
+        models_root = root / "_tool_models" / "asr" / "models"
+        target = models_root / model_id
+        if target.parent != models_root or models_root.resolve() != models_root or target.resolve() != target:
             raise ValueError("Tool model path escapes the managed cache")
         if not target.is_dir() and not missing_ok:
             raise FileNotFoundError("Tool model is not installed")
 
         if target.is_dir():
             shutil.rmtree(target)
-        summary = _storage_summary_payload(model_dir)
-        emit("tool_model_deleted", {
-            "id": model_id,
-            "tool": tool,
-            "modelStorageSummary": summary,
-        })
-        return 0
     except Exception as exc:
         return emit_error("TOOL_MODEL_DELETE_FAILED", str(exc), traceback.format_exc())
+
+    result: dict[str, Any] = {"id": model_id, "tool": tool}
+    try:
+        result["modelStorageSummary"] = _storage_summary_payload(model_dir)
+    except Exception as exc:
+        debug_log("model.storage_summary_refresh_failed", errorType=type(exc).__name__)
+    emit("tool_model_deleted", result)
+    return 0
 
 
 def cmd_cleanup_model_residual_files(payload: dict[str, Any]) -> int:
     model_dir = payload.get("modelDir") or None
     task_id = payload.get("taskId") or None
     try:
+        resolved_root = model_root(model_dir).resolve()
         summary = _storage_summary_payload(model_dir)
+        if summary.get("residualCleanupUnavailable"):
+            raise ValueError("Residual cleanup is unavailable while model references cannot be read")
         if task_id is None:
             deleted: list[str] = []
             errors: list[str] = []
@@ -1774,11 +1839,11 @@ def cmd_cleanup_model_residual_files(payload: dict[str, Any]) -> int:
                 if not path.is_file():
                     continue
                 try:
-                    path.unlink()
+                    _unlink_model_file(path, resolved_root)
                     deleted.append(str(path))
                 except Exception as exc:
                     errors.append(f"{path}: {exc}")
-            _prune_empty_tool_model_cache_dirs(Path(summary["modelDir"]))
+            _prune_empty_tool_model_cache_dirs(resolved_root)
             emit("model_residual_cleaned", {
                 "deleted": deleted,
                 "errors": errors,
@@ -1800,12 +1865,12 @@ def cmd_cleanup_model_residual_files(payload: dict[str, Any]) -> int:
         for index, item in enumerate(residual_items, start=1):
             path = Path(item.get("path", ""))
             try:
-                path.unlink()
+                _unlink_model_file(path, resolved_root)
                 deleted.append(str(path))
             except Exception as exc:
                 detail = f"{path}: {exc}"
                 errors.append(detail)
-                _prune_empty_tool_model_cache_dirs(Path(summary["modelDir"]))
+                _prune_empty_tool_model_cache_dirs(resolved_root)
                 emit("model_residual_cleanup_failed", {
                     "deleted": deleted,
                     "errors": errors,
@@ -1824,7 +1889,7 @@ def cmd_cleanup_model_residual_files(payload: dict[str, Any]) -> int:
                 "progress": int((index / total_files) * 100) if total_files > 0 else 100,
                 "message": "Cleaning residual files",
             }, task_id=task_id)
-        _prune_empty_tool_model_cache_dirs(Path(summary["modelDir"]))
+        _prune_empty_tool_model_cache_dirs(resolved_root)
         next_summary = _storage_summary_payload(model_dir)
         emit("model_residual_cleanup_done", {
             "deleted": deleted,

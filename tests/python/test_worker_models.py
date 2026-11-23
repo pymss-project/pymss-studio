@@ -1,6 +1,8 @@
 import io
 import json
+import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -65,6 +67,16 @@ CATALOG_ENTRY = worker_models.ModelEntry.from_dict({
 
 
 class CatalogTargetOverrideTests(unittest.TestCase):
+    def test_catalog_filename_takes_precedence_over_another_models_alias(self):
+        first = worker_models.ModelEntry.from_dict({
+            "name": "first.ckpt", "relpath": "first.ckpt", "aliases": ["second.ckpt"],
+        })
+        second = worker_models.ModelEntry.from_dict({"name": "second.ckpt", "relpath": "second.ckpt"})
+        worker_models._model_index.cache_clear()
+        self.addCleanup(worker_models._model_index.cache_clear)
+        with mock.patch.object(worker_models, "load_model_catalog", return_value={"models": [first, second]}):
+            self.assertEqual(worker_models.get_catalog_model_entry(second.name), second)
+
     def test_reclassified_model_still_uses_its_existing_download_directory(self):
         entry = worker_models.ModelEntry.from_dict({
             "name": "gilliaan_drumsV1.ckpt", "model_type": "bs_roformer", "supported": True,
@@ -96,6 +108,23 @@ class CatalogTargetOverrideTests(unittest.TestCase):
         self.assertEqual(result["categoryCn"], "伴奏")
         self.assertEqual(result["category"], "instrumental")
         self.assertEqual(worker_models.ModelEntry.from_dict({"name": "old", "relpath": "old"}).sort_key, "")
+
+    def test_catalog_publication_fields_are_serialized_independently(self):
+        cases = [
+            ({"author": "Kai Li, Yi Luo", "publish_date": "2024-09-06"},
+             {"author": "Kai Li, Yi Luo", "publishDate": "2024-09-06"}),
+            ({"author": "Author", "publish_date": ""}, {"author": "Author"}),
+            ({"author": None, "publish_date": "2024-09-06"}, {"publishDate": "2024-09-06"}),
+            ({}, {}),
+        ]
+        with tempfile.TemporaryDirectory() as model_dir:
+            for fields, expected in cases:
+                with self.subTest(fields=fields):
+                    entry = worker_models.ModelEntry.from_dict({
+                        "name": "model.ckpt", "relpath": "model.ckpt", **fields,
+                    })
+                    payload = worker_models.model_to_dict(entry, model_dir)
+                    self.assertEqual({key: payload[key] for key in ("author", "publishDate") if key in payload}, expected)
 
     def test_target_override_survives_catalog_overlay_and_entry_serialization(self):
         base = {
@@ -264,6 +293,228 @@ class UserModelPathTests(unittest.TestCase):
 
 
 class ModelStorageSummaryTests(unittest.TestCase):
+    def _link_directory(self, link: Path, target: Path) -> None:
+        if os.name == "nt":
+            subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(target)], check=True, capture_output=True)
+        else:
+            link.symlink_to(target, target_is_directory=True)
+
+    def test_residual_cleanup_does_not_walk_outside_directory_links(self):
+        with tempfile.TemporaryDirectory() as temp_value:
+            directory = Path(temp_value)
+            physical_root = directory / "physical"
+            physical_root.mkdir()
+            root = directory / "models"
+            self._link_directory(root, physical_root)
+            external = directory / "external"
+            empty = external / "empty"
+            empty.mkdir(parents=True)
+            outside_file = external / "keep.dat"
+            outside_file.write_bytes(b"external")
+            leftover = root / "orphan.part"
+            leftover.write_bytes(b"residual")
+            self._link_directory(root / "shared", external)
+            cache = root / "_tool_models" / "asr" / "models"
+            cache.mkdir(parents=True)
+            self._link_directory(cache / "linked", external)
+
+            registry = mock.Mock()
+            registry.model_root.return_value = root
+            registry.list_models.return_value = []
+            output = io.StringIO()
+            with mock.patch.dict("sys.modules", {"pymss": mock.Mock(), "pymss.model_registry": registry}), \
+                 mock.patch.object(worker_models, "_debug_dir", return_value=directory / "debug"), \
+                 mock.patch.object(worker_models, "_load_registered_user_models", return_value=[]), redirect_stdout(output):
+                summary = worker_models._storage_summary_payload(str(root))
+                code = worker_models.cmd_cleanup_model_residual_files({"modelDir": str(root), "taskId": "cleanup_residual_link"})
+
+            self.assertEqual(code, 0)
+            self.assertEqual([item["path"] for item in summary["residualFiles"]], [str(leftover)])
+            event = json.loads(output.getvalue().splitlines()[-1])
+            self.assertEqual(event["payload"]["deleted"], [str(leftover)])
+            self.assertTrue(outside_file.is_file())
+            self.assertTrue(empty.is_dir())
+            self.assertTrue((cache / "linked").is_dir())
+
+    def test_tool_model_deletion_refuses_linked_cache_roots_and_models(self):
+        for link_model in (False, True):
+            with self.subTest(link_model=link_model), tempfile.TemporaryDirectory() as temp_value:
+                directory = Path(temp_value)
+                root = directory / "models"
+                models = root / "_tool_models" / "asr" / "models"
+                external = directory / "external"
+                if link_model:
+                    models.mkdir(parents=True)
+                    sibling = models / "retained"
+                    sibling.mkdir()
+                    self._link_directory(models / "selected", sibling)
+                    keep = sibling / "keep.dat"
+                else:
+                    root.mkdir()
+                    keep = external / "asr" / "models" / "selected" / "keep.dat"
+                    keep.parent.mkdir(parents=True)
+                    self._link_directory(root / "_tool_models", external)
+                keep.write_bytes(b"external")
+
+                registry = mock.Mock()
+                registry.model_root.return_value = root
+                registry.list_models.return_value = []
+                output = io.StringIO()
+                with mock.patch.dict("sys.modules", {"pymss": mock.Mock(), "pymss.model_registry": registry}), redirect_stdout(output):
+                    code = worker_models.cmd_delete_tool_model({"modelDir": str(root), "tool": "asr", "id": "selected"})
+
+                self.assertEqual(code, 1)
+                self.assertTrue(keep.is_file())
+                self.assertEqual(json.loads(output.getvalue())["payload"]["code"], "TOOL_MODEL_DELETE_FAILED")
+
+    def test_unreadable_model_references_disable_cleanup_but_allow_tool_deletion(self):
+        with tempfile.TemporaryDirectory() as temp_value:
+            directory = Path(temp_value)
+            root = directory / "models"
+            tool_cache = root / "_tool_models" / "asr" / "models" / "selected"
+            tool_cache.mkdir(parents=True)
+            (tool_cache / "model.pt").write_bytes(b"cache")
+            keep = root / "possibly-referenced.ckpt"
+            keep.write_bytes(b"weights")
+            registry_path = directory / "user_models.json"
+            registry_path.write_text("{", encoding="utf-8")
+            registry = mock.Mock()
+            registry.model_root.return_value = root
+            registry.list_models.return_value = []
+            output = io.StringIO()
+            with mock.patch.dict("sys.modules", {"pymss": mock.Mock(), "pymss.model_registry": registry}), \
+                 mock.patch.dict("os.environ", {"PYMSS_USER_MODELS": str(registry_path)}), \
+                 mock.patch.object(worker_models, "_debug_dir", return_value=directory / "debug"), redirect_stdout(output):
+                target = {"modelDir": str(root)}
+                self.assertEqual(worker_models.cmd_model_storage_summary(target), 0)
+                self.assertEqual(worker_models.cmd_cleanup_model_residual_files(target), 1)
+                self.assertEqual(worker_models.cmd_cleanup_model_residual_files({**target, "taskId": "cleanup"}), 1)
+                self.assertEqual(worker_models.cmd_delete_tool_model({**target, "tool": "asr", "id": tool_cache.name}), 0)
+
+            summary, plain_cleanup, task_cleanup, removal = map(json.loads, output.getvalue().splitlines())
+            self.assertEqual(summary["type"], "model_storage_summary")
+            self.assertTrue(summary["payload"]["residualCleanupUnavailable"])
+            self.assertEqual(summary["payload"]["residualFiles"], [])
+            for cleanup in (plain_cleanup, task_cleanup):
+                self.assertEqual(cleanup["type"], "model_residual_cleanup_failed")
+                self.assertEqual(cleanup["payload"]["deleted"], [])
+            self.assertEqual(removal["type"], "tool_model_deleted")
+            self.assertTrue(removal["payload"]["modelStorageSummary"]["residualCleanupUnavailable"])
+            self.assertFalse(tool_cache.exists())
+            self.assertTrue(keep.is_file())
+
+    def test_tool_deletion_stays_successful_if_storage_refresh_fails(self):
+        with tempfile.TemporaryDirectory() as temp_value:
+            root = Path(temp_value)
+            tool_cache = root / "_tool_models" / "asr" / "models" / "selected"
+            tool_cache.mkdir(parents=True)
+            registry = mock.Mock()
+            registry.model_root.return_value = root
+            output = io.StringIO()
+            with mock.patch.dict("sys.modules", {"pymss": mock.Mock(), "pymss.model_registry": registry}), \
+                 mock.patch.object(worker_models, "_storage_summary_payload", side_effect=OSError), redirect_stdout(output):
+                code = worker_models.cmd_delete_tool_model({"modelDir": str(root), "tool": "asr", "id": tool_cache.name})
+
+            self.assertEqual(code, 0)
+            self.assertFalse(tool_cache.exists())
+            event = json.loads(output.getvalue().splitlines()[-1])
+            self.assertEqual(event["type"], "tool_model_deleted")
+            self.assertNotIn("modelStorageSummary", event["payload"])
+
+    def test_residual_cleanup_rechecks_paths_before_removal(self):
+        with tempfile.TemporaryDirectory() as temp_value:
+            directory = Path(temp_value)
+            root = directory / "models"
+            root.mkdir()
+            external = directory / "external"
+            external.mkdir()
+            keep = external / "keep.dat"
+            keep.write_bytes(b"external")
+            link = root / "switched"
+            self._link_directory(link, external)
+            stale_summary = {"modelDir": str(root), "residualFiles": [{"path": str(link / keep.name)}]}
+            output = io.StringIO()
+            with mock.patch.object(worker_models, "_storage_summary_payload", return_value=stale_summary), redirect_stdout(output):
+                code = worker_models.cmd_cleanup_model_residual_files({"modelDir": str(root), "taskId": "cleanup_residual_stale"})
+
+            self.assertEqual(code, 1)
+            self.assertTrue(keep.is_file())
+            event = json.loads(output.getvalue().splitlines()[-1])
+            self.assertEqual(event["type"], "model_residual_cleanup_failed")
+            self.assertEqual(event["payload"]["deleted"], [])
+
+    def test_residual_cleanup_keeps_files_referenced_by_the_model_library(self):
+        with tempfile.TemporaryDirectory() as temp_value:
+            directory = Path(temp_value)
+            root = directory / "models"
+            debug_dir = directory / "debug"
+            debug_dir.mkdir()
+            registry_path = directory / "user_models.json"
+            base_paths = [root / CATALOG_ENTRY.relpath, root / CATALOG_ENTRY.config_relpath]
+            debug_paths = [root / "test-model" / name for name in ("weights.ckpt", "config.yaml", "aux.bin")]
+            user_path = root / "local" / "imported.ckpt"
+            residual_path = root / "orphan.part"
+            for path in (*base_paths, *debug_paths, user_path, residual_path):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"test file")
+
+            base = {"models": [worker_models._entry_to_catalog_dict(CATALOG_ENTRY)]}
+            (debug_dir / "model-catalog.json").write_text(json.dumps({
+                "storage_format": "overlay-v1",
+                "overrides": {CATALOG_ENTRY.name: {
+                    "relpath": "test-model/weights.ckpt",
+                    "config_relpath": "test-model/config.yaml",
+                    "auxiliary_relpaths": ["test-model/aux.bin"],
+                }},
+            }), encoding="utf-8")
+            registry_path.write_text(json.dumps({"models": [{
+                "name": "imported", "model_type": "bs_roformer", "model_path": str(user_path),
+            }]}), encoding="utf-8")
+            registry = mock.Mock()
+            registry.model_root.return_value = root
+            registry.list_models.return_value = [CATALOG_ENTRY]
+            output = io.StringIO()
+            worker_models.load_model_catalog.cache_clear()
+            self.addCleanup(worker_models.load_model_catalog.cache_clear)
+            with mock.patch.dict("sys.modules", {"pymss": mock.Mock(), "pymss.model_registry": registry}), \
+                 mock.patch.dict("os.environ", {"PYMSS_STUDIO_DEBUG_DIR": str(debug_dir), "PYMSS_USER_MODELS": str(registry_path)}), \
+                 mock.patch.object(worker_models, "_base_catalog_data", return_value=base), redirect_stdout(output):
+                summary = worker_models._storage_summary_payload(str(root))
+                code = worker_models.cmd_cleanup_model_residual_files({"modelDir": str(root), "taskId": "cleanup_residual_test"})
+
+            self.assertEqual(code, 0)
+            self.assertEqual([Path(item["path"]) for item in summary["residualFiles"]], [residual_path])
+            self.assertEqual([Path(item["path"]) for item in summary["models"][0]["files"]], base_paths)
+            event = json.loads(output.getvalue().splitlines()[-1])
+            self.assertEqual(event["type"], "model_residual_cleanup_done")
+            self.assertEqual(event["payload"]["deleted"], [str(residual_path)])
+            self.assertFalse(residual_path.exists())
+            self.assertTrue(all(path.is_file() for path in (*base_paths, *debug_paths, user_path)))
+
+    def test_residual_cleanup_preserves_the_target_of_a_registered_link(self):
+        with tempfile.TemporaryDirectory() as temp_value:
+            directory = Path(temp_value)
+            root = directory / "models"
+            root.mkdir()
+            weights = root / "weights.ckpt"
+            weights.write_bytes(b"weights")
+            link = directory / "linked.ckpt"
+            try:
+                link.symlink_to(weights)
+            except OSError as exc:
+                self.skipTest(f"Symbolic links are unavailable: {exc}")
+
+            registry = mock.Mock()
+            registry.model_root.return_value = root
+            registry.list_models.return_value = []
+            with mock.patch.dict("sys.modules", {"pymss": mock.Mock(), "pymss.model_registry": registry}), \
+                 mock.patch.object(worker_models, "_debug_dir", return_value=directory / "debug"), \
+                 mock.patch.object(worker_models, "_load_registered_user_models", return_value=[FakeUserModelEntry("linked", link)]), \
+                 redirect_stdout(io.StringIO()):
+                self.assertEqual(worker_models.cmd_cleanup_model_residual_files({"modelDir": str(root)}), 0)
+
+            self.assertTrue(weights.is_file())
+
     def test_tool_model_cache_is_counted_but_not_reported_as_residual(self):
         with tempfile.TemporaryDirectory() as temp_value:
             root = Path(temp_value)
@@ -292,9 +543,6 @@ class ModelStorageSummaryTests(unittest.TestCase):
             registry = mock.Mock()
             registry.model_root.return_value = root
             registry.list_models.return_value = [CATALOG_ENTRY]
-            registry.model_path_for.side_effect = lambda entry, _: root / entry.relpath
-            registry.config_path_for.side_effect = lambda entry, _: root / entry.config_relpath
-            registry.auxiliary_paths_for.return_value = []
             with mock.patch.dict("sys.modules", {
                 "pymss": mock.Mock(),
                 "pymss.model_registry": registry,
@@ -506,6 +754,10 @@ class UserModelSerializationTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.root, True)
+        self.metadata = self.root / "custom-models-meta.json"
+        metadata_env = mock.patch.dict(os.environ, {"PYMSS_STUDIO_CUSTOM_MODEL_META": str(self.metadata)})
+        metadata_env.start()
+        self.addCleanup(metadata_env.stop)
         self.weights = self.root / "my_model.ckpt"
         self.weights.write_bytes(b"x" * 3072)
         self.config = self.root / "my_model.yaml"
@@ -521,6 +773,8 @@ class UserModelSerializationTests(unittest.TestCase):
         self.assertEqual(payload["configPath"], str(self.config))
         self.assertTrue(payload["downloaded"])
         self.assertEqual(payload["missingPaths"], [])
+        self.assertNotIn("author", payload)
+        self.assertNotIn("publishDate", payload)
 
     def test_catalog_models_are_labelled_as_catalog(self):
         payload = worker_models.model_to_dict(CATALOG_ENTRY, str(self.root), include_local_state=False)
@@ -529,28 +783,25 @@ class UserModelSerializationTests(unittest.TestCase):
         self.assertIsNone(payload["importMode"])
 
     def test_the_import_mode_travels_with_the_model(self):
-        # This is what lets the removal dialog state whether files will actually be deleted,
-        # instead of describing both cases and leaving the user to guess.
-        with mock.patch.dict("sys.modules", {
-            "worker_custom_models": mock.Mock(sidecar_entry=mock.Mock(return_value={"importMode": "copy"})),
-        }):
-            payload = worker_models.model_to_dict(FakeUserModelEntry("m", self.weights))
+        managed = self.root / "custom" / "m"
+        managed.mkdir(parents=True)
+        weights = managed / "weights.ckpt"
+        weights.write_bytes(b"copied weights")
+        self.metadata.write_text(json.dumps({"version": 1, "models": {
+            "m": {"importMode": "copy", "managedDir": str(managed)},
+        }}), encoding="utf-8")
+        payload = worker_models.model_to_dict(FakeUserModelEntry("m", weights), str(self.root))
         self.assertEqual(payload["importMode"], "copy")
 
     def test_a_model_registered_outside_the_app_reads_as_a_reference(self):
         # `pymss register` leaves no side-car. Assuming 'copy' would let the UI promise a file
         # deletion that must never happen.
-        with mock.patch.dict("sys.modules", {
-            "worker_custom_models": mock.Mock(sidecar_entry=mock.Mock(return_value={})),
-        }):
-            payload = worker_models.model_to_dict(FakeUserModelEntry("m", self.weights))
+        payload = worker_models.model_to_dict(FakeUserModelEntry("m", self.weights), str(self.root))
         self.assertEqual(payload["importMode"], "reference")
 
     def test_an_unreadable_sidecar_falls_back_to_reference(self):
-        with mock.patch.dict("sys.modules", {
-            "worker_custom_models": mock.Mock(sidecar_entry=mock.Mock(side_effect=OSError("denied"))),
-        }):
-            payload = worker_models.model_to_dict(FakeUserModelEntry("m", self.weights))
+        self.metadata.write_text("{invalid", encoding="utf-8")
+        payload = worker_models.model_to_dict(FakeUserModelEntry("m", self.weights), str(self.root))
         self.assertEqual(payload["importMode"], "reference")
 
     def test_a_size_is_measured_when_the_registration_records_none(self):
@@ -833,7 +1084,11 @@ class DeleteRefusesImportedModelsTests(unittest.TestCase):
     def _run(self, entry):
         registry = mock.Mock()
         registry.get_model_entry.return_value = entry
-        with mock.patch.dict("sys.modules", {"pymss": mock.Mock(), "pymss.model_registry": registry}), \
+        user_models = mock.Mock()
+        user_models.get_user_model_entry.return_value = entry
+        with mock.patch.dict("sys.modules", {
+            "pymss": mock.Mock(), "pymss.model_registry": registry, "pymss.user_models": user_models,
+        }), \
              redirect_stdout(self.stdout):
             return worker_models.cmd_delete_model({"model": entry.name})
 
@@ -870,13 +1125,82 @@ class DeleteLegacyCatalogEntryTests(unittest.TestCase):
 
         with mock.patch.dict("sys.modules", {"pymss": mock.Mock(), "pymss.model_registry": registry}), \
              redirect_stdout(self.stdout):
-            code = worker_models.cmd_delete_model({"model": entry.name, "modelDir": str(self.root)})
+            code = worker_models.cmd_delete_model({"model": entry.name, "modelDir": str(self.root), "catalog": "storage"})
 
         self.assertEqual(code, 0)
         self.assertFalse(self.weights.exists())
         event = [json.loads(line) for line in self.stdout.getvalue().strip().splitlines() if line.strip()][-1]
         self.assertEqual(event["type"], "model_deleted")
         self.assertEqual(event["payload"]["modelInfo"]["configInstruments"], "")
+
+    def test_library_delete_refuses_paths_outside_the_model_root(self):
+        model_root = self.root / "models"
+        model_root.mkdir()
+        entry = worker_models.ModelEntry.from_dict({
+            "name": self.weights.name, "relpath": f"../{self.weights.name}",
+        })
+        with mock.patch.object(worker_models, "_library_model_for_delete", return_value=entry), redirect_stdout(self.stdout):
+            code = worker_models.cmd_delete_model({"model": entry.name, "modelDir": str(model_root), "catalog": "library"})
+
+        self.assertEqual(code, 1)
+        self.assertTrue(self.weights.is_file())
+        event = json.loads(self.stdout.getvalue())
+        self.assertEqual(event["type"], "model_delete_failed")
+        self.assertEqual(event["payload"]["deleted"], [])
+
+    def test_delete_uses_the_catalog_for_the_selected_view(self):
+        entry = LegacyCatalogEntry("old_model.pth", "old_model.pth")
+        catalog_entry = worker_models.ModelEntry.from_dict({
+            "name": entry.name,
+            "relpath": "debug/model.pth",
+            "config_relpath": "debug/model.yaml",
+            "auxiliary_relpaths": ["debug/model.aux"],
+            "debug_source": "debug",
+            "author": "Catalog Author",
+            "publish_date": "2024-09-06",
+        })
+        registry = mock.Mock()
+        registry.get_model_entry.return_value = entry
+        user_models = mock.Mock()
+        user_models.get_user_model_entry.side_effect = KeyError(entry.name)
+        debug_files = [self.root / path for path in (
+            catalog_entry.relpath, catalog_entry.config_relpath, *catalog_entry.auxiliary_relpaths,
+        )]
+        debug_files[0].parent.mkdir()
+
+        for catalog in ("library", "storage", None):
+            with self.subTest(catalog=catalog):
+                self.weights.write_bytes(b"base weights")
+                for file in debug_files:
+                    file.write_bytes(b"debug file")
+                stdout = io.StringIO()
+                with mock.patch.dict("sys.modules", {
+                    "pymss": mock.Mock(), "pymss.model_registry": registry, "pymss.user_models": user_models,
+                }), mock.patch.object(worker_models, "_debug_dir", return_value=self.root / "debug-settings"), \
+                     mock.patch.object(worker_models, "get_catalog_model_entry", return_value=catalog_entry), \
+                     mock.patch.object(worker_models, "list_catalog_models", return_value=[catalog_entry]), \
+                     redirect_stdout(stdout):
+                    code = worker_models.cmd_delete_model({
+                        "model": entry.name, "modelDir": str(self.root), "taskId": "delete_test",
+                        **({"catalog": catalog} if catalog is not None else {}),
+                    })
+
+                self.assertEqual(code, 0)
+                event = json.loads(stdout.getvalue().splitlines()[-1])
+                self.assertEqual(event["type"], "model_delete_done")
+                result = event["payload"]
+                from_library = catalog == "library"
+                self.assertEqual({Path(path) for path in result["deleted"]}, set(debug_files if from_library else [self.weights]))
+                self.assertEqual(self.weights.exists(), from_library)
+                self.assertTrue(all(file.exists() != from_library for file in debug_files))
+                if catalog is None:
+                    self.assertEqual(result["modelInfo"]["modelPath"], str(self.weights))
+                    self.assertFalse(result["modelInfo"]["downloaded"])
+                else:
+                    self.assertEqual(result["modelInfo"]["modelPath"], str(debug_files[0]))
+                    self.assertEqual(result["modelInfo"]["downloaded"], not from_library)
+                    self.assertEqual(result["modelInfo"]["author"], "Catalog Author")
+                    self.assertEqual(result["modelInfo"]["publishDate"], "2024-09-06")
 
 
 class EnvInfoTorchDiagnosticsTests(unittest.TestCase):

@@ -1,4 +1,5 @@
 use crate::error::{AppError, AppResult};
+use crate::python::worker::run_worker_with_payload;
 use crate::state::{AppState, SharedMigrationSession};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -151,6 +152,55 @@ struct FinalizeMigrationPayload {
     copied_bytes: u64,
     skipped_files: Vec<String>,
     overwritten_files: Vec<String>,
+    copied_files: Vec<CopiedModelFile>,
+    source_dirs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelFileSnapshot {
+    size: u64,
+    modified: std::time::SystemTime,
+    link_target: Option<PathBuf>,
+}
+
+impl ModelFileSnapshot {
+    fn read(path: &Path) -> std::io::Result<Self> {
+        let metadata = fs::symlink_metadata(path)?;
+        let link_target = if metadata.file_type().is_symlink() {
+            Some(fs::read_link(path)?)
+        } else if metadata.is_file() {
+            None
+        } else {
+            return Err(std::io::Error::other("Expected a model file or link"));
+        };
+        Ok(Self {
+            size: metadata.len(),
+            modified: metadata.modified()?,
+            link_target,
+        })
+    }
+
+    fn matches(&self, path: &Path) -> bool {
+        Self::read(path).is_ok_and(|current| current == *self)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CopiedModelFile {
+    relative_path: String,
+    source: ModelFileSnapshot,
+    destination: ModelFileSnapshot,
+}
+
+impl CopiedModelFile {
+    fn is_current(&self, source_root: &Path, target_root: &Path) -> bool {
+        let source = source_root.join(&self.relative_path);
+        let destination = target_root.join(&self.relative_path);
+        validate_migration_directory(source_root, source.parent().unwrap_or(source_root)).is_ok()
+            && validate_migration_directory(target_root, destination.parent().unwrap_or(target_root)).is_ok()
+            && self.source.matches(&source)
+            && self.destination.matches(&destination)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -263,17 +313,21 @@ fn lexical_normalize_path(path: PathBuf) -> PathBuf {
     normalized
 }
 
-fn normalize_directory_path(path: &str) -> AppResult<PathBuf> {
+fn absolute_directory_path(path: &str) -> AppResult<PathBuf> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err(AppError::Worker("directory path is empty".into()));
     }
     let candidate = PathBuf::from(trimmed);
-    let absolute = if candidate.is_absolute() {
+    Ok(if candidate.is_absolute() {
         candidate
     } else {
         std::env::current_dir()?.join(candidate)
-    };
+    })
+}
+
+fn normalize_directory_path(path: &str) -> AppResult<PathBuf> {
+    let absolute = absolute_directory_path(path)?;
     if absolute.exists() {
         Ok(absolute.canonicalize()?)
     } else {
@@ -292,19 +346,21 @@ fn normalize_target_model_dir_path(path: &str) -> AppResult<PathBuf> {
     } else {
         leaf == "models"
     };
-    if is_models_dir {
-        Ok(normalized)
+    let target = if is_models_dir {
+        normalized
     } else {
-        Ok(normalized.join("models"))
-    }
+        normalized.join("models")
+    };
+    validate_migration_directory(&target, &target)?;
+    Ok(target)
 }
 
 fn path_eq(left: &Path, right: &Path) -> bool {
     #[cfg(windows)]
     {
-        left.to_string_lossy()
+        display_path(left)
             .replace('/', "\\")
-            .eq_ignore_ascii_case(&right.to_string_lossy().replace('/', "\\"))
+            .eq_ignore_ascii_case(&display_path(right).replace('/', "\\"))
     }
     #[cfg(not(windows))]
     {
@@ -353,6 +409,27 @@ fn path_is_ancestor_of(ancestor: &Path, descendant: &Path) -> bool {
     false
 }
 
+fn validate_migration_directory(root: &Path, directory: &Path) -> AppResult<()> {
+    if path_eq(root, directory) || path_is_ancestor_of(root, directory) {
+        for ancestor in directory.ancestors() {
+            match fs::symlink_metadata(ancestor) {
+                Ok(metadata) => {
+                    if metadata.is_dir() && path_eq(&ancestor.canonicalize()?, ancestor) {
+                        return Ok(());
+                    }
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Err(AppError::Worker(format!(
+        "模型迁移无法使用链接目录：{}",
+        display_path(directory)
+    )))
+}
+
 fn target_dir_empty(path: &Path) -> AppResult<bool> {
     if !path.exists() {
         return Ok(true);
@@ -366,6 +443,7 @@ fn collect_directory_files(root: &Path) -> AppResult<Vec<ModelDirMigrationFilePa
         dir: &Path,
         files: &mut Vec<ModelDirMigrationFilePayload>,
     ) -> AppResult<()> {
+        validate_migration_directory(root, dir)?;
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -415,6 +493,7 @@ fn collect_directory_files(root: &Path) -> AppResult<Vec<ModelDirMigrationFilePa
 
 fn collect_directory_dirs(root: &Path) -> AppResult<Vec<String>> {
     fn walk(root: &Path, dir: &Path, dirs: &mut Vec<String>) -> AppResult<()> {
+        validate_migration_directory(root, dir)?;
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -450,23 +529,24 @@ fn collect_directory_dirs(root: &Path) -> AppResult<Vec<String>> {
 fn count_conflicts(
     files: &[ModelDirMigrationFilePayload],
     target_model_dir: &Path,
-) -> usize {
-    files
-        .iter()
-        .filter(|file| {
-            let destination = target_model_dir.join(Path::new(&file.relative_path));
-            destination.exists() && !path_eq(Path::new(&file.source_path), &destination)
-        })
-        .count()
+) -> AppResult<usize> {
+    let mut count = 0;
+    for file in files {
+        let destination = target_model_dir.join(&file.relative_path);
+        validate_migration_directory(target_model_dir, destination.parent().unwrap_or(target_model_dir))?;
+        count += usize::from(migration_destination_exists(&destination)?);
+    }
+    Ok(count)
 }
 
 fn collect_remaining_paths(path: &Path, results: &mut Vec<String>) {
-    if !path.exists() {
-        return;
-    }
-    if path.is_file() {
-        results.push(display_path(path));
-        return;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && validate_migration_directory(path, path).is_ok() => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        _ => {
+            results.push(display_path(path));
+            return;
+        }
     }
     let entries = match fs::read_dir(path) {
         Ok(entries) => entries,
@@ -475,41 +555,68 @@ fn collect_remaining_paths(path: &Path, results: &mut Vec<String>) {
             return;
         }
     };
-    for entry in entries.flatten() {
-        let child = entry.path();
-        if child.is_dir() {
-            collect_remaining_paths(&child, results);
-        } else {
-            results.push(display_path(&child));
+    let before = results.len();
+    for entry in entries {
+        match entry {
+            Ok(entry) => collect_remaining_paths(&entry.path(), results),
+            Err(_) => results.push(display_path(path)),
         }
     }
-    if results.is_empty() {
+    if results.len() == before {
         results.push(display_path(path));
     }
 }
 
-fn cleanup_source_tree(source_root: &Path) -> Vec<String> {
-    if !source_root.exists() {
-        return Vec::new();
+fn finalize_migrated_files(
+    source_root: &Path,
+    target_root: &Path,
+    copied: &[CopiedModelFile],
+    dirs: &[String],
+    remap: impl FnOnce(Vec<&str>) -> AppResult<()>,
+) -> AppResult<Vec<String>> {
+    let ready: Vec<_> = copied.iter().filter(|file| file.is_current(source_root, target_root)).collect();
+    if !ready.is_empty() {
+        remap(ready.iter().map(|file| file.relative_path.as_str()).collect())?;
     }
-    if fs::remove_dir_all(source_root).is_ok() {
-        return Vec::new();
+    for file in ready {
+        if file.is_current(source_root, target_root) {
+            let _ = remove_migrated_file(&source_root.join(&file.relative_path));
+        }
+    }
+    let source_dirs = dirs.iter().rev().map(|dir| source_root.join(dir));
+    for directory in source_dirs.chain(std::iter::once(source_root.to_path_buf())) {
+        if validate_migration_directory(source_root, &directory).is_ok() {
+            let _ = fs::remove_dir(directory);
+        }
     }
     let mut remaining = Vec::new();
     collect_remaining_paths(source_root, &mut remaining);
     remaining.sort();
     remaining.dedup();
-    remaining
+    Ok(remaining)
 }
 
-fn remove_existing_destination(destination: &Path) -> AppResult<()> {
-    let metadata = fs::symlink_metadata(destination)?;
-    if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        fs::remove_dir_all(destination)?;
-    } else {
-        fs::remove_file(destination)?;
+fn remove_migrated_file(path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTypeExt;
+        if fs::symlink_metadata(path)?.file_type().is_symlink_dir() {
+            return fs::remove_dir(path);
+        }
     }
-    Ok(())
+    fs::remove_file(path)
+}
+
+fn migration_destination_exists(destination: &Path) -> AppResult<bool> {
+    match fs::symlink_metadata(destination) {
+        Ok(metadata) if metadata.is_dir() || destination.is_dir() => Err(AppError::Worker(format!(
+            "模型文件与目标文件夹同名：{}",
+            display_path(destination)
+        ))),
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(unix)]
@@ -546,19 +653,31 @@ fn copy_symlink(source: &Path, destination: &Path) -> AppResult<()> {
 }
 
 fn copy_entry(source: &Path, destination: &Path, kind: ModelDirMigrationFileKind, overwrite: bool) -> AppResult<()> {
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)?;
+    let (Some(parent), Some(name)) = (destination.parent(), destination.file_name()) else {
+        return Err(AppError::Worker("无效的模型迁移目标路径".into()));
+    };
+    fs::create_dir_all(parent)?;
+    if migration_destination_exists(destination)? && !overwrite {
+        return Err(AppError::Worker(format!("目标文件已存在：{}", display_path(destination))));
     }
-    if overwrite && fs::symlink_metadata(destination).is_ok() {
-        remove_existing_destination(destination)?;
-    }
+    // Stage each entry on the destination filesystem and publish it only after copying succeeds.
+    let parent = parent.canonicalize()?;
+    let destination = parent.join(name);
+    let staging = tempfile::tempdir_in(&parent)?;
+    let staged_path = staging.path().join("entry");
     match kind {
         ModelDirMigrationFileKind::File => {
-            fs::copy(source, destination)?;
+            fs::copy(source, &staged_path)?;
         }
         ModelDirMigrationFileKind::Symlink => {
-            copy_symlink(source, destination)?;
+            copy_symlink(source, &staged_path)?;
         }
+    }
+    let staged_path = tempfile::TempPath::try_from_path(staged_path)?;
+    if overwrite {
+        staged_path.persist(&destination).map_err(|error| error.error)?;
+    } else {
+        staged_path.persist_noclobber(&destination).map_err(|error| error.error)?;
     }
     Ok(())
 }
@@ -603,7 +722,7 @@ pub fn prepare_model_dir_change(
     let conflict_count = if same_as_current {
         0
     } else {
-        count_conflicts(&files, &target_model_dir)
+        count_conflicts(&files, &target_model_dir)?
     };
 
     let disk_available = disk_available_bytes(&target_model_dir);
@@ -640,22 +759,40 @@ fn build_conflict_payload(
     }
 }
 
+fn migration_roots_for_start(request: &StartModelDirMigrationRequest) -> AppResult<(PathBuf, PathBuf)> {
+    // The request contains the paths already shown by preparation. A new link must not redirect them.
+    let source = lexical_normalize_path(absolute_directory_path(&request.current_model_dir)?);
+    let target = lexical_normalize_path(absolute_directory_path(&request.target_model_dir)?);
+    validate_migration_directory(&source, &source)?;
+    validate_migration_directory(&target, &target)?;
+    if path_eq(&source, &target) || path_is_ancestor_of(&source, &target) || path_is_ancestor_of(&target, &source) {
+        return Err(AppError::Worker("模型迁移的源目录与目标目录不能重叠".into()));
+    }
+    Ok((source, target))
+}
+
 fn run_model_dir_migration(
     app: AppHandle,
     task_id: String,
     session: SharedMigrationSession,
     request: StartModelDirMigrationRequest,
 ) -> AppResult<()> {
-    let source_root = normalize_directory_path(&request.current_model_dir)?;
-    let target_root = normalize_target_model_dir_path(&request.target_model_dir)?;
+    let (source_root, target_root) = migration_roots_for_start(&request)?;
     let files = collect_directory_files(&source_root)?;
     let dirs = collect_directory_dirs(&source_root)?;
     let total_files = files.len();
     let total_bytes = files.iter().map(|item| item.size_bytes).sum::<u64>();
 
-    fs::create_dir_all(&target_root)?;
+    count_conflicts(&files, &target_root)?;
     for dir in &dirs {
-        fs::create_dir_all(target_root.join(Path::new(dir)))?;
+        validate_migration_directory(&target_root, &target_root.join(dir))?;
+    }
+    fs::create_dir_all(&target_root)?;
+    validate_migration_directory(&target_root, &target_root)?;
+    for dir in &dirs {
+        let directory = target_root.join(dir);
+        validate_migration_directory(&target_root, &directory)?;
+        fs::create_dir_all(directory)?;
     }
     emit_model_dir_migration_event(
         &app,
@@ -677,16 +814,18 @@ fn run_model_dir_migration(
     let mut completed_files = 0usize;
     let mut skipped_files = Vec::new();
     let mut overwritten_files = Vec::new();
+    let mut copied_files = Vec::new();
     let mut default_resolution: Option<ModelDirMigrationConflictResolution> = None;
 
     for file in &files {
-        let source = PathBuf::from(&file.source_path);
+        let source = source_root.join(&file.relative_path);
         let destination = target_root.join(Path::new(&file.relative_path));
         if fs::symlink_metadata(&source).is_err() {
             return Err(AppError::Worker(format!("源文件不存在：{}", source.display())));
         }
 
-        let has_destination = fs::symlink_metadata(&destination).is_ok();
+        validate_migration_directory(&target_root, destination.parent().unwrap_or(&target_root))?;
+        let has_destination = migration_destination_exists(&destination)?;
         let mut should_overwrite = false;
         if has_destination && !path_eq(&source, &destination) {
             let resolution = if let Some(choice) = &default_resolution {
@@ -749,7 +888,15 @@ fn run_model_dir_migration(
             }
         }
 
+        validate_migration_directory(&source_root, source.parent().unwrap_or(&source_root))?;
+        validate_migration_directory(&target_root, destination.parent().unwrap_or(&target_root))?;
+        let source_snapshot = ModelFileSnapshot::read(&source)?;
         copy_entry(&source, &destination, file.kind, should_overwrite)?;
+        copied_files.push(CopiedModelFile {
+            relative_path: file.relative_path.clone(),
+            source: source_snapshot,
+            destination: ModelFileSnapshot::read(&destination)?,
+        });
         completed_files += 1;
         copied_bytes = copied_bytes.saturating_add(file.size_bytes);
         emit_model_dir_migration_event(
@@ -779,6 +926,8 @@ fn run_model_dir_migration(
         copied_bytes,
         skipped_files: skipped_files.clone(),
         overwritten_files: overwritten_files.clone(),
+        copied_files,
+        source_dirs: dirs,
     });
 
     emit_model_dir_migration_event(
@@ -911,7 +1060,29 @@ pub fn confirm_model_dir_migration_switch(
         .take_finalize_payload()
         .ok_or_else(|| AppError::Worker("migration task is not ready to finalize".into()))?;
 
-    let cleanup_failed_files = cleanup_source_tree(Path::new(&finalize.source_model_dir));
+    let mut ownership_update_failed = false;
+    let cleanup_failed_files = finalize_migrated_files(
+        Path::new(&finalize.source_model_dir),
+        Path::new(&finalize.target_model_dir),
+        &finalize.copied_files,
+        &finalize.source_dirs,
+        |copied_files| {
+            let response = run_worker_with_payload(
+                &app,
+                "remap_custom_model_paths",
+                Some(json!({
+                    "fromRoot": finalize.source_model_dir,
+                    "toRoot": finalize.target_model_dir,
+                    "copiedFiles": copied_files,
+                })),
+            )?;
+            if response.get("committed").and_then(Value::as_bool) != Some(true) {
+                return Err(AppError::Worker("自定义模型路径更新未确认，原文件已保留".into()));
+            }
+            ownership_update_failed = response.get("ownershipUpdateFailed").and_then(Value::as_bool) == Some(true);
+            Ok(())
+        },
+    )?;
     emit_model_dir_migration_event(
         &app,
         &request.task_id,
@@ -927,11 +1098,12 @@ pub fn confirm_model_dir_migration_switch(
             "message": if cleanup_failed_files.is_empty() {
                 "模型目录迁移完成"
             } else {
-                "模型目录已切换，但旧目录仍有残留需要手动清理"
+                "模型目录已切换，未清理的文件仍保留在旧目录"
             },
             "skippedFiles": finalize.skipped_files,
             "overwrittenFiles": finalize.overwritten_files,
             "cleanupFailedFiles": cleanup_failed_files,
+            "ownershipUpdateFailed": ownership_update_failed,
         }),
     );
 
@@ -964,4 +1136,229 @@ pub fn cancel_model_dir_migration(
         "taskId": request.task_id,
         "accepted": true,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn link_directory(link: &Path, target: &Path) {
+        #[cfg(windows)]
+        {
+            let output = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{:?}", output);
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[test]
+    fn migration_rejects_a_linked_destination_parent_even_when_the_child_is_missing() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let target = sandbox.path().join("models");
+        let outside = sandbox.path().join("outside");
+        fs::create_dir(&target).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let external_file = outside.join("keep.dat");
+        fs::write(&external_file, b"external").unwrap();
+        let link = target.join("linked");
+        link_directory(&link, &outside);
+
+        let target = target.canonicalize().unwrap();
+        validate_migration_directory(&target, &target.join("normal/new")).unwrap();
+        assert!(validate_migration_directory(&target, &target.join("linked/new")).is_err());
+        assert!(collect_directory_files(&target)
+            .unwrap()
+            .iter()
+            .all(|entry| !entry.relative_path.starts_with("linked/")));
+        let remaining = finalize_migrated_files(&link, &target, &[], &[], |_| {
+            panic!("no files to remap")
+        }).unwrap();
+        assert_eq!(remaining, vec![display_path(&link)]);
+        assert!(external_file.is_file());
+        assert!(link.is_dir());
+        assert!(!outside.join("new").exists());
+    }
+
+    #[test]
+    fn migration_rejects_an_implicit_models_link_before_and_after_preparation() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let source = sandbox.path().join("source");
+        let selected = sandbox.path().join("selected");
+        let outside = sandbox.path().join("outside").join("models");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&selected).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let external_file = outside.join("model.ckpt");
+        fs::write(&external_file, b"original").unwrap();
+
+        let prepared = normalize_target_model_dir_path(&display_path(&selected)).unwrap();
+        let request = StartModelDirMigrationRequest {
+            task_id: None,
+            current_model_dir: display_path(&source.canonicalize().unwrap()),
+            target_model_dir: display_path(&prepared),
+        };
+        let (_, target) = migration_roots_for_start(&request).unwrap();
+        assert!(path_eq(&target, &prepared));
+        assert!(!target.exists());
+
+        link_directory(&selected.join("models"), &outside);
+        assert!(normalize_target_model_dir_path(&display_path(&selected)).is_err());
+        assert!(migration_roots_for_start(&request).is_err());
+        assert_eq!(fs::read(external_file).unwrap(), b"original");
+    }
+
+    #[test]
+    fn migration_overwrite_refuses_a_directory_and_preserves_its_contents() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let source = sandbox.path().join("source.ckpt");
+        let destination = sandbox.path().join("destination.ckpt");
+        fs::write(&source, b"model").unwrap();
+        fs::create_dir(&destination).unwrap();
+        let existing = destination.join("keep.dat");
+        fs::write(&existing, b"existing").unwrap();
+
+        assert!(migration_destination_exists(&destination).is_err());
+        assert!(copy_entry(&source, &destination, ModelDirMigrationFileKind::File, true).is_err());
+        assert_eq!(fs::read(&source).unwrap(), b"model");
+        assert_eq!(fs::read(&existing).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn migration_file_overwrite_requires_confirmation() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let source = sandbox.path().join("source.ckpt");
+        let destination = sandbox.path().join("destination.ckpt");
+        fs::write(&source, b"model").unwrap();
+        fs::write(&destination, b"existing").unwrap();
+
+        assert!(migration_destination_exists(&destination).unwrap());
+        assert!(copy_entry(&source, &destination, ModelDirMigrationFileKind::File, false).is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"existing");
+        copy_entry(&source, &destination, ModelDirMigrationFileKind::File, true).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"model");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_copy_failure_preserves_the_existing_destination() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let source = sandbox.path().join("source.ckpt");
+        let destination = sandbox.path().join("destination.ckpt");
+        fs::write(&source, b"model").unwrap();
+        fs::write(&destination, b"existing").unwrap();
+        let _locked_source = fs::OpenOptions::new().read(true).share_mode(0).open(&source).unwrap();
+
+        assert!(ModelFileSnapshot::read(&source).is_ok());
+        assert!(copy_entry(&source, &destination, ModelDirMigrationFileKind::File, true).is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"existing");
+        assert_eq!(fs::read_dir(sandbox.path()).unwrap().count(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_publishes_models_under_long_windows_paths() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let source = sandbox.path().join("source.ckpt");
+        let destination = sandbox.path().join("a".repeat(120)).join("b".repeat(120)).join("model.ckpt");
+        fs::write(&source, b"model").unwrap();
+
+        copy_entry(&source, &destination, ModelDirMigrationFileKind::File, false).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"model");
+    }
+
+    #[test]
+    fn migration_preflight_rejects_a_later_directory_conflict_before_copying() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().canonicalize().unwrap();
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir_all(target.join("b.ckpt")).unwrap();
+        fs::write(source.join("a.ckpt"), b"incoming").unwrap();
+        fs::write(source.join("b.ckpt"), b"incoming").unwrap();
+        fs::write(target.join("a.ckpt"), b"original target").unwrap();
+        fs::write(target.join("b.ckpt/keep.dat"), b"unrelated").unwrap();
+
+        let files = collect_directory_files(&source).unwrap();
+        assert!(count_conflicts(&files, &target).is_err());
+        assert_eq!(fs::read(target.join("a.ckpt")).unwrap(), b"original target");
+        assert_eq!(fs::read(target.join("b.ckpt/keep.dat")).unwrap(), b"unrelated");
+    }
+
+    fn copied_model_file(source: &Path, target: &Path, relative_path: &str) -> CopiedModelFile {
+        let old = source.join(relative_path);
+        let new = target.join(relative_path);
+        fs::write(&old, b"weights").unwrap();
+        let snapshot = ModelFileSnapshot::read(&old).unwrap();
+        copy_entry(&old, &new, ModelDirMigrationFileKind::File, false).unwrap();
+        CopiedModelFile {
+            relative_path: relative_path.into(),
+            source: snapshot,
+            destination: ModelFileSnapshot::read(&new).unwrap(),
+        }
+    }
+
+    #[test]
+    fn migration_cleans_nothing_if_registry_updates_fail() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().canonicalize().unwrap();
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::create_dir(&target).unwrap();
+        let copied = [copied_model_file(&source, &target, "nested/model.ckpt")];
+
+        let result = finalize_migrated_files(&source, &target, &copied, &["nested".into()], |files| {
+            assert_eq!(files, ["nested/model.ckpt"]);
+            assert!(source.join(files[0]).is_file());
+            Err(AppError::Worker("registry not writable".into()))
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read(source.join("nested/model.ckpt")).unwrap(), b"weights");
+        assert_eq!(fs::read(target.join("nested/model.ckpt")).unwrap(), b"weights");
+    }
+
+    #[test]
+    fn migration_cleanup_preserves_skipped_new_and_changed_files() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let source_dir = sandbox.path().join("source");
+        let target_dir = sandbox.path().join("target");
+        fs::create_dir_all(source_dir.join("nested")).unwrap();
+        fs::create_dir_all(target_dir.join("nested")).unwrap();
+        let source = source_dir.canonicalize().unwrap();
+        let target = target_dir.canonicalize().unwrap();
+        let skipped = "same.ckpt";
+        fs::write(source.join(skipped), b"source model").unwrap();
+        fs::write(target.join(skipped), b"different target model").unwrap();
+
+        let mut copied = Vec::new();
+        for relative_path in ["nested/copied.ckpt", "changed-source.ckpt", "changed-target.ckpt"] {
+            copied.push(copied_model_file(&source, &target, relative_path));
+        }
+        fs::write(source.join("changed-source.ckpt"), b"new source weights").unwrap();
+        fs::write(target.join("changed-target.ckpt"), b"new target weights").unwrap();
+        fs::write(source.join("new.ckpt"), b"created after copying").unwrap();
+
+        let remaining = finalize_migrated_files(&source, &target, &copied, &["nested".into()], |files| {
+            assert_eq!(files, ["nested/copied.ckpt"]);
+            assert!(source.join(files[0]).is_file());
+            Ok(())
+        }).unwrap();
+        assert_eq!(remaining.len(), 4);
+        assert!(!source.join("nested").exists());
+        assert_eq!(fs::read(target.join("nested/copied.ckpt")).unwrap(), b"weights");
+        assert_eq!(fs::read(source.join(skipped)).unwrap(), b"source model");
+        assert_eq!(fs::read(target.join(skipped)).unwrap(), b"different target model");
+        assert_eq!(fs::read(source.join("new.ckpt")).unwrap(), b"created after copying");
+        assert_eq!(fs::read(source.join("changed-source.ckpt")).unwrap(), b"new source weights");
+        assert_eq!(fs::read(source.join("changed-target.ckpt")).unwrap(), b"weights");
+    }
 }

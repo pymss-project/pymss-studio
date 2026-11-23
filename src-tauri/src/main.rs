@@ -241,7 +241,6 @@ fn main() {
             commands::app_cmd::start_custom_model_import,
             commands::app_cmd::unregister_custom_model,
             commands::app_cmd::relink_custom_model,
-            commands::app_cmd::remap_custom_model_paths,
             commands::app_cmd::pick_model_weights_file,
             commands::app_cmd::pick_model_config_file,
             commands::app_cmd::load_app_store,

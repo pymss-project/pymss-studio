@@ -394,13 +394,13 @@ defineExpose({ focus, blur })
 .app-select__clear { order: 2; flex-shrink: 0; width: 20px; height: 22px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--on-surface-muted); font: inherit; cursor: pointer; }
 .app-select__clear:hover { color: var(--on-surface); background: var(--surface-3); }
 .app-select__clear--single { position: absolute; inset-inline-end: 29px; top: 50%; transform: translateY(-50%); background: var(--app-select-color, var(--surface-2)); }
-.app-select__menu { z-index: 3100; min-width: var(--reka-select-trigger-width, var(--reka-combobox-trigger-width)); width: var(--reka-select-trigger-width, var(--reka-combobox-trigger-width)); max-width: calc(100vw - 16px); padding: 4px; border: 1px solid var(--outline); border-radius: 11px; background: var(--surface-1); color: var(--on-surface); box-shadow: var(--shadow-panel); font: inherit; font-size: 14px; }
+.app-select__menu { z-index: 3100; min-width: var(--reka-select-trigger-width, var(--reka-combobox-trigger-width)); width: var(--reka-select-trigger-width, var(--reka-combobox-trigger-width)); max-width: calc(100vw - 16px); padding: var(--select-menu-padding); border: 1px solid var(--outline); border-radius: var(--select-menu-radius); background: var(--surface-1); color: var(--on-surface); box-shadow: var(--shadow-panel); font: inherit; font-size: 14px; }
 .app-select__menu--tiny { font-size: 12px; }
 .app-select__menu--flexible { width: max-content; }
 .app-select__menu { --app-select-enter-y: -3px; }
 .app-select__menu[data-side='top'] { --app-select-enter-y: 3px; }
-.app-select__menu--animated[data-state='open'] { animation: app-select-enter 140ms cubic-bezier(.2, .8, .2, 1); }
-.app-select__menu--animated.app-select__menu--exit-snapshot { animation: app-select-leave 80ms ease-out; }
+.app-select__menu--animated[data-state='open'] { animation: app-select-enter var(--select-enter-motion); }
+.app-select__menu--animated.app-select__menu--exit-snapshot { animation: app-select-leave var(--select-leave-motion); }
 .app-select__menu[data-state='closed'] { pointer-events: none; }
 @keyframes app-select-enter {
   from { opacity: 0; transform: translateY(var(--app-select-enter-y)); }
@@ -413,14 +413,14 @@ defineExpose({ focus, blur })
 @media (prefers-reduced-motion: reduce) {
   .app-select__menu.app-select__menu--animated { animation: none; }
 }
-.app-select__viewport { min-height: 0; max-height: min(300px, var(--reka-select-content-available-height, var(--reka-combobox-content-available-height, 300px))); overflow: auto; width: 100%; }
-.app-select__option { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 32px; padding: 6px 9px; border-radius: 7px; outline: none; cursor: pointer; overflow-wrap: anywhere; }
+.app-select__viewport { min-height: 0; max-height: min(var(--select-menu-max-height), var(--reka-select-content-available-height, var(--reka-combobox-content-available-height, var(--select-menu-max-height)))); overflow: auto; width: 100%; scrollbar-width: thin; scrollbar-color: var(--outline-strong) transparent; }
+.app-select__option { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: var(--select-option-height); padding: 6px 9px; border-radius: var(--select-option-radius); outline: none; cursor: pointer; line-height: 20px; overflow-wrap: anywhere; }
 .app-select__option > span:first-child { flex: 1; min-width: 0; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .app-select__option > span[aria-hidden] { flex: 0 0 auto; }
 .app-select__option[data-state='checked'] { color: var(--primary-strong); background: var(--primary-softer); }
 .app-select__option[data-highlighted], .app-select__option:focus { background: var(--primary-soft); }
 .app-select__option[data-disabled] { opacity: .45; cursor: not-allowed; }
-.app-select__option[data-index] { height: 32px; width: 100%; }
+.app-select__option[data-index] { height: var(--select-option-height); width: 100%; }
 .app-select__option[data-index] > span:first-child { display: block; white-space: nowrap; text-overflow: ellipsis; }
 .app-select__group-label { padding: 7px 9px 4px; color: var(--on-surface-muted); font-size: 12px; }
 .app-select__empty { padding: 16px 9px; text-align: center; color: var(--on-surface-muted); }

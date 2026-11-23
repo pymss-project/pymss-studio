@@ -2690,6 +2690,9 @@ onMounted(async () => {
         <n-alert v-if="modelDirMigrationState.status === 'success' && modelDirMigrationState.cleanupFailedFiles.length" type="warning" :show-icon="true">
           {{ t('settings.modelDirMigrationCleanupFailedHint', { count: modelDirMigrationState.cleanupFailedFiles.length }) }}
         </n-alert>
+        <n-alert v-if="modelDirMigrationState.ownershipUpdateFailed" type="warning">
+          {{ t('settings.modelDirMigrationOwnershipWarning') }}
+        </n-alert>
       </div>
       <template #footer>
         <div class="migration-dialog__footer">

@@ -2,7 +2,9 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 if __package__:
@@ -58,6 +60,27 @@ class ProxyConfigTests(unittest.TestCase):
         event = json.loads(result.stdout.strip().splitlines()[-1])
         self.assertEqual(event["type"], "test_connection_result")
         self.assertFalse(event["payload"]["ok"])
+
+    def test_local_model_path_remap_does_not_initialize_the_proxy(self):
+        worker = _worker_test_bootstrap.WORKER_DIR / "worker.py"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = json.dumps({
+                "fromRoot": str(root / "old"),
+                "toRoot": str(root / "new"),
+                "copiedFiles": ["weights.ckpt"],
+            })
+            env = {**os.environ,
+                   "PYMSS_USER_MODELS": str(root / "user_models.json"),
+                   "PYMSS_STUDIO_PROXY_CONFIG": json.dumps({"mode": "custom", "url": "http://::1:7890"})}
+            result = subprocess.run(
+                [sys.executable, "-S", str(worker), "remap_custom_model_paths", "--payload", payload],
+                capture_output=True, text=True, env=env, timeout=20,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+        event = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(event["type"], "custom_models_remapped")
+        self.assertTrue(event["payload"]["committed"])
 
     def test_connection_command_has_socks_transport_dependencies(self):
         worker = _worker_test_bootstrap.WORKER_DIR / "worker.py"
