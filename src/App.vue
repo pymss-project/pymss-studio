@@ -477,7 +477,7 @@ const themeOverrides = computed(() => {
           class="update-install-modal"
           :bordered="false"
         >
-          <div class="update-install-panel">
+          <div class="update-install-panel console-scrollbar">
             <div class="update-install-panel__head">
               <strong>
                 {{ updateInstallTitle }}
@@ -612,10 +612,12 @@ const themeOverrides = computed(() => {
 
 .update-install-panel {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   min-width: 0;
   max-height: min(640px, calc(100vh - 96px));
-  overflow-y: auto;
+  overflow: hidden auto;
+  overflow-wrap: anywhere;
 }
 
 .update-install-panel__head {
@@ -636,6 +638,10 @@ const themeOverrides = computed(() => {
 
 .update-install-panel__meta {
   margin: -6px 0 0;
+}
+
+.update-install-panel :deep(.n-progress-icon) {
+  min-width: max-content;
 }
 
 .update-install-panel__stats {
@@ -683,7 +689,7 @@ const themeOverrides = computed(() => {
   display: grid;
   gap: 4px;
   max-height: 148px;
-  overflow-y: auto;
+  overflow: hidden auto;
   padding: 9px 10px;
   border: 1px solid color-mix(in srgb, var(--outline) 58%, transparent);
   border-radius: 8px;
@@ -706,12 +712,9 @@ const themeOverrides = computed(() => {
   font-variant-numeric: tabular-nums;
 }
 
-.update-install-panel__log-line span {
-  overflow-wrap: anywhere;
-}
-
 .update-install-panel__actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
 }
 

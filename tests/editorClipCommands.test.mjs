@@ -110,6 +110,26 @@ test('splits only inside an unlocked clip and keeps source timing and outer fade
   assert.equal(editor.canPasteClip, true)
 })
 
+test('splits a targeted clip independently of the current selection', t => {
+  const { editor, clip } = environment(t)
+  const [first, second] = editor.session.tracks
+  editor.selectClip(first.id, clip.id)
+  const target = second.clips[0]
+
+  assert.equal(editor.splitClipAt(second.id, 'missing', 4), 'unavailable')
+  assert.equal(editor.splitClipAt(second.id, target.id, target.start), 'outside')
+  target.locked = true
+  assert.equal(editor.splitClipAt(second.id, target.id, 4), 'locked')
+  assert.equal(editor.canUndo, false)
+  target.locked = false
+
+  assert.equal(editor.splitClipAt(second.id, target.id, 4), 'split')
+  assert.deepEqual(first.clips, [clip])
+  assert.deepEqual(second.clips.map(({ start, offset, duration }) => [start, offset, duration]), [[2, 1, 2], [4, 3, 4]])
+  editor.undo()
+  assert.deepEqual(editor.session.tracks[1].clips, [target])
+})
+
 test('moves and copies clips across tracks with overwrite and undo', t => {
   const { editor, clip } = environment(t)
   const [origin, destination] = editor.session.tracks
@@ -141,6 +161,50 @@ test('moves and copies clips across tracks with overwrite and undo', t => {
   assert.equal(editor.session.tracks[1].clips.length, 1)
   editor.redo()
   assert.deepEqual(editor.session.tracks[1].clips.map(item => item.id), ['clip-b', duplicate.id])
+})
+
+test('drops into a new track with the original clip timing and a single undo step', async t => {
+  const { editor, clip } = environment(t)
+  const [origin, second] = editor.session.tracks
+  editor.selectClip(origin.id, clip.id)
+  editor.dropClip({ fromTrackId: origin.id, toTrackId: null, clipId: clip.id, start: 5, copy: false })
+
+  const created = editor.session.tracks[2]
+  assert.equal(editor.session.tracks.length, 3)
+  assert.deepEqual(origin.clips, [])
+  assert.equal(origin.sourceId, '')
+  assert.equal(second.clips.length, 1)
+  assert.equal(editor.selectedTrackId, created.id)
+  assert.deepEqual(created.clips, [{ ...clip, start: 5, color: origin.color }])
+  assert.deepEqual([created.fadeIn, created.fadeOut], [clip.fadeIn, clip.fadeOut])
+
+  editor.undo()
+  assert.equal(editor.session.tracks.length, 2)
+  assert.deepEqual(editor.session.tracks[0].clips, [clip])
+  assert.equal(editor.canUndo, false)
+  editor.redo()
+  assert.deepEqual(editor.session.tracks[2].clips, created.clips)
+  await editor.flushSave()
+  await editor.loadProject('project')
+  assert.deepEqual(editor.session.tracks[0].clips, [])
+  assert.deepEqual(editor.session.tracks[2].clips, created.clips)
+})
+
+test('only a copy of a locked clip can be dropped into a new track', t => {
+  const { editor, clip } = environment(t)
+  const original = editor.session.tracks[0].clips[0]
+  original.locked = true
+  const drop = { fromTrackId: 'a', toTrackId: null, clipId: clip.id, start: 4, copy: false }
+  editor.dropClip(drop)
+  assert.equal(editor.session.tracks.length, 2)
+  assert.equal(editor.canUndo, false)
+
+  editor.dropClip({ ...drop, copy: true })
+  const copied = editor.session.tracks[2].clips[0]
+  assert.notEqual(copied.id, original.id)
+  assert.equal(copied.locked, false)
+  assert.equal(original.locked, true)
+  assert.deepEqual(editor.session.tracks[0].clips, [original])
 })
 
 test('overwrite splits the destination around the new clip and preserves both source offsets on reload', async t => {

@@ -41,6 +41,7 @@ import { selectTrackLanguage, trackLanguageStates } from '@/utils/audioTracks'
 import { emit } from '@tauri-apps/api/event'
 import { findWorkflowModel, replayWorkflowParameters, resolveWorkflowNode, workflowParameterTargets, type WorkflowParameterContext, type WorkflowParameterPlan, type WorkflowObservedParameters } from '@/workflows/inferencePolicy'
 import type { ComfyExportParameterPlan } from '@/workflows/comfyExport'
+import { describeTaskReminder, showTaskNotification } from '@/features/tasks/reminders'
 
 const studioLog = createLogger('ui.stores.task')
 
@@ -395,12 +396,6 @@ function getLogLimit(developerMode: boolean) {
 
 function markTaskStarted(task: SeparationTask, at = Date.now()) {
   if (!task.startedAt) task.startedAt = at
-}
-
-function markTaskFinished(task: SeparationTask, at = Date.now()) {
-  task.finishedAt = at
-  const startedAt = task.startedAt || task.createdAt
-  task.durationMs = Math.max(0, at - startedAt)
 }
 
 function resolveStageProgress(status: TaskStatus, current?: number, total?: number) {
@@ -1352,6 +1347,28 @@ export const useTaskStore = defineStore('task', () => {
     }
     if (!portable && revision !== store.modelInferenceRevision) throw new Error(i18n.global.t('parameterEditor.parametersChanged'))
     return plan
+  }
+
+  function markTaskFinished(task: SeparationTask, at = Date.now()) {
+    const firstCompletion = task.finishedAt == null
+    task.finishedAt = at
+    task.durationMs = Math.max(0, at - (task.startedAt || task.createdAt))
+    if (!firstCompletion || !initialized.value || !isMainTaskOwner() || !isTauriRuntime()) return
+
+    const settings = useSettingsStore()
+    if (!settings.taskSystemNotifications || !settings.appPaths?.systemNotificationSupported) return
+
+    const jobId = taskJobId(task)
+    const batch = tasks.value.filter(item => taskJobId(item) === jobId)
+    if (batch.some(item => !isTerminalTaskStatus(item.status))) return
+    const done = batch.filter(item => item.status === 'done').length
+    const failed = batch.filter(item => item.status === 'failed').length
+    if (!done && !failed) return
+
+    const { title, body } = describeTaskReminder(task.runConfig?.runMode ?? 'model', {
+      done, failed, cancelled: batch.length - done - failed,
+    })
+    void showTaskNotification(title, body).catch(error => studioLog.warn('Unable to show task notification', error))
   }
 
   async function prepareComfyExportParameters(definition: Record<string, unknown>) {

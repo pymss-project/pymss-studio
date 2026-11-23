@@ -1509,8 +1509,20 @@ export const useEditorStore = defineStore('editor', () => {
     const source = session.value.sources.find((item) => item.id === sourceId)
     if (!source) throw new Error('Source asset not found')
 
+    const track = createReferenceTrack(source, normalizeClip({
+      id: makeId('clip'),
+      assetId: source.id,
+      duration: source.duration,
+    }, source))
     pushHistory()
-    const track: EditorTrack = {
+    session.value.tracks.push(track)
+    selectTrack(track.id)
+    scheduleSave()
+    return track
+  }
+
+  function createReferenceTrack(source: EditorSource, clip: EditorClip): EditorTrack {
+    return {
       id: makeId('track'),
       sourceId: source.id,
       role: 'reference',
@@ -1520,19 +1532,11 @@ export const useEditorStore = defineStore('editor', () => {
       pan: 0,
       muted: false,
       solo: false,
-      fadeIn: 0,
-      fadeOut: 0,
+      fadeIn: clip.fadeIn,
+      fadeOut: clip.fadeOut,
       type: 'reference',
-      clips: [normalizeClip({
-        id: makeId('clip'),
-        assetId: source.id,
-        duration: source.duration,
-      }, source)],
+      clips: [clip],
     }
-    session.value.tracks.push(track)
-    selectTrack(track.id)
-    scheduleSave()
-    return track
   }
 
   function newRecordingTrack(tracks: readonly EditorTrack[]): EditorTrack {
@@ -1889,14 +1893,16 @@ export const useEditorStore = defineStore('editor', () => {
   function dropClip(drop: EditorClipDrop) {
     if (!session.value || interactionDepth.value || !Number.isFinite(drop.start) || drop.start < 0) return
     const origin = session.value.tracks.find((track) => track.id === drop.fromTrackId)
-    const destination = session.value.tracks.find((track) => track.id === drop.toTrackId)
+    const destination = drop.toTrackId === null ? null : session.value.tracks.find((track) => track.id === drop.toTrackId)
     const clip = origin?.clips?.find((item) => item.id === drop.clipId)
-    if (!origin?.clips || !destination || !clip || !sourceMap.value.has(clip.assetId)) return
+    if (!origin?.clips || !clip || destination === undefined) return
+    const source = sourceMap.value.get(clip.assetId)
+    if (!source) return
     if (!drop.copy && (clip.locked || (origin === destination && clip.start === drop.start))) return
 
-    const destinationClips = clipsForTrack(destination, sourceMap.value).filter(
+    const destinationClips = destination ? clipsForTrack(destination, sourceMap.value).filter(
       (item) => drop.copy || item.id !== clip.id,
-    )
+    ) : []
     if (hasLockedClipInRange(destinationClips, drop.start, clip.duration)) return 'locked'
 
     const moved = {
@@ -1911,8 +1917,10 @@ export const useEditorStore = defineStore('editor', () => {
     if (!drop.copy && origin !== destination) {
       replaceTrackClips(origin, origin.clips.filter((item) => item.id !== clip.id))
     }
-    replaceTrackClips(destination, [...remaining, moved].sort((a, b) => a.start - b.start))
-    selectClip(destination.id, moved.id)
+    const target = destination ?? createReferenceTrack(source, moved)
+    if (destination) replaceTrackClips(destination, [...remaining, moved].sort((a, b) => a.start - b.start))
+    else session.value.tracks.push(target)
+    selectClip(target.id, moved.id)
     scheduleSave()
   }
 
@@ -1981,7 +1989,7 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   function splitClipsAt(time: number, tracks: EditorTrack[], onlyClipId?: string) {
-    if (interactionDepth.value) return
+    if (interactionDepth.value) return false
     let nextSelectedClipId = selectedClipId.value
     const changes: { track: EditorTrack; clips: EditorClip[] }[] = []
 
@@ -2011,11 +2019,22 @@ export const useEditorStore = defineStore('editor', () => {
       if (changed) changes.push({ track, clips: clips.sort((a, b) => a.start - b.start) })
     }
 
-    if (!changes.length) return
+    if (!changes.length) return false
     pushHistory()
     for (const { track, clips } of changes) replaceTrackClips(track, clips)
     selectedClipId.value = nextSelectedClipId
     scheduleSave()
+    return true
+  }
+
+  function splitClipAt(trackId: string, clipId: string, time: number) {
+    if (interactionDepth.value) return 'unavailable'
+    const track = session.value?.tracks.find(item => item.id === trackId)
+    if (!track) return 'unavailable'
+    const clip = clipsForTrack(track, sourceMap.value).find(item => item.id === clipId)
+    if (!clip) return 'unavailable'
+    if (clip.locked) return 'locked'
+    return splitClipsAt(time, [track], clipId) ? 'split' : 'outside'
   }
 
   function splitSelectedClipAt(time: number) {
@@ -2430,6 +2449,7 @@ export const useEditorStore = defineStore('editor', () => {
     deleteSelectedClip,
     dropClip,
     pasteClipAt,
+    splitClipAt,
     splitSelectedClipAt,
     splitAllClipsAt,
     removeSource,

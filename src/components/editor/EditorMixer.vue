@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, h, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { Cut, EllipsisHorizontal, LockClosedOutline, Magnet, Navigate } from '@vicons/ionicons5'
+import { EllipsisHorizontal, LockClosedOutline, Magnet, Navigate } from '@vicons/ionicons5'
 import type { DropdownOption } from 'naive-ui'
 import type { EditorClip, EditorClipDrop, EditorSource, EditorTimelineTool, EditorTrack } from '@/types/editor'
 import EditorWaveform from '@/components/editor/EditorWaveform.vue'
@@ -54,7 +54,7 @@ const emit = defineEmits<{
   setClipLocked: [trackId: string, clipId: string, locked: boolean]
   setTool: [tool: EditorTimelineTool]
   toggleSnapping: []
-  splitAt: [time: number]
+  splitAt: [payload: { trackId: string; clipId: string; time: number }]
   dropClip: [drop: EditorClipDrop]
   revealTrack: [trackId: string]
   showInspector: []
@@ -133,6 +133,7 @@ type ClipEditState = {
   clip: EditorClip
   color: string
   copy: boolean
+  canEdit: boolean
   clientX: number
   clientY: number
   scrollLeft: number
@@ -145,14 +146,15 @@ type ClipEditState = {
   begun: boolean
 }
 let clipEditState: ClipEditState | null = null
+const clipMoveActive = ref(false)
 let latestClipPointer: PointerEvent | null = null
 let clipScrollFrame: number | null = null
 let lastClipScrollTime = 0
 
 const isMac = /Mac/i.test(navigator.platform)
 const timelineTools = [
-  { id: 'selection', label: 'editor.selectionTool', icon: Navigate, shortcut: 'V' },
-  { id: 'razor', label: 'editor.razorTool', icon: Cut, shortcut: 'C' },
+  { id: 'selection', label: 'editor.selectionTool', shortcut: 'V' },
+  { id: 'razor', label: 'editor.razorTool', shortcut: 'C' },
 ] as const
 const clipCommandLabels = {
   cut: 'editor.cutClip', copy: 'editor.copyClip', paste: 'editor.pasteClip',
@@ -314,12 +316,13 @@ function beginClipPointer(event: PointerEvent, track: EditorTrack, clip: EditorC
 
   if (props.timelineTool === 'razor') {
     if (mode !== 'move') return
-    emit('splitAt', razorPointerTime(event, clip).time)
+    emit('splitAt', { trackId: track.id, clipId: clip.id, time: razorPointerTime(event, clip).time })
     return
   }
 
   const copy = mode === 'move' && event.altKey
-  if (clip.locked && !copy) return
+  const canEdit = !clip.locked || copy
+  if (!canEdit && mode !== 'move') return
   const captureTarget = event.currentTarget as HTMLElement
   captureTarget.setPointerCapture(event.pointerId)
   clipEditState = {
@@ -330,6 +333,7 @@ function beginClipPointer(event: PointerEvent, track: EditorTrack, clip: EditorC
     clip,
     color: clipColor(clip, track),
     copy,
+    canEdit,
     clientX: event.clientX,
     clientY: event.clientY,
     scrollLeft: scrollEl.value?.scrollLeft ?? 0,
@@ -350,9 +354,12 @@ function beginClipPointer(event: PointerEvent, track: EditorTrack, clip: EditorC
 
 const razorSnapTargets = computed(() => timelineClipEdges(props.tracks, props.sourceMap))
 
+function clipPointerTime(clip: EditorClip, clientX: number, element: HTMLElement) {
+  return clip.start + (clientX - element.getBoundingClientRect().left) / props.pixelsPerSecond
+}
+
 function razorPointerTime(event: PointerEvent, clip: EditorClip) {
-  const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect()
-  const time = clip.start + (event.clientX - bounds.left) / props.pixelsPerSecond
+  const time = clipPointerTime(clip, event.clientX, event.currentTarget as HTMLElement)
   const snapped = props.snappingEnabled
     ? resolveSnappedSplitTime(clip, time, 1 / (sourceForClip(clip)?.sampleRate || 48000),
       [props.currentTime, ...razorSnapTargets.value], SNAP_DISTANCE_PX / props.pixelsPerSecond)
@@ -383,33 +390,43 @@ function timingAtPointer(event: PointerEvent, active: ClipEditState) {
 }
 
 function clipDropAt(event: PointerEvent, active: ClipEditState): EditorClipDrop | null {
-  const lane = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('[data-clip-lane]')
-  if (!lane || !mixerRootEl.value?.contains(lane) || !lane.dataset.clipLane) {
+  const lane = document.elementFromPoint(event.clientX, event.clientY)
+    ?.closest<HTMLElement>('[data-clip-lane], [data-clip-new-track]')
+  if (!lane || !mixerRootEl.value?.contains(lane)) {
     clipSnapTime.value = null
     return null
   }
+  const toTrackId = lane.dataset.clipLane ?? null
   const { start = active.start } = timingAtPointer(event, active)
-  if (!active.copy && lane.dataset.clipLane === active.trackId && start === active.start) return null
+  if (!active.copy && toTrackId === active.trackId && start === active.start) return null
   return {
     clipId: active.clip.id,
     fromTrackId: active.trackId,
-    toTrackId: lane.dataset.clipLane,
+    toTrackId,
     start,
     copy: active.copy,
   }
 }
 
-function handleClipPointerMove(event: PointerEvent) {
+async function handleClipPointerMove(event: PointerEvent) {
   const active = clipEditState
   if (!active || event.pointerId !== active.pointerId) return
   const deltaPx = event.clientX - active.clientX
-  if (!active.begun) {
+  const starting = !active.begun
+  if (starting) {
     const distance = active.mode === 'move' ? Math.hypot(deltaPx, event.clientY - active.clientY) : Math.abs(deltaPx)
     if (distance < 3) return
     active.begun = true
-    if (active.mode !== 'move') emit('beginClipEdit')
   }
+  if (!active.canEdit) return
+  const startedMove = starting && active.mode === 'move'
+  if (startedMove) clipMoveActive.value = true
+  else if (starting) emit('beginClipEdit')
   latestClipPointer = event
+  if (startedMove) {
+    await nextTick()
+    if (clipEditState !== active || latestClipPointer !== event) return
+  }
   updateClipPreview(event, active)
   if (clipScrollFrame === null) {
     lastClipScrollTime = performance.now()
@@ -420,12 +437,12 @@ function handleClipPointerMove(event: PointerEvent) {
 function updateClipPreview(event: PointerEvent, active: ClipEditState) {
   if (active.mode === 'move') {
     const drop = clipDropAt(event, active)
-    const track = drop && props.tracks.find(item => item.id === drop.toTrackId)
-    clipDropPreview.value = drop && track ? {
+    const track = props.tracks.find(item => item.id === drop?.toTrackId)
+    clipDropPreview.value = drop ? {
       drop,
       clip: active.clip,
       color: active.color,
-      blocked: hasLockedClipInRange(clipsForTrack(track), drop.start, active.clip.duration),
+      blocked: track ? hasLockedClipInRange(clipsForTrack(track), drop.start, active.clip.duration) : false,
     } : null
     return
   }
@@ -498,6 +515,7 @@ function clearClipPointer(cancelled: boolean) {
     active.captureTarget.releasePointerCapture(active.pointerId)
   }
   activeClipEditId.value = null
+  clipMoveActive.value = false
   clipDropPreview.value = null
   clipSnapTime.value = null
   if (active.begun && active.mode !== 'move') emit('commitClipEdit', cancelled)
@@ -507,9 +525,11 @@ function finishClipPointer(event: PointerEvent) {
   const active = clipEditState
   if (!active || event.pointerId !== active.pointerId) return
   const canCommit = event.type === 'pointerup' && !props.editingDisabled
-  const drop = active.begun && active.mode === 'move' && canCommit
-    ? clipDropAt(event, active) : null
+  const clickedClip = canCommit && active.mode === 'move' && !active.begun
+  const clickTime = clickedClip ? clipPointerTime(active.clip, event.clientX, active.captureTarget) : null
+  const drop = canCommit && clipMoveActive.value ? clipDropAt(event, active) : null
   clearClipPointer(!canCommit)
+  if (clickTime !== null) emit('seek', clickTime)
   if (drop) emit('dropClip', drop)
 }
 
@@ -760,7 +780,8 @@ defineExpose({
               @keydown.space.stop
               @click="useTimelineTool(tool.id)"
             >
-              <n-icon :component="tool.icon" aria-hidden="true" />
+              <n-icon v-if="tool.id === 'selection'" :component="Navigate" aria-hidden="true" />
+              <span v-else class="ruler__razor-icon" aria-hidden="true" />
             </button>
             <button
               type="button"
@@ -988,6 +1009,14 @@ defineExpose({
             </div>
           </div>
         </div>
+        <div v-if="clipMoveActive" class="new-clip-track-lane" data-clip-new-track>
+          <div v-if="clipDropPreview?.drop.toTrackId === null" class="new-clip-track-preview" role="status">
+            <div class="track-wave__clip track-wave__drop-preview"
+              :style="{ ...clipStyle(clipDropPreview.clip, clipDropPreview.drop.start), '--clip-color': clipDropPreview.color }"
+              aria-hidden="true" />
+            <span>{{ t('editor.clipDropCreatesTrack') }}</span>
+          </div>
+        </div>
         <span
           v-if="snappingEnabled && clipSnapTime !== null"
           class="clip-snap-line"
@@ -1195,6 +1224,13 @@ defineExpose({
   transform: rotate(-90deg);
 }
 
+.ruler__razor-icon {
+  width: 1em;
+  height: 1em;
+  background: currentColor;
+  mask: url('@/assets/editor-razor.svg') center / contain no-repeat;
+}
+
 .ruler__tool--snap {
   margin-inline-start: 4px;
 }
@@ -1237,6 +1273,8 @@ defineExpose({
 
 .tracks {
   position: relative;
+  display: flex;
+  flex-direction: column;
   width: max-content;
   min-width: 100%;
   min-height: calc(100% - var(--ruler-height));
@@ -1246,6 +1284,32 @@ defineExpose({
   background-size: 100% 100%, var(--lane-step) 100%;
   background-position: 0 0, 180px 0;
   background-repeat: no-repeat, repeat;
+}
+
+.new-clip-track-lane {
+  flex: 1 0 70px;
+  width: var(--lane-width);
+  margin-inline-start: 180px;
+}
+
+.new-clip-track-preview {
+  position: relative;
+  height: 70px;
+  border-bottom: 1px dashed var(--primary-border);
+  pointer-events: none;
+}
+
+.new-clip-track-preview span {
+  position: sticky;
+  z-index: 7;
+  left: 190px;
+  display: inline-block;
+  margin: 20px 10px 0;
+  padding: 5px 9px;
+  border-radius: 5px;
+  background: var(--surface-1);
+  color: var(--primary-strong);
+  font-size: 12px;
 }
 
 .track-row--selected {
@@ -1510,7 +1574,7 @@ defineExpose({
 }
 
 .editor-mixer--razor .track-wave__clip {
-  cursor: crosshair;
+  cursor: url('@/assets/editor-razor.svg') 12 12, pointer;
 }
 
 .editor-mixer--razor .track-wave__clip--locked {

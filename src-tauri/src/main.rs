@@ -136,12 +136,16 @@ fn main() {
     builder
         .setup(|app| {
             let _ = session_log::init_session_log(app.handle());
+            #[cfg(target_os = "macos")]
+            commands::task_notification::macos::install_delegate();
             #[cfg(target_os = "linux")]
             linux_font_dpi::record_diagnostics(app.handle());
             python::worker::recover_audio_output_temps(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::task_notification::prepare_task_notifications,
+            commands::task_notification::show_task_notification,
             storage_diagnostics::inspect_diagnostic_storage,
             business_diagnostics::begin_business_diagnostics,
             business_diagnostics::publish_debug_window_state,

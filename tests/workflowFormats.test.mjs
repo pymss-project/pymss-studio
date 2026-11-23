@@ -735,6 +735,39 @@ test('audio processing-only workflows save and reopen without inserting a separa
   assert.equal(getWorkflowDefinitionIssue({ ...definition, ensembles: [] }), 'steps-required')
 })
 
+test('simple workflow stores WAV and FLAC bit depths independently and preserves legacy defaults', () => {
+  const source = simpleFixture()
+  const draft = hydrateSimpleWorkflow(source)
+  const legacy = buildSimpleWorkflowDefinition(draft)
+  assert.equal(Object.hasOwn(legacy.defaults, 'wav_bit_depth'), false)
+  assert.equal(Object.hasOwn(legacy.defaults, 'flac_bit_depth'), false)
+
+  draft.wavBitDepth = 'PCM_24'
+  draft.flacBitDepth = 'PCM_16'
+  draft.defaultFormat = 'mp3'
+  const definition = buildSimpleWorkflowDefinition(draft)
+  assert.equal(analyzeSimpleWorkflow(definition).editable, true)
+  assert.deepEqual(buildSimpleWorkflowDefinition(hydrateSimpleWorkflow(definition)), definition)
+  assert.deepEqual(prepareWorkflowDefinitionForRun(definition, { device: 'cpu', outputFormat: 'wav' }).defaults, {
+    ...legacy.defaults, output_format: 'mp3', wav_bit_depth: 'PCM_24', flac_bit_depth: 'PCM_16',
+  })
+})
+
+test('imported WAV and FLAC formats use the same values as the editor format options', () => {
+  for (const format of ['wav', 'flac']) {
+    const source = simpleFixture()
+    source.defaults.output_format = ` ${format.toUpperCase()} `
+    const depthKey = `${format}_bit_depth`
+    source.defaults[depthKey] = 'PCM_16'
+
+    const draft = hydrateSimpleWorkflow(source)
+    assert.equal(draft.defaultFormat, format)
+    const { defaults } = buildSimpleWorkflowDefinition(draft)
+    assert.equal(defaults.output_format, format)
+    assert.equal(defaults[depthKey], 'PCM_16')
+  }
+})
+
 test('simple runtime preparation materializes defaults without mutating the stored workflow', () => {
   const source = simpleFixture()
   source.defaults.inference_params.batch_size = 2

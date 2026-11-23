@@ -82,6 +82,8 @@ export type PymssYamlWorkflow = {
   defaults: {
     device: string
     output_format: string
+    wav_bit_depth?: WavBitDepth
+    flac_bit_depth?: FlacBitDepth
     model_dir?: string | null
     inference_params?: Record<string, unknown>
   }
@@ -165,9 +167,16 @@ export function fitSimpleEditorViewport(
   }
 }
 
+export const SIMPLE_WAV_BIT_DEPTHS = ['FLOAT', 'PCM_24', 'PCM_16'] as const
+export const SIMPLE_FLAC_BIT_DEPTHS = ['PCM_24', 'PCM_16'] as const
+type WavBitDepth = typeof SIMPLE_WAV_BIT_DEPTHS[number]
+type FlacBitDepth = typeof SIMPLE_FLAC_BIT_DEPTHS[number]
+
 export type SimpleDraft = {
   defaultDevice: string
   defaultFormat: string
+  wavBitDepth?: WavBitDepth
+  flacBitDepth?: FlacBitDepth
   /** Null means normalization follows the model/global fallback chain. */
   defaultNormalize: boolean | null
   steps: SimpleStepDraft[]
@@ -176,6 +185,10 @@ export type SimpleDraft = {
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => Boolean(v) && typeof v === 'object' && !Array.isArray(v)
+
+function isBitDepth<T extends string>(value: unknown, options: readonly T[]): value is T {
+  return typeof value === 'string' && options.some(option => option === value)
+}
 
 const SIMPLE_INFERENCE_BOOLEAN_FIELDS = new Set<keyof SimpleWorkflowInferenceParams>([
   'standardize',
@@ -310,7 +323,9 @@ export function hydrateSimpleWorkflow(definition: unknown): SimpleDraft {
     })
   return {
     defaultDevice: String(defaults.device || 'auto'),
-    defaultFormat: String(defaults.output_format || 'wav'),
+    defaultFormat: String(defaults.output_format ?? '').trim().toLowerCase() || 'wav',
+    ...(isBitDepth(defaults.wav_bit_depth, SIMPLE_WAV_BIT_DEPTHS) ? { wavBitDepth: defaults.wav_bit_depth } : {}),
+    ...(isBitDepth(defaults.flac_bit_depth, SIMPLE_FLAC_BIT_DEPTHS) ? { flacBitDepth: defaults.flac_bit_depth } : {}),
     defaultNormalize: typeof inference.normalize === 'boolean' ? inference.normalize : null,
     steps,
     ensembles,
@@ -328,6 +343,8 @@ export function buildSimpleWorkflowDefinition(draft: SimpleDraft): PymssYamlWork
     defaults: {
       device: draft.defaultDevice || 'auto',
       output_format: draft.defaultFormat || 'wav',
+      ...(draft.wavBitDepth ? { wav_bit_depth: draft.wavBitDepth } : {}),
+      ...(draft.flacBitDepth ? { flac_bit_depth: draft.flacBitDepth } : {}),
       ...(defaultInference ? { inference_params: defaultInference } : {}),
     },
     studio: normalizeSimpleEditorUi(draft.ui, draft.steps, draft.ensembles),
@@ -568,7 +585,7 @@ type ModelEntryLike = {
 }
 
 const SIMPLE_DEFINITION_FIELDS = new Set(['version', 'defaults', 'steps', 'ensembles', 'studio'])
-const SIMPLE_DEFAULT_FIELDS = new Set(['device', 'output_format', 'inference_params'])
+const SIMPLE_DEFAULT_FIELDS = new Set(['device', 'output_format', 'inference_params', 'wav_bit_depth', 'flac_bit_depth'])
 const SIMPLE_STEP_FIELDS = new Set(['id', 'model', 'model_type', 'input', 'stems', 'save', 'output_names', 'inference_params'])
 const SIMPLE_ENSEMBLE_FIELDS = new Set(['id', 'inputs', 'algorithm', 'output_stem', 'save', 'output_name'])
 const SIMPLE_ENSEMBLE_INPUT_FIELDS = new Set(['source', 'weight'])
@@ -597,6 +614,8 @@ function usesAdvancedSimpleParameters(definition: Record<string, unknown>): bool
   if (hasInvalidSimpleEditorUi(definition.studio)) return true
   const defaults = isRecord(definition.defaults) ? definition.defaults : {}
   if (hasUnsupportedFields(defaults, SIMPLE_DEFAULT_FIELDS)) return true
+  if (Object.hasOwn(defaults, 'wav_bit_depth') && !isBitDepth(defaults.wav_bit_depth, SIMPLE_WAV_BIT_DEPTHS)) return true
+  if (Object.hasOwn(defaults, 'flac_bit_depth') && !isBitDepth(defaults.flac_bit_depth, SIMPLE_FLAC_BIT_DEPTHS)) return true
 
   const inference = isRecord(defaults.inference_params) ? defaults.inference_params : {}
   if (hasUnsupportedFields(inference, SIMPLE_DEFAULT_INFERENCE_FIELDS)) return true

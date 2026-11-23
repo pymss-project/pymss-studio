@@ -368,13 +368,11 @@ function setTimelineTool(tool: EditorTimelineTool) {
   statusToasts.value?.show(label)
 }
 
-function splitAtPointer(time: number) {
+function splitAtPointer({ trackId, clipId, time }: { trackId: string; clipId: string; time: number }) {
   if (recordingBusy.value) return
-  if (!editor.canSplitClipAt(time)) {
-    statusToasts.value?.show(t(editor.selectedClip?.locked ? 'editor.status.clipLocked' : 'editor.status.splitInsideClip'))
-    return
-  }
-  editor.splitSelectedClipAt(time)
+  const result = editor.splitClipAt(trackId, clipId, time)
+  if (result === 'locked') statusToasts.value?.show(t('editor.status.clipLocked'))
+  if (result === 'outside') statusToasts.value?.show(t('editor.status.cutInsideClip'))
 }
 
 function dropClip(drop: EditorClipDrop) {

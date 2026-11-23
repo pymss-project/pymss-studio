@@ -37,7 +37,8 @@ export type EditorTimelineTool = 'selection' | 'razor'
 export type EditorClipDrop = {
   clipId: string
   fromTrackId: string
-  toTrackId: string
+  /** Null appends a track for the dropped clip. */
+  toTrackId: string | null
   start: number
   copy: boolean
 }

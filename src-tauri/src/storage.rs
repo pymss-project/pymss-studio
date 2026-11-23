@@ -31,6 +31,7 @@ pub struct AppPathsPayload {
     pub cli_path: Option<String>,
     pub cli_path_supported: bool,
     pub cli_platform: Option<&'static str>,
+    pub system_notification_supported: bool,
     #[cfg(target_os = "linux")]
     pub cli_extract_and_run: bool,
     pub data_root: String,
@@ -162,6 +163,7 @@ pub fn app_paths_payload(app: &AppHandle) -> AppResult<AppPathsPayload> {
         cli_path,
         cli_path_supported: cli_launcher.is_some(),
         cli_platform: cli_launcher.as_ref().map(|_| std::env::consts::OS),
+        system_notification_supported: crate::commands::task_notification::supported(),
         #[cfg(target_os = "linux")]
         cli_extract_and_run: cli_launcher.is_some() && crate::studio_paths::appimage_extract_and_run(),
         data_root: data_root_dir(app)?.to_string_lossy().to_string(),

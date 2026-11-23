@@ -3739,12 +3739,7 @@ async function retryCurrentTask() {
   flex-direction: column;
   gap: 6px;
   padding: 8px;
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--outline) 120%, transparent) transparent;
 }
-.file-list::-webkit-scrollbar { width: 6px; }
-.file-list::-webkit-scrollbar-thumb { border-radius: 999px; background: color-mix(in srgb, var(--outline) 130%, transparent); }
-.file-list::-webkit-scrollbar-track { background: transparent; }
 
 .file-chip {
   display: flex;
@@ -4448,42 +4443,46 @@ async function retryCurrentTask() {
   gap: 6px;
   padding: 2px;
   padding-right: 6px;
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--on-surface-muted) 44%, transparent) transparent;
 }
 .target-list--list {
   grid-template-columns: minmax(0, 1fr);
   gap: 5px;
 }
+
+:is(.file-list, .target-list) {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--on-surface-muted) 44%, transparent) transparent;
+}
+
 @supports selector(::-webkit-scrollbar) {
-  .target-list {
+  :is(.file-list, .target-list) {
     scrollbar-width: auto;
     scrollbar-color: auto;
   }
 }
 
-.target-list::-webkit-scrollbar {
+:is(.file-list, .target-list)::-webkit-scrollbar {
   width: 9px;
 }
 
-.target-list::-webkit-scrollbar-track {
+:is(.file-list, .target-list)::-webkit-scrollbar-track {
   border-radius: 999px;
   background: transparent;
 }
 
-.target-list::-webkit-scrollbar-thumb {
+:is(.file-list, .target-list)::-webkit-scrollbar-thumb {
   min-height: 28px;
   border: 2px solid transparent;
   border-radius: 999px;
   background: color-mix(in srgb, var(--on-surface-muted) 44%, transparent) padding-box;
 }
 
-.target-list::-webkit-scrollbar-thumb:hover {
+:is(.file-list, .target-list)::-webkit-scrollbar-thumb:hover {
   background: color-mix(in srgb, var(--primary) 64%, transparent) padding-box;
 }
 
-.target-list::-webkit-scrollbar-button,
-.target-list::-webkit-scrollbar-corner {
+:is(.file-list, .target-list)::-webkit-scrollbar-button,
+:is(.file-list, .target-list)::-webkit-scrollbar-corner {
   display: none;
   width: 0;
   height: 0;

@@ -499,6 +499,34 @@ def _prepare_simple_runtime_definition(definition: dict[str, Any]) -> dict[str, 
     return transient
 
 
+def _apply_simple_output_bit_depth(dag: Any, defaults: dict[str, Any]) -> None:
+    """Apply workflow preferences to generated save nodes, which own bit depth."""
+    options = {"wav": ("FLOAT", "PCM_24", "PCM_16"), "flac": ("PCM_24", "PCM_16")}
+    bit_depths = {fmt: defaults[f"{fmt}_bit_depth"] for fmt in options if f"{fmt}_bit_depth" in defaults}
+    if not bit_depths:
+        return
+    for fmt, value in bit_depths.items():
+        if value not in options[fmt]:
+            raise ValueError(f"Invalid defaults.{fmt}_bit_depth. Expected one of: {', '.join(options[fmt])}.")
+    for node in dag.nodes:
+        if node.type != "pymss_save_audio":
+            continue
+        widgets = node.data["widgets_values"]
+        fmt = str(widgets[0]).lower()
+        if fmt in bit_depths:
+            # The two kernel layouts differ by the output-folder widget.
+            wav_index = 2 if str(widgets[1]).isdigit() else 3
+            widgets[wav_index + (fmt == "flac")] = bit_depths[fmt]
+
+
+def _normalize_simple_output_formats(definition: dict[str, Any]) -> None:
+    steps = definition.get("steps")
+    sections = [definition.get("defaults"), *(steps if isinstance(steps, list) else [])]
+    for section in sections:
+        if isinstance(section, dict) and isinstance(section.get("output_format"), str):
+            section["output_format"] = section["output_format"].strip().lower()
+
+
 def _render_simple_filename(template: Any, *, input_path: str, stem: str, model: str,
                             step_id: str, index: int, output_format: str) -> str:
     """Render and sanitize a Studio simple-workflow filename template."""
@@ -1296,6 +1324,7 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
     if fmt == "yaml":
         import pymss.workflow as pwf
         data = json.loads(workflow_path.read_text(encoding="utf-8"))
+        _normalize_simple_output_formats(data)
         if not str(payload.get("outputFormat") or "").strip():
             defaults = data.get("defaults")
             if isinstance(defaults, dict):
@@ -1338,6 +1367,7 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
                 reserved_names=reserved_simple_names,
                 start_index=len(simple_output_metadata),
             ))
+        _apply_simple_output_bit_depth(dag, wf.defaults)
     else:
         _validate_workflow_plugin_nodes(json.loads(workflow_path.read_text(encoding="utf-8")))
         dag = graph.load_comfy_file(workflow_path)

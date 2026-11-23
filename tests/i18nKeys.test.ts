@@ -22,6 +22,8 @@ const DYNAMIC_KEY_PREFIXES = [
   'parameterEditor.capability.',
   'parameterEditor.error.',
   'settings.themeAccent',
+  'settings.taskNotification.separation.',
+  'settings.taskNotification.workflow.',
   // Runtime views translate protocol action, release, stage, operator and result IDs.
   'settings.runtimeRocmAction_',
   'settings.runtimeReleaseState_',

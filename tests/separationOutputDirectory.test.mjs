@@ -29,7 +29,15 @@ const vite = await createServer({
           export function useSettingsStore() { return settings }
         `
       }
-      if (path.endsWith('/src/i18n/index.ts')) return 'export default { global: { t: key => key } }'
+      if (path.endsWith('/src/i18n/index.ts')) {
+        return `
+          import { createI18n } from 'vue-i18n'
+          import zh from '/src/i18n/zh-CN.json'
+          import en from '/src/i18n/en.json'
+          const { global } = createI18n({ legacy: false, locale: 'zh-CN', messages: { 'zh-CN': zh, en } })
+          export default { global: { locale: global.locale, t: (key, ...args) => key.startsWith('settings.taskNotification.') ? global.t(key, ...args) : key } }
+        `
+      }
       return null
     },
   }],
@@ -41,6 +49,8 @@ const { useTaskStore } = await vite.ssrLoadModule('/src/stores/task.ts')
 const { useModelStore } = await vite.ssrLoadModule('/src/stores/model.ts')
 const { useAppStore } = await vite.ssrLoadModule('/src/stores/app.ts')
 const { selectQueuedJobGroups } = await vite.ssrLoadModule('/src/features/tasks/lifecycle.ts')
+const { describeTaskReminder } = await vite.ssrLoadModule('/src/features/tasks/reminders.ts')
+const { default: i18n } = await vite.ssrLoadModule('/src/i18n/index.ts')
 const stores = []
 const waitForSave = () => new Promise(resolve => setTimeout(resolve, 180))
 
@@ -53,6 +63,8 @@ afterEach(async () => {
   settings.outputDir = 'D:/DefaultOutput'
   settings.downloadSource = 'modelscope'
   settings.maxConcurrentSeparations = 1
+  settings.taskSystemNotifications = false
+  settings.appPaths = null
 })
 
 function storage(initial = {}) {
@@ -1399,6 +1411,62 @@ function queuedBatch(id, inputCount, mode = 'workflow', createdAt = 1) {
     runConfig: { ...task.runConfig, runMode: mode },
   }))
 }
+
+test('task notifications distinguish outcomes and mention only counts that occurred', t => {
+  const outcomes = [
+    [{ done: 3, failed: 0, cancelled: 0 }, '分离任务已完成', '已成功处理 3 项。'],
+    [{ done: 2, failed: 1, cancelled: 0 }, '分离任务部分失败', '成功 2 项，失败 1 项。可在任务队列查看原因。'],
+    [{ done: 0, failed: 3, cancelled: 0 }, '分离任务失败', '3 项处理失败。可在任务队列查看原因。'],
+    [{ done: 2, failed: 0, cancelled: 1 }, '分离任务已结束', '成功 2 项，已取消 1 项。'],
+    [{ done: 0, failed: 1, cancelled: 1 }, '分离任务失败', '失败 1 项，已取消 1 项。可在任务队列查看原因。'],
+  ]
+  for (const [counts, title, body] of outcomes) {
+    assert.deepEqual(describeTaskReminder('model', counts), { title, body })
+  }
+  t.after(() => { i18n.global.locale.value = 'zh-CN' })
+  i18n.global.locale.value = 'en'
+  assert.deepEqual(describeTaskReminder('workflow', { done: 1, failed: 0, cancelled: 0 }), {
+    title: 'Workflow completed', body: '1 item processed successfully.',
+  })
+})
+
+test('system task notifications fire once per batch when enabled and supported', async () => {
+  const { task } = await resumeRestoredQueue([
+    ...queuedBatch('workflow', 1), ...queuedBatch('model', 1, 'model', 10),
+    ...queuedBatch('cancelled', 1, 'model', 20),
+    ...queuedBatch('disabled', 1, 'model', 30),
+  ], 2)
+  settings.taskSystemNotifications = true
+  settings.appPaths = { systemNotificationSupported: true }
+  const notifications = []
+  const invoke = window.__TAURI_INTERNALS__.invoke
+  window.__TAURI_INTERNALS__.invoke = (command, args) => {
+    if (command === 'show_task_notification') notifications.push(args)
+    return invoke(command, args)
+  }
+  const finish = taskId => task.handleWorkerEvent({ type: 'task_done', taskId, payload: { files: [], outputs: [] } })
+  finish('workflow-0')
+  assert.equal(notifications.length, 0)
+  task.handleWorkerEvent({ type: 'error', taskId: 'workflow-1', payload: { message: 'Failed' } })
+  finish('workflow-1')
+  assert.deepEqual(notifications, [{ title: '工作流任务部分失败', body: '成功 1 项，失败 1 项。可在任务队列查看原因。' }])
+
+  for (const taskId of ['cancelled-0', 'cancelled-1']) {
+    task.handleWorkerEvent({ type: 'task_cancelled', taskId, payload: {} })
+  }
+  assert.equal(notifications.length, 1)
+
+  settings.appPaths.systemNotificationSupported = false
+  finish('model-0')
+  finish('model-1')
+  assert.equal(notifications.length, 1)
+
+  settings.appPaths.systemNotificationSupported = true
+  settings.taskSystemNotifications = false
+  finish('disabled-0')
+  finish('disabled-1')
+  assert.equal(notifications.length, 1)
+})
 
 for (const mode of ['workflow', 'model']) {
   test(`a rejected batch cannot resubmit the following ${mode} batch during concurrent scheduling`, async () => {

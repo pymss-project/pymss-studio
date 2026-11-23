@@ -30,6 +30,8 @@ import {
   setSimpleStepInferenceOverrides,
   SIMPLE_ENSEMBLE_ALGORITHMS,
   SIMPLE_AUDIO_OPERATIONS,
+  SIMPLE_WAV_BIT_DEPTHS,
+  SIMPLE_FLAC_BIT_DEPTHS,
   isSimpleAudioOperation,
   simpleProcessingInputLimits,
   type SimpleAudioOperation,
@@ -202,6 +204,14 @@ const defaultNormalizeOptions = computed(() => [
   { label: t('workflows.inferenceEnabled'), value: 'enabled' },
   { label: t('workflows.inferenceDisabled'), value: 'disabled' },
 ])
+
+const bitDepthLabels = computed(() => ({
+  FLOAT: t('audio.bitDepthFloat32'),
+  PCM_24: t('audio.bitDepthPcm24'),
+  PCM_16: t('audio.bitDepthPcm16'),
+}))
+const wavBitDepthOptions = computed(() => SIMPLE_WAV_BIT_DEPTHS.map(value => ({ value, label: bitDepthLabels.value[value] })))
+const flacBitDepthOptions = computed(() => SIMPLE_FLAC_BIT_DEPTHS.map(value => ({ value, label: bitDepthLabels.value[value] })))
 
 const inferenceEditorStep = computed(() => (
   draft.value.steps.find(step => step.id === inferenceEditorStepId.value) || null
@@ -1360,7 +1370,8 @@ function cancelPendingConnection() {
   hoverTarget.value = null
 }
 
-watch(() => [draft.value.defaultDevice, draft.value.defaultFormat, draft.value.defaultNormalize], () => {
+watch(() => [draft.value.defaultDevice, draft.value.defaultFormat, draft.value.defaultNormalize,
+  draft.value.wavBitDepth, draft.value.flacBitDepth], () => {
   recordHistory()
 })
 
@@ -1542,6 +1553,16 @@ onBeforeUnmount(() => {
       <div class="simple-node-editor__defaults">
         <label><span>{{ t('workflows.defaultDevice') }}</span><AppSelect :aria-label="t('workflows.defaultDevice')" :ref="(instance: unknown) => setSelectInstance('default-device', instance)" v-model:value="draft.defaultDevice" :disabled="readonly" size="small" :options="[{ label: 'Auto', value: 'auto' }, { label: 'CPU', value: 'cpu' }, { label: 'CUDA', value: 'cuda' }, { label: 'MPS', value: 'mps' }, { label: 'MLX', value: 'mlx' }]" /></label>
         <label><span>{{ t('workflows.defaultFormat') }}</span><AppSelect :aria-label="t('workflows.defaultFormat')" :ref="(instance: unknown) => setSelectInstance('default-format', instance)" v-model:value="draft.defaultFormat" :disabled="readonly" size="small" :options="[{ label: 'WAV', value: 'wav' }, { label: 'FLAC', value: 'flac' }, { label: 'MP3', value: 'mp3' }, { label: 'M4A', value: 'm4a' }]" /></label>
+        <label v-if="draft.defaultFormat === 'wav'">
+          <span>{{ t('audio.wavBitDepth') }}</span>
+          <AppSelect :aria-label="t('audio.wavBitDepth')" :value="draft.wavBitDepth ?? 'FLOAT'"
+            :disabled="readonly" size="small" :options="wavBitDepthOptions" @update:value="draft.wavBitDepth = $event" />
+        </label>
+        <label v-else-if="draft.defaultFormat === 'flac'">
+          <span>{{ t('audio.flacBitDepth') }}</span>
+          <AppSelect :aria-label="t('audio.flacBitDepth')" :value="draft.flacBitDepth ?? 'PCM_24'"
+            :disabled="readonly" size="small" :options="flacBitDepthOptions" @update:value="draft.flacBitDepth = $event" />
+        </label>
         <label v-if="draft.defaultNormalize != null"><span>{{ t('workflows.defaultNormalize') }}</span><AppSelect :aria-label="t('workflows.defaultNormalize')" v-model:value="defaultNormalizeMode" :disabled="readonly" size="small" :options="defaultNormalizeOptions" /></label>
       </div>
       <template #footer><div class="simple-workflow-settings-actions"><n-button v-if="!readonly" size="small" secondary @click="autoLayout(); showWorkflowSettings = false"><template #icon><n-icon :component="LocateOutline" /></template>{{ t('workflows.autoLayout') }}</n-button><n-button size="small" secondary @click="showWorkflowSettings = false">{{ t('common.close') }}</n-button></div></template>

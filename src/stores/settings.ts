@@ -37,6 +37,7 @@ type AppPathsPayload = {
   cliPlatform?: 'windows' | 'macos' | 'linux' | null
   cliExtractAndRun?: boolean
   cliPathSupported?: boolean
+  systemNotificationSupported?: boolean
   dataRoot: string
   settingsDir: string
   modelsDir: string
@@ -106,6 +107,7 @@ type StoredSettings = {
   downloadMethod?: DownloadMethod
   maxConcurrentSeparations?: number
   clearInputAfterSubmit?: boolean
+  taskSystemNotifications?: boolean
   wavBitDepth?: string
   flacBitDepth?: string
   mp3BitRate?: string
@@ -265,6 +267,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const downloadMethod = ref<DownloadMethod>(DEFAULT_DOWNLOAD_METHOD)
   const maxConcurrentSeparations = ref(DEFAULT_CONCURRENT_SEPARATIONS)
   const clearInputAfterSubmit = ref(DEFAULT_CLEAR_INPUT_AFTER_SUBMIT)
+  const taskSystemNotifications = ref(false)
   const wavBitDepth = ref(DEFAULT_WAV_BIT_DEPTH)
   const flacBitDepth = ref(DEFAULT_FLAC_BIT_DEPTH)
   const mp3BitRate = ref(DEFAULT_MP3_BIT_RATE)
@@ -307,6 +310,7 @@ export const useSettingsStore = defineStore('settings', () => {
     downloadMethod: downloadMethod.value,
     maxConcurrentSeparations: maxConcurrentSeparations.value,
     clearInputAfterSubmit: clearInputAfterSubmit.value,
+    taskSystemNotifications: taskSystemNotifications.value,
     wavBitDepth: wavBitDepth.value,
     flacBitDepth: flacBitDepth.value,
     mp3BitRate: normalizeMp3BitRate(mp3BitRate.value),
@@ -377,6 +381,7 @@ export const useSettingsStore = defineStore('settings', () => {
     downloadMethod.value = normalizeDownloadMethod(stored?.downloadMethod)
     maxConcurrentSeparations.value = normalizeConcurrentSeparations(stored?.maxConcurrentSeparations)
     clearInputAfterSubmit.value = stored?.clearInputAfterSubmit ?? DEFAULT_CLEAR_INPUT_AFTER_SUBMIT
+    taskSystemNotifications.value = stored?.taskSystemNotifications === true
     wavBitDepth.value = stored?.wavBitDepth || DEFAULT_WAV_BIT_DEPTH
     flacBitDepth.value = stored?.flacBitDepth || DEFAULT_FLAC_BIT_DEPTH
     mp3BitRate.value = normalizeMp3BitRate(stored?.mp3BitRate)
@@ -452,6 +457,7 @@ export const useSettingsStore = defineStore('settings', () => {
       downloadMethod,
       maxConcurrentSeparations,
       clearInputAfterSubmit,
+      taskSystemNotifications,
       wavBitDepth,
       flacBitDepth,
       mp3BitRate,
@@ -973,6 +979,7 @@ export const useSettingsStore = defineStore('settings', () => {
     downloadMethod,
     maxConcurrentSeparations,
     clearInputAfterSubmit,
+    taskSystemNotifications,
     MAX_CONCURRENT_SEPARATIONS,
     SCALE_FACTOR_MIN,
     SCALE_FACTOR_MAX,

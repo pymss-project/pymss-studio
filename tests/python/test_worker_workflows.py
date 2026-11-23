@@ -348,13 +348,54 @@ class NativeSimpleAudioOperationTests(unittest.TestCase):
         self.addCleanup(worker_workflows._cleanup_workflow_file, task_id)
         with patch.object(self.core, "get_node_type", side_effect=lookup), patch.object(worker_workflows, "emit"):
             result = worker_workflows._run_pymss(
-                {"workflow": definition, "outputFormat": "wav"}, task_id,
+                {"workflow": definition}, task_id,
                 input_path=str(input_path), inputs=None, output_dir=str(root / "results"), output_layout="flat",
             )
         actual, sample_rate = self.load_audio(result["files"][0], sr=None, mono=False)
         self.assertEqual(sample_rate, 44100)
         self.assertEqual(len(result["files"]), expected_file_count)
         return np.asarray(actual).reshape(samples.shape), samples, separation_inputs, result
+
+    def test_native_bit_depth_applies_to_separation_and_audio_operation_saves(self) -> None:
+        from soundfile import info
+
+        cases = [
+            ("wav", None, "FLOAT"), ("flac", None, "PCM_24"),
+            ("wav", "PCM_24", "PCM_24"), ("wav", "PCM_16", "PCM_16"), ("flac", "PCM_16", "PCM_16"),
+        ]
+        for output_format, override, expected in cases:
+            with self.subTest(output_format=output_format, override=override):
+                defaults = {"output_format": output_format}
+                if override is not None:
+                    defaults[f"{output_format}_bit_depth"] = override
+                definition = {
+                    "version": 1, "studio": {"editor": "simple"}, "defaults": defaults,
+                    "steps": [{"id": "split", "model": "fixture", "stems": ["Vocals"], "save": {"Vocals": "Default"}}],
+                    "ensembles": [SimpleAudioOperationTests.operation("invert", ["input"], save="Default")],
+                }
+                _, _, _, result = self.run_workflow(definition, expected_file_count=2)
+                self.assertEqual({item["stem"] for item in result["outputs"]}, {"Vocals", "Audio"})
+                for path in result["files"]:
+                    self.assertEqual(Path(path).suffix, f".{output_format}")
+                    self.assertEqual(info(path).subtype, expected)
+
+    def test_direct_run_normalizes_imported_default_and_step_output_formats(self) -> None:
+        from soundfile import info
+
+        definition = {
+            "version": 1,
+            "defaults": {"output_format": " FLAC ", "flac_bit_depth": "PCM_16", "wav_bit_depth": "PCM_24"},
+            "steps": [{
+                "id": "split", "model": "fixture", "stems": ["Vocals"],
+                "output_format": " WaV ", "save": {"Vocals": "Default"},
+            }],
+            "ensembles": [SimpleAudioOperationTests.operation("invert", ["input"], save="Default")],
+        }
+        _, _, _, result = self.run_workflow(definition, expected_file_count=2)
+        self.assertEqual(
+            {Path(path).suffix: info(path).subtype for path in result["files"]},
+            {".flac": "PCM_16", ".wav": "PCM_24"},
+        )
 
     def test_native_five_stem_sum_preserves_gain_before_ensemble(self) -> None:
         stems = ["Vocals", "Drums", "Bass", "Guitar", "Other"]

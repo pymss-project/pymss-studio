@@ -39,6 +39,7 @@ import {
 import { useModelStore } from '@/stores/model'
 import { useTaskStore } from '@/stores/task'
 import { normalizeConcurrentSeparations } from '@/features/tasks/concurrency'
+import { describeTaskReminder, prepareTaskNotifications, showTaskNotification } from '@/features/tasks/reminders'
 import { formatBytes } from '@/utils/format'
 import { formatDateTime } from '@/utils/time'
 import { DEFAULT_SCALE_FACTOR, normalizeScaleFactor } from '@/utils/appZoom'
@@ -74,6 +75,7 @@ import {
   ChevronForwardOutline,
   CompassOutline,
   OptionsOutline,
+  NotificationsOutline,
 } from '@vicons/ionicons5'
 
 const { t, locale: currentLocale } = useI18n()
@@ -89,6 +91,34 @@ const app = useAppStore()
 const updates = useUpdateStore()
 const modelStore = useModelStore()
 const task = useTaskStore()
+const systemNotificationSupported = computed(() => settings.appPaths?.systemNotificationSupported === true)
+const canPreviewTaskNotification = computed(() => import.meta.env.DEV && systemNotificationSupported.value)
+const preparingTaskNotifications = ref(false)
+
+async function setTaskNotifications(enabled: boolean) {
+  if (preparingTaskNotifications.value || !systemNotificationSupported.value) return
+  if (!enabled) {
+    settings.taskSystemNotifications = false
+    return
+  }
+  preparingTaskNotifications.value = true
+  try {
+    await prepareTaskNotifications()
+    settings.taskSystemNotifications = true
+  } catch (error) {
+    message.error(t('settings.taskNotificationSetupFailed', { detail: String(error) }))
+  } finally {
+    preparingTaskNotifications.value = false
+  }
+}
+
+function previewTaskNotification() {
+  const { title, body } = describeTaskReminder('model', { done: 3, failed: 0, cancelled: 0 })
+  void prepareTaskNotifications()
+    .then(() => showTaskNotification(`${t('settings.systemNotificationPreview')} · ${title}`, body))
+    .catch(() => message.error(t('settings.taskNotificationUnavailable')))
+}
+
 type SettingsSection = 'about' | 'appearance' | 'runtime' | 'paths' | 'defaults'
 type BuildInfo = {
   version: string
@@ -2441,6 +2471,34 @@ onMounted(async () => {
               </div>
             </section>
 
+            <section class="settings-group settings-group--soft" aria-labelledby="task-reminders-title">
+              <div class="settings-group__head" id="task-reminders-title">
+                <span class="settings-group__icon">
+                  <n-icon :component="NotificationsOutline" size="16" />
+                </span>
+                <span>{{ t('settings.taskReminders') }}</span>
+              </div>
+              <div class="setting-switch-row">
+                <div class="setting-switch-row__copy">
+                  <span class="text-muted text-sm">{{ t('settings.taskSystemNotifications') }}</span>
+                  <p id="task-reminders-hint" class="text-muted text-sm setting-field__hint">
+                    {{ systemNotificationSupported ? t('settings.taskRemindersHint') : t('settings.taskSystemNotificationsUnavailable') }}
+                  </p>
+                </div>
+                <div class="task-reminder-row__actions">
+                  <n-button v-if="canPreviewTaskNotification" size="small" ghost
+                    :aria-label="t('settings.sendNotificationPreviewLabel')" @click="previewTaskNotification">
+                    {{ t('settings.sendNotificationPreview') }}
+                  </n-button>
+                  <n-switch :value="systemNotificationSupported && settings.taskSystemNotifications"
+                    :disabled="!systemNotificationSupported" :aria-disabled="!systemNotificationSupported"
+                    :loading="preparingTaskNotifications"
+                    :aria-label="t('settings.taskSystemNotifications')" aria-describedby="task-reminders-hint"
+                    @update:value="setTaskNotifications" />
+                </div>
+              </div>
+            </section>
+
             <section class="settings-group settings-group--soft">
               <div class="settings-group__head">
                 <span class="settings-group__icon">
@@ -4083,6 +4141,12 @@ onMounted(async () => {
   display: grid;
   gap: 6px;
   min-width: 0;
+}
+
+.task-reminder-row__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .settings-merged-layout {

@@ -5,6 +5,7 @@
 #define MyAppVersion GetEnv("PYMSS_VERSION") == "" ? "0.0.1" : GetEnv("PYMSS_VERSION")
 #define MyAppPublisher "TheSmallHanCat"
 #define MyAppExeName "Pymss Studio.exe"
+#define MyAppUserModelId "studio.pymss.desktop"
 #define SourceDir GetEnv("PYMSS_PORTABLE_DIR")
 #define OutputDir GetEnv("PYMSS_INSTALLER_OUTPUT") == "" ? "..\release" : GetEnv("PYMSS_INSTALLER_OUTPUT")
 #define PackageSuffix GetEnv("PYMSS_PACKAGE_SUFFIX") == "" ? "windows-x64-cuda" : GetEnv("PYMSS_PACKAGE_SUFFIX")
@@ -71,8 +72,8 @@ Source: "{#SourceDir}\python-runtime\runtime-envs\*"; DestDir: "{app}\python-run
 Name: "{app}\python-runtime\runtime-envs"; Permissions: users-modify
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; AppUserModelID: "{#MyAppUserModelId}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; AppUserModelID: "{#MyAppUserModelId}"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\bin\VC_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Microsoft Visual C++ Runtime..."; Flags: waituntilterminated runhidden skipifdoesntexist; Check: not IsVCRedistX64Installed

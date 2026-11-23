@@ -44,7 +44,11 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 pymss-audio-host = { path = "../native/audio-host", optional = true }
 
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+notify-rust = "4.18"
+
 [target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Storage_EnhancedStorage", "Win32_Storage_FileSystem", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem"] }
 windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp", "Win32_System_SystemInformation", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(unix)'.dependencies]
@@ -54,7 +58,11 @@ libc = "0.2"
 gtk = "0.18"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
 flate2 = "1"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSError", "NSString", "NSURL", "NSUUID"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 tar = "0.4"
 
 [dev-dependencies]
