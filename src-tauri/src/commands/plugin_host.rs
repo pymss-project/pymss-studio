@@ -683,8 +683,14 @@ impl HostProcess {
     }
 
     fn request_live_with(&mut self, request: Value, timeout: Duration, detector: &mut impl FnMut(u32) -> Option<String>) -> Result<Value, HostRequestError> {
-        self.finish_pending_with(detector)?;
         let operation = request.get("op").and_then(Value::as_str).unwrap_or("").to_owned();
+        let unloading_load = operation == "unload"
+            && self.pending.as_ref().is_some_and(|pending| pending.operation == "load");
+        match self.finish_pending_with(detector) {
+            // A rejected load leaves the helper alive. Still send the requested cleanup.
+            Err(HostRequestError::Operation(_)) if unloading_load => {}
+            result => result?,
+        }
         if self.live_closed {
             return if matches!(operation.as_str(), "unload" | "shutdown") { Ok(json!({"closed":true})) }
                 else { Err(HostRequestError::Operation("The previous request closed the audio session. Reload the project before retrying".into())) };

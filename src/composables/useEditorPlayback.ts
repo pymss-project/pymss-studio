@@ -5,6 +5,7 @@ import i18n from '@/i18n'
 import { normalizeMasterLimiter } from '@/utils/masterLimiter'
 import masterLimiterWorkletUrl from '@/audio/masterLimiterProcessor.js?url'
 import { clipIsActive, clipMediaTime, clipsForTrack } from '@/utils/editorClips'
+import { pluginChainSignature } from '@/utils/editorPlugins'
 import { createEditorAudioElement, createPreviewChunkReader, EditorTimelinePlayback, type TimelineAudioClip } from '@/utils/editorAudio'
 import type { EditorClip, EditorSource, EditorTrack } from '@/types/editor'
 import type { useEditorStore } from '@/stores/editor'
@@ -89,6 +90,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
   const nativePlayback = useEditorNativePlayback(editor, () => followPlayhead())
   const audioEntries = new Map<string, ManagedAudio>()
 
+  let webPlaybackProjectId: string | null = null
   let rafId: number | null = null
   let playbackAnchorTime = 0
   let activeRequestId = 0
@@ -112,6 +114,14 @@ export function useEditorPlayback(options: PlaybackOptions) {
   let masterMeterAnalyserRight: AnalyserNode | null = null
   const analyserBufferCache = new WeakMap<AnalyserNode, Uint8Array<ArrayBuffer>>()
   const audioParamValueCache = new WeakMap<AudioParam, number>()
+
+  function webOwnsPlayback() {
+    return webPlaybackProjectId !== null && webPlaybackProjectId === editor.session?.id && intent.value === 'play'
+  }
+
+  function usesNativePlayback() {
+    return nativePlayback.required.value && !webOwnsPlayback()
+  }
 
   function setAudioParamValue(param: AudioParam, value: number) {
     if (audioParamValueCache.get(param) === value) return
@@ -173,7 +183,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
 
   async function syncMasterLimiter() {
     const config = normalizeMasterLimiter(editor.session?.masterLimiter)
-    if (disposed || nativePlayback.required.value || !audioContext) return
+    if (disposed || usesNativePlayback() || !audioContext) return
     if (config.enabled && activeClips().some(({ clip }) => audioEntries.get(clip.id)?.graphEnabled === false)) {
       throw new Error(ERROR_AUDIO_CONTEXT)
     }
@@ -190,7 +200,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
         await ctx.audioWorklet.addModule(masterLimiterWorkletUrl)
         masterLimiterModuleLoaded = true
       }
-      if (disposed || audioContext !== ctx || nativePlayback.required.value) return
+      if (disposed || audioContext !== ctx || usesNativePlayback()) return
       const latest = normalizeMasterLimiter(editor.session?.masterLimiter)
       if (!latest.enabled) return
       const node = new AudioWorkletNode(ctx, 'pymss-master-limiter', {
@@ -208,7 +218,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
         masterBalanceMerger!.connect(masterMeterSplitter!)
         masterBalanceMerger!.connect(ctx.destination)
         // A retained bypass node must not fail dry playback or the native graph.
-        if (!nativePlayback.required.value && normalizeMasterLimiter(editor.session?.masterLimiter).enabled) {
+        if (!usesNativePlayback() && normalizeMasterLimiter(editor.session?.masterLimiter).enabled) {
           failPlayback(activeRequestId, new Error(String(i18n.global.t('editor.limiter.failed'))))
         }
       }
@@ -220,7 +230,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
     })().catch(cause => {
       // Setup is shared by startup and live edits. Ignore a late failure when
       // the current playback no longer needs this limiter or audio context.
-      if (disposed || audioContext !== ctx || nativePlayback.required.value
+      if (disposed || audioContext !== ctx || usesNativePlayback()
         || !normalizeMasterLimiter(editor.session?.masterLimiter).enabled) return
       throw cause
     }).finally(() => { masterLimiterSetup = null })
@@ -691,11 +701,11 @@ export function useEditorPlayback(options: PlaybackOptions) {
   }
 
   async function preloadActiveTracks() {
-    if (disposed || nativePlayback.required.value) return
+    if (disposed || usesNativePlayback()) return
     const projectId = editor.session?.id
     const entries = activeClips().map(({ track, clip, source }) => ensureAudioEntry(track, clip, source))
     await Promise.allSettled(entries.map((entry) => entry.metadataPromise))
-    if (disposed || projectId !== editor.session?.id) return
+    if (disposed || projectId !== editor.session?.id || usesNativePlayback()) return
     const timeline = ensureTimelinePlayback()
     if (timeline) {
       // Warm just the current window; a project does not wait for full decode.
@@ -858,6 +868,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
 
   function failPlayback(id: number, cause: unknown) {
     if (id !== activeRequestId) return
+    webPlaybackProjectId = null
     stopRaf()
     playback.fail(id, cause instanceof Error ? cause.message : String(cause))
     // Failure also cancels pending resume/play/metadata work. Their subsequent
@@ -918,6 +929,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
   }
 
   function releaseAudios() {
+    webPlaybackProjectId = null
     timelinePlayback?.dispose()
     timelinePlayback = null
     pauseAllAudios()
@@ -1027,7 +1039,8 @@ export function useEditorPlayback(options: PlaybackOptions) {
   }
 
   async function requestPlay(offset = currentTime.value) {
-    if (nativePlayback.required.value) {
+    if (usesNativePlayback()) {
+      activeRequestId = playback.nextRequest()
       stopRaf()
       releaseAudios()
       return nativePlayback.play(offset)
@@ -1046,6 +1059,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
       return rejectPlay(ERROR_NO_PLAYABLE_TRACKS)
     }
 
+    webPlaybackProjectId = editor.session.id
     const id = playback.beginRequest('play', 'starting')
     activeRequestId = id
 
@@ -1059,7 +1073,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
     if (intent.value !== 'play') return false
 
     if (playableCount <= 0) {
-      if (!error.value) playback.fail(id, ERROR_NO_LOADED_AUDIO)
+      if (!error.value) failPlayback(id, ERROR_NO_LOADED_AUDIO)
       return false
     }
 
@@ -1081,8 +1095,9 @@ export function useEditorPlayback(options: PlaybackOptions) {
   }
 
   function requestPause(reset = false) {
-    if (nativePlayback.required.value) return nativePlayback.pause(reset)
+    if (usesNativePlayback()) return nativePlayback.pause(reset)
     const nextTime = reset ? 0 : clampTime(sampleCurrentTime())
+    webPlaybackProjectId = null
     const id = playback.beginRequest('pause', 'pausing')
     activeRequestId = id
     finishPaused(id, nextTime)
@@ -1129,7 +1144,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
 
   function seek(time: number) {
     const next = clampTime(time)
-    if (nativePlayback.required.value) return nativePlayback.seek(next)
+    if (usesNativePlayback()) return nativePlayback.seek(next)
     const playing = intent.value === 'play'
     const id = playback.beginRequest(playing ? 'play' : 'pause', playing ? 'starting' : 'paused')
     activeRequestId = id
@@ -1141,7 +1156,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
       void syncActiveAudios(next, id).then((count) => {
         if (id !== activeRequestId || intent.value !== 'play') return
         if (count <= 0) {
-          playback.fail(id, ERROR_NO_LOADED_AUDIO)
+          failPlayback(id, ERROR_NO_LOADED_AUDIO)
           return
         }
         if (!playback.finishPlay(id)) return
@@ -1154,7 +1169,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
   }
 
   function applyMasterVolume() {
-    if (nativePlayback.required.value) return
+    if (usesNativePlayback()) return
     applyMasterAudioSettings()
     for (const { track, clip, source } of activeClips()) {
       const entry = ensureAudioEntry(track, clip, source)
@@ -1175,7 +1190,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
   watch(trackMixSignature, applyMasterVolume)
 
   watch(() => editor.masterPan, () => {
-    if (nativePlayback.required.value) return
+    if (usesNativePlayback()) return
     applyMasterAudioSettings()
   })
 
@@ -1191,14 +1206,14 @@ export function useEditorPlayback(options: PlaybackOptions) {
   watch(
     () => trackSignature(),
     () => {
-      if (nativePlayback.required.value) return
+      if (usesNativePlayback()) return
       if (intent.value === 'play') {
         const id = playback.beginRequest('play', 'starting')
         activeRequestId = id
         void syncActiveAudios(currentTime.value, id).then((count) => {
           if (id !== activeRequestId || intent.value !== 'play') return
           if (count <= 0) {
-            playback.fail(id, ERROR_NO_LOADED_AUDIO)
+            failPlayback(id, ERROR_NO_LOADED_AUDIO)
             return
           }
           if (!playback.finishPlay(id)) return
@@ -1215,15 +1230,38 @@ export function useEditorPlayback(options: PlaybackOptions) {
     { immediate: true },
   )
 
-  watch(nativePlayback.required, (required) => {
-    stopRaf()
-    releaseAudios()
-    if (required) {
-      activeRequestId = playback.nextRequest()
-      playback.finishPause(activeRequestId)
+  function pendingPluginChain() {
+    const project = editor.session
+    if (!project || !nativePlayback.required.value || !webOwnsPlayback()) return ''
+    return pluginChainSignature(project)
+  }
+
+  watch([nativePlayback.required, () => editor.session, pendingPluginChain], ([required, project], [wasRequired]) => {
+    if (!required || !project) {
+      if (wasRequired && webOwnsPlayback()) playback.clearError()
+      return
     }
-    // Leaving the native graph already starts its asynchronous pause. Keep that
-    // request current so its response can settle the transport before Web Audio resumes.
+    if (!webOwnsPlayback()) {
+      if (!wasRequired) {
+        stopRaf()
+        releaseAudios()
+      }
+      return
+    }
+    const isCurrent = () => !disposed && project === editor.session && nativePlayback.required.value && webOwnsPlayback()
+    playback.clearError()
+    void nativePlayback.play(currentTime.value, {
+      isCurrent,
+      takePosition() {
+        const position = clampTime(sampleCurrentTime())
+        activeRequestId = playback.nextRequest()
+        stopRaf()
+        releaseAudios()
+        return position
+      },
+    }).catch(cause => {
+      if (isCurrent()) error.value = cause instanceof Error ? cause.message : String(cause)
+    })
   })
 
   onBeforeUnmount(() => {

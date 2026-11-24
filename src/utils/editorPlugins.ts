@@ -148,6 +148,13 @@ export function projectPluginSlots(project: EditorSession) {
   return [...(project.pluginChain || []), ...project.tracks.flatMap(track => track.pluginChain || [])]
 }
 
+export function pluginChainSignature(project: EditorSession) {
+  return JSON.stringify([
+    project.pluginChain || [],
+    project.tracks.filter(track => track.pluginChain?.length).map(track => [track.id, track.pluginChain]),
+  ])
+}
+
 export function hasEditorPlugins(project: EditorSession | null | undefined) {
   return Boolean(project && projectPluginSlots(project).length)
 }

@@ -377,6 +377,11 @@ impl Session {
         Ok(self.status())
     }
 
+    #[cfg(test)]
+    pub(crate) fn start_test_transport(&self, frame: u64) {
+        self.clock.transition(frame, true);
+    }
+
     pub fn seek(&mut self, position: f64) -> Result<Value, String> {
         let frame = self.frame(position)?;
         self.transport_playing = self.playback_intent();

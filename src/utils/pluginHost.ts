@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import i18n from '@/i18n'
 import type { EditorPluginSlot, EditorSession } from '@/types/editor'
-import { pluginProcessingProject, pluginProjectBlockReason, pluginProjectSignature, projectPluginSlots } from './editorPlugins'
+import { pluginChainSignature, pluginProcessingProject, pluginProjectBlockReason, pluginProjectSignature, projectPluginSlots } from './editorPlugins'
 
 export type PluginHostCapabilities = { enabled: boolean; platform: string; formats: string[]; nativeEditor: boolean; nativeEditorFormats?: string[]; recording?: boolean; experimental: boolean; labBuild?: boolean; scanControl?: boolean; catalogCache?: boolean; nativeTransport?: boolean; defaultDirectories?: string[] }
 export type PluginDescriptor = { id: string; classId: string; name: string; vendor: string; version: string; path: string; isInstrument: boolean | null; format?: string; auVersion?: 2 | 3; isShellChild?: boolean; category?: string; subCategories?: string[]; rawCategory?: number | null; componentType?: number; componentSubtype?: number; componentManufacturer?: number }
@@ -18,6 +18,8 @@ export class PluginHostDialogPendingError extends Error {
 }
 type Session = PluginSessionState & { signature: string; capturedRevision: number; lastStatus: number; lastFallback: number; nativeTransport: boolean; transportRevision?: number }
 let loaded: Session | null = null
+let pendingLoad: { project: EditorSession; signature: string; chainSignature: string } | null = null
+let pendingUpdate: { session: Session; signature: string } | null = null
 let operationQueue: Promise<unknown> = Promise.resolve()
 let capabilities: Promise<PluginHostCapabilities> | null = null
 let monitor: ReturnType<typeof setTimeout> | null = null
@@ -126,14 +128,21 @@ function observeResponse(request: Record<string, unknown>, value: unknown) {
 
 async function requestNow<T>(request: Record<string, unknown>): Promise<T> {
   const current = loaded
+  const update = current && request.projectId === current.project.id && pendingUpdate?.session === current ? pendingUpdate : null
   try {
     const result = await invoke<T>('plugin_host_request', { request })
+    // The native host drains a deferred update before returning the next successful reply.
+    if (update) {
+      update.session.signature = update.signature
+      pendingUpdate = null
+    }
     observeResponse(request, result)
     return result
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause)
     const interactionRequired = message.startsWith('PLUGIN_HOST_DIALOG_PENDING:')
     const failure = interactionRequired ? new PluginHostDialogPendingError() : cause
+    if (update && !interactionRequired) pendingUpdate = null
     if (interactionRequired && current && loaded === current && request.projectId === current.project.id) {
       current.interactionRequired = true; current.error = (failure as Error).message; current.dirty = true
       publish()
@@ -160,15 +169,43 @@ export function assertPluginProjectSupported(project: EditorSession, formats?: r
   if (pluginProjectBlockReason(project, formats)) throw new Error(String(i18n.global.t('editor.plugins.formatBlocked')))
 }
 
+function acceptPluginLoad(project: EditorSession, signature: string, response: Partial<PluginHostStatus>, hostCapabilities: PluginHostCapabilities) {
+  recoveryGenerations.delete(project)
+  pendingUpdate = null
+  loaded = { project, sessionId: response.sessionId || `session-${++sessionSequence}`, revision: response.stateRevision || 0,
+    capturedRevision: -1, dirty: true, error: null, signature, unavailable: false, unavailablePlugins: response.unavailablePlugins || [], openEditors: response.openEditors || [], lastStatus: 0, lastFallback: Date.now(), nativeTransport: hostCapabilities.nativeTransport ?? Number.isSafeInteger(response.transportRevision), transportOwner: response.transportOwner,
+    transportRevision: Number.isSafeInteger(response.transportRevision) && Number(response.transportRevision) >= 0 ? response.transportRevision : undefined }
+  publish()
+  scheduleMonitor()
+}
+
 async function ensureNow(project: EditorSession) {
   const hostCapabilities = await pluginHostCapabilities()
   assertPluginProjectSupported(project, hostCapabilities.formats || ['vst3'])
   if (!hostCapabilities.enabled) throw new Error(String(i18n.global.t('editor.plugins.unavailable')))
   if (loaded?.unavailable) throw new Error(String(i18n.global.t('editor.plugins.stateReloadRequired')))
   if (loaded && loaded.project !== project && (loaded.dirty || loaded.error)) throw new Error(loaded.error || String(i18n.global.t('editor.plugins.stateCaptureUnavailable')))
+  if (pendingLoad) {
+    const pending = pendingLoad
+    try {
+      // Status drains the outstanding load. Sending another load would replace the helper and reopen the dialog.
+      const response = await requestNow<PluginHostStatus>({ op: 'status', projectId: pending.project.id })
+      pendingLoad = null
+      if (pending.project === project) acceptPluginLoad(project, pending.signature, response, hostCapabilities)
+    } catch (cause) {
+      if (cause instanceof PluginHostDialogPendingError) throw cause
+      pendingLoad = null
+      // The error belongs to the chain that actually opened the dialog.
+      if (pending.project === project && pending.chainSignature === pluginChainSignature(project)) throw cause
+    }
+  }
+  if (loaded?.project === project && (loaded.interactionRequired || pendingUpdate?.session === loaded)) {
+    await requestNow<PluginHostStatus>({ op: 'status', projectId: project.id })
+  }
   const signature = pluginProjectSignature(project)
   if (loaded?.project === project && !loaded.unavailable && loaded.signature === signature) return
   const op = loaded?.project === project && !loaded.unavailable ? 'update' : 'load'
+  const loadChainSignature = op === 'load' ? pluginChainSignature(project) : undefined
   const previousSlots = op === 'update' && loaded ? projectPluginSlots(JSON.parse(loaded.signature) as EditorSession) : []
   const stateRestoreSlotIds = projectPluginSlots(project).filter(slot => previousSlots.some(previous => previous.id === slot.id
     && previous.path === slot.path && previous.pluginId === slot.pluginId && previous.state !== slot.state)).map(slot => slot.id)
@@ -181,6 +218,12 @@ async function ensureNow(project: EditorSession) {
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause)
     const accepted = /^PLUGIN_HOST_RECOVERY_LOAD_FAILED:(\d+):([\s\S]*)$/.exec(message)
+    if (loadChainSignature !== undefined && cause instanceof PluginHostDialogPendingError && !loaded) {
+      pendingLoad = { project, signature, chainSignature: loadChainSignature }
+    }
+    if (op === 'update' && cause instanceof PluginHostDialogPendingError && loaded?.project === project) {
+      pendingUpdate = { session: loaded, signature }
+    }
     if (expectedGeneration !== undefined && accepted && Number.isSafeInteger(Number(accepted[1]))
       && Number(accepted[1]) === expectedGeneration + 1 && recoveryGenerations.get(project) === expectedGeneration) {
       recoveryGenerations.set(project, Number(accepted[1]))
@@ -189,14 +232,15 @@ async function ensureNow(project: EditorSession) {
     }
     throw cause
   }
-  recoveryGenerations.delete(project)
   if (op === 'load' || !loaded || loaded.project !== project) {
-    loaded = { project, sessionId: response.sessionId || `session-${++sessionSequence}`, revision: response.stateRevision || 0,
-      capturedRevision: -1, dirty: true, error: null, signature, unavailable: false, unavailablePlugins: response.unavailablePlugins || [], openEditors: response.openEditors || [], lastStatus: 0, lastFallback: Date.now(), nativeTransport: hostCapabilities.nativeTransport ?? Number.isSafeInteger(response.transportRevision), transportOwner: response.transportOwner,
-      transportRevision: Number.isSafeInteger(response.transportRevision) && Number(response.transportRevision) >= 0 ? response.transportRevision : undefined }
-    publish()
-  } else { loaded.signature = signature; loaded.error = null }
-  scheduleMonitor()
+    pendingLoad = null
+    acceptPluginLoad(project, signature, response, hostCapabilities)
+  } else {
+    recoveryGenerations.delete(project)
+    loaded.signature = signature
+    loaded.error = null
+    scheduleMonitor()
+  }
 }
 export function ensurePluginSession(project: EditorSession) { return enqueue(() => ensureNow(project)) }
 
@@ -256,6 +300,27 @@ export function snapshotPluginStates(project: EditorSession, options: { force?: 
       throw cause
     }
   })
+}
+
+export async function unloadPendingPluginLoad(projectId: string) {
+  const pending = await enqueue(async () => pendingLoad?.project.id === projectId ? pendingLoad : null)
+  if (!pending) return false
+  for (;;) {
+    const finished = await enqueue(async () => {
+      if (pendingLoad !== pending) return true
+      try {
+        await requestNow({ op: 'unload', projectId })
+      } catch (cause) {
+        if (cause instanceof PluginHostDialogPendingError) return false
+        pendingLoad = null
+        throw cause
+      }
+      pendingLoad = null
+      return true
+    })
+    if (finished) return true
+    await new Promise<void>(resolve => setTimeout(resolve, 200))
+  }
 }
 
 export function unloadPluginSession(projectId: string, options: { discardUnsaved?: boolean } = {}) {

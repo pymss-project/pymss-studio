@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { masterLimiterRenderRate, normalizeMasterLimiter } from '@/utils/masterLimiter'
 import { createLogger } from '@/utils/logger'
 import { clonePluginChain, hasEditorPlugins, neutralPluginRenderProject, normalizePluginChain, pluginProcessingProject, projectPluginSlots, pluginProjectVersion } from '@/utils/editorPlugins'
-import { assertPluginProjectSupported, currentPluginSession, discardUnavailablePluginSession, observePluginSession, PluginHostDialogPendingError, pluginHostCapabilities, reloadPluginSession, snapshotPluginStates, unloadPluginSession, type PluginSessionState } from '@/utils/pluginHost'
+import { assertPluginProjectSupported, currentPluginSession, discardUnavailablePluginSession, observePluginSession, PluginHostDialogPendingError, pluginHostCapabilities, reloadPluginSession, snapshotPluginStates, unloadPendingPluginLoad, unloadPluginSession, type PluginSessionState } from '@/utils/pluginHost'
 import { computed, onScopeDispose, ref, watch } from 'vue'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
@@ -890,6 +890,7 @@ export const useEditorStore = defineStore('editor', () => {
 
 
   async function releasePluginSession(project: EditorSession) {
+    if (await unloadPendingPluginLoad(project.id)) return
     if (currentPluginSession()?.project.id !== project.id) return
     if (pluginSaveTimer) clearTimeout(pluginSaveTimer)
     pluginSaveTimer = null
@@ -1713,21 +1714,38 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   async function relinkSource(sourceId: string, pickedPath?: string | null) {
-    if (!session.value) throw new Error('Editor session is not loaded')
-    const source = session.value.sources.find((item) => item.id === sourceId)
-    if (!source) throw new Error('Source asset not found')
+    const project = session.value
+    if (!project) throw new Error('Editor session is not loaded')
+    if (!project.sources.some((source) => source.id === sourceId)) throw new Error('Source asset not found')
     const resolvedPath = pickedPath ?? await pickRelinkFile()
-    if (!resolvedPath) return null
+    if (!resolvedPath || session.value !== project) return null
     const result = await invoke<RelinkEditorSourcesResult>('relink_editor_sources', {
       payload: {
-        projectId: session.value.id,
+        projectId: project.id,
         sourceId,
         pickedPath: resolvedPath,
       },
     })
-    session.value = normalizeSession(result.project)
-    await hydratePeaksFromCache(session.value.id)
-    hydrateSessionSourcesInBackground(session.value.id)
+    if (session.value !== project) return null
+    // Relinking changes source records. The saved project may predate live edits.
+    const sources = new Map(result.project.sources.map(source => [source.id, source]))
+    project.sources = project.sources.map(source => {
+      const linked = sources.get(source.id)
+      if (!linked) return source
+      return {
+        ...source,
+        path: linked.path,
+        missing: Boolean(linked.missing),
+        originKind: linked.originKind,
+        originRoot: linked.originRoot,
+        relativePath: linked.relativePath,
+        ...(linked.path !== source.path ? { peaksPath: null, peaks: [], channelPeaks: [] } : {}),
+      }
+    })
+    project.updatedAt = Math.max(project.updatedAt, Number(result.project.updatedAt || 0))
+    scheduleSave()
+    await hydratePeaksFromCache(project.id)
+    if (session.value === project) hydrateSessionSourcesInBackground(project.id)
     return result
   }
 
@@ -1771,16 +1789,10 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   function toggleTrackFlag(trackId: string, flag: 'muted' | 'solo') {
-    const tracks = session.value?.tracks
-    const track = tracks?.find((item) => item.id === trackId)
-    if (!tracks || !track) return
+    const track = session.value?.tracks.find((item) => item.id === trackId)
+    if (!track) return
     pushHistory()
-    if (flag === 'solo') {
-      const enabled = !track.solo
-      for (const item of tracks) item.solo = item.id === trackId && enabled
-    } else {
-      track.muted = !track.muted
-    }
+    track[flag] = !track[flag]
     scheduleSave()
   }
 

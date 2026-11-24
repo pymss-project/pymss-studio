@@ -365,17 +365,11 @@ fn host_tick(
                     }
                 }
             }
-            let mut resume = false;
-            let mut position = 0.0;
             let mut looping = false;
             let mut open = Vec::new();
             let mut suppressed = Vec::new();
             if let Some(current) = session.as_mut() {
-                let status = current.status();
-                resume = op == "update" && !offline && status["playing"].as_bool().unwrap_or(false);
-                position = status["position"].as_f64().unwrap_or(0.0);
                 looping = current.looping;
-                current.pause()?;
                 if op == "update" {
                     suppressed = current
                         .suppressed_track_ids()
@@ -390,6 +384,8 @@ fn host_tick(
                     let snapshot = current.snapshot()?;
                     preserve_states_except(&mut spec, &current.spec, &snapshot, &restore);
                     open = current.open_editors();
+                } else {
+                    current.pause()?;
                 }
             }
             let mut new_session = match sample_rate {
@@ -399,18 +395,33 @@ fn host_tick(
             if !suppressed.is_empty() {
                 new_session.monitor(suppressed)?;
             }
+            // Keep the old graph running while the replacement is prepared and
+            // transfer its latest cursor when swapping outputs.
+            let previous = session
+                .as_ref()
+                .filter(|_| op == "update")
+                .map(Session::status);
+            let resume = !offline
+                && previous
+                    .as_ref()
+                    .and_then(|status| status["playing"].as_bool())
+                    .unwrap_or(false);
+            let position = previous
+                .as_ref()
+                .and_then(|status| status["position"].as_f64())
+                .unwrap_or(0.0);
             *session = Some(new_session);
             let current = session.as_mut().ok_or("Audio session is unavailable")?;
-            for slot in open {
-                if current.has_editor(&slot) {
-                    current.editor(&slot, true)?;
-                }
-            }
             if resume {
                 current.play(position, looping)?;
             } else if op == "update" {
                 current.looping = looping;
                 current.seek(position)?;
+            }
+            for slot in open {
+                if current.has_editor(&slot) {
+                    current.editor(&slot, true)?;
+                }
             }
             return Ok(Some(current.status()));
         }
@@ -507,7 +518,19 @@ fn host_tick(
             value["transportRevision"] = json!(soundcraft_vst3_host::editor_transport_revision(owner));
             respond(id, Ok(value));
         }
-        Err(error) => respond(id, Err(error)),
+        Err(error) => {
+            // An update can leave the old graph running if replacement fails.
+            // Stop it before replying, including when a later RPC drains this error.
+            if op == "update"
+                && let Some(current) = session.as_mut()
+                && message.pointer("/project/id").and_then(Value::as_str)
+                    == Some(current.spec.id.as_str())
+                && let Err(cause) = current.pause()
+            {
+                current.fail(cause);
+            }
+            respond(id, Err(error));
+        }
         Ok(None) => {}
     }
     true
@@ -773,6 +796,23 @@ mod tests {
         let mut session = None;
         let mut pending = Some(RenderRequest { id: 12, progress: false });
         assert!(!host_tick(&input, &mut session, &mut pending, &mut None));
+    }
+
+    #[test]
+    fn rejected_update_stops_the_matching_graph_at_its_current_position() {
+        let mut spec = session("unused");
+        spec.plugin_chain.clear();
+        let active = Session::load_at_rate(spec, PathBuf::from("ffmpeg"), 48000, false).unwrap();
+        active.start_test_transport(12000);
+        let mut session = Some(active);
+        let (tx, input) = bounded(1);
+        for (project, playing) in [("other", true), ("one", false)] {
+            tx.send(Ok(json!({"id": 1, "op": "update", "sampleRate": 0, "project": {"id": project}}))).unwrap();
+            assert!(host_tick(&input, &mut session, &mut None, &mut None));
+            let status = session.as_ref().unwrap().status();
+            assert_eq!(status["playing"], playing);
+            assert_eq!(status["position"], 0.25);
+        }
     }
 
     #[test]

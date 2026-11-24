@@ -271,6 +271,20 @@ fn absent_modal_keeps_the_original_timeout_and_dismissed_modal_has_a_bounded_dea
 
 #[cfg(any(unix, windows))]
 #[test]
+fn unload_releases_the_helper_after_a_deferred_load_is_rejected() {
+    let mut fixture = Fixture::new();
+    fixture.suspend("load", Duration::from_millis(30));
+    fixture.replies.send(Ok(json!({"id":1,"ok":false,"error":"Plugin load failed"}))).unwrap();
+    let result = fixture.process().request_live_with(
+        json!({"op":"unload"}), REQUEST_TIMEOUT, &mut |_| None,
+    );
+    assert!(result.is_ok());
+    assert!(fixture.process().live_closed);
+    assert_eq!(fixture.requests.lock().unwrap()[1]["op"], "unload");
+}
+
+#[cfg(any(unix, windows))]
+#[test]
 fn deferred_snapshot_is_drained_but_only_a_new_snapshot_is_returned_for_persistence() {
     let mut fixture = Fixture::new();
     fixture.suspend("snapshot", Duration::from_millis(30));

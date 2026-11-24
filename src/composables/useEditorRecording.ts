@@ -14,7 +14,7 @@ type RecordingOptions = {
   editor: EditorStore
   currentTime: Ref<number>
   requestPlayback: (offset?: number) => Promise<boolean>
-  pausePlayback: () => void
+  pausePlayback: () => boolean | Promise<boolean>
   followPlayhead?: () => void
 }
 
@@ -329,7 +329,6 @@ export function useEditorRecording(options: RecordingOptions) {
       const selectedTrack = editor.selectedTrack
       const targetTrack = selectedTrack?.role === 'recording' ? selectedTrack : editor.addRecordingTrack()
       targetTrackId.value = targetTrack.id
-      playback.setSuppressedTrackIds([targetTrack.id])
 
       mediaSource = audioContext.createMediaStreamSource(mediaStream)
       processor = audioContext.createScriptProcessor(4096, 1, 1)
@@ -358,7 +357,15 @@ export function useEditorRecording(options: RecordingOptions) {
         playback.setRecordingProjectId(projectId)
         ownsRecordingTransport = true
         playback.setLoop(false)
-        pausePlayback()
+      }
+      const paused = await pausePlayback()
+      assertStartCurrent(generation, projectId)
+      if (!paused) throw new Error(playback.error || message('editor.recordingPlaybackFailed'))
+      if (hasEditorPlugins(editor.session) !== nativeRecording) {
+        throw new Error(message('editor.recordingPlaybackChanged'))
+      }
+      playback.setSuppressedTrackIds([targetTrack.id])
+      if (nativeRecording) {
         const started = await requestPlayback(startTime.value)
         assertStartCurrent(generation, projectId)
         if (hasEditorPlugins(editor.session) !== nativeRecording) {
@@ -370,10 +377,7 @@ export function useEditorRecording(options: RecordingOptions) {
       recordingStartedAt = performance.now() / 1000
       elapsed.value = 0
       timerRaf = requestAnimationFrame(updateRecordingTimer)
-      if (!nativeRecording) {
-        pausePlayback()
-        void requestPlayback(startTime.value)
-      }
+      if (!nativeRecording) void requestPlayback(startTime.value)
       return true
     } catch (cause) {
       if (generation === lifecycleGeneration) allocationPromise = null

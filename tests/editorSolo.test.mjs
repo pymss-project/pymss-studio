@@ -41,28 +41,32 @@ function environment(t) {
 const soloIds = editor => editor.session.tracks.filter(track => track.solo).map(track => track.id)
 const mutedIds = editor => editor.session.tracks.filter(track => track.muted).map(track => track.id)
 
-test('solo switches tracks as one undoable edit and persists without changing manual mute', async t => {
+test('multi-track solo toggles only the target track as undoable, persisted edits', async t => {
   const { editor, saved } = environment(t)
   editor.toggleTrackFlag('a', 'solo')
-  assert.deepEqual(soloIds(editor), ['a'])
   editor.toggleTrackFlag('b', 'solo')
+  assert.deepEqual(soloIds(editor), ['a', 'b'])
+  editor.toggleTrackFlag('a', 'solo')
   assert.deepEqual(soloIds(editor), ['b'])
   assert.deepEqual(mutedIds(editor), ['c'])
   editor.undo()
-  assert.deepEqual(soloIds(editor), ['a'])
+  assert.deepEqual(soloIds(editor), ['a', 'b'])
   editor.redo()
   assert.deepEqual(soloIds(editor), ['b'])
-  await editor.flushSave()
-  assert.deepEqual(saved.at(-1).tracks.filter(track => track.solo).map(track => track.id), ['b'])
-  editor.toggleTrackFlag('b', 'solo')
-  assert.deepEqual(soloIds(editor), [])
+  editor.toggleTrackFlag('c', 'solo')
+  assert.deepEqual(soloIds(editor), ['b', 'c'])
   assert.deepEqual(mutedIds(editor), ['c'])
+  await editor.flushSave()
+  assert.deepEqual(saved.at(-1).tracks.filter(track => track.solo).map(track => track.id), ['b', 'c'])
   editor.toggleTrackFlag('c', 'muted')
   assert.deepEqual(mutedIds(editor), [])
+  assert.deepEqual(soloIds(editor), ['b', 'c'])
+  editor.toggleTrackFlag('b', 'solo')
+  editor.toggleTrackFlag('c', 'solo')
   assert.deepEqual(soloIds(editor), [])
 })
 
-test('clicking an active solo exits legacy multi-solo and invalid tracks leave history intact', t => {
+test('existing solo flags are independent and invalid tracks leave history intact', t => {
   const { editor } = environment(t)
   editor.session.tracks[0].solo = true
   editor.session.tracks[1].solo = true
@@ -70,10 +74,7 @@ test('clicking an active solo exits legacy multi-solo and invalid tracks leave h
   assert.equal(editor.canUndo, false)
   assert.deepEqual(soloIds(editor), ['a', 'b'])
   editor.toggleTrackFlag('b', 'solo')
-  assert.deepEqual(soloIds(editor), [])
+  assert.deepEqual(soloIds(editor), ['a'])
   editor.undo()
   assert.deepEqual(soloIds(editor), ['a', 'b'])
-  editor.toggleTrackFlag('c', 'solo')
-  assert.deepEqual(soloIds(editor), ['c'])
-  assert.deepEqual(mutedIds(editor), ['c'])
 })

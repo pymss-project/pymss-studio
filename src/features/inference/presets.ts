@@ -3,7 +3,7 @@ import type { CustomParameterIntent, ParameterResolutionMetadata } from './param
 export const INFERENCE_PRESETS = [
   { id: 'speed', label: 'parameterEditor.presets.speed', chunkMilliseconds: 8000, overlapBasisPoints: 2000 },
   { id: 'balanced', label: 'parameterEditor.presets.balanced', chunkMilliseconds: 10000, overlapBasisPoints: 5000 },
-  { id: 'quality', label: 'parameterEditor.presets.quality', chunkMilliseconds: 14000, overlapBasisPoints: 8000 },
+  { id: 'quality', label: 'parameterEditor.presets.quality', chunkMilliseconds: 12000, overlapBasisPoints: 7500 },
 ] as const
 
 export type InferencePreset = typeof INFERENCE_PRESETS[number]
