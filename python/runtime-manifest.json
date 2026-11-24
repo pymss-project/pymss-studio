@@ -52,7 +52,7 @@
         "linux"
       ],
       "torch": {
-        "requirement": "torch==2.12.1+xpu",
+        "requirement": "torch==2.7.1+xpu",
         "indexUrl": "https://download.pytorch.org/whl/xpu"
       }
     },

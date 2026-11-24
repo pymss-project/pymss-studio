@@ -281,8 +281,6 @@ def _studio_separator_type() -> type[Any]:
                 amp_enabled=bool(amp),
                 logger=getattr(self, "logger", kwargs.get("logger")),
             )
-            self._studio_naming = _normalize_output_naming(output_naming)
-            self._studio_output_model = output_model
             self._studio_output_lock = Lock()
             self._studio_claimed_paths: set[Path] = set()
             self._studio_last_outputs: list[dict[str, str]] = []
@@ -292,9 +290,14 @@ def _studio_separator_type() -> type[Any]:
             self._studio_input_contexts: dict[str, deque[dict[str, Any]]] = {}
             self._studio_active_context: dict[str, Any] | None = None
             self._studio_active_output_count = 0
-            self._studio_expected_output_count = self._calculate_expected_output_count()
             self._studio_output_sources: dict[Path, str] = {}
             self._studio_track_failure: str | None = None
+            self._studio_bind_output_naming(output_naming, output_model)
+
+        def _studio_bind_output_naming(self, output_naming: Any, output_model: str) -> None:
+            self._studio_naming = _normalize_output_naming(output_naming)
+            self._studio_output_model = output_model
+            self._studio_expected_output_count = self._calculate_expected_output_count()
             stems = self._stems_to_save() or list(self.config.training.instruments)
             ordered_stems = [stem for _, stem in sorted(
                 enumerate(stems),
@@ -605,14 +608,16 @@ def _rebind_cached_separator(
     separator.logger = logger
     separator.output_format = output_format
     separator.debug = bool(payload.get("debug", False))
+    instruments = list(separator.config.training.instruments)
     store_dirs = _store_dirs_for_selected_stems(str(payload["output"]), selected_stems)
     if isinstance(store_dirs, str):
-        instruments = list(separator.config.training.instruments)
         store_dirs = {stem: store_dirs for stem in instruments}
+    else:
+        valid_stems = {stem.lower() for stem in instruments}
+        store_dirs = {stem: directory for stem, directory in store_dirs.items() if stem.lower() in valid_stems}
     separator.store_dirs = store_dirs
     separator.save_as_folder = bool(save_as_folder and len(set(separator.store_dirs.values())) == 1)
-    separator._studio_naming = _normalize_output_naming(payload.get("outputNaming"))
-    separator._studio_output_model = str(payload.get("model") or "")
+    separator._studio_bind_output_naming(payload.get("outputNaming"), str(payload.get("model") or ""))
     separator._studio_claimed_paths = set()
     separator._studio_last_outputs = []
     separator._studio_input_contexts = {}
@@ -883,6 +888,9 @@ def _prepare_separator(
             "message": "Reusing the model already loaded on the device",
         }, task_id=task_id)
         return cached
+    if cached is not None:
+        release_cached_separator()
+        del cached
     separator = StudioMSSeparator(
         model_type=resolved_model_type,
         model_path=resolved_model_path,

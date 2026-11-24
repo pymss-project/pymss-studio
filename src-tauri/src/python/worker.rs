@@ -200,14 +200,16 @@ static APPLICATION_ACCESS: Mutex<RuntimeAccess> = Mutex::new(RuntimeAccess {
 });
 
 pub(crate) fn acquire_application_update() -> AppResult<impl Drop> {
-    acquire_runtime_access(&APPLICATION_ACCESS, "update_runtime_core")
+    let guard = acquire_runtime_access(&APPLICATION_ACCESS, "update_runtime_core")
         .map_err(|error| match error {
             AppError::Worker(message) if message.starts_with("RUNTIME_BUSY:") => AppError::Worker(
                 "Wait for running audio and runtime operations to finish before updating the application.".into(),
             ),
             error => error,
         })?
-        .ok_or_else(|| AppError::Worker("Unable to reserve the application for updating".into()))
+        .ok_or_else(|| AppError::Worker("Unable to reserve the application for updating".into()))?;
+    warm_infer::retire_idle_session()?;
+    Ok(guard)
 }
 
 pub(crate) fn acquire_application_operation() -> AppResult<impl Drop + Send> {
@@ -217,8 +219,10 @@ pub(crate) fn acquire_application_operation() -> AppResult<impl Drop + Send> {
 }
 
 pub(crate) fn acquire_plugin_source_update() -> AppResult<impl Drop> {
-    acquire_runtime_access(&RUNTIME_ACCESS, "manage_plugin")?
-        .ok_or_else(|| AppError::Worker("Unable to reserve plugin source configuration".into()))
+    let guard = acquire_runtime_access(&RUNTIME_ACCESS, "manage_plugin")?
+        .ok_or_else(|| AppError::Worker("Unable to reserve plugin source configuration".into()))?;
+    warm_infer::retire_idle_session()?;
+    Ok(guard)
 }
 
 #[derive(Default)]
@@ -443,6 +447,11 @@ fn acquire_worker_runtime_access(app: &AppHandle, command: &str, payload: &Value
         }
         Some(guard)
     } else { None };
+    if guard.as_ref().is_some_and(|guard| guard.updating || guard.installing_plugins)
+        || matches!(command, "infer_workflow" | "run_operation")
+    {
+        warm_infer::retire_idle_session()?;
+    }
     Ok(guard)
 }
 
@@ -1656,6 +1665,18 @@ pub fn spawn_worker_background(
 #[path = "warm_infer.rs"]
 mod warm_infer;
 
+fn registered_task_ids(task_id: &str, payload: &Value) -> Vec<String> {
+    let mut ids = vec![task_id.to_owned()];
+    if let Some(tasks) = payload.get("tasks").and_then(Value::as_array) {
+        for id in tasks.iter().filter_map(|item| item.get("taskId").and_then(Value::as_str)) {
+            if !ids.iter().any(|registered| registered == id) {
+                ids.push(id.to_owned());
+            }
+        }
+    }
+    ids
+}
+
 fn spawn_worker_background_inner(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1670,16 +1691,7 @@ fn spawn_worker_background_inner(
     let mut application_access = Some(acquire_application_operation()?);
     let mut runtime_access = acquire_worker_runtime_access(&app, command, &payload)?;
     let release_event = runtime_access.as_ref().and_then(|_| runtime_release_event(command, &payload));
-    let mut registered_task_ids = vec![task_id.clone()];
-    if let Some(tasks) = payload.get("tasks").and_then(Value::as_array) {
-        for item in tasks {
-            if let Some(child_task_id) = item.get("taskId").and_then(Value::as_str) {
-                if !registered_task_ids.iter().any(|id| id == child_task_id) {
-                    registered_task_ids.push(child_task_id.to_string());
-                }
-            }
-        }
-    }
+    let registered_task_ids = registered_task_ids(&task_id, &payload);
     {
         let tasks = state
             .tasks

@@ -322,7 +322,7 @@ test('backend recognition does not leak Object.prototype keys', () => {
 test('GPU vendor decides the recommended backend', () => {
   assert.equal(recommendedRuntimeBackend({ platform: 'win32', gpuVendors: ['nvidia'] }), 'cuda')
   assert.equal(recommendedRuntimeBackend({ platform: 'win32', gpuVendors: ['amd'] }), 'rocm')
-  assert.equal(recommendedRuntimeBackend({ platform: 'win32', gpuVendors: ['intel'] }), 'xpu')
+  assert.equal(recommendedRuntimeBackend({ platform: 'win32', gpuVendors: ['intel'] }), 'cpu')
 })
 
 test('a discrete NVIDIA card outranks an integrated AMD one', () => {
@@ -332,7 +332,14 @@ test('a discrete NVIDIA card outranks an integrated AMD one', () => {
 test('Linux GPU recommendations use the supported accelerator environments', () => {
   assert.equal(recommendedRuntimeBackend({ platform: 'linux', gpuVendors: ['amd'] }), 'rocm')
   assert.equal(recommendedRuntimeBackend({ platform: 'linux', gpuVendors: ['nvidia'] }), 'cuda')
-  assert.equal(recommendedRuntimeBackend({ platform: 'linux', gpuVendors: ['intel'] }), 'xpu')
+  assert.equal(recommendedRuntimeBackend({ platform: 'linux', gpuVendors: ['intel'] }), 'cpu')
+})
+
+test('Intel graphics require a positive XPU capability check for a recommendation', () => {
+  for (const platform of ['win32', 'linux']) {
+    assert.equal(recommendedRuntimeBackend({ platform, gpuVendors: ['intel'], torchBackend: 'xpu', acceleratorAvailable: false }), 'cpu')
+    assert.equal(recommendedRuntimeBackend({ platform, torchBackend: 'xpu', acceleratorAvailable: true }), 'xpu')
+  }
 })
 
 test('macOS recommends MLX even before its architecture is identified', () => {

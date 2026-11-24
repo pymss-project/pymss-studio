@@ -48,6 +48,30 @@ class SeparatorCacheTests(unittest.TestCase):
         )
         self.assertNotEqual(first, second)
 
+    def test_cache_miss_releases_old_model_before_loading_new_model(self):
+        previous = _Separator()
+        resolved = {"model_type": "bs_roformer", "model_path": "new.ckpt"}
+
+        def load_model(**kwargs):
+            self.assertTrue(previous.closed)
+            self.assertIsNone(worker_infer._SEPARATOR_CACHE["separator"])
+            self.assertEqual(kwargs["model_path"], "new.ckpt")
+            return _Separator()
+
+        with (
+            mock.patch.dict(os.environ, {"PYMSS_STUDIO_KEEP_MODEL": "1"}),
+            mock.patch.object(worker_infer, "_studio_separator_type", return_value=load_model),
+            mock.patch.object(worker_infer, "_resolve_studio_model", return_value=resolved),
+            mock.patch.object(worker_infer, "emit"),
+        ):
+            worker_infer._release_separator(previous, reuse=True)
+            current = worker_infer._prepare_separator(
+                payload={"model": "next", "output": ".", "device": "cpu"},
+                task_id="next", progress_callback=None, logger=None,
+            )
+
+        self.assertIsNot(current, previous)
+
 
 if __name__ == "__main__":
     unittest.main()

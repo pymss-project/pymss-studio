@@ -9,7 +9,7 @@ import { useNumberInputAccessibility } from '@/composables/useNumberInputAccessi
 import { useRoute, useRouter } from 'vue-router'
 import { useDialog, useMessage, type DropdownOption } from 'naive-ui'
 import { convertFileSrc } from '@tauri-apps/api/core'
-import { mediaSourceUrl, needsBlobMediaSource, releaseMediaSourceUrl } from '@/utils/mediaSource'
+import { loadPreviewMediaSource, needsBlobMediaSource, releasePreviewMediaSource } from '@/utils/mediaSource'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import {
@@ -313,9 +313,9 @@ const submittingJob = ref(false)
 const cancellingTaskId = ref<string | null>(null)
 const cancellingQueueJobId = ref<string | null>(null)
 const audioElements = new Map<string, HTMLAudioElement>()
-const audioBlobUrls = new WeakMap<HTMLAudioElement, string>()
 const audioAccessOrder: string[] = []
 const playingOutputPath = ref('')
+let previewPlayGeneration = 0
 const outputPlayback = ref<Record<string, { currentTime: number; duration: number }>>({})
 const draggedInputIndex = ref<number | null>(null)
 const inputDragPointerId = ref<number | null>(null)
@@ -1236,12 +1236,8 @@ function releasePreviewAudio(path: string) {
   const audio = audioElements.get(path)
   if (audio) {
     audioElements.delete(path)
-    const blobUrl = audioBlobUrls.get(audio)
-    if (blobUrl) {
-      releaseMediaSourceUrl(blobUrl)
-      audioBlobUrls.delete(audio)
-    }
     audio.pause()
+    releasePreviewMediaSource(audio)
     audio.removeAttribute('src')
     audio.load()
   }
@@ -1299,18 +1295,6 @@ function getAudio(path: string) {
   return audio
 }
 
-async function loadPreviewAudio(audio: HTMLAudioElement, path: string) {
-  if (audio.src) return
-  const url = await mediaSourceUrl(path)
-  if (audioElements.get(path) !== audio) {
-    releaseMediaSourceUrl(url)
-    return
-  }
-  audioBlobUrls.set(audio, url)
-  audio.src = url
-  audio.load()
-}
-
 function syncOutputPreviewAudio(outputs: StemOutput[]) {
   const activePaths = new Set(outputs.map(output => output.path).filter(Boolean))
   for (const path of [...audioElements.keys()]) {
@@ -1324,23 +1308,30 @@ function syncOutputPreviewAudio(outputs: StemOutput[]) {
 watch(playableOutputs, syncOutputPreviewAudio, { immediate: true })
 
 async function toggleOutputPlayback(output: StemOutput) {
-  if (!output.path) return
-  const audio = getAudio(output.path)
-  if (playingOutputPath.value === output.path && !audio.paused) {
+  const path = output.path
+  if (!path) return
+  const audio = getAudio(path)
+  const generation = ++previewPlayGeneration
+  const isCurrent = () => generation === previewPlayGeneration && audioElements.get(path) === audio
+  if (playingOutputPath.value === path && !audio.paused) {
     audio.pause()
     playingOutputPath.value = ''
     return
   }
 
-  audioElements.forEach((item, path) => {
-    if (path !== output.path) item.pause()
+  audioElements.forEach((item, itemPath) => {
+    if (itemPath !== path) {
+      item.pause()
+      if (!item.src) releasePreviewMediaSource(item)
+    }
   })
+  playingOutputPath.value = ''
   try {
-    await loadPreviewAudio(audio, output.path)
+    if (!await loadPreviewMediaSource(audio, path) || !isCurrent()) return
     await audio.play()
-    playingOutputPath.value = output.path
+    if (isCurrent()) playingOutputPath.value = path
   } catch (error) {
-    message.error(error instanceof Error ? error.message : t('separate.previewPlayFailed'))
+    if (isCurrent()) message.error(error instanceof Error ? error.message : t('separate.previewPlayFailed'))
   }
 }
 

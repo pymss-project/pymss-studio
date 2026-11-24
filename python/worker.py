@@ -5,7 +5,7 @@ import json
 import os
 import sys
 
-from worker_protocol import debug_log, emit, emit_error, load_payload, protocol_logging
+from worker_protocol import bind_request_id, debug_log, emit, emit_error, load_payload, protocol_logging
 from worker_proxy import ProxyConfigError, configure_process_proxy, load_proxy_config, parse_proxy_config
 from worker_rocm import RocmWorkerAbort, rocm_worker_poisoned
 
@@ -178,39 +178,54 @@ def run_command(command: str, payload: dict) -> int:
     return emit_error("UNKNOWN_COMMAND", f"Unknown command: {command}")
 
 
+def run_protocol_command(command: str, payload: dict) -> int:
+    with protocol_logging(
+        command,
+        task_id=payload.get("taskId"),
+        job_id=payload.get("jobId"),
+        batch=isinstance(payload.get("tasks"), list) and bool(payload["tasks"]),
+    ):
+        return run_command(command, payload)
+
+
 def serve() -> int:
     """Run inference commands from stdin and keep the loaded model resident."""
     os.environ["PYMSS_STUDIO_KEEP_MODEL"] = "1"
-    debug_log("worker.serve", command="serve")
-    while True:
-        line = sys.stdin.readline()
-        if line == "":
-            return 0
+    os.environ["PYMSS_STUDIO_LOG_TRANSPORT"] = "protocol"
+    for line in sys.stdin:
         if not line.strip():
             continue
-        command = "serve"
-        payload: dict = {}
         try:
             message = json.loads(line)
-            command = str(message.get("command") or "")
+            request_id = message.get("requestId")
+            if not isinstance(request_id, str) or not request_id:
+                raise ValueError("Missing inference request ID")
+            command = message.get("command")
             raw_payload = message.get("payload")
             payload = raw_payload if isinstance(raw_payload, dict) else {}
-            if command == "shutdown":
-                from worker_infer import release_cached_separator
-                release_cached_separator()
-                emit("command_finished", {"code": 0})
-                return 0
-            code = run_command(command, payload)
-        except RocmWorkerAbort as aborted:
-            emit_error(getattr(aborted.error, "code", "ROCM_CONTEXT_LOST"), str(aborted.error),
-                       task_id=payload.get("taskId"), extra={"workerRestartRequired": True})
-            emit("command_finished", {"code": 1})
+        except (AttributeError, ValueError) as exc:
+            emit_error("INVALID_REQUEST", str(exc))
             return 1
-        except Exception as exc:
-            import traceback
-            debug_log("worker.exception", command=command, error=str(exc), detail=traceback.format_exc())
-            code = emit_error("UNKNOWN_ERROR", str(exc), traceback.format_exc(), task_id=payload.get("taskId"))
-        emit("command_finished", {"code": code})
+        with bind_request_id(request_id):
+            if command != "infer":
+                emit_error("UNKNOWN_COMMAND", f"Unknown command: {command}", task_id=payload.get("taskId"))
+                emit("command_finished", {"code": 1})
+                return 1
+            try:
+                code = run_protocol_command(command, payload)
+            except RocmWorkerAbort as aborted:
+                code = emit_error(getattr(aborted.error, "code", "ROCM_CONTEXT_LOST"), str(aborted.error),
+                                  task_id=payload.get("taskId"), extra={"workerRestartRequired": True})
+            except ProxyConfigError as exc:
+                code = emit_error(exc.code, str(exc), task_id=payload.get("taskId"))
+            except Exception as exc:
+                import traceback
+                code = emit_error("UNKNOWN_ERROR", str(exc), traceback.format_exc(), task_id=payload.get("taskId"))
+            poisoned = rocm_worker_poisoned()
+            emit("command_finished", {"code": (code or 1) if poisoned else code})
+            if poisoned:
+                return code or 1
+    return 0
 
 
 def main(argv: list[str]) -> int:
@@ -221,13 +236,7 @@ def main(argv: list[str]) -> int:
     try:
         payload = load_payload(args.payload)
         debug_log("worker.payload", command=args.command, hasPayload=bool(args.payload))
-        with protocol_logging(
-            args.command,
-            task_id=payload.get("taskId"),
-            job_id=payload.get("jobId"),
-            batch=isinstance(payload.get("tasks"), list) and bool(payload["tasks"]),
-        ):
-            code = run_command(args.command, payload)
+        code = run_protocol_command(args.command, payload)
         debug_log("worker.exit", command=args.command, code=code)
         return code
     except RocmWorkerAbort as aborted:
@@ -247,7 +256,6 @@ if __name__ == "__main__":
     if rocm_worker_poisoned():
         # Do not run Torch/driver finalizers against a damaged HIP context.
         # The parent owns process-tree cleanup and releases its runtime lease.
-        import os
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(exit_code or 1)

@@ -221,12 +221,12 @@ export function recommendedRuntimeBackend(info: RuntimeInfo | null | undefined):
   const { isMac } = detectRuntimePlatform(info)
   if (isMac) return 'mlx'
   const vendors = info?.gpuVendors
-  if (!vendors?.length) return null
   // A discrete NVIDIA card wins over an AMD integrated one when both are present.
-  if (vendors.includes('nvidia')) return 'cuda'
-  if (vendors.includes('amd')) return supportsRuntimeManagement(info) ? 'rocm' : 'cpu'
-  if (vendors.includes('intel')) return 'xpu'
-  return 'cpu'
+  if (vendors?.includes('nvidia')) return 'cuda'
+  if (vendors?.includes('amd')) return supportsRuntimeManagement(info) ? 'rocm' : 'cpu'
+  // Intel vendor detection includes older integrated graphics that lack XPU support.
+  if (supportsRuntimeManagement(info) && info?.torchBackend === 'xpu' && info.acceleratorAvailable === true) return 'xpu'
+  return vendors?.length ? 'cpu' : null
 }
 
 export type RuntimeManifestStatus = 'current' | 'older' | 'newer' | 'unknown'

@@ -11,14 +11,48 @@ export function needsBlobMediaSource() {
     && !/Android/i.test(navigator.userAgent)
 }
 
-export async function mediaSourceUrl(path: string) {
-  const url = convertFileSrc(path)
-  if (!needsBlobMediaSource()) return url
-  const response = await fetch(url)
-  if (!response.ok) throw new Error(`Audio request failed: ${response.status}`)
-  return URL.createObjectURL(await response.blob())
+type PreviewSource = {
+  controller: AbortController
+  ready: Promise<boolean>
+  url?: string
 }
 
-export function releaseMediaSourceUrl(url: string) {
-  if (url.startsWith('blob:')) URL.revokeObjectURL(url)
+const previewSources = new WeakMap<HTMLAudioElement, PreviewSource>()
+
+export async function loadPreviewMediaSource(audio: HTMLAudioElement, path: string) {
+  if (audio.src) return true
+  const pending = previewSources.get(audio)
+  if (pending) return pending.ready
+  const assetUrl = convertFileSrc(path)
+  if (!needsBlobMediaSource()) {
+    audio.src = assetUrl
+    audio.load()
+    return true
+  }
+
+  const controller = new AbortController()
+  const ready = fetch(assetUrl, { signal: controller.signal }).then(async (response) => {
+    if (!response.ok) throw new Error(`Audio request failed: ${response.status}`)
+    const blob = await response.blob()
+    if (controller.signal.aborted) return false
+    source.url = URL.createObjectURL(blob)
+    audio.src = source.url
+    audio.load()
+    return true
+  }).catch((error) => {
+    if (controller.signal.aborted) return false
+    releasePreviewMediaSource(audio)
+    throw error
+  })
+  const source: PreviewSource = { controller, ready }
+  previewSources.set(audio, source)
+  return ready
+}
+
+export function releasePreviewMediaSource(audio: HTMLAudioElement) {
+  const source = previewSources.get(audio)
+  if (!source) return
+  previewSources.delete(audio)
+  source.controller.abort()
+  if (source.url) URL.revokeObjectURL(source.url)
 }
