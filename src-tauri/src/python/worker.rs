@@ -80,6 +80,7 @@ struct BackgroundTask {
     command: String,
     runtime_tree: Option<Arc<process_tree::RuntimeProcessTree>>,
     completion: Option<Arc<RuntimeMaintenanceCompletion>>,
+    inference_launch: Option<Arc<tauri::async_runtime::Mutex<()>>>,
 }
 static BACKGROUND_TASKS: OnceLock<Mutex<HashMap<String, Arc<BackgroundTask>>>> = OnceLock::new();
 
@@ -453,6 +454,11 @@ fn acquire_worker_runtime_access(app: &AppHandle, command: &str, payload: &Value
         warm_infer::retire_idle_session()?;
     }
     Ok(guard)
+}
+
+pub(crate) fn background_inference_launch(task_id: &str) -> Option<Arc<tauri::async_runtime::Mutex<()>>> {
+    let tasks = BACKGROUND_TASKS.get()?.lock().ok()?;
+    tasks.get(task_id)?.inference_launch.clone()
 }
 
 fn worker_path(app: &AppHandle) -> AppResult<PathBuf> {
@@ -1760,7 +1766,7 @@ fn spawn_worker_background_inner(
         let _ = std::fs::remove_file(&payload_file);
         AppError::Worker("background command registry lock poisoned".into())
     })?;
-    if let Some(id) = registered_task_ids.iter().find(|id| task_registry.contains_key(*id)) {
+    if let Some(id) = registered_task_ids.iter().find(|id| task_registry.contains_key(*id) || background_registry.contains_key(*id)) {
         let _ = std::fs::remove_file(&payload_file);
         return Err(AppError::Worker(format!("task already exists: {id}")));
     }
@@ -1813,6 +1819,7 @@ fn spawn_worker_background_inner(
         .then(|| Arc::new(RuntimeMaintenanceCompletion::default()));
     let task = Arc::new(BackgroundTask {
         command: command_name.clone(), runtime_tree: runtime_tree.clone(), completion: maintenance_completion.clone(),
+        inference_launch: None,
     });
     for id in &registered_task_ids {
         background_registry.insert(id.clone(), task.clone());
@@ -2428,6 +2435,7 @@ mod tests {
             let completion = std::sync::Arc::new(super::RuntimeMaintenanceCompletion::default());
             registry.lock().unwrap().insert(id.into(), std::sync::Arc::new(super::BackgroundTask {
                 command: command.into(), runtime_tree: None, completion: Some(completion.clone()),
+                inference_launch: None,
             }));
             assert!(super::defers_task_cancellation(id));
             let captured = super::runtime_maintenance_completion(id).unwrap();

@@ -185,33 +185,28 @@ pub(super) fn spawn_background(
         .as_ref()
         .and_then(|_| runtime_release_event("infer", &payload));
     let registered_ids = registered_task_ids(&task_id, &payload);
-    let mut session = open_session(&app, &operation_id)?;
-    let mut tasks = state
-        .tasks
-        .lock()
-        .map_err(|_| AppError::Worker("task registry lock poisoned".into()))?;
-    let mut background = BACKGROUND_TASKS
-        .get_or_init(Default::default)
-        .lock()
-        .map_err(|_| AppError::Worker("background command registry lock poisoned".into()))?;
-    if let Some(id) = registered_ids
-        .iter()
-        .find(|id| tasks.contains_key(*id) || background.contains_key(*id))
-    {
-        return Err(AppError::Worker(format!("task already exists: {id}")));
-    }
-    let record = Arc::new(BackgroundTask {
-        command: "infer".into(),
-        runtime_tree: None,
-        completion: None,
+    let launch = Arc::new(tauri::async_runtime::Mutex::new(()));
+    let launching = launch.try_lock().expect("new inference launch lock");
+    reserve_job(&state, &registered_ids, Arc::clone(&launch))?;
+    let session = open_session(&app, &operation_id).and_then(|session| {
+        session.set_stderr_tasks(&registered_ids);
+        let mut tasks = state
+            .tasks
+            .lock()
+            .map_err(|_| AppError::Worker("task registry lock poisoned".into()))?;
+        for id in &registered_ids {
+            tasks.insert(id.clone(), Arc::clone(&session.child));
+        }
+        Ok(session)
     });
-    session.set_stderr_tasks(&registered_ids);
-    for id in &registered_ids {
-        background.insert(id.clone(), Arc::clone(&record));
-        tasks.insert(id.clone(), Arc::clone(&session.child));
-    }
-    drop(background);
-    drop(tasks);
+    let mut session = match session {
+        Ok(session) => session,
+        Err(error) => {
+            unregister_job(&state, &registered_ids);
+            return Err(error);
+        }
+    };
+    drop(launching);
     let started_at = Instant::now();
     std::thread::spawn(move || {
         let mut terminal = HashSet::new();
@@ -301,6 +296,37 @@ pub(super) fn spawn_background(
             ],
         );
     });
+    Ok(())
+}
+
+fn reserve_job(
+    state: &AppState,
+    ids: &[String],
+    launch: Arc<tauri::async_runtime::Mutex<()>>,
+) -> AppResult<()> {
+    let tasks = state
+        .tasks
+        .lock()
+        .map_err(|_| AppError::Worker("task registry lock poisoned".into()))?;
+    let mut background = BACKGROUND_TASKS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| AppError::Worker("background command registry lock poisoned".into()))?;
+    if let Some(id) = ids
+        .iter()
+        .find(|id| tasks.contains_key(*id) || background.contains_key(*id))
+    {
+        return Err(AppError::Worker(format!("task already exists: {id}")));
+    }
+    let record = Arc::new(BackgroundTask {
+        command: "infer".into(),
+        runtime_tree: None,
+        completion: None,
+        inference_launch: Some(launch),
+    });
+    for id in ids {
+        background.insert(id.clone(), Arc::clone(&record));
+    }
     Ok(())
 }
 
@@ -407,9 +433,11 @@ fn collect_job(
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_request_event, WorkerIdentity};
+    use super::{reserve_job, unregister_job, validate_request_event, AppState, WorkerIdentity};
+    use crate::python::worker::background_inference_launch;
     use serde_json::json;
     use std::process::Command;
+    use std::sync::Arc;
 
     #[test]
     fn warm_session_identity_changes_with_the_runtime_overlay() {
@@ -439,5 +467,31 @@ mod tests {
             .to_string()
             .contains("another request"));
         assert!(validate_request_event(&envelope, "previous").is_ok());
+    }
+
+    #[test]
+    fn warm_launch_reserves_batch_ids_before_a_process_exists() {
+        let state = AppState::new();
+        let ids = [
+            "warm-launch-root".to_owned(),
+            "warm-launch-member".to_owned(),
+        ];
+        let launch = Arc::new(tauri::async_runtime::Mutex::new(()));
+        let starting = launch.try_lock().unwrap();
+        reserve_job(&state, &ids, Arc::clone(&launch)).unwrap();
+        assert!(state.tasks.lock().unwrap().is_empty());
+        let member_launch = background_inference_launch(&ids[1]).unwrap();
+        assert!(Arc::ptr_eq(&member_launch, &launch));
+        assert!(member_launch.try_lock().is_err());
+        assert!(reserve_job(
+            &state,
+            &ids[1..],
+            Arc::new(tauri::async_runtime::Mutex::new(()))
+        )
+        .is_err());
+        drop(starting);
+        assert!(member_launch.try_lock().is_ok());
+        unregister_job(&state, &ids);
+        assert!(background_inference_launch(&ids[1]).is_none());
     }
 }

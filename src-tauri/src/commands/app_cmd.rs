@@ -2590,6 +2590,9 @@ pub async fn cancel_task(
     state: State<'_, AppState>,
     task_id: String,
 ) -> AppResult<bool> {
+    if let Some(launch) = crate::python::worker::background_inference_launch(&task_id) {
+        drop(launch.lock().await);
+    }
     let deferred_cancellation = crate::python::worker::defers_task_cancellation(&task_id);
     let runtime_completion = crate::python::worker::runtime_maintenance_completion(&task_id);
     let cancellation = state.tasks.lock().ok().and_then(|mut tasks| {
