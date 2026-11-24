@@ -1,4 +1,5 @@
 use crate::engine::{Event, Session};
+use crate::graph::same_plugin_instance;
 use crate::timeline::{PluginSlot, SessionSpec};
 use crossbeam_channel::{Receiver, bounded};
 use serde_json::{Value, json};
@@ -140,18 +141,14 @@ fn inputs() -> Receiver<Result<Value, String>> {
     rx
 }
 
-fn topology(spec: &SessionSpec) -> Value {
-    let slots = |slots: &[PluginSlot]| {
-        slots
-            .iter()
-            .map(|s| {
-                json!({ "id": s.id, "pluginId": s.plugin_id,
-        "path": s.path, "format": s.format, "bypassWarning": s.bypass_warning })
-            })
-            .collect::<Vec<_>>()
+fn same_plugin_topology(previous: &SessionSpec, next: &SessionSpec) -> bool {
+    let same_chain = |old: &[PluginSlot], new: &[PluginSlot]| {
+        old.len() == new.len()
+            && old.iter().zip(new).all(|(old, new)| same_plugin_instance(old, new))
     };
-    json!({ "id": spec.id, "sources": spec.sources, "master": slots(&spec.plugin_chain), "tracks": spec.tracks.iter()
-        .map(|t| json!({ "id": t.id, "slots": slots(&t.plugin_chain) })).collect::<Vec<_>>() })
+    same_chain(&previous.plugin_chain, &next.plugin_chain)
+        && previous.tracks.iter().zip(&next.tracks)
+            .all(|(old, new)| same_chain(&old.plugin_chain, &new.plugin_chain))
 }
 
 fn project(request: &Value) -> Result<SessionSpec, String> {
@@ -355,13 +352,19 @@ fn host_tick(
                     if current.spec.id != spec.id {
                         return Err("Audio project changed".into());
                     }
-                    if restore.is_empty()
-                        && topology(&current.spec) == topology(&spec)
-                        && current.can_update_in_place(&spec)
+                    if current.accepts_in_place_update(&spec, &ffmpeg)
                         && current.is_offline() == offline
                         && sample_rate.is_none_or(|rate| rate == current.sample_rate)
                     {
-                        return current.update_mix(spec).map(Some);
+                        if restore.is_empty()
+                            && same_plugin_topology(&current.spec, &spec)
+                            && current.can_update_in_place(&spec)
+                        {
+                            return current.update_mix(spec).map(Some);
+                        }
+                        if !offline {
+                            return current.update_plugins(spec, &restore).map(Some);
+                        }
                     }
                 }
             }
@@ -418,11 +421,7 @@ fn host_tick(
                 current.looping = looping;
                 current.seek(position)?;
             }
-            for slot in open {
-                if current.has_editor(&slot) {
-                    current.editor(&slot, true)?;
-                }
-            }
+            current.reopen_editors(open);
             return Ok(Some(current.status()));
         }
         if op == "unload" && session.is_none() {
@@ -819,11 +818,11 @@ mod tests {
     fn state_and_bypass_changes_keep_topology_but_relocation_requires_a_rebuild() {
         let one = session("old-state");
         let mut two = session("new-state");
-        assert_eq!(topology(&one), topology(&two));
+        assert!(same_plugin_topology(&one, &two));
         two.plugin_chain[0].bypassed = true;
-        assert_eq!(topology(&one), topology(&two));
+        assert!(same_plugin_topology(&one, &two));
         two.plugin_chain[0].path = "C:/plugins/relocated.vst3".into();
-        assert_ne!(topology(&one), topology(&two));
+        assert!(!same_plugin_topology(&one, &two));
     }
 
     #[test]

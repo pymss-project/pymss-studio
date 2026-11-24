@@ -1,8 +1,8 @@
 use crate::plugins::HostedPlugin;
-use crate::timeline::{SessionSpec, Timeline, monitor_mask};
+use crate::timeline::{PluginSlot, PreparedMixUpdate, SessionSpec, Timeline, monitor_mask};
 use base64::Engine;
 use soundcraft_dsp::{PluginEditor, PluginStateReader, Transport};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 pub(crate) const BLOCK: usize = 256;
@@ -90,7 +90,7 @@ impl Delay {
     }
 }
 
-struct Slot {
+pub(crate) struct Slot {
     id: String,
     plugin: HostedPlugin,
     bypassed: bool,
@@ -98,6 +98,12 @@ struct Slot {
     bypass: Delay,
     dry: Vec<Vec<f32>>,
     warmup: usize,
+}
+
+pub(crate) struct PluginUpdate {
+    added: HashMap<String, Slot>,
+    retained: HashSet<String>,
+    pub unavailable: Vec<UnavailablePlugin>,
 }
 
 fn total_latency(values: impl Iterator<Item = usize>) -> usize {
@@ -209,8 +215,8 @@ pub(crate) struct Graph {
     pub levels: Vec<[f32; 2]>,
 }
 
-fn chain(
-    slots: &[crate::timeline::PluginSlot],
+fn chain<'a>(
+    slots: impl IntoIterator<Item = &'a PluginSlot>,
     rate: u32,
     offline: bool,
     ui: &mut HashMap<String, UiSlot>,
@@ -320,6 +326,52 @@ fn chain(
     Ok(result)
 }
 
+pub(crate) fn same_plugin_instance(old: &PluginSlot, new: &PluginSlot) -> bool {
+    old.id == new.id
+        && old.format == new.format
+        && old.plugin_id == new.plugin_id
+        && old.path == new.path
+        && old.bypass_warning == new.bypass_warning
+        && (old.bypassed && old.skip_load) == (new.bypassed && new.skip_load)
+}
+
+pub(crate) fn prepare_plugin_update(
+    spec: &SessionSpec,
+    rate: u32,
+    offline: bool,
+    retained: &HashSet<String>,
+    unavailable: &[UnavailablePlugin],
+) -> Result<(PluginUpdate, HashMap<String, UiSlot>), String> {
+    let mut unavailable: Vec<_> = unavailable.iter()
+        .filter(|entry| retained.contains(&entry.slot_id))
+        .cloned()
+        .collect();
+    let mut ui = HashMap::new();
+    let mut added = HashMap::new();
+    let mut load = |slots: &[PluginSlot]| -> Result<(), String> {
+        let slots = chain(
+            slots.iter().filter(|slot| !retained.contains(&slot.id)),
+            rate,
+            offline,
+            &mut ui,
+            &mut unavailable,
+        )?;
+        added.extend(slots.into_iter().map(|slot| (slot.id.clone(), slot)));
+        Ok(())
+    };
+    for track in &spec.tracks {
+        load(&track.plugin_chain).map_err(|message| {
+            let label = if track.name.trim().is_empty() { &track.id } else { &track.name };
+            format!("Track {label:?}: {message}")
+        })?;
+    }
+    load(&spec.plugin_chain).map_err(|message| format!("Master output: {message}"))?;
+    Ok((
+        PluginUpdate { added, retained: retained.clone(), unavailable },
+        ui,
+    ))
+}
+
 impl Graph {
     #[cfg(test)]
     pub fn load(
@@ -419,6 +471,76 @@ impl Graph {
 
     pub fn is_offline(&self) -> bool {
         self.offline
+    }
+
+    /// The worker commits the edit at a block boundary and returns retired
+    /// processors to the UI thread, where their editors can detach first.
+    pub fn update_plugins(
+        &mut self,
+        spec: SessionSpec,
+        prepared: PreparedMixUpdate,
+        update: &mut PluginUpdate,
+    ) -> Result<Vec<Slot>, String> {
+        let live: HashMap<_, _> = self.chains
+            .iter().flatten().chain(&self.master)
+            .filter(|slot| update.retained.contains(&slot.id))
+            .chain(update.added.values())
+            .map(|slot| (slot.id.as_str(), slot.latency))
+            .collect();
+        let latency_of = |slots: &[PluginSlot]| {
+            total_latency(slots.iter().filter_map(|slot| live.get(slot.id.as_str()).copied()))
+        };
+        let track_latencies: Vec<_> = spec.tracks.iter()
+            .map(|track| latency_of(&track.plugin_chain)).collect();
+        let maximum = track_latencies.iter().copied().max().unwrap_or(0);
+        let limiter = spec.master_limiter.clone().unwrap_or_default();
+        let latency = maximum
+            .saturating_add(latency_of(&spec.plugin_chain))
+            .saturating_add(limiter.latency(self.sample_rate));
+        if latency > MAX_LATENCY {
+            return Err("Combined plugin latency exceeds the supported limit".into());
+        }
+        let delays = track_latencies.into_iter()
+            .map(|latency| Delay::new(maximum - latency))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.timeline.apply_mix_update(prepared)?;
+
+        let mut previous: HashMap<_, _> = self.chains
+            .iter_mut()
+            .flat_map(|chain| chain.drain(..))
+            .chain(self.master.drain(..))
+            .map(|slot| (slot.id.clone(), slot))
+            .collect();
+        let mut build_chain = |slots: &[PluginSlot]| -> Vec<Slot> {
+            slots.iter().filter_map(|next| {
+                let mut slot = if update.retained.contains(&next.id) {
+                    previous.remove(&next.id)?
+                } else {
+                    update.added.remove(&next.id)?
+                };
+                slot.set_bypassed(next.bypassed);
+                Some(slot)
+            }).collect()
+        };
+        for (chain, track) in self.chains.iter_mut().zip(&spec.tracks) {
+            *chain = build_chain(&track.plugin_chain);
+        }
+        self.master = build_chain(&spec.plugin_chain);
+        self.limiter.configure(limiter);
+        self.delays = delays;
+        self.latency = latency;
+        self.unavailable_plugins.clone_from(&update.unavailable);
+        self.duration = (spec.duration() * f64::from(self.sample_rate)).round() as u64;
+        self.spec = spec;
+        self.refresh_tail();
+        Ok(previous.into_values().collect())
+    }
+
+    fn refresh_tail(&mut self) {
+        let tail = tail_length(&self.chains, &self.master, &self.spec);
+        let cap = u64::from(self.sample_rate) * 30;
+        self.tail = tail.min(cap);
+        self.tail_limited = tail > cap;
     }
 
     pub fn reset(&mut self) {
@@ -588,10 +710,7 @@ impl Graph {
         }
         self.duration = (spec.duration() * f64::from(self.sample_rate)).round() as u64;
         self.spec = spec;
-        let tail = tail_length(&self.chains, &self.master, &self.spec);
-        let cap = u64::from(self.sample_rate) * 30;
-        self.tail = tail.min(cap);
-        self.tail_limited = tail > cap;
+        self.refresh_tail();
         Ok(())
     }
 

@@ -4,6 +4,17 @@ use std::time::{Duration, Instant};
 
 pub(super) const PENDING_PREFIX: &str = "PLUGIN_HOST_DIALOG_PENDING:";
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Detection {
+    Early,
+    AtDeadline,
+}
+
+impl Detection {
+    // macOS window levels also describe nonblocking popups and tooltips.
+    pub const NATIVE: Self = if cfg!(windows) { Self::Early } else { Self::AtDeadline };
+}
+
 pub(super) struct Pending {
     pub id: u64,
     pub operation: String,

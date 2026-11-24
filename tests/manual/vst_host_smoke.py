@@ -168,7 +168,7 @@ def visible_windows(process_id: int) -> list[dict[str, Any]]:
         user32.GetWindowTextW(hwnd, name, len(name))
         rect = wintypes.RECT()
         user32.GetWindowRect(hwnd, ctypes.byref(rect))
-        found.append({"title": name.value, "width": rect.right - rect.left, "height": rect.bottom - rect.top})
+        found.append({"handle": hwnd, "title": name.value, "width": rect.right - rect.left, "height": rect.bottom - rect.top})
         return True
 
     user32.EnumWindows(collect, 0)
@@ -487,6 +487,45 @@ def main() -> int:
             report["cases"].append({"name": "editor_open_close_reopen", "status": "skipped", "reason": "--skip-editor"})
         else:
             case("editor_open_close_reopen", editor_cycle)
+
+            def edit_open_chain() -> dict[str, Any]:
+                spec = project("edit-open-chain")
+                chain = spec["tracks"][0]["pluginChain"]
+                chain.append(slot("second-gain"))
+                session_id = load(spec)["sessionId"]
+                handles = {}
+                for effect in chain:
+                    identifier = effect["id"]
+                    old = set(handles.values())
+                    assert host.request("editor", slotId=identifier, open=True)["open"]
+                    if os.name == "nt":
+                        new = {
+                            window["handle"] for window in visible_windows(host.process.pid)
+                            if window["title"] == "Fixture Gain"
+                        } - old
+                        assert len(new) == 1, new
+                        handles[identifier] = new.pop()
+
+                def update(open_ids: set[str]) -> None:
+                    status = host.request("update", project=spec, ffmpeg=str(ffmpeg))
+                    assert status["sessionId"] == session_id, status
+                    assert set(status["openEditors"]) == open_ids, status
+                    if os.name == "nt":
+                        actual = {
+                            window["handle"] for window in visible_windows(host.process.pid)
+                            if window["title"] == "Fixture Gain"
+                        }
+                        assert actual == {handles[identifier] for identifier in open_ids}, actual
+
+                chain.append(slot("third-gain"))
+                update({"track-gain", "second-gain"})
+                chain.reverse()
+                update({"track-gain", "second-gain"})
+                chain.pop(1)
+                update({"track-gain"})
+                return {"survivingNativeWindow": os.name == "nt"}
+
+            case("chain_edits_keep_surviving_native_editors", edit_open_chain)
     except Exception as error:
         report["fatalError"] = str(error)
         print(f"FAIL setup: {error}", flush=True)

@@ -225,6 +225,25 @@ with sync_playwright() as p:
         expect(search_modal).not_to_be_visible()
         results.append('searchable combobox inside Naive modal preserves Escape and focus boundary')
 
+        page.locator('#open-floating-modal').click()
+        floating = page.get_by_role('dialog', name='Floating panel', exact=True)
+        expect(floating).to_be_visible()
+        for key in ['floatingSelect', 'floating-search']:
+            control = open_control(key)
+            floating.locator('#floating-blank').click()
+            expect(control).to_have_attribute('aria-expanded', 'false')
+            open_control(key)
+            outside = floating.locator('#floating-outside')
+            outside.click()
+            expect(control).to_have_attribute('aria-expanded', 'false')
+            expect(outside).to_be_focused()
+            expect(floating).to_be_visible()
+        assert value('outsideClicks') == 2
+        assert value('floatingSelect') == 'a' and value('search') == 'b'
+        page.evaluate('selectFixture.state.floatingOpen = false')
+        expect(floating).to_be_hidden()
+        results.append('outside clicks dismiss both popup variants in a floating panel that stops pointer events')
+
         page.locator('#open-export').click()
         modal = page.get_by_role('dialog')
         expect(modal).to_be_visible()

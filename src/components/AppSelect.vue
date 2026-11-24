@@ -192,6 +192,25 @@ function setOpen(value: boolean) {
   emit('update:show', value)
   if (value) returnFocus = true
 }
+function dismissFromOutside(event: MouseEvent) {
+  // Wait for a click on touch so scrolling outside the menu does not close it.
+  if (!open.value || (event.type === 'pointerdown' && (event as PointerEvent).pointerType === 'touch')) return
+  const path = event.composedPath()
+  if ((root.value && path.includes(root.value)) || (menu.value && path.includes(menu.value))) return
+  returnFocus = false
+  setOpen(false)
+}
+watch([open, root], ([showing, element], _, onCleanup) => {
+  if (!showing || !element) return
+  // Floating panels can stop bubbling to protect their own pointer interactions.
+  const doc = element.ownerDocument
+  doc.addEventListener('pointerdown', dismissFromOutside, true)
+  doc.addEventListener('click', dismissFromOutside, true)
+  onCleanup(() => {
+    doc.removeEventListener('pointerdown', dismissFromOutside, true)
+    doc.removeEventListener('click', dismissFromOutside, true)
+  })
+}, { flush: 'sync' })
 function update(keys: unknown) {
   if (props.disabled) return
   if (props.multiple && Array.isArray(keys)) {

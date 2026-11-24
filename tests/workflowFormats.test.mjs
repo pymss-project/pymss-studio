@@ -5,7 +5,7 @@ import { createServer } from 'vite'
 
 const vite = await createServer({
   configFile: false,
-  server: { middlewareMode: true, hmr: false },
+  server: { middlewareMode: true, watch: null, hmr: false, ws: false },
   appType: 'custom',
   optimizeDeps: { noDiscovery: true },
   resolve: {

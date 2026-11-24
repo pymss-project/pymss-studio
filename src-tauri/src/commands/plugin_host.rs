@@ -679,14 +679,20 @@ impl HostProcess {
     }
 
     fn request_live(&mut self, request: Value, timeout: Duration) -> Result<Value, HostRequestError> {
-        self.request_live_with(request, timeout, &mut dialogs::owned_dialog)
+        self.request_live_with(request, timeout, dialogs::Detection::NATIVE, &mut dialogs::owned_dialog)
     }
 
-    fn request_live_with(&mut self, request: Value, timeout: Duration, detector: &mut impl FnMut(u32) -> Option<String>) -> Result<Value, HostRequestError> {
+    fn request_live_with(
+        &mut self,
+        request: Value,
+        timeout: Duration,
+        detection: dialogs::Detection,
+        detector: &mut impl FnMut(u32) -> Option<String>,
+    ) -> Result<Value, HostRequestError> {
         let operation = request.get("op").and_then(Value::as_str).unwrap_or("").to_owned();
         let unloading_load = operation == "unload"
             && self.pending.as_ref().is_some_and(|pending| pending.operation == "load");
-        match self.finish_pending_with(detector) {
+        match self.finish_pending_with(detection, detector) {
             // A rejected load leaves the helper alive. Still send the requested cleanup.
             Err(HostRequestError::Operation(_)) if unloading_load => {}
             result => result?,
@@ -697,15 +703,23 @@ impl HostProcess {
         }
         let (id, started) = self.send_request(request, timeout)?;
         self.pending = Some(dialogs::Pending::new(id, operation, started, timeout));
-        self.receive_live_with(detector)
+        self.receive_live_with(detection, detector)
     }
 
-    fn finish_pending_with(&mut self, detector: &mut impl FnMut(u32) -> Option<String>) -> Result<(), HostRequestError> {
-        if self.pending.is_some() { self.receive_live_with(detector)?; }
+    fn finish_pending_with(
+        &mut self,
+        detection: dialogs::Detection,
+        detector: &mut impl FnMut(u32) -> Option<String>,
+    ) -> Result<(), HostRequestError> {
+        if self.pending.is_some() { self.receive_live_with(detection, detector)?; }
         Ok(())
     }
 
-    fn receive_live_with(&mut self, detector: &mut impl FnMut(u32) -> Option<String>) -> Result<Value, HostRequestError> {
+    fn receive_live_with(
+        &mut self,
+        detection: dialogs::Detection,
+        detector: &mut impl FnMut(u32) -> Option<String>,
+    ) -> Result<Value, HostRequestError> {
         loop {
             // Always consume a completed response before inspecting windows. A dialog may
             // outlive its SDK call, and a dead helper must never be retained on that evidence.
@@ -728,16 +742,20 @@ impl HostProcess {
                 }
                 return Err(HostRequestError::Transport("The audio host timed out and was terminated".into()));
             }
-            // Give normal fast RPCs a chance to complete even if a plugin also owns a modeless
-            // dialog. A real modal blocks the UI dispatch and leaves this response outstanding.
-            match self.responses.recv_timeout(remaining.min(Duration::from_millis(50))) {
+            let wait = match detection {
+                dialogs::Detection::Early => remaining.min(Duration::from_millis(50)),
+                dialogs::Detection::AtDeadline => remaining,
+            };
+            match self.responses.recv_timeout(wait) {
                 Ok(value) => return self.complete_live(value),
+                Err(mpsc::RecvTimeoutError::Timeout) if detection == dialogs::Detection::Early => {
+                    if let Some(title) = detector(self.control.pid) {
+                        self.pending.as_mut().expect("a live request is outstanding").suspend();
+                        return Err(HostRequestError::DialogPending(dialogs::message(&title)));
+                    }
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => return Err(HostRequestError::Transport("The audio host response pipe closed".into())),
-            }
-            if let Some(title) = detector(self.control.pid) {
-                self.pending.as_mut().expect("a live request is outstanding").suspend();
-                return Err(HostRequestError::DialogPending(dialogs::message(&title)));
             }
         }
     }
@@ -918,20 +936,33 @@ fn reconcile_live_session(session: &mut Session, pid: &ProcessLease, closing: bo
     }
 }
 
-fn prepare_live_load_with(session: &mut Session, pid: &ProcessLease, generation: u64, detector: &mut impl FnMut(u32) -> Option<String>) -> Result<(), HostRequestError> {
+fn prepare_live_load_with(
+    session: &mut Session,
+    pid: &ProcessLease,
+    generation: u64,
+    detection: dialogs::Detection,
+    detector: &mut impl FnMut(u32) -> Option<String>,
+) -> Result<(), HostRequestError> {
     // The caller holds the session lock and has checked this load's reservation. Claim it
     // before any fallible preparation so a retired or failed host remains recoverable.
     session.generation = generation;
-    let mut result = match session.process.as_mut() {
-        Some(process) => process.finish_pending_with(detector),
+    let result = match session.process.as_mut() {
+        Some(process) => process.finish_pending_with(detection, detector).and_then(|()| {
+            let Some(title) = detector(process.control.pid) else {
+                return Ok(());
+            };
+            if detection == dialogs::Detection::Early {
+                // A dialog can also originate in a plugin window message, outside any RPC.
+                return Err(HostRequestError::DialogPending(dialogs::message(&title)));
+            }
+            // Verify the old helper can respond before replacing it when a popup is visible.
+            match process.request_live_with(json!({"op":"status"}), REQUEST_TIMEOUT, detection, detector) {
+                Ok(_) | Err(HostRequestError::Operation(_)) => Ok(()),
+                Err(error) => Err(error),
+            }
+        }),
         None => Ok(()),
     };
-    if result.is_ok() {
-        if let Some(title) = session.process.as_ref().and_then(|process| detector(process.control.pid)) {
-            // A dialog can also originate in a plugin window message, outside any RPC.
-            result = Err(HostRequestError::DialogPending(dialogs::message(&title)));
-        }
-    }
     let fatal = result.as_ref().is_err_and(HostRequestError::is_fatal);
     reconcile_live_session(session, pid, fatal);
     result?;
@@ -1265,7 +1296,10 @@ pub async fn plugin_host_request(
             return Err("The audio host session belongs to another project or is closed".into());
         }
         if op == "load" {
-            prepare_live_load_with(&mut session, &state.session_pid, generation, &mut dialogs::owned_dialog)
+            prepare_live_load_with(
+                &mut session, &state.session_pid, generation,
+                dialogs::Detection::NATIVE, &mut dialogs::owned_dialog,
+            )
                 .map_err(|error| error.to_string())?;
         }
         if op == "load" || op == "update" {
@@ -1523,30 +1557,37 @@ fn scan_paths(paths: Vec<String>) -> Result<(Vec<PathBuf>, Vec<ScanFailure>), St
     let mut valid = Vec::new();
     let mut failures = Vec::new();
     for path in paths {
-        let result = (|| {
+        let result = (|| -> std::io::Result<()> {
             if is_virtual_scan_target(&path) {
                 return if cfg!(all(feature = "native-plugins", target_os = "macos")) {
                     Ok(())
                 } else {
-                    Err("Audio Unit discovery is only available on macOS".into())
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "Audio Unit discovery is only available on macOS",
+                    ))
                 };
             }
-            let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
+            let metadata = fs::metadata(&path)?;
             let bundle = is_plugin_path(&path);
             if !bundle && !metadata.is_dir() {
-                return Err("The selected path is not a directory or a recognized plugin".into());
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "The selected path is not a directory or a recognized plugin",
+                ));
             }
             // Validate access here: the recursive bundle finder skips unreadable roots.
             if metadata.is_dir() && !bundle {
-                fs::read_dir(&path).map_err(|error| error.to_string())?;
+                fs::read_dir(&path)?;
             }
             Ok(())
         })();
         match result {
             Ok(()) => valid.push(path),
-            Err(message) => failures.push(ScanFailure {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => failures.push(ScanFailure {
                 path: path.to_string_lossy().into_owned(),
-                message,
+                message: error.to_string(),
             }),
         }
     }
@@ -2042,7 +2083,7 @@ mod tests {
         let mut session = Session { generation: 8, ..Session::default() };
         let generation = begin_load_generation(&state, None).unwrap();
         assert!(require_generation(&state, generation).is_ok());
-        prepare_live_load_with(&mut session, &state.session_pid, generation, &mut |_| None).unwrap();
+        prepare_live_load_with(&mut session, &state.session_pid, generation, dialogs::Detection::NATIVE, &mut |_| None).unwrap();
         let root = tempfile::tempdir().unwrap();
         let mut request = json!({"project":{"pluginChain":[{
             "format":"vst3", "bypassed":false,
@@ -2589,7 +2630,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_paths_only_validates_explicit_sources() {
+    fn scan_paths_silently_ignores_missing_sources_and_keeps_other_failures() {
         let root = tempfile::tempdir().unwrap();
         let missing = root.path().join("missing");
         let file = root.path().join("readme.txt");
@@ -2603,7 +2644,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(paths, vec![valid]);
-        assert_eq!(failures.len(), 2);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].path, file.to_string_lossy());
         let (paths, failures) = scan_paths(Vec::new()).unwrap();
         assert!(paths.is_empty());
         assert!(failures.is_empty());

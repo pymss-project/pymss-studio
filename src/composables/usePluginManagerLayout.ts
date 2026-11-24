@@ -12,13 +12,12 @@ export function usePluginManagerLayout(open: Ref<boolean>, parametersOpen: Ref<b
   const preferredParameters = ref<number>()
   const bodyWidth = ref(0)
   const paneHeight = ref(0)
-  const viewportWidth = ref(window.innerWidth)
   const viewportHeight = ref(window.innerHeight)
   const resizing = ref<Split | null>(null)
-  const stacked = computed(() => viewportWidth.value <= 760)
+  const compact = computed(() => bodyWidth.value > 0 && bodyWidth.value < 720)
   const libraryMin = computed(() => Math.min(260, Math.max(0, bodyWidth.value - HANDLE_SIZE)))
-  const libraryMax = computed(() => Math.max(libraryMin.value, bodyWidth.value - HANDLE_SIZE - 320))
-  const libraryWidth = computed(() => clamp(preferredLibrary.value ?? clamp(bodyWidth.value * 0.3, 260, 380), libraryMin.value, libraryMax.value))
+  const libraryMax = computed(() => Math.max(libraryMin.value, bodyWidth.value - HANDLE_SIZE - 380))
+  const libraryWidth = computed(() => clamp(preferredLibrary.value ?? clamp(bodyWidth.value * 0.35, 280, 380), libraryMin.value, libraryMax.value))
   // Keep the toolbar, parameter list and pagination usable. When both panes no
   // longer fit, the chain scrolls instead of reducing the dock below its minimum.
   const parameterMin = computed(() => 150)
@@ -36,13 +35,12 @@ export function usePluginManagerLayout(open: Ref<boolean>, parametersOpen: Ref<b
 
   function measure() {
     if (disposed) return
-    viewportWidth.value = window.innerWidth
     viewportHeight.value = window.innerHeight
     if (!open.value) return
     const body = managerBody.value
     const chain = managerChain.value
     if (body) bodyWidth.value = body.clientWidth
-    if (chain && parametersOpen.value) {
+    if (chain?.clientHeight && parametersOpen.value) {
       const style = getComputedStyle(chain)
       const children = Array.from(chain.children) as HTMLElement[]
       const fixed = children.filter(child => !child.matches('.plugin-manager__slots, .plugin-manager__parameter-dock, [role="separator"]'))
@@ -51,7 +49,7 @@ export function usePluginManagerLayout(open: Ref<boolean>, parametersOpen: Ref<b
       const gaps = (Number.parseFloat(style.rowGap) || 0) * Math.max(0, children.length - 1)
       paneHeight.value = Math.max(0, chain.clientHeight - padding - fixed - gaps - HANDLE_SIZE)
     }
-    if (stacked.value && resizing.value === 'library') finishResize()
+    if (compact.value && resizing.value === 'library') finishResize()
   }
 
   function persist() {
@@ -94,7 +92,7 @@ export function usePluginManagerLayout(open: Ref<boolean>, parametersOpen: Ref<b
   function blurResize() { finishResize() }
 
   function startResize(kind: Split, event: PointerEvent) {
-    if (event.button !== 0 || !open.value || (kind === 'library' && stacked.value)
+    if (event.button !== 0 || !open.value || (kind === 'library' && compact.value)
       || (kind === 'parameters' && !parametersOpen.value)) return
     measure()
     finishResize()
@@ -183,5 +181,5 @@ export function usePluginManagerLayout(open: Ref<boolean>, parametersOpen: Ref<b
   })
 
   return { managerBody, managerChain, managerStyle, libraryWidth, libraryMin, libraryMax,
-    parameterHeight, parameterMin, parameterMax, resizing, stacked, startResize, resizeWithKeyboard, resetSize }
+    parameterHeight, parameterMin, parameterMax, resizing, compact, startResize, resizeWithKeyboard, resetSize }
 }

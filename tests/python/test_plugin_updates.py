@@ -36,6 +36,135 @@ class PluginUpdateTests(unittest.TestCase):
         self.assertEqual(code, 0, events)
         self.assertEqual(events[-1]["payload"]["installed"][0]["version"], "2.0.0")
 
+    def test_same_version_bundled_content_can_be_updated_after_the_catalog_advances(self):
+        from pymss.plugins import install as installer, marketplace
+
+        self.install(self.source())
+        receipt = self.root / "installed/hello/.pymss-install.json"
+        metadata = json.loads(receipt.read_text())
+        metadata.update(source="git", url=marketplace.GITHUB_REPOSITORY, subpath="plugins/hello", preinstalled=True)
+        receipt.write_text(json.dumps(metadata))
+        snapshot = self.work / "bundle"
+        bundled = snapshot / "hello"
+        shutil.copytree(self.source(), bundled)
+        (bundled / "ui.html").write_text("File drop support", encoding="utf-8")
+        commit = "b" * 40
+        row = {"name": "hello", "subpath": "plugins/hello", "url": marketplace.GITHUB_REPOSITORY,
+               "version": "1.0.0", "files": {}}
+        (snapshot / "manifest.json").write_text(json.dumps({"schemaVersion": 1, "plugins": [row],
+            "source": {"local": False, "commit": commit, "repository": marketplace.GITHUB_REPOSITORY}}))
+
+        def acquire(url, destination, *, subpath, ref, temporary_root):
+            self.assertEqual(url, marketplace.GITCODE_REPOSITORY)
+            self.assertEqual(ref, commit)
+            shutil.copytree(bundled, destination)
+            return {"resolved_commit": ref}
+
+        with mock.patch.object(plugins, "_BUNDLED_ROOT", snapshot), \
+             mock.patch.dict(os.environ, {"PYMSS_PLUGINS_REGISTRY": marketplace.GITCODE_REGISTRY, "PYMSS_PLUGINS_SOURCE": "gitcode"}), \
+             mock.patch.object(installer, "list_available",
+                               return_value=[{**row, "ref": commit, "url": marketplace.GITCODE_REPOSITORY}]) as catalog, \
+             mock.patch.object(installer, "_clone", side_effect=acquire) as clone, \
+             mock.patch.object(marketplace, "_json") as compare:
+            code, events = self.manage("check_updates", name="hello")
+            self.assertEqual(code, 0, events)
+            self.assertEqual(events[-1]["payload"]["updates"]["hello"]["status"], "content")
+            compare.assert_not_called()
+            older_commit = "a" * 40
+            marketplace_receipt = {**metadata, "url": marketplace.GITCODE_REPOSITORY,
+                                   "preinstalled": False, "defaultRepository": True,
+                                   "resolved_commit": older_commit}
+            compare.return_value = {"merge_base_commit": {"sha": older_commit}}
+            receipt.write_text(json.dumps(marketplace_receipt))
+            code, events = self.manage("check_updates", name="hello")
+            self.assertEqual(code, 0, events)
+            update = events[-1]["payload"]["updates"]["hello"]
+            self.assertEqual((update["status"], update["remote_commit"]), ("content", commit))
+            compare.assert_called_once_with(
+                "https://api.gitcode.com/api/v5/repos/pymss-project/pymss-plugins/"
+                f"compare/{older_commit}...{commit}?suffix=.toml",
+            )
+
+            latest_commit = "c" * 40
+            catalog.return_value = [{**row, "ref": commit, "url": marketplace.GITCODE_REPOSITORY}]
+            compare.return_value = {"status": "behind", "merge_base_commit": {"sha": commit}}
+            for preinstalled in (False, True):
+                with self.subTest(preinstalled=preinstalled):
+                    receipt.write_text(json.dumps({**marketplace_receipt, "preinstalled": preinstalled,
+                                                   "resolved_commit": latest_commit}))
+                    code, events = self.manage("check_updates", name="hello")
+                    self.assertEqual(code, 0, events)
+                    update = events[-1]["payload"]["updates"]["hello"]
+                    self.assertEqual(update["status"], "source_changed")
+                    self.assertNotIn("target", update)
+                    code, events = self.manage("update", name="hello", expectedUpdate=update)
+                    self.assertEqual(code, 1, events)
+                    clone.assert_not_called()
+                    self.assertEqual(json.loads(receipt.read_text())["resolved_commit"], latest_commit)
+
+            compare.side_effect = OSError("Comparison unavailable")
+            receipt.write_text(json.dumps(marketplace_receipt))
+            code, events = self.manage("check_updates", name="hello")
+            self.assertEqual(code, 0, events)
+            update = events[-1]["payload"]["updates"]["hello"]
+            self.assertEqual(update["status"], "source_changed")
+            self.assertNotIn("target", update)
+
+            receipt.write_text(json.dumps({**marketplace_receipt, "url": "https://github.com/example/plugins"}))
+            code, events = self.manage("check_updates", name="hello")
+            self.assertEqual(code, 0, events)
+            self.assertEqual(events[-1]["payload"]["updates"]["hello"]["status"], "source_changed")
+
+            catalog.return_value = [{**row, "ref": latest_commit, "url": marketplace.GITCODE_REPOSITORY}]
+            comparison_base = {
+                f"{older_commit}...{commit}": older_commit,
+                f"{commit}...{latest_commit}": commit,
+            }
+
+            def gitcode_compare(url):
+                self.assertTrue(url.startswith("https://api.gitcode.com/"), url)
+                pair = url.split("/compare/")[1].split("?")[0]
+                return {"merge_base_commit": {"sha": comparison_base.get(pair, commit)}}
+
+            compare.side_effect = gitcode_compare
+            comparison_base[f"{commit}...{latest_commit}"] = older_commit
+            receipt.write_text(json.dumps(marketplace_receipt))
+            code, events = self.manage("check_updates", name="hello")
+            self.assertEqual(code, 0, events)
+            self.assertEqual(events[-1]["payload"]["updates"]["hello"]["status"], "source_changed")
+            comparison_base[f"{commit}...{latest_commit}"] = commit
+            receipt.write_text(json.dumps({**metadata, "resolved_commit": "d" * 40}))
+            code, events = self.manage("check_updates", name="hello")
+            self.assertEqual(code, 0, events)
+            update = events[-1]["payload"]["updates"]["hello"]
+            self.assertEqual(update["status"], "source_changed")
+            self.assertNotIn("target", update)
+
+            for initial, saved in ((marketplace_receipt, False), (metadata, True)):
+                with self.subTest(preinstalled=saved):
+                    receipt.write_text(json.dumps(initial))
+                    self.assertFalse(receipt.with_name("ui.html").exists())
+                    code, events = self.manage("check_updates", name="hello")
+                    self.assertEqual(code, 0, events)
+                    update = events[-1]["payload"]["updates"]["hello"]
+                    self.assertEqual((update["status"], update["content_changed"]), ("content", True))
+                    self.assertEqual(update["remote_commit"], commit)
+                    self.assertEqual(update["target"]["source"]["ref"], commit)
+                    code, events = self.manage("update", name="hello", expectedUpdate=update)
+                    self.assertEqual(code, 0, events)
+                    self.assertEqual(json.loads(receipt.read_text())["resolved_commit"], commit)
+                    self.assertTrue(receipt.with_name("ui.html").is_file())
+                    if not saved:
+                        receipt.with_name("ui.html").unlink()
+            code, events = self.manage("check_updates", name="hello")
+            self.assertEqual(code, 0, events)
+            update = events[-1]["payload"]["updates"]["hello"]
+            self.assertEqual((update["status"], update["remote_commit"]), ("source_changed", latest_commit))
+            catalog.return_value = [{**row, "ref": commit, "url": marketplace.GITCODE_REPOSITORY}]
+            code, events = self.manage("check_updates", name="hello")
+            self.assertEqual(code, 0, events)
+            self.assertEqual(events[-1]["payload"]["updates"]["hello"]["status"], "latest")
+
     def test_an_old_core_cannot_silently_ignore_a_reviewed_update(self):
         with mock.patch.object(management, "UPDATE_REVIEW_VERSION", 0), mock.patch.object(plugins, "_service") as service:
             code, events = self.manage("update", name="hello", expectedUpdate={"target": {"schemaVersion": 1}})

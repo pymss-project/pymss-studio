@@ -680,7 +680,7 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
 .inspector-strip__fader :deep(.editor-parameter-slider) { flex-direction: column; flex: 1; min-height: 0; gap: 0; }
 .inspector-strip__fader :deep(.editor-parameter-slider__control) { display: flex; justify-content: center; flex: 1; min-height: 0; }
 .inspector-strip__fader :deep(.n-slider) { height: 100%; }
-.inspector-strip__fader :deep(.editor-parameter-slider__reset) { position: absolute; bottom: 0; left: 50%; transform: translateX(-50%); min-height: 18px; max-width: 100%; padding: 0 3px; font-size: 9px; white-space: normal; }
+.inspector-strip__fader :deep(.editor-parameter-slider__reset) { position: absolute; bottom: 0; inset-inline: 0; margin-inline: auto; width: max-content; min-height: 18px; padding: 0 3px; font-size: 9px; white-space: nowrap; }
 .inspector-strip__meter { display: grid; grid-template-columns: 5px 5px 16px; gap: 2px; }
 .inspector-strip__meter-bar { position: relative; overflow: hidden; background: var(--surface-2); border: 1px solid var(--outline); border-radius: 2px; }
 .inspector-strip__meter-bar > span { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(255, 106, 106, 0.95), rgba(255, 170, 102, 0.92) 24%, rgba(92, 214, 132, 0.9) 60%); }
@@ -831,6 +831,7 @@ details.inspector-group[open] > summary.inspector-group__header::after {
 
 .dual-fields > .panel-field {
   flex: 1;
+  min-width: 0;
 }
 
 .stats-grid {
@@ -945,6 +946,7 @@ details.inspector-group[open] > summary.inspector-group__header::after {
   .editor-inspector__scroll { padding-inline: 8px; }
   .inspector-strip { grid-template-columns: 66px minmax(0, 1fr); }
   .inspector-group { padding-inline: 8px; }
+  .inspector-group--clip .dual-fields { flex-direction: column; }
 }
 @container channel-inspector (min-width: 300px) {
   .inspector-strip { grid-template-columns: 84px minmax(0, 1fr); }
@@ -962,6 +964,7 @@ details.inspector-group[open] > summary.inspector-group__header::after {
   .inspector-strip { height: clamp(204px, 35dvh, 224px); }
   .inspector-strip__controls { gap: 4px; }
   .inspector-strip__fader-area { min-height: 76px; }
+  .inspector-strip__meter-scale > span:nth-child(even) { display: none; }
   .inspector-strip__flag { height: 18px; }
   .inspector-strip__readout { padding-top: 2px; }
 }

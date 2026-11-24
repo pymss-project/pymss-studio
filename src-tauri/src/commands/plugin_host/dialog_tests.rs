@@ -1,4 +1,5 @@
 use super::*;
+use super::dialogs::Detection;
 
 #[cfg(windows)]
 #[test]
@@ -154,7 +155,7 @@ impl Fixture {
     fn suspend(&mut self, operation: &str, timeout: Duration) {
         let result =
             self.process()
-                .request_live_with(json!({"op":operation}), timeout, &mut |_| {
+                .request_live_with(json!({"op":operation}), timeout, Detection::Early, &mut |_| {
                     Some("Authorization".into())
                 });
         assert!(matches!(result, Err(HostRequestError::DialogPending(_))));
@@ -174,6 +175,60 @@ impl Drop for Fixture {
 
 #[cfg(any(unix, windows))]
 #[test]
+fn popup_hint_does_not_interrupt_a_reply_within_the_deadline() {
+    let mut fixture = Fixture::new();
+    let sender = fixture.replies.clone();
+    let reply = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(125));
+        sender.send(Ok(json!({"id":1,"ok":true,"result":{"states":{}}}))).unwrap();
+    });
+    let result = fixture.process().request_live_with(
+        json!({"op":"snapshot"}), Duration::from_secs(2), Detection::AtDeadline,
+        &mut |_| panic!("A popup must only be checked after the reply deadline"),
+    ).unwrap();
+    reply.join().unwrap();
+    assert_eq!(result["states"], json!({}));
+    assert!(fixture.process().pending.is_none());
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn popup_at_the_deadline_keeps_the_original_request_pending() {
+    let mut fixture = Fixture::new();
+    let error = fixture.process().request_live_with(
+        json!({"op":"snapshot"}), Duration::from_millis(75), Detection::AtDeadline,
+        &mut |_| Some(String::new()),
+    ).unwrap_err();
+    assert!(matches!(error, HostRequestError::DialogPending(_)));
+    assert!(fixture.process().pending.as_ref().unwrap().is_suspended());
+    fixture.replies.send(Ok(json!({"id":1,"ok":true,"result":{"states":{}}}))).unwrap();
+    fixture.process().finish_pending_with(Detection::AtDeadline, &mut |_| {
+        panic!("The original reply must be consumed before inspecting windows");
+    }).unwrap();
+    assert!(fixture.process().pending.is_none());
+    assert_eq!(fixture.requests.lock().unwrap().len(), 1);
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn popup_does_not_prevent_replacing_a_responsive_session() {
+    let mut fixture = Fixture::new();
+    fixture.replies.send(Ok(json!({"id":1,"ok":true,"result":{"sessionId":"old-session"}}))).unwrap();
+    let process = fixture.process.take().unwrap();
+    let pid = ProcessLease::default();
+    pid.publish(&process).unwrap();
+    let mut session = Session { process: Some(process), ..Session::default() };
+    prepare_live_load_with(
+        &mut session, &pid, 2, Detection::AtDeadline, &mut |_| Some(String::new()),
+    ).unwrap();
+    assert_eq!(fixture.requests.lock().unwrap()[0]["op"], "status");
+    assert!(session.process.is_none());
+    assert_eq!(pid.id(), 0);
+    assert_eq!(session.generation, 2);
+}
+
+#[cfg(any(unix, windows))]
+#[test]
 fn modal_retains_one_request_and_drains_its_exact_id_before_another_write() {
     let mut fixture = Fixture::new();
     fixture.suspend("editor", Duration::from_millis(30));
@@ -181,7 +236,7 @@ fn modal_retains_one_request_and_drains_its_exact_id_before_another_write() {
     let result =
         fixture
             .process()
-            .request_live_with(json!({"op":"status"}), REQUEST_TIMEOUT, &mut |_| {
+            .request_live_with(json!({"op":"status"}), REQUEST_TIMEOUT, Detection::Early, &mut |_| {
                 Some("Authorization".into())
             });
     assert!(result
@@ -196,7 +251,7 @@ fn modal_retains_one_request_and_drains_its_exact_id_before_another_write() {
         .unwrap();
     let result = fixture
         .process()
-        .request_live_with(json!({"op":"status"}), Duration::from_secs(1), &mut |_| {
+        .request_live_with(json!({"op":"status"}), Duration::from_secs(1), Detection::Early, &mut |_| {
             None
         })
         .unwrap();
@@ -231,6 +286,7 @@ fn stale_reply_and_eof_are_fatal_even_when_a_modal_was_detected() {
         let result = fixture.process().request_live_with(
             json!({"op":"status"}),
             REQUEST_TIMEOUT,
+            Detection::Early,
             &mut |_| Some("Authorization".into()),
         );
         assert!(result.unwrap_err().is_fatal());
@@ -250,6 +306,7 @@ fn absent_modal_keeps_the_original_timeout_and_dismissed_modal_has_a_bounded_dea
         let result = fixture.process().request_live_with(
             json!({"op":"status"}),
             Duration::from_millis(60),
+            Detection::Early,
             &mut |_| None,
         );
         assert!(result.unwrap_err().is_fatal());
@@ -259,7 +316,7 @@ fn absent_modal_keeps_the_original_timeout_and_dismissed_modal_has_a_bounded_dea
         let retry = std::time::Instant::now();
         assert!(fixture
             .process()
-            .request_live_with(json!({"op":"status"}), REQUEST_TIMEOUT, &mut |_| None)
+            .request_live_with(json!({"op":"status"}), REQUEST_TIMEOUT, Detection::Early, &mut |_| None)
             .unwrap_err()
             .is_fatal());
         assert!(
@@ -276,7 +333,7 @@ fn unload_releases_the_helper_after_a_deferred_load_is_rejected() {
     fixture.suspend("load", Duration::from_millis(30));
     fixture.replies.send(Ok(json!({"id":1,"ok":false,"error":"Plugin load failed"}))).unwrap();
     let result = fixture.process().request_live_with(
-        json!({"op":"unload"}), REQUEST_TIMEOUT, &mut |_| None,
+        json!({"op":"unload"}), REQUEST_TIMEOUT, Detection::Early, &mut |_| None,
     );
     assert!(result.is_ok());
     assert!(fixture.process().live_closed);
@@ -361,14 +418,14 @@ fn deferred_close_never_sends_another_request_to_a_closed_graph() {
     let result =
         fixture
             .process()
-            .request_live_with(json!({"op":"status"}), REQUEST_TIMEOUT, &mut |_| None);
+            .request_live_with(json!({"op":"status"}), REQUEST_TIMEOUT, Detection::Early, &mut |_| None);
     assert!(!result.unwrap_err().is_fatal());
     assert!(fixture.process().live_closed);
     assert_eq!(fixture.process().sequence, 1);
     assert_eq!(
         fixture
             .process()
-            .request_live_with(json!({"op":"unload"}), REQUEST_TIMEOUT, &mut |_| None)
+            .request_live_with(json!({"op":"unload"}), REQUEST_TIMEOUT, Detection::Early, &mut |_| None)
             .unwrap()["closed"],
         true
     );
@@ -393,7 +450,7 @@ fn replacement_waits_for_modal_but_explicit_discard_and_shutdown_reclaim_the_own
                 native_session_id: Some("instance".into()),
                 process: Some(process),
             };
-            let result = prepare_live_load_with(&mut session, &live.session_pid, 2, &mut |_| {
+            let result = prepare_live_load_with(&mut session, &live.session_pid, 2, Detection::Early, &mut |_| {
                 Some("Authorization".into())
             });
             assert!(matches!(result, Err(HostRequestError::DialogPending(_))));
@@ -499,7 +556,7 @@ fn two_editor_windows_can_snapshot_and_release_their_own_hosts() {
     ] {
         let mut session = live.session.lock().unwrap();
         let generation = begin_load_generation(live, None).unwrap();
-        prepare_live_load_with(&mut session, &live.session_pid, generation, &mut |_| None).unwrap();
+        prepare_live_load_with(&mut session, &live.session_pid, generation, Detection::Early, &mut |_| None).unwrap();
         let process = fixture.process.take().unwrap();
         live.session_pid.publish(&process).unwrap();
         session.process = Some(process);
@@ -583,7 +640,7 @@ fn fatal_load_preparation_retains_the_claimed_generation_for_recovery() {
         process: Some(process),
     };
     let generation = begin_load_generation(&state, None).unwrap();
-    let error = prepare_live_load_with(&mut session, &state.session_pid, generation, &mut |_| None)
+    let error = prepare_live_load_with(&mut session, &state.session_pid, generation, Detection::Early, &mut |_| None)
         .unwrap_err();
     assert!(error.is_fatal());
     assert!(session.process.is_none());

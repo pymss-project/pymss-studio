@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "repository": {
     "url": "https://github.com/pymss-project/pymss-plugins",
-    "ref": "main",
+    "ref": "aa892418f98ee3ad50574f37bdac9a916a96cec8",
     "registryRef": "main"
   },
   "preinstalled": [

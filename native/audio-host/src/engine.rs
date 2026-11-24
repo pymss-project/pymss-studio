@@ -1,12 +1,15 @@
-use crate::graph::{BLOCK, Graph, GraphError, LatencyChange, UiSlot, UnavailablePlugin};
+use crate::graph::{
+    BLOCK, Graph, GraphError, LatencyChange, PluginUpdate, Slot, UiSlot, UnavailablePlugin,
+    prepare_plugin_update, same_plugin_instance,
+};
 use crate::output::{self, Clock, Frame, Output};
-use crate::timeline::{PreparedMixUpdate, SessionSpec, monitor_mask, prepare_mix_update};
+use crate::timeline::{PreparedMixUpdate, SessionSpec, monitor_mask, prepare_mix_update, same_sources};
 use base64::Engine;
 use crossbeam_channel::{Receiver, Sender, bounded};
 use rtrb::{Consumer, Producer};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -17,12 +20,24 @@ enum Control {
     Pause,
     Seek(u64, u64),
     Mix(SessionSpec, PreparedMixUpdate, Sender<Result<(), String>>),
+    Plugins(
+        SessionSpec,
+        PreparedMixUpdate,
+        PluginUpdate,
+        Sender<PluginUpdateReply>,
+    ),
     Monitor(Vec<String>, Sender<Result<(), String>>),
     Param(String, String, f64, f32),
     Params(Vec<(String, String, f64, f32)>),
     Barrier(Sender<Result<(), String>>, Arc<AtomicBool>),
     Renegotiate(Sender<Result<u64, String>>),
     Render(PathBuf),
+}
+
+struct PluginUpdateReply {
+    update: PluginUpdate,
+    result: Result<Vec<Slot>, String>,
+    graph_revision: u64,
 }
 
 /// A capture owns the pause; releasing it cannot be blocked by a full command
@@ -174,35 +189,43 @@ struct Meter {
 #[derive(Default)]
 struct LatencyRecovery {
     vst_used: bool,
-    au_attempts: u8,
-    last_au_completed: Option<Instant>,
+    au_slots: HashMap<String, AuLatencyRecovery>,
+}
+
+#[derive(Default)]
+struct AuLatencyRecovery {
+    attempts: u8,
+    last_completed: Option<Instant>,
 }
 
 impl LatencyRecovery {
-    fn begin(&mut self, now: Instant, is_au: bool) -> bool {
-        if !is_au {
+    fn begin(&mut self, now: Instant, au_slot: Option<&str>) -> bool {
+        let Some(slot) = au_slot else {
             return !std::mem::replace(&mut self.vst_used, true);
-        }
+        };
         // A single AU edit can publish several latency changes as its processing chain
         // settles. Bound back-to-back recovery while allowing subsequent edits.
         const MAX_AU_ATTEMPTS: u8 = 4;
         const AU_QUIET_PERIOD: Duration = Duration::from_secs(2);
-        if self
-            .last_au_completed
+        let recovery = self.au_slots.entry(slot.to_owned()).or_default();
+        if recovery
+            .last_completed
             .is_some_and(|last| now.duration_since(last) >= AU_QUIET_PERIOD)
         {
-            self.au_attempts = 0;
+            recovery.attempts = 0;
         }
-        if self.au_attempts >= MAX_AU_ATTEMPTS {
+        if recovery.attempts >= MAX_AU_ATTEMPTS {
             return false;
         }
-        self.au_attempts += 1;
+        recovery.attempts += 1;
         true
     }
 
-    fn complete(&mut self, now: Instant, is_au: bool) {
-        if is_au {
-            self.last_au_completed = Some(now);
+    fn complete(&mut self, now: Instant, au_slot: Option<&str>) {
+        if let Some(slot) = au_slot {
+            if let Some(recovery) = self.au_slots.get_mut(slot) {
+                recovery.last_completed = Some(now);
+            }
         } else {
             // The snapshot taken during recovery can collect editor callbacks.
             // Those events are part of the recovery that just completed.
@@ -640,6 +663,85 @@ impl Session {
         &self.suppressed_track_ids
     }
 
+    pub fn update_plugins(&mut self, spec: SessionSpec, restore: &[String]) -> Result<Value, String> {
+        let old: HashMap<_, _> = self.spec.slots().into_iter()
+            .map(|slot| (&slot.id, slot)).collect();
+        let mut retained = HashSet::new();
+        for slot in spec.slots() {
+            if !restore.contains(&slot.id)
+                && old.get(&slot.id).is_some_and(|previous| same_plugin_instance(previous, slot))
+                && (slot.bypassed || self.ui.contains_key(&slot.id))
+            {
+                retained.insert(slot.id.clone());
+            }
+        }
+        let prepared = prepare_mix_update(spec.clone(), self.sample_rate)?;
+        let (update, new_ui) = prepare_plugin_update(
+            &spec,
+            self.sample_rate,
+            self.offline,
+            &retained,
+            &self.unavailable_plugins,
+        )?;
+        let unavailable = update.unavailable.clone();
+        self.idle();
+        let pause = SnapshotPause::acquire(&self.tx, Duration::from_secs(5))?;
+        if self.clock.recovering.load(Ordering::Acquire) {
+            return Err("Plugin timing is changing; retry the chain edit after recovery".into());
+        }
+        let (reply, applied) = bounded(1);
+        let command = Control::Plugins(spec.clone(), prepared, update, reply);
+        if let Err(error) = self.tx.try_send(command) {
+            drop(new_ui);
+            drop(error.into_inner());
+            return Err("Audio command queue is unavailable".into());
+        }
+        // Once admitted, the worker owns the transaction. Wait for a definitive
+        // result so controllers and processors always describe the same graph.
+        let PluginUpdateReply { update, result, graph_revision } = applied
+            .recv()
+            .map_err(|_| "Audio processing did not apply the plugin update".to_string())?;
+        let retired = match result {
+            Ok(retired) => retired,
+            Err(error) => {
+                drop(new_ui);
+                drop(update);
+                return Err(error);
+            }
+        };
+        let mut reopen = Vec::new();
+        let removed: Vec<_> = self.ui.keys().filter(|id| !retained.contains(*id))
+            .cloned().collect();
+        let mut retired_ui = Vec::new();
+        for id in removed {
+            if let Some(mut slot) = self.ui.remove(&id) {
+                if let Some(editor) = &mut slot.editor {
+                    if editor.is_open() && new_ui.contains_key(&id) {
+                        reopen.push(id);
+                    }
+                    editor.close();
+                }
+                retired_ui.push(slot);
+            }
+        }
+        drop(retired);
+        drop(retired_ui);
+        drop(update);
+        self.ui.extend(new_ui);
+        self.unavailable_plugins = unavailable;
+        self.spec = spec;
+        self.graph_revision = graph_revision;
+        self.latency_recovery = LatencyRecovery::default();
+        self.state_revision = self.state_revision.saturating_add(1);
+        // Invalidate queued output from the previous route and refill at the
+        // current cursor. Seeking resets DSP history, not controllers or views.
+        let position = self.clock.position() as f64 / f64::from(self.sample_rate);
+        self.seek(position)?;
+        drop(pause);
+        self.reopen_editors(reopen);
+        Ok(self.status())
+    }
+
     /// A transient monitor update affects subsequent rendering, without changing project mute
     /// flags or transport. Recording starts a fresh playback epoch after this acknowledgement.
     pub fn monitor(&mut self, ids: Vec<String>) -> Result<Value, String> {
@@ -667,6 +769,15 @@ impl Session {
                 .slots()
                 .iter()
                 .all(|slot| slot.bypassed || self.ui.contains_key(&slot.id))
+    }
+
+    pub fn accepts_in_place_update(&self, spec: &SessionSpec, ffmpeg: &Path) -> bool {
+        self.error.is_none()
+            && !self.clock.recovering.load(Ordering::Acquire)
+            && self.ffmpeg == ffmpeg
+            && same_sources(&self.spec, spec)
+            && self.spec.tracks.len() == spec.tracks.len()
+            && self.spec.tracks.iter().zip(&spec.tracks).all(|(old, new)| old.id == new.id)
     }
 
     pub fn start_render(&mut self, path: PathBuf) -> Result<(), String> {
@@ -713,10 +824,15 @@ impl Session {
             .collect()
     }
 
-    pub fn has_editor(&self, slot: &str) -> bool {
-        self.ui
-            .get(slot)
-            .is_some_and(|entry| entry.editor.is_some())
+    pub fn reopen_editors(&mut self, slots: Vec<String>) {
+        for slot in slots {
+            if self.ui.get(&slot).is_some_and(|entry| entry.editor.is_some())
+                && let Err(error) = self.editor(&slot, true)
+            {
+                // DSP is already committed. A failed window must not reject the graph update.
+                eprintln!("Could not reopen plugin editor ({slot}): {error}");
+            }
+        }
     }
 
     fn playback_intent(&self) -> bool {
@@ -745,11 +861,12 @@ impl Session {
         if let Some(error) = &self.error {
             return Err(error.clone());
         }
-        let is_au = self
+        let au_slot = self
             .ui
             .get(&change.slot)
-            .is_some_and(|slot| slot.format == "au");
-        if !self.latency_recovery.begin(Instant::now(), is_au) {
+            .filter(|slot| slot.format == "au")
+            .map(|_| change.slot.as_str());
+        if !self.latency_recovery.begin(Instant::now(), au_slot) {
             return Err(format!(
                 "Plugin latency remained unstable after automatic recovery ({}; previous latency {} samples). Reload the project before retrying",
                 change.slot, change.previous
@@ -792,7 +909,7 @@ impl Session {
         } else {
             self.seek(seconds)?;
         }
-        self.latency_recovery.complete(Instant::now(), is_au);
+        self.latency_recovery.complete(Instant::now(), au_slot);
         Ok(())
     }
 
@@ -1101,6 +1218,13 @@ fn process(
                         clock.finish(generation);
                     }
                     let _ = reply.try_send(result);
+                }
+                Control::Plugins(spec, prepared, mut update, reply) => {
+                    let result = graph.update_plugins(spec, prepared, &mut update);
+                    if result.is_ok() {
+                        graph_revision = graph_revision.saturating_add(1);
+                    }
+                    let _ = reply.try_send(PluginUpdateReply { update, result, graph_revision });
                 }
                 Control::Monitor(ids, reply) => {
                     let result = graph.set_monitor(&ids);
@@ -1502,6 +1626,58 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reopening_editors_skips_missing_views_and_continues_after_an_open_error() {
+        use soundcraft_dsp::{Category, PluginEditor, PluginInfo};
+        static INFO: PluginInfo = PluginInfo {
+            id: "effect",
+            name: "Effect",
+            short_name: "Effect",
+            category: Category::Other,
+            is_instrument: false,
+            audiosuite: true,
+            params: &[],
+        };
+        #[derive(Default)]
+        struct View(bool);
+        impl PluginEditor for View {
+            fn open(&mut self) -> Result<(), String> {
+                self.0 = true;
+                Ok(())
+            }
+            fn close(&mut self) {
+                self.0 = false;
+            }
+            fn is_open(&self) -> bool {
+                self.0
+            }
+            fn idle(&mut self) -> Vec<(String, f32)> {
+                Vec::new()
+            }
+        }
+        let spec = serde_json::from_value(
+            json!({"id":"reopen", "name":"Audio", "sources":[], "tracks":[]}),
+        )
+        .unwrap();
+        let mut session = Session::load(spec, PathBuf::from("ffmpeg")).unwrap();
+        let ui_slot = |editor| UiSlot {
+            format: "vst3".into(),
+            info: &INFO,
+            editor,
+            reader: None,
+            timing: None,
+            values: HashMap::new(),
+            plain_values: HashMap::new(),
+            was_open: false,
+        };
+        session.ui.insert("headless".into(), ui_slot(None));
+        session.ui.insert("failed".into(), ui_slot(Some(Box::new(ParameterController))));
+        session.ui.insert("working".into(), ui_slot(Some(Box::new(View::default()))));
+        session.reopen_editors(vec!["headless".into(), "failed".into(), "working".into()]);
+        assert_eq!(session.open_editors(), ["working"]);
+        assert!(session.error.is_none());
+    }
+
     struct ClosingController {
         stopped: Arc<AtomicBool>,
         closed: Arc<AtomicBool>,
@@ -1822,11 +1998,11 @@ mod tests {
         let mut recovery = LatencyRecovery::default();
         for index in 0..4 {
             let now = start + Duration::from_millis(index * 100);
-            assert!(recovery.begin(now, true));
-            recovery.complete(now, true);
+            assert!(recovery.begin(now, Some("au")));
+            recovery.complete(now, Some("au"));
         }
-        assert!(!recovery.begin(start + Duration::from_millis(400), true));
-        assert!(recovery.begin(start + Duration::from_secs(3), true));
+        assert!(!recovery.begin(start + Duration::from_millis(400), Some("au")));
+        assert!(recovery.begin(start + Duration::from_secs(3), Some("au")));
     }
 
     #[test]
@@ -1838,27 +2014,64 @@ mod tests {
         let (commands, received) = bounded(1);
         session.tx = commands;
         let start = Instant::now();
-        assert!(session.latency_recovery.begin(start, false));
+        assert!(session.latency_recovery.begin(start, None));
         for index in 0..4 {
             let now = start + Duration::from_millis(index * 100);
-            assert!(session.latency_recovery.begin(now, true));
-            session.latency_recovery.complete(now, true);
+            assert!(session.latency_recovery.begin(now, Some("slot")));
+            session.latency_recovery.complete(now, Some("slot"));
             session.apply_editor_edits(vec![("slot".into(), "gain".into(), 0.5, 0.0)]);
             assert!(matches!(received.try_recv(), Ok(Control::Params(_))));
         }
-        assert!(!session.latency_recovery.begin(start + Duration::from_millis(400), true));
-        assert!(session.latency_recovery.begin(start + Duration::from_millis(400), false));
+        assert!(!session.latency_recovery.begin(start + Duration::from_millis(400), Some("slot")));
+        assert!(session.latency_recovery.begin(start + Duration::from_millis(400), None));
     }
 
     #[test]
     fn au_recovery_does_not_spend_the_vst_recovery_attempt() {
         let start = Instant::now();
         let mut recovery = LatencyRecovery::default();
-        assert!(recovery.begin(start, true));
-        recovery.complete(start, true);
-        assert!(recovery.begin(start, false));
-        recovery.complete(start, false);
-        assert!(!recovery.begin(start + Duration::from_secs(3), false));
+        assert!(recovery.begin(start, Some("au")));
+        recovery.complete(start, Some("au"));
+        assert!(recovery.begin(start, None));
+        recovery.complete(start, None);
+        assert!(!recovery.begin(start + Duration::from_secs(3), None));
+    }
+
+    #[test]
+    fn independent_audio_units_can_recover_within_the_same_burst() {
+        use soundcraft_dsp::{Category, PluginInfo};
+        static INFO: PluginInfo = PluginInfo {
+            id: "effect",
+            name: "Effect",
+            short_name: "Effect",
+            category: Category::Other,
+            is_instrument: false,
+            audiosuite: true,
+            params: &[],
+        };
+        let spec = serde_json::from_value(
+            json!({"id":"au-budget", "name":"Audio", "sources":[], "tracks":[]}),
+        )
+        .unwrap();
+        let mut session = Session::load_at_rate(spec, "ffmpeg".into(), 48000, true).unwrap();
+        for id in ["first", "second"] {
+            session.ui.insert(id.into(), UiSlot {
+                format: "au".into(),
+                info: &INFO,
+                editor: None,
+                reader: Some(Box::new(|| Some(vec![1]))),
+                timing: None,
+                values: HashMap::new(),
+                plain_values: HashMap::new(),
+                was_open: false,
+            });
+        }
+        for id in ["first", "first", "second", "second", "second"] {
+            session.recover_latency(
+                LatencyChange { slot: id.into(), previous: 0 },
+                session.graph_revision,
+            ).unwrap();
+        }
     }
 
     #[test]

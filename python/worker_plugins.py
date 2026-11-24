@@ -18,6 +18,7 @@ import sys
 import tomllib
 from contextlib import contextmanager
 from contextvars import ContextVar
+from http.client import HTTPException
 from threading import RLock
 from pathlib import Path
 from typing import Any, Iterator
@@ -1083,6 +1084,107 @@ def _check_updates(root: Path, task_id: str | None):
             return _manager_engine()._check_updates(root, task_id)
 
 
+def _official_commit_is_ahead(source_url: str, base: str, head: str) -> bool:
+    if base == head or not all(re.fullmatch(r"[0-9a-f]{40}", commit) for commit in (base, head)):
+        return False
+    from pymss.plugins import marketplace
+    from pymss.plugins.sources import SourceError
+
+    gitcode = source_url == marketplace.GITCODE_REPOSITORY
+    if gitcode:
+        repository = source_url.removeprefix("https://gitcode.com/")
+        url = f"https://api.gitcode.com/api/v5/repos/{repository}/compare/{base}...{head}?suffix=.toml"
+    else:
+        repository = marketplace.GITHUB_REPOSITORY.removeprefix("https://github.com/")
+        # GitHub only includes file patches on the first page.
+        url = f"https://api.github.com/repos/{repository}/compare/{base}...{head}?per_page=1&page=2"
+    try:
+        comparison = marketplace._json(url)
+    except (SourceError, OSError, ValueError, HTTPException):
+        return False
+    merge_base = comparison.get("merge_base_commit") if isinstance(comparison, dict) else None
+    return (isinstance(merge_base, dict) and merge_base.get("sha") == base
+            and (gitcode or comparison.get("status") == "ahead"))
+
+
+def _resolve_bundled_update_contents(updates: dict) -> None:
+    if not any(update.get("status") == "source_changed" for update in updates.values()):
+        return
+    try:
+        manifest = json.loads((_BUNDLED_ROOT / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    origin = manifest.get("source", {})
+    bundled_commit = origin.get("commit")
+    if (origin.get("local") is not False or not isinstance(bundled_commit, str)
+            or not re.fullmatch(r"[0-9a-f]{40,64}", bundled_commit)):
+        return
+    advances: dict[tuple[str, str, str], bool] = {}
+
+    def is_ahead(source_url: str, base: str, head: str) -> bool:
+        key = (source_url, base, head)
+        if key not in advances:
+            advances[key] = _official_commit_is_ahead(*key)
+        return advances[key]
+
+    for bundle in manifest["plugins"]:
+        name = bundle["name"]
+        update = updates.get(name, {})
+        target = update.get("target", {})
+        candidate = target.get("candidate", {})
+        source = target.get("source", {})
+        installed = target.get("installed", {})
+        receipt = installed.get("source", {})
+        source_url = source.get("url", "").rstrip("/").removesuffix(".git")
+        if (update.get("status") != "source_changed"
+                or candidate.get("version") != bundle["version"]
+                or source.get("subpath") != bundle["subpath"]
+                or not (source_url == origin.get("repository") or source.get("officialSelection"))):
+            continue
+        catalog_commit = candidate.get("commit")
+        use_bundled_commit = catalog_commit != bundled_commit
+        if use_bundled_commit and (
+            not source.get("officialSelection") or not isinstance(catalog_commit, str)
+            or installed.get("version") != bundle["version"]
+        ):
+            continue
+        if not receipt.get("preinstalled"):
+            installed_url = receipt.get("url")
+            if (not source.get("officialSelection") or not isinstance(installed_url, str)
+                    or receipt.get("subpath") != bundle["subpath"]):
+                continue
+            from pymss.plugins.marketplace import GITCODE_REPOSITORY, GITHUB_REPOSITORY
+
+            if installed_url.rstrip("/").removesuffix(".git") not in {GITHUB_REPOSITORY, GITCODE_REPOSITORY}:
+                continue
+        try:
+            changed = _plugin_content_digest(_BUNDLED_ROOT / name) != installed["content"]
+        except (OSError, ValueError):
+            continue
+        installed_commit = receipt.get("resolved_commit")
+        if changed and (installed_commit is not None or not receipt.get("preinstalled")) and (
+            not isinstance(installed_commit, str) or not source.get("officialSelection")
+            or not is_ahead(source_url, installed_commit, bundled_commit)
+        ):
+            update.pop("target", None)
+            continue
+        if changed and use_bundled_commit:
+            # Verify the selected mirror contains the bundled revision before pinning it.
+            if not is_ahead(source_url, bundled_commit, catalog_commit):
+                update.pop("target", None)
+                continue
+            target["source"] = {**source, "ref": bundled_commit}
+            target["candidate"] = {"version": bundle["version"], "commit": bundled_commit}
+            update["remote_commit"] = bundled_commit
+        elif use_bundled_commit:
+            # The packaged content is already installed. The newer remote
+            # commit's package contents have not been compared.
+            continue
+        update.update(status="content" if changed else "latest", content_changed=changed, up_to_date=not changed)
+        if not changed:
+            update.pop("target")
+
+
 def cmd_manage_plugin(payload: dict[str, Any]) -> int:
     task_id = str(payload.get("taskId") or "").strip() or None
     action = str(payload.get("action") or "").strip()
@@ -1109,6 +1211,8 @@ def cmd_manage_plugin(payload: dict[str, Any]) -> int:
             _require_plugin_runtime()
         with _plugin_registry():
             outcome = _service(root).manage(action, **{key: value for key, value in payload.items() if key != "action"})
+        if action == "check_updates":
+            _resolve_bundled_update_contents(outcome["updates"])
         _stage(task_id, "Refreshing plugin status", "refreshing")
         # Update checks share the runtime with running operations; their result refresh
         # must not attempt to recover or replace the plugin binding.

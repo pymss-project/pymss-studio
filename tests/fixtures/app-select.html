@@ -14,7 +14,8 @@ import en from '/src/i18n/en.json'
 import '/src/styles/global.scss'
 
 const options = [{ label: 'Alpha', value: 'a' }, { label: 'Beta', value: 'b' }, { label: 'Unavailable', value: 'x', disabled: true }, { label: 'Gamma', value: 'c' }]
-const state = reactive({ theme: 'light', simple: 'a', search: 'a', multiple: [], multiReadOnly: [], controlledOpen: false, typed: 0, large: 0, largeSearch: 0, reject: null, rejectSearch: null, disabled: false, loading: false, exportOpen: false, searchModal: false, format: 'wav', wav: 'PCM_16', flac: 'PCM_16', rate: 'auto', options })
+const state = reactive({ theme: 'light', simple: 'a', search: 'a', multiple: [], multiReadOnly: [], controlledOpen: false, typed: 0, large: 0, largeSearch: 0, reject: null, rejectSearch: null, disabled: false, loading: false, exportOpen: false, searchModal: false, floatingOpen: false, floatingSelect: 'a', floatingSelectOpen: false, outsideClicks: 0, format: 'wav', wav: 'PCM_16', flac: 'PCM_16', rate: 'auto', options })
+const stop = event => event.stopPropagation()
 let instance
 const shortcuts = reactive({})
 const pinia = createPinia()
@@ -49,6 +50,15 @@ const app = createApp({ render: () => h(NConfigProvider, { theme: state.theme ==
   field('rejectSearch', 'Controlled empty search', { filterable: true }),
   h('button', { id: 'open-search-modal', onClick: () => state.searchModal = true }, 'Search modal'),
   h(NModal, { show: state.searchModal, preset: 'card', title: 'Search modal', 'aria-label': 'Search modal', style: 'width:500px', 'onUpdate:show': value => state.searchModal = value }, { default: () => field('search', 'Modal search', { id: 'modal-search', filterable: true }) }),
+  h('button', { id: 'open-floating-modal', onClick: () => state.floatingOpen = true }, 'Floating panel'),
+  h(NModal, { show: state.floatingOpen, preset: 'card', title: 'Floating panel', 'aria-label': 'Floating panel', style: 'width:500px',
+    showMask: false, trapFocus: false, blockScroll: false,
+    'onUpdate:show': value => state.floatingOpen = value }, { default: () => h('div', { style: 'width:240px', onPointerdown: stop, onClick: stop }, [
+    field('floatingSelect', 'Floating selection', { show: state.floatingSelectOpen, 'onUpdate:show': value => state.floatingSelectOpen = value }),
+    field('search', 'Floating search', { id: 'floating-search', filterable: true }),
+    h('div', { id: 'floating-blank', style: 'position:absolute;right:24px;top:40px;width:150px;height:50px' }),
+    h('button', { id: 'floating-outside', style: 'position:absolute;right:24px;bottom:24px', onClick: () => state.outsideClicks++ }, 'Outside the popup'),
+  ]) }),
   h('button', { id: 'open-export', onClick: () => state.exportOpen = true }, 'Export settings'),
   h(EditorExportDialog, { show: state.exportOpen, sessionName: 'Session', duration: 12, trackCount: 3, exporting: state.disabled, exportCancelling: false, exportProgress: 0, exportProgressText: '', format: state.format, wavBitDepth: state.wav, flacBitDepth: state.flac, sampleRate: state.rate, peakProtection: true, fileName: 'mix', exportDir: 'C:/Output', exportDirResolving: false,
     'onUpdate:show': value => state.exportOpen = value, 'onUpdate:format': value => state.format = value, 'onUpdate:wav-bit-depth': value => state.wav = value, 'onUpdate:flac-bit-depth': value => state.flac = value, 'onUpdate:sample-rate': value => state.rate = value }),

@@ -220,17 +220,19 @@ const rulerStep = computed(() => {
 
 const laneStepPx = computed(() => Math.max(48, rulerStep.value * props.pixelsPerSecond))
 
+const RULER_END_LABEL_CLEARANCE = 80
 const rulerTicks = computed(() => {
   const total = props.duration
   if (total <= 0) return []
   const step = rulerStep.value
-  const ticks: { time: number; left: number }[] = []
-  for (let time = 0; time <= total; time += step) {
-    ticks.push({ time, left: time * props.pixelsPerSecond })
+  const end = total * props.pixelsPerSecond
+  const ticks = [{ time: 0, left: 0, end: false, showLabel: true }]
+  // Regular labels sit after their ticks, and the end label sits before its tick.
+  for (let time = step; time < total; time += step) {
+    const left = time * props.pixelsPerSecond
+    ticks.push({ time, left, end: false, showLabel: end - left >= RULER_END_LABEL_CLEARANCE })
   }
-  if (!ticks.length || ticks[ticks.length - 1].time < total) {
-    ticks.push({ time: total, left: total * props.pixelsPerSecond })
-  }
+  ticks.push({ time: total, left: end, end: true, showLabel: end >= RULER_END_LABEL_CLEARANCE })
   return ticks
 })
 
@@ -800,8 +802,8 @@ defineExpose({
         </div>
         <div class="ruler__track" :style="{ width: `${laneWidth}px` }" @click="seekFromEvent">
           <div class="ruler__grid">
-            <span v-for="tick in rulerTicks" :key="tick.time" class="ruler-tick" :style="{ transform: `translateX(${tick.left}px)` }">
-              {{ formatTimecode(tick.time) }}
+            <span v-for="tick in rulerTicks" :key="tick.time" class="ruler-tick" :class="{ 'ruler-tick--end': tick.end }" :style="{ transform: `translateX(${tick.left}px)` }">
+              <span v-if="tick.showLabel" class="ruler-tick__label">{{ formatTimecode(tick.time) }}</span>
             </span>
           </div>
         </div>
@@ -1254,7 +1256,16 @@ defineExpose({
   border-left: 1px solid var(--outline);
   color: var(--on-surface-muted);
   font-size: 10px;
+  min-height: 27px;
   white-space: nowrap;
+}
+
+.ruler-tick--end { padding-inline: 0; }
+
+.ruler-tick--end .ruler-tick__label {
+  position: absolute;
+  top: 10px;
+  inset-inline-end: 4px;
 }
 
 .track-row {
@@ -1502,7 +1513,6 @@ defineExpose({
   width: var(--lane-width);
   overflow: hidden;
   background: color-mix(in srgb, var(--surface) 84%, var(--surface-3));
-  border-left: 1px solid color-mix(in srgb, var(--outline) 44%, transparent);
 }
 
 .track-wave {

@@ -534,7 +534,7 @@ fn compile_tracks(
         .collect()
 }
 
-fn same_sources(previous: &SessionSpec, next: &SessionSpec) -> bool {
+pub(crate) fn same_sources(previous: &SessionSpec, next: &SessionSpec) -> bool {
     previous.sources.len() == next.sources.len()
         && previous
             .sources
@@ -546,6 +546,7 @@ fn same_sources(previous: &SessionSpec, next: &SessionSpec) -> bool {
                     && old.duration == new.duration
                     && old.sample_rate == new.sample_rate
                     && old.channels == new.channels
+                    && old.missing == new.missing
             })
 }
 
