@@ -9,6 +9,7 @@ import { useNumberInputAccessibility } from '@/composables/useNumberInputAccessi
 import { useRoute, useRouter } from 'vue-router'
 import { useDialog, useMessage, type DropdownOption } from 'naive-ui'
 import { convertFileSrc } from '@tauri-apps/api/core'
+import { loadPreviewMediaSource, needsBlobMediaSource, releasePreviewMediaSource } from '@/utils/mediaSource'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import {
@@ -314,6 +315,7 @@ const cancellingQueueJobId = ref<string | null>(null)
 const audioElements = new Map<string, HTMLAudioElement>()
 const audioAccessOrder: string[] = []
 const playingOutputPath = ref('')
+let previewPlayGeneration = 0
 const outputPlayback = ref<Record<string, { currentTime: number; duration: number }>>({})
 const draggedInputIndex = ref<number | null>(null)
 const inputDragPointerId = ref<number | null>(null)
@@ -1235,6 +1237,7 @@ function releasePreviewAudio(path: string) {
   if (audio) {
     audioElements.delete(path)
     audio.pause()
+    releasePreviewMediaSource(audio)
     audio.removeAttribute('src')
     audio.load()
   }
@@ -1265,7 +1268,10 @@ function getAudio(path: string) {
 
   const audio = new Audio()
   audio.preload = 'metadata'
-  audio.src = convertFileSrc(path)
+  if (!needsBlobMediaSource()) {
+    audio.src = convertFileSrc(path)
+    audio.load()
+  }
   audio.addEventListener('loadedmetadata', () => {
     if (audioElements.get(path) !== audio) return
     setOutputPlayback(path, { duration: audio.duration || 0 })
@@ -1286,7 +1292,6 @@ function getAudio(path: string) {
   audioElements.set(path, audio)
   touchPreviewAudio(path)
   trimPreviewAudioCache(path)
-  audio.load()
   return audio
 }
 
@@ -1303,22 +1308,30 @@ function syncOutputPreviewAudio(outputs: StemOutput[]) {
 watch(playableOutputs, syncOutputPreviewAudio, { immediate: true })
 
 async function toggleOutputPlayback(output: StemOutput) {
-  if (!output.path) return
-  const audio = getAudio(output.path)
-  if (playingOutputPath.value === output.path && !audio.paused) {
+  const path = output.path
+  if (!path) return
+  const audio = getAudio(path)
+  const generation = ++previewPlayGeneration
+  const isCurrent = () => generation === previewPlayGeneration && audioElements.get(path) === audio
+  if (playingOutputPath.value === path && !audio.paused) {
     audio.pause()
     playingOutputPath.value = ''
     return
   }
 
-  audioElements.forEach((item, path) => {
-    if (path !== output.path) item.pause()
+  audioElements.forEach((item, itemPath) => {
+    if (itemPath !== path) {
+      item.pause()
+      if (!item.src) releasePreviewMediaSource(item)
+    }
   })
+  playingOutputPath.value = ''
   try {
+    if (!await loadPreviewMediaSource(audio, path) || !isCurrent()) return
     await audio.play()
-    playingOutputPath.value = output.path
+    if (isCurrent()) playingOutputPath.value = path
   } catch (error) {
-    message.error(error instanceof Error ? error.message : t('separate.previewPlayFailed'))
+    if (isCurrent()) message.error(error instanceof Error ? error.message : t('separate.previewPlayFailed'))
   }
 }
 

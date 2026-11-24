@@ -1551,7 +1551,7 @@ onBeforeUnmount(() => {
 
     <n-modal :aria-label="t('workflows.settingsAction')" v-model:show="showWorkflowSettings" preset="card" :title="t('workflows.settingsAction')" class="simple-workflow-settings-modal" style="width: min(440px, calc(100vw - 32px))">
       <div class="simple-node-editor__defaults">
-        <label><span>{{ t('workflows.defaultDevice') }}</span><AppSelect :aria-label="t('workflows.defaultDevice')" :ref="(instance: unknown) => setSelectInstance('default-device', instance)" v-model:value="draft.defaultDevice" :disabled="readonly" size="small" :options="[{ label: 'Auto', value: 'auto' }, { label: 'CPU', value: 'cpu' }, { label: 'CUDA', value: 'cuda' }, { label: 'MPS', value: 'mps' }, { label: 'MLX', value: 'mlx' }]" /></label>
+        <label><span>{{ t('workflows.defaultDevice') }}</span><AppSelect :aria-label="t('workflows.defaultDevice')" :ref="(instance: unknown) => setSelectInstance('default-device', instance)" v-model:value="draft.defaultDevice" :disabled="readonly" size="small" :options="[{ label: 'Auto', value: 'auto' }, { label: 'CPU', value: 'cpu' }, { label: 'CUDA', value: 'cuda' }, { label: 'XPU', value: 'xpu' }, { label: 'MPS', value: 'mps' }, { label: 'MLX', value: 'mlx' }]" /></label>
         <label><span>{{ t('workflows.defaultFormat') }}</span><AppSelect :aria-label="t('workflows.defaultFormat')" :ref="(instance: unknown) => setSelectInstance('default-format', instance)" v-model:value="draft.defaultFormat" :disabled="readonly" size="small" :options="[{ label: 'WAV', value: 'wav' }, { label: 'FLAC', value: 'flac' }, { label: 'MP3', value: 'mp3' }, { label: 'M4A', value: 'm4a' }]" /></label>
         <label v-if="draft.defaultFormat === 'wav'">
           <span>{{ t('audio.wavBitDepth') }}</span>

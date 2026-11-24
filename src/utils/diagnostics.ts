@@ -65,13 +65,26 @@ export function buildDiagnosticChecks(input: {
 
   const acceleratorError = env?.cudaAvailableError || env?.cudaDeviceCountError || env?.cudaDeviceNamesError
   const backend = env?.torchBackend || runtime?.torchBackend
-  const hasDeviceProbe = [env?.cudaAvailable, env?.mpsAvailable, env?.mlxAvailable].some(value => typeof value === 'boolean')
-  const accelerated = hasDeviceProbe ? env?.cudaAvailable || env?.mpsAvailable || env?.mlxAvailable : runtime?.acceleratorAvailable
+  const hasDeviceProbe = [env?.cudaAvailable, env?.xpuAvailable, env?.mpsAvailable, env?.mlxAvailable].some(value => typeof value === 'boolean')
+  const accelerated = hasDeviceProbe
+    ? Boolean(env?.cudaAvailable || env?.xpuAvailable || env?.mpsAvailable || env?.mlxAvailable)
+    : runtime?.acceleratorAvailable
   const acceleratorKnown = hasDeviceProbe || typeof runtime?.acceleratorAvailable === 'boolean' || backend === 'cpu'
+  const acceleratorValue = !accelerated
+    ? (acceleratorKnown ? 'CPU' : undefined)
+    : env?.cudaAvailable
+      ? String(backend || 'CUDA').toUpperCase()
+      : env?.xpuAvailable
+        ? `XPU (${env.xpuDeviceCount || env.xpuDevices?.length || 0})`
+        : env?.mlxAvailable
+          ? 'MLX'
+          : env?.mpsAvailable
+            ? 'MPS'
+            : String(backend || 'CUDA').toUpperCase()
   checks.push({
     key: 'accelerator', group: 'runtime', label: 'debug.checkAccelerator',
     state: acceleratorError ? 'warn' : accelerated ? 'ok' : !acceleratorKnown ? 'unknown' : backend === 'cpu' ? 'ok' : 'warn',
-    value: accelerated ? env?.mlxAvailable ? 'MLX' : env?.mpsAvailable ? 'MPS' : String(backend || 'CUDA').toUpperCase() : acceleratorKnown ? 'CPU' : undefined,
+    value: acceleratorValue,
     detail: acceleratorError || undefined, hint: 'debug.hintAccelerator', action: 'runtime',
   })
 

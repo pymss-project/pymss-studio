@@ -213,7 +213,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
     dynamicStems: true,
     widgets: [
       { name: 'model_name', type: 'combo', default: '', options: [] },
-      { name: 'device', type: 'combo', default: 'auto', options: ['auto', 'cpu', 'cuda', 'mps', 'mlx'] },
+      { name: 'device', type: 'combo', default: 'auto', options: ['auto', 'cpu', 'cuda', 'xpu', 'mps', 'mlx'] },
       { name: 'download_missing', type: 'toggle', default: true },
       { name: 'source', type: 'combo', default: 'modelscope', options: ['Default', 'modelscope', 'huggingface', 'hf-mirror'] },
       { name: 'device_ids', type: 'text', default: '0' },
@@ -232,7 +232,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
     dynamicStems: true,
     widgets: [
       { name: 'model_name', type: 'combo', default: '', options: [] },
-      { name: 'device', type: 'combo', default: 'auto', options: ['auto', 'cpu', 'cuda', 'mps', 'mlx'] },
+      { name: 'device', type: 'combo', default: 'auto', options: ['auto', 'cpu', 'cuda', 'xpu', 'mps', 'mlx'] },
       { name: 'download_missing', type: 'toggle', default: true },
       { name: 'source', type: 'combo', default: 'modelscope', options: ['Default', 'modelscope', 'huggingface', 'hf-mirror'] },
       { name: 'device_ids', type: 'text', default: '0' },
@@ -252,7 +252,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
     widgets: [
       { name: 'model_name', type: 'combo', default: '', options: [] },
       { name: 'model_type', type: 'combo', default: 'auto', options: ['auto', 'mel_band_roformer', 'bs_roformer', 'bs_roformer_hyperace', 'bs_conformer', 'mel_band_conformer', 'mdx23c', 'htdemucs', 'apollo', 'bandit', 'bandit_v2', 'scnet'] },
-      { name: 'device', type: 'combo', default: 'auto', options: ['auto', 'cpu', 'cuda', 'mps', 'mlx'] },
+      { name: 'device', type: 'combo', default: 'auto', options: ['auto', 'cpu', 'cuda', 'xpu', 'mps', 'mlx'] },
       { name: 'device_ids', type: 'text', default: '0' },
       { name: 'debug', type: 'toggle', default: false },
     ],
