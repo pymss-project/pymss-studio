@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -16,6 +17,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 VARIANTS = ("cuda", "cpu", "online", "rocm")
+SEVEN_ZIP = Path(r"C:\Program Files\7-Zip\7z.exe")
 
 
 class WindowsReleaseTests(unittest.TestCase):
@@ -153,6 +155,47 @@ class WindowsReleaseTests(unittest.TestCase):
                 self.assertIs(data["pymss_windows_cli_update"], True)
                 self.assertIs(data["pymss_update_supported"], True)
 
+    @unittest.skipUnless(sys.platform == "win32" and shutil.which("pwsh") and SEVEN_ZIP.is_file(),
+                         "Windows, PowerShell and 7-Zip are required to build the update archive")
+    def test_online_update_archive_contains_cli_with_default_icon(self):
+        spec = importlib.util.spec_from_file_location("stage_windows_cli", ROOT / "scripts/stage-windows-cli.py")
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        job = self.windows["windows-online-7z"]
+        step = next(step for step in job["steps"] if step.get("name") == "Build Windows update archive")
+        stage_name = "Pymss-Studio-1.2.3-windows-x64-online"
+        source = step["run"].replace("${{ needs.windows-online-prepare.outputs.stage_name }}", stage_name)
+        source = source.replace("${{ needs.windows-online-prepare.outputs.version }}", "1.2.3")
+        with tempfile.TemporaryDirectory(prefix="pymss release ") as temporary:
+            work = Path(temporary)
+            stage = work / "release" / stage_name
+            (stage / "python").mkdir(parents=True)
+            (stage / "python/worker.py").write_bytes(b"worker")
+            launcher = Path(sys.executable)
+            gui = stage / "Pymss Studio.exe"
+            shutil.copyfile(launcher, gui)
+            self.assertTrue(cli.icon_resources(gui))
+            cli.stage_cli(gui, stage)
+            staged_cli = stage / "pymss.exe"
+            self.assertFalse(cli.icon_resources(staged_cli))
+            self.assertEqual(gui.read_bytes(), launcher.read_bytes())
+
+            script = work / "build-update.ps1"
+            script.write_text(source, encoding="utf-8")
+            command = [shutil.which("pwsh"), "-NoProfile", "-NonInteractive", "-File", str(script)]
+            result = subprocess.run(command, cwd=work, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            update = stage.parent / "Pymss-Studio-1.2.3-windows-x64-update.zip"
+            with zipfile.ZipFile(update) as archive:
+                self.assertEqual(archive.read("pymss.exe"), staged_cli.read_bytes())
+                self.assertEqual(archive.read("Pymss Studio.exe"), gui.read_bytes())
+                self.assertEqual(archive.read("python/worker.py"), b"worker")
+
+            staged_cli.unlink()
+            result = subprocess.run(command, cwd=work, capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("The staged Windows CLI is missing", result.stderr)
+
     def test_every_package_downloads_the_same_tools_before_staging(self):
         producer = self.windows["windows-bundled-tools"]
         self.assertNotIn("needs", producer)
@@ -175,6 +218,7 @@ class WindowsReleaseTests(unittest.TestCase):
                 self.assertNotIn("releases/download/release-1.37.0", runs)
                 self.assertNotIn("aka.ms/vs/17", runs)
                 self.assertIn("scripts/verify-native-plugins.py", runs)
+                self.assertIn('scripts/stage-windows-cli.py "src-tauri/target/release/pymss.exe" "$stage"', runs)
                 for suffix in ("7z", "exe"):
                     self.assertEqual(self.windows[f"windows-{variant}-{suffix}"]["needs"], f"windows-{variant}-prepare")
 
