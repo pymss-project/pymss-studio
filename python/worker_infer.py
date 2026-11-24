@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import math
 import os
 import re
@@ -273,8 +274,13 @@ def _studio_separator_type() -> type[Any]:
             if isinstance(getattr(model, "use_amp", None), bool):
                 amp = model.use_amp
             self._studio_rocm_checks = model_native_checks(model, use_amp=bool(amp), device=getattr(self, "device", kwargs.get("device", "auto")))
-            self._studio_naming = _normalize_output_naming(output_naming)
-            self._studio_output_model = output_model
+            from worker_infer_accel import optimize_separator_inference
+            self._studio_accel = optimize_separator_inference(
+                self,
+                explicit_params=params,
+                amp_enabled=bool(amp),
+                logger=getattr(self, "logger", kwargs.get("logger")),
+            )
             self._studio_output_lock = Lock()
             self._studio_claimed_paths: set[Path] = set()
             self._studio_last_outputs: list[dict[str, str]] = []
@@ -284,9 +290,14 @@ def _studio_separator_type() -> type[Any]:
             self._studio_input_contexts: dict[str, deque[dict[str, Any]]] = {}
             self._studio_active_context: dict[str, Any] | None = None
             self._studio_active_output_count = 0
-            self._studio_expected_output_count = self._calculate_expected_output_count()
             self._studio_output_sources: dict[Path, str] = {}
             self._studio_track_failure: str | None = None
+            self._studio_bind_output_naming(output_naming, output_model)
+
+        def _studio_bind_output_naming(self, output_naming: Any, output_model: str) -> None:
+            self._studio_naming = _normalize_output_naming(output_naming)
+            self._studio_output_model = output_model
+            self._studio_expected_output_count = self._calculate_expected_output_count()
             stems = self._stems_to_save() or list(self.config.training.instruments)
             ordered_stems = [stem for _, stem in sorted(
                 enumerate(stems),
@@ -558,6 +569,89 @@ def _emit_inference_error(exc: Exception, task_id: str) -> int:
         )
     return emit_error("INFERENCE_FAILED", message, traceback.format_exc(), task_id=task_id)
 
+_SEPARATOR_CACHE: dict[str, Any] = {"key": None, "separator": None}
+
+
+def _keep_loaded_model() -> bool:
+    return os.environ.get("PYMSS_STUDIO_KEEP_MODEL") == "1"
+
+
+def _separator_cache_key(resolved: dict[str, Any], *, device: str, device_ids: list[int], use_tta: bool, inference_params: dict[str, Any], audio_params: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        resolved.get("model_type"),
+        resolved.get("model_path"),
+        resolved.get("config_path"),
+        resolved.get("target_instrument_override"),
+        device,
+        tuple(device_ids),
+        bool(use_tta),
+        json.dumps(inference_params, sort_keys=True, default=str),
+        json.dumps(audio_params, sort_keys=True, default=str),
+    )
+
+
+def _rebind_cached_separator(
+    separator: Any,
+    *,
+    payload: dict[str, Any],
+    progress_callback: Any,
+    logger: Any,
+    output_format: str,
+    selected_stems: list[str],
+    save_as_folder: bool,
+) -> None:
+    """Point a resident separator at this job without reloading its weights."""
+    separator.progress_callback = progress_callback
+    model = getattr(separator, "model", None)
+    if model is not None and hasattr(model, "progress_callback"):
+        model.progress_callback = progress_callback
+    separator.logger = logger
+    separator.output_format = output_format
+    separator.debug = bool(payload.get("debug", False))
+    instruments = list(separator.config.training.instruments)
+    store_dirs = _store_dirs_for_selected_stems(str(payload["output"]), selected_stems)
+    if isinstance(store_dirs, str):
+        store_dirs = {stem: store_dirs for stem in instruments}
+    else:
+        valid_stems = {stem.lower() for stem in instruments}
+        store_dirs = {stem: directory for stem, directory in store_dirs.items() if stem.lower() in valid_stems}
+    separator.store_dirs = store_dirs
+    separator.save_as_folder = bool(save_as_folder and len(set(separator.store_dirs.values())) == 1)
+    separator._studio_bind_output_naming(payload.get("outputNaming"), str(payload.get("model") or ""))
+    separator._studio_claimed_paths = set()
+    separator._studio_last_outputs = []
+    separator._studio_input_contexts = {}
+    separator._studio_active_context = None
+    separator._studio_active_output_count = 0
+    separator._studio_output_sources = {}
+    separator._studio_track_failure = None
+    separator._studio_track_context = None
+    separator._studio_folder_progress = False
+
+
+def _release_separator(separator: Any, *, reuse: bool) -> None:
+    if separator is None:
+        return
+    if reuse and _keep_loaded_model() and getattr(separator, "_studio_cache_key", None) is not None:
+        previous = _SEPARATOR_CACHE.get("separator")
+        if previous is not None and previous is not separator:
+            _close_separator(previous)
+        _SEPARATOR_CACHE["key"] = separator._studio_cache_key
+        _SEPARATOR_CACHE["separator"] = separator
+        return
+    if _SEPARATOR_CACHE.get("separator") is separator:
+        _SEPARATOR_CACHE["key"] = None
+        _SEPARATOR_CACHE["separator"] = None
+    _close_separator(separator)
+
+
+def release_cached_separator() -> None:
+    separator = _SEPARATOR_CACHE.get("separator")
+    _SEPARATOR_CACHE["key"] = None
+    _SEPARATOR_CACHE["separator"] = None
+    _close_separator(separator)
+
+
 def _close_separator(separator: Any) -> None:
     if separator is None or rocm_worker_poisoned():
         return
@@ -770,7 +864,34 @@ def _prepare_separator(
     target_options = {}
     if resolved.get('target_instrument_override') is not None:
         target_options['target_instrument_override'] = resolved['target_instrument_override']
-    return StudioMSSeparator(
+    cache_key = _separator_cache_key(
+        resolved,
+        device=device,
+        device_ids=device_ids,
+        use_tta=use_tta,
+        inference_params=runtime_inference_params,
+        audio_params=audio_params,
+    )
+    cached = _SEPARATOR_CACHE.get("separator")
+    if _keep_loaded_model() and cached is not None and _SEPARATOR_CACHE.get("key") == cache_key:
+        _rebind_cached_separator(
+            cached,
+            payload=payload,
+            progress_callback=progress_callback,
+            logger=logger,
+            output_format=output_format,
+            selected_stems=selected_stems,
+            save_as_folder=bool(payload.get("saveAsFolder", False)),
+        )
+        emit("task_log", {
+            "level": "info",
+            "message": "Reusing the model already loaded on the device",
+        }, task_id=task_id)
+        return cached
+    if cached is not None:
+        release_cached_separator()
+        del cached
+    separator = StudioMSSeparator(
         model_type=resolved_model_type,
         model_path=resolved_model_path,
         config_path=resolved.get('config_path'),
@@ -789,6 +910,8 @@ def _prepare_separator(
         output_naming=payload.get("outputNaming"),
         output_model=str(model_name or ""),
     )
+    separator._studio_cache_key = cache_key
+    return separator
 
 
 def _snapshot_runtime_params(
@@ -1005,6 +1128,7 @@ def cmd_infer_batch(payload: dict[str, Any]) -> int:
     active_task_id: str | None = None
     terminal_task_ids: set[str] = set()
     failed = False
+    reuse = False
     last_progress: dict[str, Any] | None = None
     last_progress_task_id: str | None = None
 
@@ -1077,6 +1201,7 @@ def cmd_infer_batch(payload: dict[str, Any]) -> int:
                 }, task_id=task_id)
                 terminal_task_ids.add(task_id)
         active_task_id = None
+        reuse = not failed
         return 1 if failed else 0
     except RocmWorkerAbort as aborted:
         for item in batch_tasks:
@@ -1089,7 +1214,7 @@ def cmd_infer_batch(payload: dict[str, Any]) -> int:
                 _emit_inference_error(exc, item["taskId"])
         return 1
     finally:
-        _close_separator(separator)
+        _release_separator(separator, reuse=reuse)
         cleanup.close()
 
 
@@ -1130,6 +1255,7 @@ def cmd_infer(payload: dict[str, Any]) -> int:
 
     separator = None
     cleanup = ExitStack()
+    reuse = False
     try:
         begin_rocm_operation()
         emit("task_started", {"model": model_name, "input": input_path, "output": task_output}, task_id=task_id)
@@ -1158,6 +1284,7 @@ def cmd_infer(payload: dict[str, Any]) -> int:
         task_output = resolve_pymss_output_dir(output_dir, success_files, input_path, save_as_folder)
         outputs = separator.studio_outputs()
         emit("task_done", {"files": [output["path"] for output in outputs], "outputs": outputs, "outputDir": str(Path(task_output).resolve()), "outputRoot": output_dir, "outputFormat": output_format}, task_id=task_id)
+        reuse = True
         return 0
     except RocmWorkerAbort as aborted:
         return _emit_inference_error(aborted.error, task_id)
@@ -1168,5 +1295,5 @@ def cmd_infer(payload: dict[str, Any]) -> int:
     except Exception as exc:
         return _emit_inference_error(exc, task_id)
     finally:
-        _close_separator(separator)
+        _release_separator(separator, reuse=reuse)
         cleanup.close()

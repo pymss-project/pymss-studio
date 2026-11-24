@@ -80,6 +80,7 @@ struct BackgroundTask {
     command: String,
     runtime_tree: Option<Arc<process_tree::RuntimeProcessTree>>,
     completion: Option<Arc<RuntimeMaintenanceCompletion>>,
+    inference_launch: Option<Arc<tauri::async_runtime::Mutex<()>>>,
 }
 static BACKGROUND_TASKS: OnceLock<Mutex<HashMap<String, Arc<BackgroundTask>>>> = OnceLock::new();
 
@@ -200,14 +201,16 @@ static APPLICATION_ACCESS: Mutex<RuntimeAccess> = Mutex::new(RuntimeAccess {
 });
 
 pub(crate) fn acquire_application_update() -> AppResult<impl Drop> {
-    acquire_runtime_access(&APPLICATION_ACCESS, "update_runtime_core")
+    let guard = acquire_runtime_access(&APPLICATION_ACCESS, "update_runtime_core")
         .map_err(|error| match error {
             AppError::Worker(message) if message.starts_with("RUNTIME_BUSY:") => AppError::Worker(
                 "Wait for running audio and runtime operations to finish before updating the application.".into(),
             ),
             error => error,
         })?
-        .ok_or_else(|| AppError::Worker("Unable to reserve the application for updating".into()))
+        .ok_or_else(|| AppError::Worker("Unable to reserve the application for updating".into()))?;
+    warm_infer::retire_idle_session()?;
+    Ok(guard)
 }
 
 pub(crate) fn acquire_application_operation() -> AppResult<impl Drop + Send> {
@@ -217,8 +220,10 @@ pub(crate) fn acquire_application_operation() -> AppResult<impl Drop + Send> {
 }
 
 pub(crate) fn acquire_plugin_source_update() -> AppResult<impl Drop> {
-    acquire_runtime_access(&RUNTIME_ACCESS, "manage_plugin")?
-        .ok_or_else(|| AppError::Worker("Unable to reserve plugin source configuration".into()))
+    let guard = acquire_runtime_access(&RUNTIME_ACCESS, "manage_plugin")?
+        .ok_or_else(|| AppError::Worker("Unable to reserve plugin source configuration".into()))?;
+    warm_infer::retire_idle_session()?;
+    Ok(guard)
 }
 
 #[derive(Default)]
@@ -448,7 +453,17 @@ fn acquire_worker_runtime_access(app: &AppHandle, command: &str, payload: &Value
         }
         Some(guard)
     } else { None };
+    if guard.as_ref().is_some_and(|guard| guard.updating || guard.installing_plugins)
+        || matches!(command, "infer_workflow" | "run_operation")
+    {
+        warm_infer::retire_idle_session()?;
+    }
     Ok(guard)
+}
+
+pub(crate) fn background_inference_launch(task_id: &str) -> Option<Arc<tauri::async_runtime::Mutex<()>>> {
+    let tasks = BACKGROUND_TASKS.get()?.lock().ok()?;
+    tasks.get(task_id)?.inference_launch.clone()
 }
 
 fn worker_path(app: &AppHandle) -> AppResult<PathBuf> {
@@ -642,6 +657,13 @@ fn build_worker_command(
     let active_overlay = active_runtime_python
         .as_deref()
         .and_then(|python| active_overlay(&root, bundled.as_deref(), python));
+    let xpu_amp = xpu_fp16_amp(
+        active_runtime_python
+            .as_deref()
+            .and_then(interpreter_backend_name)
+            .as_deref(),
+        std::env::var("PYMSS_AMP").ok().as_deref(),
+    );
     let python = select_worker_python(command, &bootstrap_python, active_runtime_python)?;
     let mut managed_roots = vec![root];
     managed_roots.extend(bundled);
@@ -676,7 +698,11 @@ fn build_worker_command(
             },
         )
         .env("PYMSS_STUDIO_BOOTSTRAP_PYTHON", &bootstrap_python)
-        .env("PYMSS_STUDIO_ALLOW_DEBUG_RUNTIME_OVERRIDE", if developer_mode { "1" } else { "0" })
+        .env("PYMSS_STUDIO_ALLOW_DEBUG_RUNTIME_OVERRIDE", if developer_mode { "1" } else { "0" });
+    if let Some(value) = xpu_amp {
+        cmd.env("PYMSS_AMP", value);
+    }
+    cmd
         .env(
             "PYMSS_STUDIO_DEFAULT_OUTPUT_DIR",
             default_output_dir(app)?.to_string_lossy().to_string(),
@@ -1647,6 +1673,21 @@ pub fn spawn_worker_background(
     result
 }
 
+#[path = "warm_infer.rs"]
+mod warm_infer;
+
+fn registered_task_ids(task_id: &str, payload: &Value) -> Vec<String> {
+    let mut ids = vec![task_id.to_owned()];
+    if let Some(tasks) = payload.get("tasks").and_then(Value::as_array) {
+        for id in tasks.iter().filter_map(|item| item.get("taskId").and_then(Value::as_str)) {
+            if !ids.iter().any(|registered| registered == id) {
+                ids.push(id.to_owned());
+            }
+        }
+    }
+    ids
+}
+
 fn spawn_worker_background_inner(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1655,19 +1696,13 @@ fn spawn_worker_background_inner(
     mut payload: Value,
     operation_id: String,
 ) -> AppResult<()> {
+    if command == "infer" {
+        return warm_infer::spawn_background(app, state, task_id, payload, operation_id);
+    }
     let mut application_access = Some(acquire_application_operation()?);
     let mut runtime_access = acquire_worker_runtime_access(&app, command, &payload)?;
     let release_event = runtime_access.as_ref().and_then(|_| runtime_release_event(command, &payload));
-    let mut registered_task_ids = vec![task_id.clone()];
-    if let Some(tasks) = payload.get("tasks").and_then(Value::as_array) {
-        for item in tasks {
-            if let Some(child_task_id) = item.get("taskId").and_then(Value::as_str) {
-                if !registered_task_ids.iter().any(|id| id == child_task_id) {
-                    registered_task_ids.push(child_task_id.to_string());
-                }
-            }
-        }
-    }
+    let registered_task_ids = registered_task_ids(&task_id, &payload);
     {
         let tasks = state
             .tasks
@@ -1736,7 +1771,7 @@ fn spawn_worker_background_inner(
         let _ = std::fs::remove_file(&payload_file);
         AppError::Worker("background command registry lock poisoned".into())
     })?;
-    if let Some(id) = registered_task_ids.iter().find(|id| task_registry.contains_key(*id)) {
+    if let Some(id) = registered_task_ids.iter().find(|id| task_registry.contains_key(*id) || background_registry.contains_key(*id)) {
         let _ = std::fs::remove_file(&payload_file);
         return Err(AppError::Worker(format!("task already exists: {id}")));
     }
@@ -1789,6 +1824,7 @@ fn spawn_worker_background_inner(
         .then(|| Arc::new(RuntimeMaintenanceCompletion::default()));
     let task = Arc::new(BackgroundTask {
         command: command_name.clone(), runtime_tree: runtime_tree.clone(), completion: maintenance_completion.clone(),
+        inference_launch: None,
     });
     for id in &registered_task_ids {
         background_registry.insert(id.clone(), task.clone());
@@ -2404,6 +2440,7 @@ mod tests {
             let completion = std::sync::Arc::new(super::RuntimeMaintenanceCompletion::default());
             registry.lock().unwrap().insert(id.into(), std::sync::Arc::new(super::BackgroundTask {
                 command: command.into(), runtime_tree: None, completion: Some(completion.clone()),
+                inference_launch: None,
             }));
             assert!(super::defers_task_cancellation(id));
             let captured = super::runtime_maintenance_completion(id).unwrap();
@@ -3407,6 +3444,32 @@ trigger_worker_native_fault()
             &active,
             &python.to_string_lossy()
         ));
+
+        let xpu = root
+            .join("runtime-envs")
+            .join("xpu")
+            .join("Scripts")
+            .join("python.exe");
+        fs::create_dir_all(xpu.parent().unwrap()).unwrap();
+        fs::write(&xpu, "stub").unwrap();
+        let xpu = fs::canonicalize(xpu).unwrap();
+        fs::write(
+            &active,
+            serde_json::to_vec(&json!({"backend": "xpu", "pythonPath": xpu.to_string_lossy()}))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(super::active_path_backend_matches(
+            &active,
+            &xpu.to_string_lossy()
+        ));
+        assert_eq!(
+            super::xpu_fp16_amp(super::interpreter_backend_name(&xpu.to_string_lossy()).as_deref(), None),
+            Some("1")
+        );
+        assert_eq!(super::xpu_fp16_amp(Some("xpu"), Some("0")), None);
+        assert_eq!(super::xpu_fp16_amp(Some("cuda"), None), None);
+        assert_eq!(super::xpu_fp16_amp(Some("cpu"), None), None);
 
         fs::write(
             &active,

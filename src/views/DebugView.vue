@@ -613,6 +613,7 @@ function currentCatalogDownloadUrl(relpath: unknown) {
 const runningDownloadTasks = computed(() => Object.values(downloadTasks.value).filter((item) => ['preparing', 'downloading'].includes(item.status)))
 const runtimeDevice = computed(() => settings.getRuntimeDeviceConfig(app.envInfo))
 const cudaDevices = computed(() => env.value?.cudaDevices || [])
+const xpuDevices = computed(() => env.value?.xpuDevices || [])
 const runtimeRows = computed(() => [
   { label: t('settings.workerVersion'), value: env.value?.workerVersion },
   { label: 'pymss-core', value: app.runtimeInfo?.pymssCoreVersion },
@@ -744,6 +745,7 @@ const runtimeDebugEnvironments = computed<RuntimeDebugEnvironmentRow[]>(() => (a
 const runtimeBackendOptions = [
   { label: 'CPU', value: 'cpu' },
   { label: 'CUDA', value: 'cuda' },
+  { label: 'XPU', value: 'xpu' },
   { label: 'ROCm', value: 'rocm' },
   { label: 'MLX', value: 'mlx' },
 ]
@@ -1642,6 +1644,14 @@ onBeforeUnmount(() => {
           <h3>{{ t('debug.cudaDevices') }}</h3>
           <div v-for="gpu in cudaDevices" :key="gpu.id" class="cuda-row">
             <span>CUDA {{ gpu.id }}</span>
+            <strong>{{ gpu.name }}</strong>
+            <code v-if="gpu.totalMemoryBytes">{{ formatBytes(gpu.totalMemoryBytes) }}</code>
+          </div>
+        </div>
+        <div v-if="xpuDevices.length" class="cuda-list">
+          <h3>{{ t('debug.xpuDevices') }}</h3>
+          <div v-for="gpu in xpuDevices" :key="gpu.id" class="cuda-row">
+            <span>XPU {{ gpu.id }}</span>
             <strong>{{ gpu.name }}</strong>
             <code v-if="gpu.totalMemoryBytes">{{ formatBytes(gpu.totalMemoryBytes) }}</code>
           </div>

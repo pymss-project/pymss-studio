@@ -945,7 +945,7 @@ pub async fn debug_runtime_restore_file(app: AppHandle, payload: DebugRuntimeRes
 
 fn validate_debug_runtime_override(backend: &str, python_path: &str) -> AppResult<(String, String)> {
     let backend = backend.trim().to_lowercase();
-    if !matches!(backend.as_str(), "cpu" | "cuda" | "rocm" | "mlx") {
+    if !matches!(backend.as_str(), "cpu" | "cuda" | "xpu" | "rocm" | "mlx") {
         return Err(AppError::Worker("runtime debug backend is unsupported".into()));
     }
     let python_path = python_path.trim();
@@ -2583,43 +2583,31 @@ pub async fn cancel_task(
     state: State<'_, AppState>,
     task_id: String,
 ) -> AppResult<bool> {
+    if let Some(launch) = crate::python::worker::background_inference_launch(&task_id) {
+        drop(launch.lock().await);
+    }
     let deferred_cancellation = crate::python::worker::defers_task_cancellation(&task_id);
     let runtime_completion = crate::python::worker::runtime_maintenance_completion(&task_id);
-    if state
-        .terminal_tasks
-        .lock()
-        .map(|terminal| terminal.contains(&task_id))
-        .unwrap_or(false)
-    {
-        await_runtime_cancel_completion(runtime_completion).await?;
-        return Ok(false);
-    }
-    let child = state
-        .tasks
-        .lock()
-        .ok()
-        .and_then(|mut tasks| tasks.remove(&task_id));
-    if let Some(child) = child {
-        let mut cancelled_task_ids = vec![task_id.clone()];
-        if let Ok(mut tasks) = state.tasks.lock() {
-            let linked_ids: Vec<String> = tasks
-                .iter()
-                .filter_map(|(id, registered)| {
-                    if std::sync::Arc::ptr_eq(registered, &child) {
-                        Some(id.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            for id in linked_ids {
-                tasks.remove(&id);
-                cancelled_task_ids.push(id);
-            }
+    let cancellation = state.tasks.lock().ok().and_then(|mut tasks| {
+        if state.terminal_tasks.lock().is_ok_and(|terminal| terminal.contains(&task_id)) {
+            return None;
         }
+        let child = tasks.remove(&task_id)?;
+        let mut cancelled_task_ids = vec![task_id.clone()];
+        tasks.retain(|id, registered| {
+            if std::sync::Arc::ptr_eq(registered, &child) {
+                cancelled_task_ids.push(id.clone());
+                false
+            } else {
+                true
+            }
+        });
         if let Ok(mut cancelled) = state.cancelled_tasks.lock() {
             cancelled.extend(cancelled_task_ids.iter().cloned());
         }
+        Some((child, cancelled_task_ids))
+    });
+    if let Some((child, cancelled_task_ids)) = cancellation {
         if let Some(completion) = runtime_completion {
             let cancel_id = task_id.clone();
             tauri::async_runtime::spawn_blocking(move || crate::python::worker::cancel_runtime_maintenance_worker(&cancel_id, child, completion))

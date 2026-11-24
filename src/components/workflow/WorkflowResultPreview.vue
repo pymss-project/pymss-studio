@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { vSliderA11y } from '@/directives/sliderAccessibility'
 import { convertFileSrc } from '@tauri-apps/api/core'
+import { loadPreviewMediaSource, needsBlobMediaSource, releasePreviewMediaSource } from '@/utils/mediaSource'
 import { FolderOutline, OpenOutline, PauseOutline, PlayOutline } from '@vicons/ionicons5'
 import { isTauriRuntime } from '@/utils/appStore'
 import type { StemOutput } from '@/stores/task'
@@ -43,6 +44,7 @@ function releaseAudio() {
   removeListeners = undefined
   if (audio) {
     audio.pause()
+    releasePreviewMediaSource(audio)
     audio.removeAttribute('src')
     audio.load()
     update(audioPath, { loading: false })
@@ -61,7 +63,7 @@ function prepareAudio(path: string) {
   audio = player
   audioPath = path
   player.preload = 'metadata'
-  update(path, { loading: true, failed: false })
+  update(path, { loading: !needsBlobMediaSource(), failed: false })
   const fail = () => {
     if (audio !== player) return
     playingPath.value = ''
@@ -85,8 +87,10 @@ function prepareAudio(path: string) {
     for (const [event, handler] of Object.entries(handlers)) player.removeEventListener(event, handler)
   }
   try {
-    player.src = convertFileSrc(path)
-    player.load()
+    if (!needsBlobMediaSource()) {
+      player.src = convertFileSrc(path)
+      player.load()
+    }
   } catch { fail() }
   return player
 }
@@ -102,6 +106,7 @@ async function toggle(path: string) {
   }
   update(path, { loading: true, failed: false })
   try {
+    if (!await loadPreviewMediaSource(player, path) || audio !== player || generation !== playGeneration) return
     await player.play()
     if (audio === player && generation === playGeneration) {
       playingPath.value = path

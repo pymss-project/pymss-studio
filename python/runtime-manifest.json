@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "baseGeneration": 1,
-  "manifestVersion": "2026.11.15",
+  "manifestVersion": "2026.11.22",
   "python": "3.12",
   "bootstrap": {
     "requests": "requests[socks]>=2.32,<3"
@@ -44,6 +44,16 @@
       "torch": {
         "requirement": "torch==2.7.1",
         "indexUrl": "https://download.pytorch.org/whl/cu128"
+      }
+    },
+    "xpu": {
+      "platforms": [
+        "win32",
+        "linux"
+      ],
+      "torch": {
+        "requirement": "torch==2.7.1+xpu",
+        "indexUrl": "https://download.pytorch.org/whl/xpu"
       }
     },
     "rocm": {

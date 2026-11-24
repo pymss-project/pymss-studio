@@ -41,6 +41,7 @@ export function runtimeLoadError(info: RuntimeInfo | null | undefined, env: EnvI
 const RUNTIME_SIZE_HINTS: Record<RuntimeBackend, string> = {
   cpu: '~800 MB',
   cuda: '~3 GB',
+  xpu: '~2.5 GB',
   rocm: '~5 GB',
   mlx: '~600 MB',
 }
@@ -52,6 +53,7 @@ export function runtimeSizeHint(backend: RuntimeBackend | string) {
 const RUNTIME_BACKEND_LABELS: Record<RuntimeBackend, string> = {
   cpu: 'CPU',
   cuda: 'NVIDIA CUDA',
+  xpu: 'Intel XPU',
   rocm: 'AMD ROCm',
   mlx: 'Apple MLX',
 }
@@ -219,11 +221,12 @@ export function recommendedRuntimeBackend(info: RuntimeInfo | null | undefined):
   const { isMac } = detectRuntimePlatform(info)
   if (isMac) return 'mlx'
   const vendors = info?.gpuVendors
-  if (!vendors?.length) return null
   // A discrete NVIDIA card wins over an AMD integrated one when both are present.
-  if (vendors.includes('nvidia')) return 'cuda'
-  if (vendors.includes('amd')) return supportsRuntimeManagement(info) ? 'rocm' : 'cpu'
-  return 'cpu'
+  if (vendors?.includes('nvidia')) return 'cuda'
+  if (vendors?.includes('amd')) return supportsRuntimeManagement(info) ? 'rocm' : 'cpu'
+  // Intel vendor detection includes older integrated graphics that lack XPU support.
+  if (supportsRuntimeManagement(info) && info?.torchBackend === 'xpu' && info.acceleratorAvailable === true) return 'xpu'
+  return vendors?.length ? 'cpu' : null
 }
 
 export type RuntimeManifestStatus = 'current' | 'older' | 'newer' | 'unknown'

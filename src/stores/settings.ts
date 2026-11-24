@@ -231,7 +231,7 @@ export type AudioParams = {
  * fail inside pymss. See getRuntimeDeviceConfig().
  */
 export type RuntimeDeviceConfig = {
-  device: 'auto' | 'cpu' | 'cuda' | 'mps' | 'mlx'
+  device: 'auto' | 'cpu' | 'cuda' | 'mps' | 'mlx' | 'xpu'
   deviceIds: number[]
 }
 
@@ -244,11 +244,12 @@ export type DeviceOption = {
 }
 
 function compatibleRuntimeDeviceSelection(selected: string, env?: EnvInfo | null): string {
-  if (env?.torchAvailable !== true || !['cpu', 'cuda', 'rocm'].includes(env.torchBackend || '')) return selected
+  if (env?.torchAvailable !== true || !['cpu', 'cuda', 'rocm', 'xpu'].includes(env.torchBackend || '')) return selected
   const kind = selected.split(':')[0]
   if (kind === 'cuda' || kind === 'rocm') return env.torchBackend === 'cuda' || env.torchBackend === 'rocm' ? selected : 'auto'
   if (kind === 'mps') return env.mpsAvailable ? selected : 'auto'
   if (kind === 'mlx') return env.mlxAvailable ? selected : 'auto'
+  if (kind === 'xpu') return env.torchBackend === 'xpu' && env.xpuAvailable ? selected : 'auto'
   return selected
 }
 
@@ -528,6 +529,23 @@ export const useSettingsStore = defineStore('settings', () => {
         options.push({ label: `${gpuName} ${id}`, value: `${gpuKind}:${id}`, type: gpuKind, deviceIds: [id] })
       }
     }
+    for (const gpu of env?.xpuDevices || []) {
+      const memory = gpu.totalMemoryBytes
+        ? ` · ${(gpu.totalMemoryBytes / 1024 / 1024 / 1024).toFixed(1)} GB`
+        : ''
+      options.push({
+        label: `XPU ${gpu.id}: ${gpu.name}${memory}`,
+        value: `xpu:${gpu.id}`,
+        type: 'xpu',
+        deviceIds: [gpu.id],
+      })
+    }
+    if (env?.xpuAvailable && !(env.xpuDevices || []).length) {
+      const count = Math.max(1, env.xpuDeviceCount || 1)
+      for (let id = 0; id < count; id += 1) {
+        options.push({ label: `XPU ${id}`, value: `xpu:${id}`, type: 'xpu', deviceIds: [id] })
+      }
+    }
     if (env?.mlxAvailable) options.push({ label: 'Apple MLX', value: 'mlx', type: 'mlx', deviceIds: [0] })
     if (env?.mpsAvailable) options.push({ label: 'Apple MPS', value: 'mps', type: 'mps', deviceIds: [0] })
     return options
@@ -543,6 +561,10 @@ export const useSettingsStore = defineStore('settings', () => {
     }
     // Bare 'rocm' is what settings saved before ROCm gained per-device values.
     if (selected === 'cuda' || selected === 'rocm') return { device: 'cuda', deviceIds: [0] }
+    if (selected === 'xpu' || selected.startsWith('xpu:')) {
+      const id = selected.startsWith('xpu:') ? parseInt(selected.slice('xpu:'.length), 10) : 0
+      return { device: 'xpu', deviceIds: Number.isFinite(id) ? [id] : [0] }
+    }
     if (selected === 'auto' && env?.mlxAvailable) {
       return { device: 'mlx', deviceIds: [0] }
     }

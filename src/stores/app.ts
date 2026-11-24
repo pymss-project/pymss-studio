@@ -34,12 +34,18 @@ export type EnvInfo = {
   cudaDeviceCountError?: string | null
   cudaDeviceNamesError?: string | null
   mpsAvailable?: boolean
+  xpuAvailable?: boolean
+  xpuAvailableError?: string | null
+  xpuDeviceCount?: number
+  xpuDevices?: XpuDeviceInfo[]
+  xpuDeviceCountError?: string | null
+  xpuDeviceNamesError?: string | null
   mlxAvailable?: boolean
   avAvailable?: boolean
   librosaAvailable?: boolean
 }
 
-export type RuntimeBackend = 'cpu' | 'cuda' | 'rocm' | 'mlx'
+export type RuntimeBackend = 'cpu' | 'cuda' | 'xpu' | 'rocm' | 'mlx'
 export type RuntimeGpuProbeCheck = {
   id: string; status: 'passed' | 'failed' | 'unavailable' | 'timeout' | 'skipped'
   message?: string; precision?: string; requiredForBasic?: boolean; errorCode?: string
@@ -206,6 +212,12 @@ export type CudaDeviceInfo = {
   minor?: number
 }
 
+export type XpuDeviceInfo = {
+  id: number
+  name: string
+  totalMemoryBytes?: number
+}
+
 export type DiagnosticLevel = 'ok' | 'warn' | 'error'
 export type DiagnosticItem = {
   key: string
@@ -309,16 +321,18 @@ export const useAppStore = defineStore('app', () => {
       },
       {
         key: 'accelerator',
-        level: env.cudaAvailable || env.mpsAvailable || env.mlxAvailable ? 'ok' : 'warn',
+        level: env.cudaAvailable || env.xpuAvailable || env.mpsAvailable || env.mlxAvailable ? 'ok' : 'warn',
         label: 'Accelerator',
         value: env.cudaAvailable
           ? `${env.torchBackend === 'rocm' ? 'ROCm' : 'CUDA'} (${env.cudaDeviceCount || 0})`
-          : env.mlxAvailable
+          : env.xpuAvailable
+            ? `XPU (${env.xpuDeviceCount || 0})`
+            : env.mlxAvailable
               ? 'MLX'
               : env.mpsAvailable
                 ? 'MPS'
-              : 'CPU only',
-        detail: env.cudaAvailable || env.mpsAvailable || env.mlxAvailable
+                : 'CPU only',
+        detail: env.cudaAvailable || env.xpuAvailable || env.mpsAvailable || env.mlxAvailable
           ? undefined
           : 'No hardware accelerator detected. Separation still works, but can be slower.',
       },
@@ -354,7 +368,7 @@ export const useAppStore = defineStore('app', () => {
     if (!info?.ready) return false
     if (backend === 'mlx') return Boolean(info.packages?.mlx)
     if (info.torchBackend !== backend) return false
-    if (backend === 'cuda' || backend === 'rocm') return Boolean(info.acceleratorAvailable)
+    if (backend === 'cuda' || backend === 'rocm' || backend === 'xpu') return Boolean(info.acceleratorAvailable)
     return true
   }
 

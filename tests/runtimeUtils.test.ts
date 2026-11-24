@@ -332,6 +332,14 @@ test('a discrete NVIDIA card outranks an integrated AMD one', () => {
 test('Linux GPU recommendations use the supported accelerator environments', () => {
   assert.equal(recommendedRuntimeBackend({ platform: 'linux', gpuVendors: ['amd'] }), 'rocm')
   assert.equal(recommendedRuntimeBackend({ platform: 'linux', gpuVendors: ['nvidia'] }), 'cuda')
+  assert.equal(recommendedRuntimeBackend({ platform: 'linux', gpuVendors: ['intel'] }), 'cpu')
+})
+
+test('Intel graphics require a positive XPU capability check for a recommendation', () => {
+  for (const platform of ['win32', 'linux']) {
+    assert.equal(recommendedRuntimeBackend({ platform, gpuVendors: ['intel'], torchBackend: 'xpu', acceleratorAvailable: false }), 'cpu')
+    assert.equal(recommendedRuntimeBackend({ platform, torchBackend: 'xpu', acceleratorAvailable: true }), 'xpu')
+  }
 })
 
 test('macOS recommends MLX even before its architecture is identified', () => {
@@ -382,7 +390,7 @@ test('manifest status is unknown when either side did not record a version', () 
 })
 
 test('every shipped backend has its own download size hint', () => {
-  const hints = ['cpu', 'cuda', 'rocm', 'mlx'].map(runtimeSizeHint)
+  const hints = ['cpu', 'cuda', 'xpu', 'rocm', 'mlx'].map(runtimeSizeHint)
   assert.equal(new Set(hints).size, hints.length)
   assert.equal(runtimeSizeHint('unknown-backend'), '~1 GB')
 })
