@@ -926,7 +926,7 @@
       "scanDetails": "Scan details",
       "addSelected": "Add effect",
       "closeParameters": "Close parameters",
-      "dialogPending": "The plugin is waiting for a dialog. Switch to its window and complete or cancel authorization or file selection to continue. The current session has been retained.",
+      "dialogPending": "The plugin is waiting for a menu or dialog. Switch to its window and complete or dismiss it to continue. The current session is still open.",
       "recoveryEditTitle": "Recover Plugin Operation",
       "recoveryEditWarning": "Plugin processing has stopped. Continuing will use the plugin parameters currently retained in the project. Uncaptured plugin changes cannot be recovered. Track and clip edits will be preserved.",
       "recoveryEditConfirm": "Recover and Continue",

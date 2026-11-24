@@ -236,19 +236,21 @@ fn chain(
                     return Err(warning.clone());
                 }
             }
+            let state = slot
+                .state
+                .as_ref()
+                .map(|state| {
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(state)
+                        .map_err(|_| "Invalid plugin state")?;
+                    if bytes.len() > 32 * 1024 * 1024 {
+                        return Err("Plugin state exceeds the supported size");
+                    }
+                    Ok(bytes)
+                })
+                .transpose()?;
             let mut plugin = HostedPlugin::load(slot)?;
-            if let Some(state) = &slot.state {
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(state)
-                    .map_err(|_| format!("Invalid plugin state ({})", slot.name))?;
-                if bytes.len() > 32 * 1024 * 1024 || !plugin.load_state(&bytes) {
-                    return Err(format!("Unable to restore plugin state ({})", slot.name));
-                }
-            }
-            plugin.set_offline(offline)?;
-            plugin
-                .try_prepare(rate as f32, BLOCK, 2)
-                .map_err(|e| format!("{}: {e}", slot.name))?;
+            plugin.prepare_with_state(rate as f32, BLOCK, 2, offline, state.as_deref())?;
             Ok(plugin)
         };
         let mut plugin = match load() {

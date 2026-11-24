@@ -1,4 +1,4 @@
-//! Windows plugin dialogs can hold the helper UI thread inside a modal message loop.
+//! Native plugin dialogs and menus can hold the helper UI thread inside a nested event loop.
 //! Only the live session retains such a request; scanners and temporary exporters stay bounded.
 use std::time::{Duration, Instant};
 
@@ -41,7 +41,7 @@ impl Pending {
 
 pub(super) fn message(title: &str) -> String {
     let dialog = if title.is_empty() {
-        "a plugin dialog".into()
+        "the open plugin menu or dialog".into()
     } else {
         format!("the plugin dialog \"{title}\"")
     };
@@ -50,9 +50,50 @@ pub(super) fn message(title: &str) -> String {
     )
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(super) fn owned_dialog(_pid: u32) -> Option<String> {
     None
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn owned_dialog(pid: u32) -> Option<String> {
+    use core_foundation::{
+        base::{CFType, TCFType},
+        dictionary::CFDictionary,
+        number::CFNumber,
+    };
+    use core_graphics::window::{
+        copy_window_info, kCGNullWindowID, kCGWindowLayer, kCGWindowListExcludeDesktopElements,
+        kCGWindowListOptionOnScreenOnly, kCGWindowOwnerPID,
+    };
+
+    // The SDK's kCGPopUpMenuWindowLevel. Normal plugin editors use the floating level.
+    const POP_UP_MENU_LEVEL: i32 = 101;
+    let pid = i32::try_from(pid).ok()?;
+    let windows = copy_window_info(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        kCGNullWindowID,
+    )?;
+    // Only use owner and level metadata. Window titles and screen contents are unnecessary.
+    // SAFETY: the keys are Core Graphics constants. The array returned by Quartz owns
+    // each dictionary and its CF values for the duration of these lookups.
+    let found = unsafe {
+        windows.iter().any(|window| {
+            let window = CFType::wrap_under_get_rule(*window);
+            let Some(properties) = window.downcast::<CFDictionary>() else {
+                return false;
+            };
+            let number = |key| {
+                let value = properties.find(key)?;
+                CFType::wrap_under_get_rule(*value)
+                    .downcast::<CFNumber>()?
+                    .to_i32()
+            };
+            number(kCGWindowOwnerPID.cast()) == Some(pid)
+                && number(kCGWindowLayer.cast()) == Some(POP_UP_MENU_LEVEL)
+        })
+    };
+    found.then(String::new)
 }
 
 #[cfg(windows)]

@@ -926,7 +926,7 @@
       "scanDetails": "扫描详情",
       "addSelected": "添加效果器",
       "closeParameters": "收起参数",
-      "dialogPending": "插件正在等待对话框操作。请切换到插件窗口，完成或取消授权、文件选择等操作后继续；当前会话已保留。",
+      "dialogPending": "插件窗口有菜单或对话框等待操作。请完成或关闭它后继续，当前会话已保留。",
       "recoveryEditTitle": "恢复插件操作",
       "recoveryEditWarning": "插件处理已中断。继续后，将使用工程中现有的插件参数完成本次操作，尚未捕获的插件参数无法恢复。音轨和片段编辑将保留。",
       "recoveryEditConfirm": "恢复并继续",

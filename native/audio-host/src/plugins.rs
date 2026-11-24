@@ -82,8 +82,33 @@ impl HostedPlugin {
             _ => None,
         }
     }
-    pub(crate) fn load_state(&mut self, state: &[u8]) -> bool {
-        dispatch!(self, plugin, plugin.load_state(state))
+    pub(crate) fn prepare_with_state(
+        &mut self,
+        rate: f32,
+        block: usize,
+        channels: usize,
+        offline: bool,
+        state: Option<&[u8]>,
+    ) -> Result<(), String> {
+        let restore = |plugin: &mut Self| {
+            if state.is_some_and(|bytes| !dispatch!(plugin, effect, effect.load_state(bytes))) {
+                Err("Unable to restore plugin state".to_string())
+            } else {
+                Ok(())
+            }
+        };
+        let is_au = matches!(self, Self::Au(_));
+        if !is_au {
+            restore(self)?;
+        }
+        self.set_offline(offline)?;
+        self.try_prepare(rate, block, channels)?;
+        // Some AUs (including Ozone 12 after Master Assistant) need their DSP
+        // initialized before dispatching the saved ClassInfo to the plugin.
+        if is_au {
+            restore(self)?;
+        }
+        Ok(())
     }
     pub(crate) fn reset(&mut self) {
         dispatch!(self, plugin, plugin.reset())

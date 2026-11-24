@@ -171,6 +171,46 @@ struct Meter {
     right: AtomicU32,
 }
 
+#[derive(Default)]
+struct LatencyRecovery {
+    vst_used: bool,
+    au_attempts: u8,
+    last_au_completed: Option<Instant>,
+}
+
+impl LatencyRecovery {
+    fn begin(&mut self, now: Instant, is_au: bool) -> bool {
+        if !is_au {
+            return !std::mem::replace(&mut self.vst_used, true);
+        }
+        // A single AU edit can publish several latency changes as its processing chain
+        // settles. Bound back-to-back recovery while allowing subsequent edits.
+        const MAX_AU_ATTEMPTS: u8 = 4;
+        const AU_QUIET_PERIOD: Duration = Duration::from_secs(2);
+        if self
+            .last_au_completed
+            .is_some_and(|last| now.duration_since(last) >= AU_QUIET_PERIOD)
+        {
+            self.au_attempts = 0;
+        }
+        if self.au_attempts >= MAX_AU_ATTEMPTS {
+            return false;
+        }
+        self.au_attempts += 1;
+        true
+    }
+
+    fn complete(&mut self, now: Instant, is_au: bool) {
+        if is_au {
+            self.last_au_completed = Some(now);
+        } else {
+            // The snapshot taken during recovery can collect editor callbacks.
+            // Those events are part of the recovery that just completed.
+            self.vst_used = true;
+        }
+    }
+}
+
 pub(crate) struct Session {
     pub spec: SessionSpec,
     pub sample_rate: u32,
@@ -191,7 +231,7 @@ pub(crate) struct Session {
     pub looping: bool,
     pub session_id: String,
     state_revision: u64,
-    latency_recovery_used: bool,
+    latency_recovery: LatencyRecovery,
     transport_playing: bool,
     graph_revision: u64,
     unavailable_plugins: Vec<UnavailablePlugin>,
@@ -292,7 +332,7 @@ impl Session {
             looping: false,
             session_id: session_id(),
             state_revision: 0,
-            latency_recovery_used: false,
+            latency_recovery: LatencyRecovery::default(),
             transport_playing: false,
             graph_revision: 0,
             unavailable_plugins,
@@ -458,7 +498,7 @@ impl Session {
         entry.plain_values.insert(id.into(), value);
         if entry.values.insert(id.into(), normalized) != Some(normalized) {
             self.state_revision = self.state_revision.saturating_add(1);
-            self.latency_recovery_used = false;
+            self.latency_recovery = LatencyRecovery::default();
         }
         Ok(
             json!({ "updated": true, "value": value, "projectId": self.spec.id, "sessionId": self.session_id, "stateRevision": self.state_revision }),
@@ -518,7 +558,9 @@ impl Session {
                 self.fail("Plugin parameter batch queue is unavailable".into());
             } else {
                 self.state_revision = self.state_revision.saturating_add(count);
-                self.latency_recovery_used = false;
+                // An AU can emit these callbacks while its latency is settling. Keep
+                // its recovery budget until the quiet period or an explicit host edit.
+                self.latency_recovery.vst_used = false;
             }
         }
     }
@@ -578,7 +620,7 @@ impl Session {
             .zip(spec.slots())
             .any(|(old, new)| old.bypassed != new.bypassed)
         {
-            self.latency_recovery_used = false;
+            self.latency_recovery = LatencyRecovery::default();
         }
         if latency_changed {
             let frame = self.clock.position().min((spec.duration() * f64::from(self.sample_rate)).round() as u64);
@@ -703,13 +745,16 @@ impl Session {
         if let Some(error) = &self.error {
             return Err(error.clone());
         }
-        if self.latency_recovery_used {
+        let is_au = self
+            .ui
+            .get(&change.slot)
+            .is_some_and(|slot| slot.format == "au");
+        if !self.latency_recovery.begin(Instant::now(), is_au) {
             return Err(format!(
                 "Plugin latency remained unstable after automatic recovery ({}; previous latency {} samples). Reload the project before retrying",
                 change.slot, change.previous
             ));
         }
-        self.latency_recovery_used = true;
         // Explicit controls may have arrived after the worker's notification.
         // Their current cursor and intent always take precedence over the old
         // failed block's position or playing state.
@@ -741,13 +786,13 @@ impl Session {
         self.spec = spec;
         self.session_id = session_id();
         self.state_revision = 0;
-        self.latency_recovery_used = true;
         self.clock.recovering.store(false, Ordering::Release);
         if resume {
             self.play(seconds, looping)?;
         } else {
             self.seek(seconds)?;
         }
+        self.latency_recovery.complete(Instant::now(), is_au);
         Ok(())
     }
 
@@ -1769,6 +1814,51 @@ mod tests {
         let result = SnapshotPause::acquire(&commands, Duration::from_secs(1));
         assert!(matches!(result, Err(error) if error == "processor rejected parameter flush"));
         assert!(!worker.join().unwrap().load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn au_latency_recovery_accepts_staged_changes_and_bounds_unstable_bursts() {
+        let start = Instant::now();
+        let mut recovery = LatencyRecovery::default();
+        for index in 0..4 {
+            let now = start + Duration::from_millis(index * 100);
+            assert!(recovery.begin(now, true));
+            recovery.complete(now, true);
+        }
+        assert!(!recovery.begin(start + Duration::from_millis(400), true));
+        assert!(recovery.begin(start + Duration::from_secs(3), true));
+    }
+
+    #[test]
+    fn native_parameter_callbacks_cannot_renew_an_au_latency_recovery_burst() {
+        let spec = serde_json::from_value(json!({
+            "id": "latency-budget", "name": "Audio", "sources": [], "tracks": []
+        })).unwrap();
+        let mut session = Session::load_at_rate(spec, "ffmpeg".into(), 48000, true).unwrap();
+        let (commands, received) = bounded(1);
+        session.tx = commands;
+        let start = Instant::now();
+        assert!(session.latency_recovery.begin(start, false));
+        for index in 0..4 {
+            let now = start + Duration::from_millis(index * 100);
+            assert!(session.latency_recovery.begin(now, true));
+            session.latency_recovery.complete(now, true);
+            session.apply_editor_edits(vec![("slot".into(), "gain".into(), 0.5, 0.0)]);
+            assert!(matches!(received.try_recv(), Ok(Control::Params(_))));
+        }
+        assert!(!session.latency_recovery.begin(start + Duration::from_millis(400), true));
+        assert!(session.latency_recovery.begin(start + Duration::from_millis(400), false));
+    }
+
+    #[test]
+    fn au_recovery_does_not_spend_the_vst_recovery_attempt() {
+        let start = Instant::now();
+        let mut recovery = LatencyRecovery::default();
+        assert!(recovery.begin(start, true));
+        recovery.complete(start, true);
+        assert!(recovery.begin(start, false));
+        recovery.complete(start, false);
+        assert!(!recovery.begin(start + Duration::from_secs(3), false));
     }
 
     #[test]
