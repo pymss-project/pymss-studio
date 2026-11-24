@@ -494,6 +494,40 @@ test('project completion releases the audio transport without waiting for a UI f
   assert.deepEqual(env.ended, [1])
 })
 
+test('duration-only edits keep scheduled audio and advance through an extended silent tail', async t => {
+  const env = fixture(t)
+  await env.transport.start([env.entry('audible', 0, 0, 1)], 0, 2)
+  const [node] = env.nodes
+  env.context.currentTime = 0.56
+  env.transport.setDuration(1.5)
+  assert.ok(Math.abs(env.transport.currentTime - 0.5) < 1e-8)
+  assert.equal(node.stopped, false)
+  assert.equal(env.nodes.length, 1)
+
+  env.transport.setDuration(3)
+  env.context.currentTime = 2.56
+  await env.transport.pump()
+  assert.ok(Math.abs(env.transport.currentTime - 2.5) < 1e-8)
+  assert.deepEqual(env.buffering, [])
+  assert.equal(node.stopped, false)
+  env.transport.setDuration(2.25)
+  await env.transport.pump()
+  assert.deepEqual(env.ended, [2.25])
+})
+
+test('duration edits during a pending start apply when the audio becomes ready', async t => {
+  const delayed = gate<AudioBuffer>()
+  const env = fixture(t, async () => delayed.promise)
+  const starting = env.transport.start([env.entry('audible', 0, 0, 1)], 0, 2)
+  env.transport.setDuration(4)
+  delayed.resolve(buffer())
+  assert.equal(await starting, true)
+  await env.transport.pump()
+  env.context.currentTime = 3.06
+  assert.ok(Math.abs(env.transport.currentTime - 3) < 1e-8)
+  assert.deepEqual(env.ended, [])
+})
+
 test('an overestimated source tail does not interrupt other tracks or get decoded repeatedly', async t => {
   const reads: number[] = []
   const env = fixture(t, async (source, index) => {

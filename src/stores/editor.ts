@@ -1686,27 +1686,29 @@ export const useEditorStore = defineStore('editor', () => {
     } satisfies ScanAudioPathsResult
   }
 
-  function sourcesInUse() {
-    if (!session.value) return []
-    const sourceIds = new Set(session.value.tracks.flatMap((track) => [
-      track.sourceId,
-      ...(track.clips || []).map((clip) => clip.assetId),
-    ]).filter(Boolean))
-    return session.value.sources.filter((source) => sourceIds.has(source.id))
-  }
-
   function missingSources() {
     return session.value?.sources.filter((source) => source.missing) || []
   }
 
-  function missingSourcesInUse() {
-    return sourcesInUse().filter((source) => source.missing)
-  }
-
-  function assertNoMissingSourcesInUse(message: string) {
-    const missing = missingSourcesInUse()
-    if (!missing.length) return
-    throw new Error(message)
+  function missingSourcesInUse({ suppressedTrackIds, skipZeroGain = false }: {
+    suppressedTrackIds?: readonly string[]
+    skipZeroGain?: boolean
+  } = {}) {
+    const missing = missingSources()
+    if (!session.value || !missing.length) return missing
+    const tracks = session.value.tracks
+    const hasSolo = tracks.some(track => track.solo)
+    const usedSourceIds = new Set<string>()
+    for (const track of tracks) {
+      if (track.muted || (hasSolo && !track.solo) || suppressedTrackIds?.includes(track.id)
+        || (skipZeroGain && track.volume <= 0)) continue
+      for (const clip of clipsForTrack(track, sourceMap.value)) {
+        if (!clip.muted && clip.duration > 0 && (!skipZeroGain || clip.volume > 0)) {
+          usedSourceIds.add(clip.assetId)
+        }
+      }
+    }
+    return missing.filter(source => usedSourceIds.has(source.id))
   }
 
   async function pickRelinkFile() {
@@ -1936,6 +1938,17 @@ export const useEditorStore = defineStore('editor', () => {
     scheduleSave()
   }
 
+  function setClipMuted(trackId: string, clipId: string, muted: boolean) {
+    if (interactionDepth.value) return
+    const track = session.value?.tracks.find(item => item.id === trackId)
+    const clip = track?.clips?.find(item => item.id === clipId)
+    if (!clip || clip.locked || clip.muted === muted) return
+
+    pushHistory()
+    clip.muted = muted
+    scheduleSave()
+  }
+
   function setClipLocked(trackId: string, clipId: string, locked: boolean) {
     if (interactionDepth.value) return
     const track = session.value?.tracks.find(item => item.id === trackId)
@@ -2161,19 +2174,21 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   async function exportMix(options?: EditorExportFormat | EditorExportOptions) {
-    if (!session.value) throw new Error('Editor session is not loaded')
+    const exportProject = session.value
+    if (!exportProject) throw new Error('Editor session is not loaded')
     if (exporting.value) throw new Error('Editor export is already running')
-    assertNoMissingSourcesInUse(String(i18n.global.t('editor.assetOfflineBlocked')))
+    const pluginRenderRequired = projectPluginSlots(exportProject).some(slot => !slot.bypassed) || normalizeMasterLimiter(exportProject.masterLimiter).enabled
+    if (missingSourcesInUse({ skipZeroGain: true }).length) {
+      throw new Error(String(i18n.global.t('editor.assetOfflineBlocked')))
+    }
     const normalized = typeof options === 'string'
       ? { format: options, audioParams: undefined }
       : (options || {})
     const fmt = normalized.format || exportFormat.value
     const taskId = `editor_export_${Date.now().toString(36)}_${++exportRequestSequence}_${Math.random().toString(36).slice(2, 8)}`
-    const exportProject = session.value
     let snapshot = JSON.parse(JSON.stringify(exportProject)) as EditorSession
     const renderController = new AbortController()
     exportRenderController = renderController
-    const pluginRenderRequired = projectPluginSlots(snapshot).some(slot => !slot.bypassed) || normalizeMasterLimiter(snapshot.masterLimiter).enabled
     let pluginTailLimited = false
     exporting.value = true
     exportCancelling.value = false
@@ -2438,7 +2453,6 @@ export const useEditorStore = defineStore('editor', () => {
     pickRelinkFile,
     missingSources,
     missingSourcesInUse,
-    assertNoMissingSourcesInUse,
     renameTrack,
     localizeDefaultTrackNames,
     toggleTrackFlag,
@@ -2446,6 +2460,7 @@ export const useEditorStore = defineStore('editor', () => {
     setTrackPan,
     setClipFades,
     setClipTiming,
+    setClipMuted,
     setClipLocked,
     setMasterVolume,
     setMasterPan,

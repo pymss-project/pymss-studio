@@ -182,7 +182,7 @@ const {
   currentTime: playbackCurrentTime,
   requestPlayback: playbackRequestPlay,
   pausePlayback: () => playbackRequestPause(false),
-  followPlayhead: playbackFollowPlayhead,
+  followPlayhead: () => playbackFollowPlayhead('recording'),
 })
 const recordingPreview = computed(() => {
   if (!recordingTargetTrackId.value || recordingState.value === 'idle' || recordingState.value === 'preparing') {
@@ -260,9 +260,12 @@ function scheduleInitialZoomFit(sessionId: string) {
 
 async function togglePlayback() {
   if (isRecording.value) return false
-  const ok = await toggleTransport()
-  if (!ok && playbackError.value) message.error(playbackError.value)
+  return toggleTransport()
 }
+
+watch(playbackError, error => {
+  if (error && !recordingBusy.value) message.error(error)
+}, { flush: 'sync' })
 
 let nativeShortcutDisposed = false
 let nativeShortcutQueue = Promise.resolve()
@@ -386,6 +389,10 @@ function moveClipOnTrack({ trackId, clipId, start }: { trackId: string; clipId: 
 
 function setClipLocked(trackId: string, clipId: string, locked: boolean) {
   if (!recordingBusy.value) editor.setClipLocked(trackId, clipId, locked)
+}
+
+function setClipMuted(trackId: string, clipId: string, muted: boolean) {
+  if (!recordingBusy.value) editor.setClipMuted(trackId, clipId, muted)
 }
 
 const clipCommandState = computed(() => {
@@ -754,6 +761,7 @@ watch(
             @split-at="splitAtPointer"
             @drop-clip="dropClip"
             @set-clip-locked="setClipLocked"
+            @set-clip-muted="setClipMuted"
             @reveal-track="revealTrackSource"
             @zoom-in="editor.zoomIn"
             @zoom-out="editor.zoomOut"

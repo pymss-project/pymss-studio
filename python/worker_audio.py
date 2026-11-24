@@ -482,16 +482,11 @@ def cmd_export_editor_mix(payload: dict[str, Any]) -> int:
                     sources[str(source_id)] = item
 
         tracks = project.get("tracks", []) or []
-        active_tracks = [
-            track for track in tracks
-            if not track.get("muted") and (track.get("sourceId") or track.get("clips"))
-        ]
         has_solo = any(bool(track.get("solo")) for track in tracks)
         audio_cache: dict[str, tuple[Any, int]] = {}
         target_rate: int | None = None
-        rendered_clip_count = 0
         rendered_channels = 0
-        total_samples = 0
+        rendered_samples = 0
 
         def source_for_clip(track: dict[str, Any], clip: dict[str, Any]) -> dict[str, Any] | None:
             source_id = clip.get("assetId") or track.get("sourceId")
@@ -519,6 +514,17 @@ def cmd_export_editor_mix(payload: dict[str, Any]) -> int:
                 "muted": False,
             }]
 
+        def clip_duration_seconds(clip: dict[str, Any], source: dict[str, Any] | None) -> float:
+            duration = float(clip.get("duration", 0) or 0)
+            if duration > 0:
+                return duration
+            offset = max(0.0, float(clip.get("offset", 0) or 0))
+            return max(0.0, float((source or {}).get("duration", 0) or 0) - offset)
+
+        def mix_channels(track: dict[str, Any], source: dict[str, Any] | None) -> int:
+            source_channels = int((source or {}).get("channels") or 1)
+            return 2 if source_channels > 1 or abs(float(track.get("pan", 0.0) or 0.0)) > 1e-6 else 1
+
         def read_source_audio(source: dict[str, Any]) -> tuple[Any, int]:
             nonlocal target_rate
             source_id = str(source.get("id") or source.get("path") or "")
@@ -541,13 +547,27 @@ def cmd_export_editor_mix(payload: dict[str, Any]) -> int:
 
         render_items: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
         missing_sources: list[str] = []
-        for track in active_tracks:
-            if (has_solo and not track.get("solo")) or float(track.get("volume", 1.0) or 0) <= 0:
+        timeline_end_seconds = 0.0
+        timeline_rate = 0
+        timeline_channels = 1
+        for track in tracks:
+            if not (track.get("sourceId") or track.get("clips")):
                 continue
+            mix_track = (
+                not track.get("muted")
+                and (not has_solo or track.get("solo"))
+                and float(track.get("volume", 1.0) or 0) > 0
+            )
             for clip in track_clips(track):
-                if clip.get("muted") or float(clip.get("volume", 1.0) or 0) <= 0:
-                    continue
                 source = source_for_clip(track, clip)
+                duration = clip_duration_seconds(clip, source)
+                if duration > 0:
+                    start = max(0.0, float(clip.get("start", 0) or 0))
+                    timeline_end_seconds = max(timeline_end_seconds, start + duration)
+                    timeline_rate = max(timeline_rate, int((source or {}).get("sampleRate") or 0))
+                    timeline_channels = max(timeline_channels, mix_channels(track, source))
+                if not mix_track or clip.get("muted") or float(clip.get("volume", 1.0) or 0) <= 0:
+                    continue
                 if not source:
                     missing_sources.append(str(clip.get("assetId") or track.get("sourceId") or clip.get("id") or "unknown"))
                     continue
@@ -563,8 +583,8 @@ def cmd_export_editor_mix(payload: dict[str, Any]) -> int:
             if len(unique_missing) > 5:
                 preview += f" (+{len(unique_missing) - 5} more)"
             return fail("EDITOR_EXPORT_SOURCE_MISSING", f"Missing source files: {preview}")
-        if not render_items:
-            return fail("EDITOR_EXPORT_FAILED", "No audible clips to export")
+        if not render_items and timeline_end_seconds <= 0:
+            return fail("EDITOR_EXPORT_FAILED", "No clips to export")
         report_progress("preparing", 8)
 
         sample_rate_value = audio_params.get("sample_rate", audio_params.get("sampleRate", "auto"))
@@ -592,24 +612,19 @@ def cmd_export_editor_mix(payload: dict[str, Any]) -> int:
                         source_rates.add(sample_rate)
             if source_rates:
                 target_rate = min(max(source_rates), 48000)
+            elif not render_items:
+                target_rate = min(timeline_rate, 48000) if timeline_rate else 44100
         report_progress("preparing", 12)
 
         if target_rate:
             planned_channels = 1
             planned_samples = 0
             for track, clip, source in render_items:
-                source_channels = min(2, max(1, int(source.get("channels") or 1)))
-                if source_channels == 1 and abs(float(track.get("pan", 0.0) or 0.0)) > 1e-6:
-                    source_channels = 2
-                planned_channels = max(planned_channels, source_channels)
+                planned_channels = max(planned_channels, mix_channels(track, source))
                 start_samples = max(0, int(float(clip.get("start", 0) or 0) * target_rate))
-                offset_seconds = max(0.0, float(clip.get("offset", 0) or 0))
-                duration_seconds = float(clip.get("duration", 0) or 0)
-                if duration_seconds <= 0:
-                    duration_seconds = max(0.0, float(source.get("duration", 0) or 0) - offset_seconds)
                 planned_samples = max(
                     planned_samples,
-                    start_samples + max(0, int(duration_seconds * target_rate)),
+                    start_samples + int(clip_duration_seconds(clip, source) * target_rate),
                 )
             if planned_samples > 0:
                 mix_buffer = _DiskMixBuffer(
@@ -675,8 +690,7 @@ def cmd_export_editor_mix(payload: dict[str, Any]) -> int:
                         end,
                     )
                 mix_buffer.add(start, segment)
-                rendered_clip_count += 1
-                total_samples = max(total_samples, end)
+                rendered_samples = max(rendered_samples, end)
             finally:
                 source_remaining[source_key] -= 1
                 if source_remaining[source_key] <= 0:
@@ -689,28 +703,38 @@ def cmd_export_editor_mix(payload: dict[str, Any]) -> int:
                 str(source.get("name") or Path(source.get("path") or "").name),
             )
 
-        if mix_buffer is None or rendered_clip_count <= 0 or not target_rate or total_samples <= 0:
+        if not target_rate or (render_items and not rendered_samples):
             return fail("EDITOR_EXPORT_FAILED", "No audible clips to export")
+        total_samples = max(rendered_samples, round(timeline_end_seconds * target_rate))
+        if total_samples <= 0:
+            return fail("EDITOR_EXPORT_FAILED", "No clips to export")
         master_volume = float(project.get("masterVolume", 1.0) or 0)
         master_pan = float(project.get("masterPan", 0.0) or 0.0)
-        channels = 2 if rendered_channels == 1 and abs(master_pan) > 1e-6 else rendered_channels
+        mix_channel_count = rendered_channels or timeline_channels
+        channels = 2 if abs(master_pan) > 1e-6 else mix_channel_count
         block_frames = 256 * 1024
-        block_count = max(1, math.ceil(total_samples / block_frames))
+        peak_block_count = math.ceil(rendered_samples / block_frames)
 
         def master_block(start: int, end: int) -> Any:
-            block = mix_buffer.block(start, end, rendered_channels)
+            if mix_buffer is None or start >= rendered_samples:
+                return np.zeros((channels, end - start), dtype=np.float32)
+            block = mix_buffer.block(start, min(end, rendered_samples), rendered_channels)
             if master_volume != 1.0:
                 block *= master_volume
-            return _apply_stereo_pan(block, master_pan)
+            block = _apply_stereo_pan(block, master_pan)
+            if end > rendered_samples:
+                # Encode the silent tail without growing the disk-backed mix.
+                block = np.pad(block, ((0, 0), (0, end - rendered_samples)))
+            return block
 
         peak = 0.0
-        for block_index, start in enumerate(range(0, total_samples, block_frames), 1):
+        for block_index, start in enumerate(range(0, rendered_samples, block_frames), 1):
             check_cancelled()
-            end = min(total_samples, start + block_frames)
+            end = min(rendered_samples, start + block_frames)
             block = master_block(start, end)
             if block.size:
                 peak = max(peak, float(np.max(np.abs(block))))
-            report_progress("finalizing", 86 + int(block_index / block_count * 6))
+            report_progress("finalizing", 86 + int(block_index / peak_block_count * 6))
 
         peak_protection_value = audio_params.get("peak_protection", audio_params.get("peakProtection"))
         requested_wav_subtype = str(
@@ -767,6 +791,7 @@ def cmd_export_editor_mix(payload: dict[str, Any]) -> int:
             )
             os.close(file_descriptor)
             temporary_path = Path(temporary_name)
+            block_count = math.ceil(total_samples / block_frames)
             with sf.SoundFile(
                 str(temporary_path),
                 mode="w",

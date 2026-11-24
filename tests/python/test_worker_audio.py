@@ -355,8 +355,12 @@ class EditorEffectTests(unittest.TestCase):
 
             project['tracks'][0]['solo'] = False
             project['tracks'][2]['solo'] = True
-            with mock.patch('worker_audio.emit'), mock.patch('worker_audio.emit_error', return_value=1):
-                self.assertEqual(cmd_export_editor_mix(payload), 1)
+            payload['fileName'] = 'silent_solo.wav'
+            with mock.patch('worker_audio.emit'):
+                self.assertEqual(cmd_export_editor_mix(payload), 0)
+            rendered, _ = sf.read(root / 'output/silent_solo.wav', dtype='float32', always_2d=True)
+            self.assertEqual(rendered.shape, (200, 2))
+            np.testing.assert_array_equal(rendered, 0)
 
     def test_inaudible_multichannel_tracks_do_not_change_export_channels_or_rate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_value:
@@ -383,8 +387,9 @@ class EditorEffectTests(unittest.TestCase):
                         self.assertEqual(cmd_export_editor_mix(payload), 0)
                     actual, rate = sf.read(root / "output" / f"excluded_{index}.wav", dtype="float32", always_2d=True)
                     self.assertEqual(rate, 1000)
-                    self.assertEqual(actual.shape, (200, 1))
-                    np.testing.assert_array_equal(actual[:, 0], np.full(200, .1, dtype=np.float32))
+                    self.assertEqual(actual.shape, (1000, 1))
+                    np.testing.assert_array_equal(actual[:200, 0], np.full(200, .1, dtype=np.float32))
+                    np.testing.assert_array_equal(actual[200:], 0)
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is required for preview downmix parity")
     def test_multichannel_export_matches_preview_downmix_and_pan(self) -> None:
@@ -493,6 +498,57 @@ class EditorEffectTests(unittest.TestCase):
             self.assertAlmostEqual(float(rendered[25]), 0.1, places=3)
             self.assertAlmostEqual(float(rendered[75]), 0.2, places=3)
             self.assertAlmostEqual(float(rendered[125]), 0.1, places=3)
+
+    def test_export_preserves_the_timeline_through_a_muted_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_value:
+            root = Path(temp_value)
+            source = root / "source.wav"
+            sf.write(source, np.full(4800, 0.125, dtype=np.float32), 48000, subtype="FLOAT")
+            payload = self._export_payload(root, source, name="muted-tail")
+            payload["project"]["assets"][0].update(sampleRate=48000, duration=0.1)
+            track = payload["project"]["tracks"][0]
+            track["clips"][0]["duration"] = 0.1
+            track["clips"].append({
+                "id": "muted-tail",
+                "assetId": "offline-source",
+                "start": 6.2,
+                "offset": 0,
+                "duration": 0.1,
+                "volume": 1,
+                "muted": True,
+            })
+            for format_name in ("wav", "flac"):
+                with self.subTest(format=format_name):
+                    payload["format"] = format_name
+                    with mock.patch("worker_audio.emit") as emit:
+                        self.assertEqual(cmd_export_editor_mix(payload), 0)
+                    result = emit.call_args.args[1]
+                    rendered, rate = sf.read(root / "output" / f"muted-tail_mix.{format_name}")
+                    self.assertEqual(rate, 48000)
+                    self.assertEqual(len(rendered), 302400)
+                    self.assertEqual(result["duration"], 6.3)
+                    np.testing.assert_array_equal(rendered[:4800], 0.125)
+                    np.testing.assert_array_equal(rendered[4800:], 0)
+
+    def test_export_creates_an_equal_length_silent_file_when_all_clips_are_muted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_value:
+            root = Path(temp_value)
+            payload = self._export_payload(root, root / "offline.wav", name="silent")
+            project = payload["project"]
+            project["assets"][0].update(sampleRate=32000, duration=0.25, channels=2)
+            project["tracks"][0]["clips"][0].update(start=0.25, duration=0.25, muted=True)
+            for format_name in ("wav", "flac"):
+                with self.subTest(format=format_name):
+                    payload["format"] = format_name
+                    with mock.patch("worker_audio.emit") as emit, mock.patch("worker_audio._read_editor_audio") as read:
+                        self.assertEqual(cmd_export_editor_mix(payload), 0)
+                    read.assert_not_called()
+                    result = emit.call_args.args[1]
+                    rendered, rate = sf.read(root / "output" / f"silent_mix.{format_name}")
+                    self.assertEqual(rate, 32000)
+                    self.assertEqual(rendered.shape, (16000, 2))
+                    self.assertEqual(result["duration"], 0.5)
+                    np.testing.assert_array_equal(rendered, 0)
 
     def test_master_pan_reports_the_final_stereo_channel_count(self) -> None:
         with tempfile.TemporaryDirectory() as temp_value:

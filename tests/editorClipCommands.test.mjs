@@ -26,10 +26,31 @@ function environment(t) {
     volume: 0.8, fadeIn: 1, fadeOut: 2, muted: false, locked: false,
   }
   let saved
+  let exportListener
+  const exports = []
+  const nativeRenders = []
   window.__TAURI_INTERNALS__ = {
+    transformCallback(callback) {
+      exportListener = callback
+      return 1
+    },
     async invoke(command, args) {
+      if (command === 'plugin:event|listen') return 1
+      if (command === 'plugin_host_capabilities') return { enabled: true, formats: ['vst3'] }
+      if (command === 'plugin_host_render') {
+        nativeRenders.push(args.project)
+        return { path: 'native-mix.wav', duration: 8, sampleRate: 48000, channels: 2 }
+      }
+      if (command === 'plugin_host_cleanup_render') return
+      if (command === 'start_editor_mix_export') {
+        exports.push(args.payload)
+        exportListener({ payload: {
+          type: 'editor_mix_exported', taskId: args.payload.taskId, payload: { path: 'mix.wav' },
+        } })
+        return { started: true }
+      }
       if (command === 'save_editor_project') {
-        saved = structuredClone(args.project)
+        saved = JSON.parse(JSON.stringify(args.project))
         return saved
       }
       if (command === 'load_editor_project') return structuredClone({ ...saved, id: args.projectId })
@@ -50,8 +71,65 @@ function environment(t) {
     })),
   }
   t.after(async () => { await editor.flushSave(); editor.$dispose() })
-  return { editor, clip }
+  return { editor, clip, exports, nativeRenders }
 }
+
+test('mutes only the targeted unlocked clip and preserves its state through history and reload', async t => {
+  const { editor, clip } = environment(t)
+  editor.selectClip('a', clip.id)
+  editor.session.tracks[1].clips[0].locked = true
+  editor.setClipMuted('b', 'clip-b', true)
+  assert.equal(editor.session.tracks[1].clips[0].muted, false)
+  assert.equal(editor.canUndo, false)
+
+  editor.setClipMuted('a', clip.id, true)
+  assert.deepEqual(editor.selectedClip, { ...clip, muted: true })
+  assert.equal(editor.session.tracks[0].muted, false)
+  assert.equal(editor.session.tracks[1].clips[0].muted, false)
+  assert.equal(editor.duration, 8)
+  editor.setClipMuted('a', clip.id, true)
+  editor.undo()
+  assert.equal(editor.selectedClip.muted, false)
+  editor.redo()
+  assert.equal(editor.selectedClip.muted, true)
+
+  await editor.flushSave()
+  await editor.loadProject('project')
+  assert.equal(editor.session.tracks[0].clips[0].muted, true)
+  editor.setClipMuted('a', clip.id, false)
+  assert.equal(editor.session.tracks[0].clips[0].muted, false)
+})
+
+test('export blocks offline clips in the mix and preserves the timing of excluded offline clips', async t => {
+  const { editor, clip, exports, nativeRenders } = environment(t)
+  const [first, second] = editor.session.tracks
+  const source = editor.session.sources[0]
+  source.missing = true
+  editor.session.sources.push({ ...source, id: 'online', path: 'online.wav', missing: false })
+  second.clips[0].assetId = 'online'
+
+  await assert.rejects(editor.exportMix('wav'), /relink/i)
+  assert.equal(exports.length, 0)
+
+  editor.setClipMuted(first.id, clip.id, true)
+  await editor.exportMix('wav')
+  assert.deepEqual(exports[0].project.tracks[0].clips[0], { ...clip, muted: true })
+
+  editor.setClipMuted(first.id, clip.id, false)
+  second.solo = true
+  await editor.exportMix('wav')
+  assert.deepEqual(exports[1].project.tracks[0].clips[0], clip)
+
+  second.solo = false
+  first.volume = 0
+  await editor.exportMix('wav')
+  assert.equal(exports[2].project.tracks[0].volume, 0)
+
+  editor.session.masterLimiter = { enabled: true }
+  await editor.exportMix('wav')
+  assert.equal(nativeRenders[0].tracks[0].volume, 0)
+  assert.deepEqual(nativeRenders[0].tracks[0].clips[0], clip)
+})
 
 test('cuts the last clip into the clipboard and keeps the empty track empty after reload', async t => {
   const { editor, clip } = environment(t)

@@ -50,7 +50,7 @@ type ManagedAudio = {
   meterAnalyserRight?: AnalyserNode | null
 }
 
-type FollowPlayheadMode = 'playback' | 'seek'
+type FollowPlayheadMode = 'playback' | 'seek' | 'recording'
 
 const ERROR_SESSION_NOT_LOADED = '请先加载编辑工程'
 const ERROR_NO_PLAYABLE_TRACKS = '当前没有可播放的音轨'
@@ -452,19 +452,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
   }
 
   function hasMissingSourcesInUse() {
-    const session = editor.session
-    if (!session) return false
-    const hasSolo = session.tracks.some((track) => track.solo)
-    const suppressedTrackIds = new Set(playback.suppressedTrackIds)
-    // Only block playback for tracks that would actually be audible.
-    // A muted, suppressed, or solo-excluded offline clip must not prevent previewing the rest.
-    return session.tracks
-      .filter((track) => !track.muted && !suppressedTrackIds.has(track.id) && (!hasSolo || track.solo))
-      .some((track) => clipsForTrack(track, editor.sourceMap).some((clip) => (
-        !clip.muted
-        && clip.duration > 0
-        && Boolean(editor.sourceMap.get(clip.assetId)?.missing)
-      )))
+    return editor.missingSourcesInUse({ suppressedTrackIds: playback.suppressedTrackIds }).length > 0
   }
 
   function trackSignature() {
@@ -749,6 +737,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
   }
 
   function followPlayhead(mode: FollowPlayheadMode = 'playback') {
+    if (mode === 'playback' && intent.value !== 'play') return
     const el = scrollEl.value
     if (!el) return
     const x = trackHeaderWidth + currentTime.value * editor.pixelsPerSecond
@@ -790,6 +779,10 @@ export function useEditorPlayback(options: PlaybackOptions) {
       followScrollRafId = null
     }
   }
+
+  watch(intent, next => {
+    if (next === 'pause') stopFollowScroll()
+  }, { flush: 'sync' })
 
   function stopRaf() {
     if (rafId !== null) {
@@ -971,37 +964,38 @@ export function useEditorPlayback(options: PlaybackOptions) {
   }
 
   async function syncActiveAudios(targetTime: number, expectedRequestId: number) {
+    if (hasMissingSourcesInUse()) throw new Error(ERROR_MISSING_ASSETS())
     // The scheduler will retain reads needed at the new position and cancel
     // the rest once it has computed that window.
     pauseAllAudios(true)
     const entries = activeClips()
-    if (!entries.length) {
+    if (!computeDuration()) {
       timelinePlayback?.pause()
       pauseInactiveAudios(new Set())
-      return 0
+      return false
     }
 
     const ctx = ensureAudioContext()
     if (ctx && ctx.state !== 'running') {
       await ctx.resume()
     }
-    if (expectedRequestId !== activeRequestId) return 0
+    if (expectedRequestId !== activeRequestId) return false
     if (ctx && ctx.state !== 'running') throw new Error(ERROR_AUDIO_CONTEXT)
     if (normalizeMasterLimiter(editor.session?.masterLimiter).enabled && !ctx) throw new Error(ERROR_AUDIO_CONTEXT)
     await syncMasterLimiter()
-    if (expectedRequestId !== activeRequestId) return 0
+    if (expectedRequestId !== activeRequestId) return false
 
     const timeline = ensureTimelinePlayback()
     if (timeline) {
-      const nextTime = clampTime(targetTime)
+      const duration = computeDuration()
+      const nextTime = clampTime(targetTime, duration)
       pauseInactiveAudios(new Set(entries.map(({ clip }) => clip.id)))
       playback.setCurrentTime(nextTime)
       applyClipStates(nextTime, false)
       const scheduledEntries = timelineEntries()
       if (scheduledEntries.length !== entries.length) throw new Error(ERROR_AUDIO_CONTEXT)
-      const started = await timeline.start(scheduledEntries, nextTime, computeDuration())
-      if (expectedRequestId !== activeRequestId || !started) return 0
-      return entries.length
+      const started = await timeline.start(scheduledEntries, nextTime, duration)
+      return expectedRequestId === activeRequestId && started
     }
 
     const activeIds = new Set(entries.map(({ clip }) => clip.id))
@@ -1033,9 +1027,9 @@ export function useEditorPlayback(options: PlaybackOptions) {
 
     const activeManaged = managed.filter(({ clip }) => clipIsActive(clip, nextTime))
     await Promise.all(activeManaged.map(({ entry }) => playEntry(entry)))
-    if (expectedRequestId !== activeRequestId) return 0
+    if (expectedRequestId !== activeRequestId) return false
     playbackAnchorTime = performance.now() / 1000 - nextTime
-    return managed.length
+    return true
   }
 
   async function requestPlay(offset = currentTime.value) {
@@ -1055,7 +1049,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
       return rejectPlay(ERROR_MISSING_ASSETS())
     }
 
-    if (!activeClips().length) {
+    if (!computeDuration()) {
       return rejectPlay(ERROR_NO_PLAYABLE_TRACKS)
     }
 
@@ -1063,16 +1057,15 @@ export function useEditorPlayback(options: PlaybackOptions) {
     const id = playback.beginRequest('play', 'starting')
     activeRequestId = id
 
-    const playableCount = await syncActiveAudios(offset, id).catch((cause) => {
-      if (id !== activeRequestId) return -1
-      failPlayback(id, cause)
-      return 0
+    const started = await syncActiveAudios(offset, id).catch((cause) => {
+      if (id === activeRequestId) failPlayback(id, cause)
+      return false
     })
 
     if (id !== activeRequestId) return false
     if (intent.value !== 'play') return false
 
-    if (playableCount <= 0) {
+    if (!started) {
       if (!error.value) failPlayback(id, ERROR_NO_LOADED_AUDIO)
       return false
     }
@@ -1153,9 +1146,9 @@ export function useEditorPlayback(options: PlaybackOptions) {
 
     if (playing) {
       followPlayhead('seek')
-      void syncActiveAudios(next, id).then((count) => {
+      void syncActiveAudios(next, id).then((started) => {
         if (id !== activeRequestId || intent.value !== 'play') return
-        if (count <= 0) {
+        if (!started) {
           failPlayback(id, ERROR_NO_LOADED_AUDIO)
           return
         }
@@ -1204,15 +1197,23 @@ export function useEditorPlayback(options: PlaybackOptions) {
   )
 
   watch(
-    () => trackSignature(),
-    () => {
+    [trackSignature, () => editor.duration, hasMissingSourcesInUse],
+    ([signature, duration, missing], [previousSignature, , previouslyMissing]) => {
       if (usesNativePlayback()) return
       if (intent.value === 'play') {
+        if (!duration) {
+          requestPause(true)
+          return
+        }
+        if (signature === previousSignature && missing === previouslyMissing) {
+          timelinePlayback?.setDuration(duration)
+          return
+        }
         const id = playback.beginRequest('play', 'starting')
         activeRequestId = id
-        void syncActiveAudios(currentTime.value, id).then((count) => {
+        void syncActiveAudios(currentTime.value, id).then((started) => {
           if (id !== activeRequestId || intent.value !== 'play') return
-          if (count <= 0) {
+          if (!started) {
             failPlayback(id, ERROR_NO_LOADED_AUDIO)
             return
           }

@@ -151,8 +151,8 @@ fn has_clips(track: &TrackSpec) -> bool {
 }
 
 impl SessionSpec {
-    /// Validates structure and the files that could actually be heard. Unused,
-    /// muted, and solo-excluded offline assets remain recoverable in a project.
+    /// Validates structure and the files that could actually be heard. Unused
+    /// or inaudible assets can remain offline in a project.
     pub fn validate(&self) -> Result<(), String> {
         valid_id(&self.id, "Session")?;
         in_range(self.master_volume, 0.0, 2.0, "Master volume")?;
@@ -191,7 +191,7 @@ impl SessionSpec {
             in_range(track.pan, -1.0, 1.0, "Track pan")?;
             in_range(track.fade_in, 0.0, MAX_DURATION_SECONDS, "Track fade-in")?;
             in_range(track.fade_out, 0.0, MAX_DURATION_SECONDS, "Track fade-out")?;
-            let audible = !track.muted && (!has_solo || track.solo);
+            let audible = !track.muted && (!has_solo || track.solo) && track.volume > 0.0;
             if has_clips(track) {
                 for clip in track.clips.as_ref().expect("non-empty clips") {
                     valid_id(&clip.id, "Clip")?;
@@ -228,7 +228,7 @@ impl SessionSpec {
                             clip.id, source.id
                         ));
                     }
-                    if audible && !clip.muted && clip.duration > 0.0 {
+                    if audible && !clip.muted && clip.volume > 0.0 && clip.duration > 0.0 {
                         used_sources.insert(source.id.as_str());
                     }
                 }
@@ -1397,6 +1397,34 @@ mod tests {
         spec.sources[0].sample_rate = 8000;
         spec.sources[0].path = "relative.wav".into();
         assert!(spec.validate().unwrap_err().contains("absolute file path"));
+    }
+
+    #[test]
+    fn offline_sources_are_checked_when_gain_makes_them_audible() {
+        let (_directory, mut spec) = fixture(1.0);
+        spec.sources[0].missing = true;
+        spec.tracks[0].volume = 0.0;
+        assert!(spec.validate().is_ok());
+        assert_eq!(spec.duration(), 1.0);
+        spec.tracks[0].volume = 1.0;
+        assert!(spec.validate().unwrap_err().contains("offline"));
+
+        spec.tracks[0].clips = Some(vec![ClipSpec {
+            id: "clip".into(),
+            asset_id: spec.sources[0].id.clone(),
+            start: 0.0,
+            offset: 0.0,
+            duration: 1.0,
+            volume: 0.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            muted: false,
+            locked: false,
+        }]);
+        assert!(spec.validate().is_ok());
+        assert_eq!(spec.duration(), 1.0);
+        spec.tracks[0].clips.as_mut().unwrap()[0].volume = 1.0;
+        assert!(spec.validate().unwrap_err().contains("offline"));
     }
 
     #[test]

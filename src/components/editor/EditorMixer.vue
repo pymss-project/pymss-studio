@@ -52,6 +52,7 @@ const emit = defineEmits<{
   removeTrack: [trackId: string]
   clipCommand: [command: EditorClipCommand]
   setClipLocked: [trackId: string, clipId: string, locked: boolean]
+  setClipMuted: [trackId: string, clipId: string, muted: boolean]
   setTool: [tool: EditorTimelineTool]
   toggleSnapping: []
   splitAt: [payload: { trackId: string; clipId: string; time: number }]
@@ -203,6 +204,11 @@ const clipMenuOptions = computed<DropdownOption[]>(() => [
   clipMenuItem('splitAll'),
   clipMenuItem('delete'),
   {
+    key: 'toggle-clip-mute',
+    label: t(contextClip.value?.clip.muted ? 'editor.unmuteClip' : 'editor.muteClip'),
+    disabled: Boolean(props.editingDisabled || contextClip.value?.clip.locked),
+  },
+  {
     key: 'toggle-lock',
     label: t(contextClip.value?.clip.locked ? 'editor.unlockClip' : 'editor.lockClip'),
     disabled: Boolean(props.editingDisabled),
@@ -267,7 +273,8 @@ function sourceForClip(clip: EditorClip) {
 }
 
 function clipAccessibleName(clip: EditorClip, track: EditorTrack) {
-  const name = sourceForClip(clip)?.name || track.name
+  const sourceName = sourceForClip(clip)?.name || track.name
+  const name = clip.muted ? t('editor.mutedClipName', { name: sourceName }) : sourceName
   return clip.locked ? t('editor.lockedClipName', { name }) : name
 }
 
@@ -705,6 +712,10 @@ function handleContextMenuSelect(key: string | number) {
     return
   }
   if (key === 'inspect') emit('showInspector')
+  if (key === 'toggle-clip-mute' && contextClip.value && !props.editingDisabled) {
+    const { track, clip } = contextClip.value
+    if (!clip.locked) emit('setClipMuted', track.id, clip.id, !clip.muted)
+  }
   if (key === 'toggle-lock' && contextClip.value && !props.editingDisabled) {
     const { track, clip } = contextClip.value
     emit('setClipLocked', track.id, clip.id, !clip.locked)
@@ -1635,7 +1646,7 @@ defineExpose({
 }
 
 .track-wave__clip--muted {
-  --clip-content-opacity: 0.46;
+  --clip-content-opacity: 0.28;
 }
 
 .track-wave__clip--editing {

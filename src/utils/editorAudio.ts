@@ -124,10 +124,9 @@ export class EditorTimelinePlayback {
   }
 
   get currentTime() {
-    return this.running
-      ? Math.max(this.offset, Math.min(this.duration, this.coveredUntil,
-        this.offset + this.context.currentTime - this.origin))
-      : this.offset
+    if (!this.running) return this.offset
+    const position = Math.min(this.coveredUntil, this.offset + this.context.currentTime - this.origin)
+    return Math.min(this.duration, Math.max(this.offset, position))
   }
   get bufferedUntil() { return this.coveredUntil }
   get isPlaying() { return this.running && !this.buffering }
@@ -144,14 +143,13 @@ export class EditorTimelinePlayback {
   async start(entries: TimelineAudioClip[], offset: number, duration: number): Promise<boolean> {
     const rate = this.context.sampleRate
     offset = Math.round(offset * rate) / rate
-    duration = Math.round(duration * rate) / rate
-    const until = Math.min(duration, offset + PREVIEW_CHUNK_SECONDS)
-    const segments = this.segments(entries, offset, until)
     this.pause(true)
+    this.setDuration(duration)
+    const until = Math.min(this.duration, offset + PREVIEW_CHUNK_SECONDS)
+    const segments = this.segments(entries, offset, until)
     this.cancelPending(new Set(segments.map(({ entry, index }) => this.key(entry.source, index))))
     const generation = this.generation
     this.entries = entries
-    this.duration = duration
     this.offset = offset
     const cancelled = new Promise<null>(resolve => { this.cancelStart = () => resolve(null) })
     let ready: Map<string, AudioBuffer | null> | null
@@ -207,6 +205,11 @@ export class EditorTimelinePlayback {
     this.cacheBytes = 0
   }
 
+  setDuration(duration: number) {
+    const rate = this.context.sampleRate
+    this.duration = Math.round(duration * rate) / rate
+  }
+
   updateMix(entries: TimelineAudioClip[]) {
     // Editor patches may replace clip objects. Future chunks must use the
     // latest objects too, not only update gains on already scheduled slices.
@@ -235,12 +238,17 @@ export class EditorTimelinePlayback {
     }
     if (!this.running || this.loadingAhead || this.coveredUntil >= this.duration
       || this.coveredUntil - this.currentTime >= PREFETCH_SECONDS) return
-    this.loadingAhead = true
-    const generation = this.generation
-    let operationGeneration = generation
     const from = this.coveredUntil
     const until = Math.min(this.duration, from + PREVIEW_CHUNK_SECONDS)
     const segments = this.segments(this.entries, from, until)
+    if (!segments.length) {
+      // Silent windows need no decoding or change to the playback clock.
+      this.coveredUntil = until
+      return
+    }
+    this.loadingAhead = true
+    const generation = this.generation
+    let operationGeneration = generation
     try {
       const ready = await this.prepare(segments)
       if (generation !== this.generation || !this.running) return
