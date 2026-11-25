@@ -286,6 +286,17 @@ test('shared sources reuse decoded chunks and decoder failures cancel startup', 
   assert.equal(failed.nodes.length, 0)
 })
 
+test('a file replaced at the same path is decoded again once its duration changes', async t => {
+  let reads = 0
+  const env = fixture(t, async () => { reads++; return buffer() })
+  const entry = env.entry('song')
+  await env.transport.start([entry], 0, 3)
+  env.transport.pause()
+  entry.source = { ...entry.source, duration: 45 }
+  await env.transport.start([entry], 0, 3)
+  assert.equal(reads, 2)
+})
+
 test('replacing clip mix settings also updates chunks prepared after the edit', async t => {
   const env = fixture(t)
   const original = env.entry()

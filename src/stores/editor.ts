@@ -1279,16 +1279,19 @@ export const useEditorStore = defineStore('editor', () => {
       .every((value) => Number.isFinite(value) && value > 0))
   }
 
-  async function ensurePeaks(sourceId: string) {
+  // `refresh` rebuilds through the worker, which reuses its cache only while the file is unchanged.
+  async function ensurePeaks(sourceId: string, { refresh = false } = {}) {
     if (!session.value) return null
     const source = session.value.sources.find((item) => item.id === sourceId)
-    if (!source || source.missing || hasRenderablePeaks(source)) return source || null
+    if (!source || source.missing || (!refresh && hasRenderablePeaks(source))) return source || null
 
-    const cachedPeaks = await loadPeaksFromCache(source.peaksPath, source.path)
-    if (cachedPeaks?.peaks.length && cachedPeaksMatchSource(source, cachedPeaks)) {
-      source.peaks = cachedPeaks.peaks
-      source.channelPeaks = cachedPeaks.channelPeaks
-      return source
+    if (!refresh) {
+      const cachedPeaks = await loadPeaksFromCache(source.peaksPath, source.path)
+      if (cachedPeaks?.peaks.length && cachedPeaksMatchSource(source, cachedPeaks)) {
+        source.peaks = cachedPeaks.peaks
+        source.channelPeaks = cachedPeaks.channelPeaks
+        return source
+      }
     }
 
     const pending = pendingPeaks.get(sourceId)
@@ -1323,8 +1326,8 @@ export const useEditorStore = defineStore('editor', () => {
     return task
   }
 
-  function ensurePeaksInBackground(sourceId: string) {
-    void ensurePeaks(sourceId)
+  function ensurePeaksInBackground(sourceId: string, options?: { refresh?: boolean }) {
+    void ensurePeaks(sourceId, options)
       .then(() => {
         if (!session.value) return
         scheduleSave()
@@ -1476,11 +1479,18 @@ export const useEditorStore = defineStore('editor', () => {
     const targetSession = session.value
     const normalized = normalizePathKey(path)
     const existing = session.value.sources.find((source) => normalizePathKey(source.path) === normalized)
-    if (existing) return existing
-
     const metadata = await getMetadata(path)
     if (session.value !== targetSession) throw new Error('Editor project changed during asset import')
     if (!hasUsableAudioMetadata(metadata)) throw new Error(String(i18n.global.t('editor.assetMetadataInvalid')))
+    if (existing) {
+      // The file at this path may have been replaced since the asset was first imported.
+      existing.duration = Number(metadata.duration)
+      existing.sampleRate = Number(metadata.sampleRate)
+      existing.channels = Number(metadata.channels)
+      existing.missing = false
+      ensurePeaksInBackground(existing.id, { refresh: true })
+      return existing
+    }
     const concurrentSource = targetSession.sources.find((source) => normalizePathKey(source.path) === normalized)
     if (concurrentSource) return concurrentSource
     const source: EditorSource = {

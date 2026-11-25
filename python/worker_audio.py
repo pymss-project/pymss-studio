@@ -354,6 +354,14 @@ def cmd_audio_metadata(payload: dict[str, Any]) -> int:
         return emit_error("AUDIO_METADATA_FAILED", str(exc), traceback.format_exc())
 
 
+def _read_cached_peaks(peaks_path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(peaks_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def cmd_waveform_peaks(payload: dict[str, Any]) -> int:
     path_value = payload.get("path")
     if not path_value:
@@ -367,12 +375,16 @@ def cmd_waveform_peaks(payload: dict[str, Any]) -> int:
     cache_name = f"{path.stem}_{cache_key}_{resolution}_v2.json"
     peaks_path = cache_dir / cache_name
     try:
-        if peaks_path.is_file() and peaks_path.stat().st_mtime >= path.stat().st_mtime:
-            data = json.loads(peaks_path.read_text(encoding="utf-8"))
-            channel_peaks = data.get("channelPeaks") or []
+        # A file replaced in place can keep an older modification time (copies preserve it),
+        # so the cache must match the exact size and timestamp it was built from.
+        stat = path.stat()
+        fingerprint = {"sourceSize": stat.st_size, "sourceMtimeNs": stat.st_mtime_ns}
+        cached = _read_cached_peaks(peaks_path)
+        if cached and all(cached.get(key) == value for key, value in fingerprint.items()):
+            channel_peaks = cached.get("channelPeaks") or []
             if isinstance(channel_peaks, list):
-                data["channels"] = max(int(data.get("channels") or 0), len(channel_peaks))
-            emit("waveform_peaks", data)
+                cached["channels"] = max(int(cached.get("channels") or 0), len(channel_peaks))
+            emit("waveform_peaks", cached)
             return 0
 
         import numpy as np  # type: ignore
@@ -416,6 +428,7 @@ def cmd_waveform_peaks(payload: dict[str, Any]) -> int:
             "duration": metadata.get("duration", 0),
             "sampleRate": metadata.get("sampleRate") or sr,
             "channels": channel_count,
+            **fingerprint,
         }
         peaks_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         emit("waveform_peaks", data)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -676,3 +677,34 @@ class AudioTrackProbeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WaveformPeakCacheTests(unittest.TestCase):
+    def _peaks(self, source: Path, cache_dir: Path) -> dict:
+        import io
+        import json
+        import contextlib
+        from worker_audio import cmd_waveform_peaks
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(cmd_waveform_peaks({'path': str(source), 'cacheDir': str(cache_dir), 'resolution': 80}), 0)
+        return json.loads(output.getvalue().strip().splitlines()[-1])['payload']
+
+    def test_a_file_replaced_in_place_with_an_older_timestamp_is_measured_again(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_value:
+            root = Path(temp_value)
+            source = root / 'song.wav'
+            sf.write(source, np.full(4410, 0.2, dtype=np.float32), 44100)
+            first = self._peaks(source, root / 'peaks')
+            cached_mtime = source.stat().st_mtime
+
+            # Copying a different song over the same name keeps its original, older timestamp.
+            sf.write(source, np.full(4410, 0.8, dtype=np.float32), 44100)
+            os.utime(source, (cached_mtime - 3600, cached_mtime - 3600))
+            second = self._peaks(source, root / 'peaks')
+
+            self.assertAlmostEqual(max(first['peaks']), 0.2, places=3)
+            self.assertAlmostEqual(max(second['peaks']), 0.8, places=3)
+            self.assertEqual(second['peaksPath'], first['peaksPath'])
+            self.assertEqual(self._peaks(source, root / 'peaks')['peaks'], second['peaks'])

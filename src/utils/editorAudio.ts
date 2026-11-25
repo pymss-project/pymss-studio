@@ -313,8 +313,9 @@ export class EditorTimelinePlayback {
     return result
   }
 
+  // Duration separates a file replaced at the same path once its metadata is refreshed.
   private sourceKey(source: EditorSource) {
-    return JSON.stringify([source.path, source.sampleRate, source.channels])
+    return JSON.stringify([source.path, source.sampleRate, source.channels, source.duration])
   }
 
   private key(source: EditorSource, index: number) { return `${this.sourceKey(source)}:${index}` }
