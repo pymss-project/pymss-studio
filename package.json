@@ -10,6 +10,7 @@
     "test": "node --test \"tests/**/*.test.*\"",
     "test:frontend": "pnpm test",
     "test:python": "python -m unittest discover -s tests/python -t tests -p \"test_*.py\"",
+    "test:python:fast": "python scripts/run-python-tests.py --skip-runtime-packaging",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "test:all": "pnpm test:frontend && pnpm test:python && pnpm test:rust",
     "preview": "vite preview",

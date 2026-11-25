@@ -752,9 +752,9 @@ useDiagnosticWindowState('workflow', () => ({
   background: transparent;
   cursor: text;
   font: inherit;
-  font-size: 18px;
-  font-weight: 800;
-  line-height: 1.12;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.2;
   text-align: left;
 }
 

@@ -5,11 +5,14 @@ import { useNumberInputAccessibility } from '@/composables/useNumberInputAccessi
 import { useDialog, useMessage, type DropdownOption, type InputInst } from 'naive-ui'
 import {
   ArrowRedoOutline,
+  AddOutline,
+  AlertCircleOutline,
   ArrowUndoOutline,
   CloseOutline,
   ExpandOutline,
   LocateOutline,
   SettingsOutline,
+  WarningOutline,
 } from '@vicons/ionicons5'
 import { WORKFLOW_NODE_STATUS_KEYS, type WorkflowNodeState } from '@/workflows/workbench'
 import WorkflowNodeLog from '@/components/workflow/WorkflowNodeLog.vue'
@@ -1418,11 +1421,17 @@ onBeforeUnmount(() => {
         <n-input v-else ref="nameInputRef" v-model:value="name" size="small" :placeholder="t('workflows.namePlaceholder')" @blur="finishNameEdit" @keydown.enter.prevent="finishNameEdit" @keydown.esc.prevent="cancelNameEdit" />
         <slot v-if="!readonly" name="save-status" />
       </div>
+      <span v-if="formError" class="simple-node-editor__notice simple-node-editor__error" role="alert" :title="formError">
+        <n-icon :component="AlertCircleOutline" aria-hidden="true" /><span>{{ formError }}</span>
+      </span>
+      <span v-else-if="advisory" class="simple-node-editor__notice simple-node-editor__warning" :title="advisory">
+        <n-icon :component="WarningOutline" aria-hidden="true" /><span>{{ advisory }}</span>
+      </span>
       <div class="simple-node-editor__actions">
         <div v-if="!readonly" class="simple-node-editor__action-group">
           <n-button size="small" quaternary circle :title="t('common.undo')" :aria-label="t('common.undo')" :disabled="history.length <= 1" @click="undo"><template #icon><n-icon :component="ArrowUndoOutline" /></template></n-button>
           <n-button size="small" quaternary circle :title="t('common.redo')" :aria-label="t('common.redo')" :disabled="!future.length" @click="redo"><template #icon><n-icon :component="ArrowRedoOutline" /></template></n-button>
-          <n-button size="small" secondary @click="openNodeTypeChooser()">{{ t('workflows.addStep') }}</n-button>
+          <n-button size="small" secondary @click="openNodeTypeChooser()"><template #icon><n-icon :component="AddOutline" /></template>{{ t('workflows.addStep') }}</n-button>
         </div>
         <div class="simple-node-editor__action-group">
           <n-button size="small" quaternary @click="fitView"><template #icon><n-icon :component="ExpandOutline" /></template>{{ t('workflows.fitView') }}</n-button>
@@ -1432,8 +1441,6 @@ onBeforeUnmount(() => {
           <slot name="run-controls"><n-button size="small" type="primary" :disabled="!canRun || saving" @click="emit('run')">{{ t('workflows.runWorkflowAction') }}</n-button></slot>
         </div>
       </div>
-      <span v-if="formError" class="simple-node-editor__notice simple-node-editor__error" role="alert">{{ formError }}</span>
-      <span v-else-if="advisory" class="simple-node-editor__notice simple-node-editor__warning">{{ advisory }}</span>
       <slot name="execution-progress" />
     </header>
 
@@ -1652,10 +1659,10 @@ onBeforeUnmount(() => {
 .simple-node-editor__topbar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 10px 16px;
+  gap: 6px 12px;
+  padding: 8px 10px 8px 16px;
   border: 1px solid color-mix(in srgb, var(--outline) 78%, transparent);
-  border-radius: 16px;
+  border-radius: 12px;
   background: color-mix(in srgb, var(--surface-1) 92%, var(--primary-soft));
   box-shadow:
     inset 0 0 0 1px color-mix(in srgb, var(--outline) 32%, transparent),
@@ -1663,17 +1670,15 @@ onBeforeUnmount(() => {
 }
 
 .simple-node-editor__topbar {
-  min-height: 58px;
-  justify-content: space-between;
   flex-wrap: wrap;
 }
 
 .simple-node-editor__title {
   display: flex;
   align-items: center;
-  min-width: 180px;
+  min-width: 0;
   gap: 10px;
-  flex: 1 1 280px;
+  flex: 0 1 auto;
 }
 
 .simple-name-trigger {
@@ -1684,8 +1689,8 @@ onBeforeUnmount(() => {
   background: transparent;
   color: var(--on-surface);
   font: inherit;
-  font-size: 18px;
-  font-weight: 800;
+  font-size: 16px;
+  font-weight: 700;
   text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1701,17 +1706,21 @@ onBeforeUnmount(() => {
 .simple-node-editor__actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
+  margin-left: auto;
   flex-wrap: wrap;
   justify-content: flex-end;
   min-width: 0;
 }
 
-.simple-node-editor__action-group { display: flex; align-items: center; gap: 6px; }
-.simple-node-editor__action-group + .simple-node-editor__action-group { padding-left: 12px; border-left: 1px solid var(--outline); }
+.simple-node-editor__action-group { display: flex; align-items: center; gap: 4px; }
+.simple-node-editor__action-group + .simple-node-editor__action-group { padding-left: 8px; border-left: 1px solid var(--outline); }
 .simple-node-editor__action-group--run { flex-wrap: wrap; }
 .simple-node-editor__actions :deep(.workflow-run-controls) { flex-wrap: wrap; }
-.simple-node-editor__notice { flex: 1 0 100%; font-size: 12px; line-height: 1.5; }
+.simple-node-editor__notice { display: inline-flex; align-items: center; gap: 4px; flex: 1 1 0; min-width: 0; font-size: 12px; }
+.simple-node-editor__notice > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.simple-node-editor__notice :deep(.n-icon) { flex-shrink: 0; }
+.simple-node-editor__topbar > :deep(.workflow-execution-progress) { flex-basis: 100%; }
 
 .simple-node-editor__defaults { display: grid; gap: 14px; }
 .simple-node-editor__defaults label {
@@ -1747,16 +1756,14 @@ onBeforeUnmount(() => {
 .simple-node-editor__hint {
   position: absolute;
   z-index: 4;
-  top: 12px;
-  left: 16px;
-  max-width: min(620px, calc(100% - 32px));
-  padding: 7px 10px;
-  border: 1px solid color-mix(in srgb, var(--outline) 78%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--surface-1) 94%, transparent);
+  bottom: 10px;
+  left: 14px;
+  max-width: min(620px, calc(100% - 28px));
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface-1) 72%, transparent);
   color: var(--on-surface-muted);
-  box-shadow: 0 6px 20px color-mix(in srgb, var(--surface) 14%, transparent);
-  font-size: 12px;
+  font-size: 11px;
   pointer-events: none;
 }
 

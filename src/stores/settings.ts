@@ -12,7 +12,9 @@ import {
 } from '@/utils/theme'
 import {
   applyScaleFactor,
+  broadcastScaleFactor,
   DEFAULT_SCALE_FACTOR,
+  listenForScaleFactor,
   normalizeScaleFactor,
   SCALE_FACTOR_MAX,
   SCALE_FACTOR_MIN,
@@ -343,7 +345,9 @@ export const useSettingsStore = defineStore('settings', () => {
     if (scaleApplyTimer) clearTimeout(scaleApplyTimer)
     scaleApplyTimer = setTimeout(() => {
       scaleApplyTimer = null
-      void applyScaleFactor(value).catch((error) => studioLog.warn('Failed to apply scale factor', error))
+      void applyScaleFactor(value)
+        .then(() => broadcastScaleFactor(value))
+        .catch((error) => studioLog.warn('Failed to apply scale factor', error))
     }, 140)
   }
 
@@ -415,6 +419,11 @@ export const useSettingsStore = defineStore('settings', () => {
 
     applyTheme(themeMode.value, themeAccent.value)
     await applyScaleFactor(scaleFactor.value).catch((error) => studioLog.warn('Failed to apply scale factor', error))
+    if (isTauriRuntime()) {
+      await listenForScaleFactor((value) => {
+        void applyScaleFactor(value).catch((error) => studioLog.warn('Failed to apply scale factor', error))
+      }).catch((error) => studioLog.warn('Failed to follow scale factor changes', error))
+    }
     setLocale(locale.value)
     initialized.value = true
     if (shouldPersistNormalizedSettings) queuePersist()

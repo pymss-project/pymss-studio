@@ -11,7 +11,7 @@ import { createLogger } from '@/utils/logger'
 import { computed, useId, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useMessage } from 'naive-ui'
-import { AddOutline, ArrowRedoOutline, ArrowUndoOutline, ExpandOutline, SearchOutline } from '@vicons/ionicons5'
+import { AddOutline, AlertCircleOutline, ArrowRedoOutline, ArrowUndoOutline, ExpandOutline, HelpCircleOutline, SearchOutline, WarningOutline } from '@vicons/ionicons5'
 import { invoke } from '@tauri-apps/api/core'
 import { LGraph, LGraphCanvas, LiteGraph, createBounds, type LGraphNode } from '@comfyorg/litegraph'
 import '@comfyorg/litegraph/style.css'
@@ -822,6 +822,12 @@ function configureGraphNode(node: LGraphNode) {
   <div class="litegraph-editor" @keydown.capture="guardReadonlyKeyboard" @keyup.capture="guardReadonlyKeyboard">
     <header v-if="!readonly" class="toolbar">
       <div class="toolbar__title"><slot name="title" /></div>
+      <span v-if="formError && !loadError" class="toolbar__notice err" role="alert" :title="formError">
+        <n-icon :component="AlertCircleOutline" aria-hidden="true" /><span>{{ formError }}</span>
+      </span>
+      <span v-else-if="advisory && !loadError" class="toolbar__notice warn" :title="advisory">
+        <n-icon :component="WarningOutline" aria-hidden="true" /><span>{{ advisory }}</span>
+      </span>
       <div class="toolbar__actions">
         <div class="toolbar__group">
           <n-button size="small" quaternary circle :title="t('common.undo')" :aria-label="t('common.undo')" :disabled="!ready || !canUndo" @click="undo"><template #icon><n-icon :component="ArrowUndoOutline" /></template></n-button>
@@ -844,15 +850,18 @@ function configureGraphNode(node: LGraphNode) {
         <div class="toolbar__group">
           <n-button size="small" quaternary :disabled="!ready" @click="fitView"><template #icon><n-icon :component="ExpandOutline" /></template>{{ t('workflows.fitView') }}</n-button>
           <slot name="settings-controls" />
+          <n-popover trigger="click" placement="bottom-end" :style="{ maxWidth: '320px' }">
+            <template #trigger>
+              <n-button size="small" quaternary circle :title="t('accessibility.advancedCanvasHelpTitle')" :aria-label="t('accessibility.advancedCanvasHelpTitle')">
+                <template #icon><n-icon :component="HelpCircleOutline" /></template>
+              </n-button>
+            </template>
+            <p class="canvas-help-popover">{{ t('accessibility.advancedCanvasHelp') }}</p>
+          </n-popover>
         </div>
         <div class="toolbar__group toolbar__group--run"><slot name="run-controls" /></div>
       </div>
-      <span v-if="formError && !loadError" class="toolbar__notice err" role="alert">{{ formError }}</span>
-      <span v-else-if="advisory && !loadError" class="toolbar__notice warn">{{ advisory }}</span>
-      <details class="canvas-accessibility-help">
-        <summary>{{ t('accessibility.advancedCanvasHelpTitle') }}</summary>
-        <p :id="canvasHelpId">{{ t('accessibility.advancedCanvasHelp') }}</p>
-      </details>
+      <p :id="canvasHelpId" class="sr-only">{{ t('accessibility.advancedCanvasHelp') }}</p>
       <slot name="execution-progress" />
     </header>
     <slot v-else name="execution-progress" />
@@ -873,18 +882,19 @@ function configureGraphNode(node: LGraphNode) {
 </template>
 
 <style scoped>
-.canvas-accessibility-help { flex-basis: 100%; color: var(--on-surface-muted); font-size: 12px; }
-.canvas-accessibility-help summary { width: fit-content; cursor: pointer; }
-.canvas-accessibility-help p { margin: 8px 0 0; line-height: 1.6; }
+.canvas-help-popover { margin: 0; font-size: 12px; line-height: 1.6; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 
 .canvas-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--on-surface-muted); }
-.litegraph-editor { display: flex; flex-direction: column; height: 100%; min-height: 0; gap: 10px; color: var(--on-surface); }
-.toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; padding: 10px 16px; border: 1px solid var(--outline); border-radius: 16px; background: var(--surface-1); }
-.toolbar__title { display: flex; align-items: center; flex: 1 1 200px; min-width: 0; }
-.toolbar__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.toolbar__group { display: inline-flex; align-items: center; gap: 6px; }
-.toolbar__group + .toolbar__group { padding-left: 10px; border-left: 1px solid var(--outline); }
-.toolbar__notice { flex-basis: 100%; font-size: 11px; }
+.litegraph-editor { display: flex; flex-direction: column; height: 100%; min-height: 0; gap: 8px; color: var(--on-surface); }
+.toolbar { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 8px 10px 8px 16px; border: 1px solid var(--outline); border-radius: 12px; background: var(--surface-1); }
+.toolbar__title { display: flex; align-items: center; flex: 0 1 auto; min-width: 0; }
+.toolbar__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
+.toolbar__group { display: inline-flex; align-items: center; gap: 4px; }
+.toolbar__group + .toolbar__group { padding-left: 8px; border-left: 1px solid var(--outline); }
+.toolbar__notice { display: inline-flex; align-items: center; gap: 4px; flex: 1 1 0; min-width: 0; font-size: 12px; }
+.toolbar__notice > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toolbar__notice :deep(.n-icon) { flex-shrink: 0; }
 .err { color: var(--danger); }
 .warn { color: var(--warning); }
 .palette { width: min(320px, calc(100vw - 32px)); max-height: min(580px, calc(100vh - 120px)); display: flex; flex-direction: column; border: 1px solid var(--outline-strong); border-radius: 12px; background: var(--surface-1); color: var(--on-surface); box-shadow: var(--shadow-panel); overflow: hidden; }

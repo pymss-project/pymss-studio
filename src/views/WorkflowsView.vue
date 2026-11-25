@@ -43,6 +43,7 @@ import {
 } from '@/utils/workflowSimple'
 import { WorkflowEditorInUseError } from '@/utils/workflowEditorState'
 import { themeIsDark } from '@/utils/theme'
+import { formatDateTime, formatRecentTime } from '@/utils/time'
 import { hasInvalidSimpleStructure, isGraphWorkflowDefinition, isSimpleWorkflowDefinition } from '@/workflows/formats'
 import { litegraphToComfy } from '@/litegraph/graphAdapter'
 import { buildComfyWorkflowExport, ComfyParameterExportError } from '@/workflows/comfyExport'
@@ -53,7 +54,10 @@ import {
   getWorkflowDefinitionIssue,
 } from '@/workflows/runtimeDefinition'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
+// Relative update times ("3 hours ago") are refreshed once a minute.
+const clockNow = ref(Date.now())
+const clockTimer = setInterval(() => { clockNow.value = Date.now() }, 60_000)
 const message = useMessage()
 const dialog = useDialog()
 const workflow = useWorkflowStore()
@@ -204,6 +208,14 @@ const workflowListMetaMap = computed(() => Object.fromEntries(workflows.value.ma
 
 function workflowListMeta(item: WorkflowEntry) {
   return workflowListMetaMap.value[item.id] || ''
+}
+
+function workflowUpdatedLabel(item: WorkflowEntry) {
+  return formatRecentTime(item.updatedAt, locale.value, clockNow.value)
+}
+
+function workflowUpdatedTitle(item: WorkflowEntry) {
+  return item.updatedAt > 0 ? formatDateTime(new Date(item.updatedAt).toISOString()) : ''
 }
 
 function workflowTypeLabel(item: WorkflowEntry) {
@@ -993,6 +1005,7 @@ const stopEditorCloseSubscription = workflow.$onAction(({ name: action, after })
 
 onUnmounted(() => {
   unmounted = true
+  clearInterval(clockTimer)
   stopEditorCloseSubscription()
   closeWorkflowContextMenu()
 })
@@ -1083,15 +1096,20 @@ watch([() => selectedWorkflow.value?.id, () => selectedWorkflow.value?.name], ()
                 <span class="wf-row__main">
                   <strong>{{ item.name }}</strong>
                   <span class="wf-row__meta">
-                    <small class="wf-row__type">{{ workflowTypeLabel(item) }}</small>
+                    <small v-if="workflowKind(item) === 'invalid'" class="wf-row__type">{{ workflowTypeLabel(item) }}</small>
                     <small class="wf-row__summary">{{ workflowListMeta(item) }}</small>
                   </span>
                 </span>
-                <span
-                  class="wf-row__dot"
-                  :class="isWorkflowBlocked(item) ? 'wf-row__dot--warn' : 'wf-row__dot--ok'"
-                  :title="isWorkflowBlocked(item) ? t('workflows.workflowValidationTitle') : t('workflows.statusReady')"
-                />
+                <span class="wf-row__aside">
+                  <time v-if="item.updatedAt > 0" class="wf-row__time" :datetime="new Date(item.updatedAt).toISOString()" :title="workflowUpdatedTitle(item)">{{ workflowUpdatedLabel(item) }}</time>
+                  <span
+                    v-if="isWorkflowBlocked(item)"
+                    class="wf-row__dot wf-row__dot--warn"
+                    role="img"
+                    :aria-label="t('workflows.workflowValidationTitle')"
+                    :title="t('workflows.workflowValidationTitle')"
+                  />
+                </span>
               </button>
             </section>
           </div>
@@ -1660,11 +1678,6 @@ watch([() => selectedWorkflow.value?.id, () => selectedWorkflow.value?.name], ()
   font-weight: 700;
 }
 
-.wf-row--advanced .wf-row__type {
-  background: transparent;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 28%, var(--outline));
-}
-
 .wf-row--invalid .wf-row__type {
   color: var(--warning);
   background: color-mix(in srgb, var(--warning) 12%, transparent);
@@ -1686,9 +1699,16 @@ watch([() => selectedWorkflow.value?.id, () => selectedWorkflow.value?.name], ()
   flex: 0 0 auto;
 }
 
-.wf-row__dot--ok {
-  background: var(--success);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 18%, transparent);
+.wf-row__aside {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wf-row__time {
+  color: var(--on-surface-muted);
+  font-size: 10px;
+  white-space: nowrap;
 }
 
 .wf-row__dot--warn {
