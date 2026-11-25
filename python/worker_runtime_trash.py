@@ -77,7 +77,6 @@ def start_purge(root: Path) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             close_fds=True,
-            cwd=str(root.parent),
             **options,
         )
     except OSError:

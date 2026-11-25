@@ -75,4 +75,7 @@ class RuntimeTrashTests(unittest.TestCase):
         self.assertEqual(completed.stdout, "")
         self._wait_until_empty()
         self.assertFalse(has_pending(self.trash))
+        # The purge holds its lock until it finishes; wait for it before the directory is removed.
+        with runtime_lock(self.trash / ".purge.lock", timeout=20):
+            pass
 
