@@ -46,7 +46,7 @@ import {
 import { useSettingsStore } from '@/stores/settings'
 import { useModelStore, type ModelEntry } from '@/stores/model'
 import { useAppStore } from '@/stores/app'
-import { buildModelCategoryOptionsFromModels, getModelCategoryLabel, hasModelCategoryOption, matchesModelCategory, type CategoryLikeModel } from '@/utils/modelCategory'
+import { buildModelCategoryOptionsFromModels, getModelCategoryLabel, getModelCategoryParts, hasModelCategoryOption, matchesModelCategory, type CategoryLikeModel } from '@/utils/modelCategory'
 import { compareModelDefaultOrder } from '@/utils/modelSort'
 import { matchesModelQuery } from '@/utils/modelSearch'
 import { getSeparateWorkflowInputIssue } from '@/utils/workflowInputs'
@@ -868,7 +868,7 @@ const startStatusText = computed(() => {
   }
   if (runMode.value === 'workflow' && !selectedWorkflow.value) return t('separate.startHintNoWorkflow')
   if (outputDirectoryError.value) return outputDirectoryError.value
-  if (!inputFiles.value.length) return t('separate.outputDirectorySummary')
+  if (!inputFiles.value.length) return t('separate.startHintNoInput')
   if (runMode.value === 'model' && ensembleEnabled.value && !ensembleReady.value) return t('separate.ensembleNotReady')
   if (runMode.value === 'model' && !ensembleEnabled.value && !modelDownloaded.value) return t('separate.startHintModelMissing')
   if (runMode.value === 'model' && !ensembleEnabled.value && !hasOutputStemSelection.value) {
@@ -992,7 +992,7 @@ const canStart = computed(() => (
   && (runMode.value === 'workflow'
     ? Boolean(selectedWorkflow.value) && inputFiles.value.length > 0
     : ensembleEnabled.value
-      ? ensembleReady.value
+      ? ensembleReady.value && inputFiles.value.length > 0
       : (modelDownloaded.value && inputFiles.value.length > 0 && hasOutputStemSelection.value))
 ))
 function isSeparationJob(job: SeparationJob) {
@@ -1585,6 +1585,10 @@ function resetOutputNaming() {
 
 function categoryLabel(item: CategoryLikeModel | null | undefined) {
   return getModelCategoryLabel(item, locale.value, t('common.notSet'))
+}
+
+function categoryLeafLabel(item: CategoryLikeModel | null | undefined) {
+  return getModelCategoryParts(item, locale.value).at(-1) || t('common.notSet')
 }
 
 function modelTargetLabel(item: {
@@ -2325,9 +2329,6 @@ async function retryCurrentTask() {
             {{ option.label }}
           </n-radio-button>
         </n-radio-group>
-        <n-button text class="console-topbar__manage" @click="router.push(runMode === 'workflow' ? '/workflows' : '/models')">
-          {{ runMode === 'workflow' ? t('separate.manageWorkflowsInline') : t('separate.manageModelsInline') }}
-        </n-button>
       </div>
     </header>
 
@@ -2729,19 +2730,16 @@ async function retryCurrentTask() {
                 </div>
               </div>
               <div class="stage-head__controls">
-                <div v-if="runMode === 'model'" class="stage-head__extra" data-guide="model-mode">
-                  <AppSelect
-                    :value="ensembleEnabled ? 'ensemble' : 'single'"
-                    size="small"
-                    :options="[
-                      { label: t('separate.singleModelMode'), value: 'single' },
-                      { label: t('separate.ensembleMode'), value: 'ensemble' },
-                    ]"
-                    class="model-mode-select"
-                    :aria-label="t('separate.modelModeLabel')"
-                    @update:value="(value: string | number) => { ensembleEnabled = value === 'ensemble' }"
-                  />
-                </div>
+                <n-radio-group
+                  v-if="runMode === 'model'"
+                  v-model:value="ensembleEnabled"
+                  class="mode-switch mode-switch--compact"
+                  :aria-label="t('separate.modelModeLabel')"
+                  data-guide="model-mode"
+                >
+                  <n-radio-button :value="false">{{ t('separate.singleModelMode') }}</n-radio-button>
+                  <n-radio-button :value="true">{{ t('separate.ensembleMode') }}</n-radio-button>
+                </n-radio-group>
                 <n-button class="stage-head__queue" size="small" secondary data-guide="task-queue" @click="showQueueModal = true">
                   <template #icon><n-icon :component="ListOutline" /></template>
                   {{ t('separate.batchQueue') }}
@@ -2834,7 +2832,7 @@ async function retryCurrentTask() {
                       <span class="target-row__body">
                         <span class="target-row__name" :title="item.name">{{ item.name }}</span>
                         <span class="target-row__meta">
-                          <span class="target-row__tag" :title="categoryLabel(item)">{{ categoryLabel(item) }}</span>
+                          <span class="target-row__tag" :title="categoryLabel(item)">{{ categoryLeafLabel(item) }}</span>
                           <span class="target-row__desc" :title="modelMetaLine(item)">{{ modelMetaLine(item) }}</span>
                           <span v-if="modelListViewMode === 'list'" class="target-row__usage">{{ t('models.useCountValue', { count: modelUseCount(item.name) }) }}</span>
                         </span>
@@ -2855,6 +2853,7 @@ async function retryCurrentTask() {
                   <div v-if="filteredDownloadedModels.length" class="model-pagination">
                     <span>{{ t('separate.modelPageSummary', { total: filteredDownloadedModels.length }) }}</span>
                     <n-pagination
+                      v-if="filteredDownloadedModels.length > modelPageSize"
                       v-model:page="modelPage"
                       v-model:page-size="modelPageSize"
                       :item-count="filteredDownloadedModels.length"
@@ -2939,10 +2938,10 @@ async function retryCurrentTask() {
 
             <footer class="launch-bar" :class="`launch-bar--${canStart ? 'ready' : 'idle'}`">
               <div class="launch-bar__status">
-                <span class="launch-bar__glyph"><n-icon :component="CheckmarkCircle" /></span>
+                <span class="launch-bar__glyph"><n-icon :component="canStart ? CheckmarkCircle : InformationCircleOutline" /></span>
                 <div class="launch-bar__text">
                   <strong>{{ startStatusText }}</strong>
-                  <span :title="outputSummaryPath">{{ outputSummaryPath }}</span>
+                  <span v-if="canStart || outputDirectoryError" :title="outputSummaryPath">{{ outputSummaryPath }}</span>
                 </div>
               </div>
               <div class="launch-bar__actions">
@@ -3496,12 +3495,6 @@ async function retryCurrentTask() {
   min-width: 0;
 }
 
-.console-topbar__manage {
-  color: color-mix(in srgb, var(--on-surface-muted) 84%, var(--on-surface));
-  white-space: nowrap;
-  font-size: 12px;
-}
-
 /* segmented mode switch */
 .mode-switch {
   display: inline-flex;
@@ -3523,6 +3516,8 @@ async function retryCurrentTask() {
   transition: color 160ms ease, background 200ms ease, box-shadow 200ms ease;
 }
 
+.mode-switch--compact { border-radius: 10px; }
+.mode-switch--compact :deep(.n-radio-button) { height: 26px; line-height: 26px; padding: 0 12px; border-radius: 7px; font-size: 12px; }
 .mode-switch :deep(.n-radio-group__splitor) { display: none; }
 .mode-switch :deep(.n-radio-button__state-border) { display: none; }
 
@@ -4270,9 +4265,6 @@ async function retryCurrentTask() {
   flex-direction: column;
   gap: 12px;
 }
-.stage-head__extra { flex: 0 0 auto; }
-.model-mode-select { width: 156px; }
-.model-mode-select :deep(.app-select__value) { white-space: nowrap; }
 
 .view-toggle {
   display: inline-flex;
@@ -5552,7 +5544,6 @@ async function retryCurrentTask() {
   .stage-head { align-items: flex-start; flex-direction: column; }
   .stage-head__controls { width: 100%; margin-left: 0; }
   .stage-head__queue { flex: 1 1 auto; }
-  .stage-head__extra { width: 100%; }
   .model-mode-control { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .model-mode-control__tab { min-width: 0; }
   .console-topbar {
