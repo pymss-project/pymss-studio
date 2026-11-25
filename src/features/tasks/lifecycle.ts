@@ -54,6 +54,19 @@ export function isInterruptedTaskStatus(status: TaskStatus) {
   return INTERRUPTIBLE_TASK_STATUSES.includes(status as (typeof INTERRUPTIBLE_TASK_STATUSES)[number])
 }
 
+// History saved by earlier releases recorded interruptions only through this message.
+const LEGACY_INTERRUPTED_ERROR = '应用关闭或重启导致任务中断'
+
+/**
+ * Restore a persisted task's status. Active stages become failed interruptions; failed tasks keep
+ * an interruption recorded earlier, including history that only carried the legacy message.
+ */
+export function restoreTaskInterruption(status: TaskStatus, record: { interrupted?: boolean; error?: string }) {
+  if (isInterruptedTaskStatus(status)) return { status: 'failed' as const, interrupted: true, interruptedNow: true }
+  const interrupted = status === 'failed' && (record.interrupted === true || record.error === LEGACY_INTERRUPTED_ERROR)
+  return { status, interrupted, interruptedNow: false }
+}
+
 export function taskJobId(task: Pick<TaskLifecycleItem, 'id' | 'jobId' | 'batchId'>) {
   return task.jobId || task.batchId || task.id
 }

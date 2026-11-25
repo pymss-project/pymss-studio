@@ -9,6 +9,7 @@ import { useRouter } from 'vue-router'
 import {
   AlertCircleOutline,
   CheckmarkCircleOutline,
+  ChevronDownOutline,
   CloudDownloadOutline,
   FolderOpenOutline,
   InformationCircleOutline,
@@ -290,6 +291,22 @@ const diagnostics = computed(() => buildDiagnosticChecks({
   pluginDiagnostics: pluginDiagnostics.snapshot.value, pluginError: pluginDiagnostics.error.value,
 }))
 const diagnosticSummary = computed(() => summarizeDiagnosticChecks(diagnostics.value))
+const DIAGNOSTIC_ATTENTION_ORDER: DiagnosticState[] = ['error', 'warn', 'unknown']
+const attentionChecks = computed(() => diagnostics.value
+  .filter(check => DIAGNOSTIC_ATTENTION_ORDER.includes(check.state))
+  .sort((left, right) => DIAGNOSTIC_ATTENTION_ORDER.indexOf(left.state) - DIAGNOSTIC_ATTENTION_ORDER.indexOf(right.state)))
+const DIAGNOSTIC_COUNT_KEYS = {
+  optional: 'debug.countOptional', unknown: 'debug.countUnknown', warn: 'debug.countWarn', error: 'debug.countError',
+} as const
+const diagnosticBreakdown = computed(() => {
+  const summary = diagnosticSummary.value
+  return [
+    t('debug.countOk', { count: summary.ok }),
+    ...(Object.keys(DIAGNOSTIC_COUNT_KEYS) as Array<keyof typeof DIAGNOSTIC_COUNT_KEYS>)
+      .filter(state => summary[state] > 0)
+      .map(state => t(DIAGNOSTIC_COUNT_KEYS[state], { count: summary[state] })),
+  ].join(' · ')
+})
 watch([developerMode, () => diagnosticSummary.value.state], ([enabled, state], [wasEnabled]) => {
   if (!enabled) diagnosticDetailsOpen.value = false
   else if (!wasEnabled) diagnosticDetailsOpen.value = state === 'error' || state === 'warn'
@@ -342,6 +359,12 @@ const advancedTabs = computed(() => [
   { key: 'editor-host', label: t('debugBusiness.editorTab') },
   { key: 'system', label: t('debugSystem.tab') },
 ] as Array<{ key: DebugTab; label: string }>)
+const activeAdvancedTab = computed(() => advancedTabs.value.find(tab => tab.key === activeTab.value))
+const advancedTabOptions = computed(() => advancedTabs.value.map(tab => ({ key: tab.key, label: tab.label })))
+const exportOptions = computed(() => [
+  { key: 'summary', label: t('debug.copySummary'), disabled: diagnosticBusy.value },
+  { key: 'report', label: t('debug.createReport'), disabled: debugLogClearing.value || debugLogReportLoading.value },
+])
 const debugModelOptions = computed(() => modelStore.models
   .filter((model) => model.downloaded || model.source === 'user')
   .map((model) => ({
@@ -842,9 +865,11 @@ const debugLogIssueCounts = computed(() => {
   return { errors, warnings, tracebacks }
 })
 const statusCards = computed(() => [
-  { label: t('debug.envStatus'), value: t(diagnosticStateLabels[diagnosticSummary.value.state]), tone: diagnosticSummary.value.state, detail: t('debug.checkCounts', { ok: diagnosticSummary.value.ok, total: diagnostics.value.length }), tab: 'overview' as DebugTab },
-  { label: t('debug.runningTasks'), value: String(runningTasks.value.length), tone: 'neutral', detail: [t('debug.workflowCount', { count: runningTasks.value.filter(item => item.runConfig?.runMode === 'workflow').length }), t('debug.queuedCount', { count: task.queuedTasks.length })].join(' · '), tab: 'activity' as DebugTab },
-  { label: t('debug.downloadingModels'), value: String(runningDownloadTasks.value.length), tone: 'neutral', detail: t('debug.openActivity'), tab: 'activity' as DebugTab },
+  { label: t('debug.envStatus'), value: t(diagnosticStateLabels[diagnosticSummary.value.state]), tone: diagnosticSummary.value.state, detail: diagnosticBreakdown.value, tab: 'overview' as DebugTab },
+  { label: t('debug.runningTasks'), value: String(runningTasks.value.length), tone: 'neutral', detail: [
+    t('debug.queuedCount', { count: task.queuedTasks.length }),
+    t('debug.downloadingCount', { count: runningDownloadTasks.value.length }),
+  ].join(' · '), tab: 'activity' as DebugTab },
 ])
 
 function downloadStatusLabel(item: DownloadTask) {
@@ -859,6 +884,19 @@ function downloadStatusLabel(item: DownloadTask) {
 function openStatusCard(tab: DebugTab) {
   activeTab.value = tab
   if (tab === 'overview') diagnosticDetailsOpen.value = true
+}
+
+async function revealDiagnosticCheck(key: string) {
+  diagnosticDetailsOpen.value = true
+  await nextTick()
+  const row = document.getElementById(`diagnostic-check-${key}`)
+  row?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  row?.focus({ preventScroll: true })
+}
+
+function selectExportAction(key: string | number) {
+  if (key === 'summary') copyDiagnosticSummary()
+  else if (key === 'report') void createDebugLogReport()
 }
 
 function diagnosticIcon(level: DiagnosticState) {
@@ -1556,8 +1594,12 @@ onBeforeUnmount(() => {
         <p>{{ t('debug.subtitle') }}</p>
       </div>
       <div class="debug-header-actions">
-        <n-button secondary :disabled="!developerMode || diagnosticBusy" @click="copyDiagnosticSummary">{{ t('debug.copySummary') }}</n-button>
-        <n-button secondary :disabled="!developerMode || debugLogClearing" :loading="debugLogReportLoading" @click="createDebugLogReport">{{ t('debug.createReport') }}</n-button>
+        <n-dropdown trigger="click" placement="bottom-end" :options="exportOptions" :disabled="!developerMode" @select="selectExportAction">
+          <n-button secondary :disabled="!developerMode" :loading="debugLogReportLoading" icon-placement="right">
+            <template #icon><n-icon :component="ChevronDownOutline" /></template>
+            {{ t('debug.exportDiagnostics') }}
+          </n-button>
+        </n-dropdown>
         <n-button type="primary" :disabled="!developerMode || diagnosticBusy" :loading="diagnosticBusy" @click="checkEnv">
           <template #icon><n-icon :component="RefreshOutline" /></template>
           {{ diagnosticBusy ? t('settings.checkingEnv') : t('settings.checkEnv') }}
@@ -1592,9 +1634,12 @@ onBeforeUnmount(() => {
         {{ tab.label }}
       </button>
     </nav>
-    <nav class="debug-advanced-nav" :aria-label="t('debug.advancedTools')">
-      <button v-for="tab in advancedTabs" :key="tab.key" type="button" class="debug-tab" :class="{ 'debug-tab--active': activeTab === tab.key }" :aria-current="activeTab === tab.key ? 'page' : undefined" @click="activeTab = tab.key">{{ tab.label }}</button>
-    </nav>
+    <n-dropdown trigger="click" placement="bottom-start" :options="advancedTabOptions" @select="(key: string | number) => activeTab = key as DebugTab">
+      <button type="button" class="debug-tab debug-advanced-trigger" :class="{ 'debug-tab--active': activeAdvancedTab }" :aria-current="activeAdvancedTab ? 'page' : undefined" aria-haspopup="menu">
+        <span>{{ activeAdvancedTab?.label || t('debug.advancedTools') }}</span>
+        <n-icon :component="ChevronDownOutline" aria-hidden="true" />
+      </button>
+    </n-dropdown>
     </div>
 
     <template v-if="activeTab === 'plugins' && developerMode">
@@ -1612,12 +1657,21 @@ onBeforeUnmount(() => {
 
     <div class="debug-check-status" aria-live="polite">
       <span>{{ diagnosticBusy ? t('settings.checkingEnv') : lastCheckedAt ? `${t('debug.lastChecked')} ${eventTime(new Date(lastCheckedAt).toISOString())}` : t('debug.cachedSnapshot') }}</span>
-      <span>{{ t('debug.issueCounts', { errors: diagnosticSummary.error, warnings: diagnosticSummary.warn, unknown: diagnosticSummary.unknown }) }}</span>
+      <span>{{ diagnosticBreakdown }}</span>
     </div>
-    <article v-if="latestFailedTask" class="debug-latest-failure">
-      <n-icon :component="AlertCircleOutline" />
+    <ul v-if="attentionChecks.length && !diagnosticBusy" class="debug-attention" :aria-label="t('debug.attentionTitle')">
+      <li v-for="item in attentionChecks" :key="item.key">
+        <button type="button" class="debug-attention__item" :class="`debug-attention__item--${item.state}`" @click="revealDiagnosticCheck(item.key)">
+          <n-icon :component="diagnosticIcon(item.state)" aria-hidden="true" />
+          <strong>{{ te(item.label) ? t(item.label) : item.label }}</strong>
+          <span>{{ t(diagnosticStateLabels[item.state]) }}</span>
+        </button>
+      </li>
+    </ul>
+    <article v-if="latestFailedTask" class="debug-latest-failure" :class="{ 'debug-latest-failure--interrupted': latestFailedTask.interrupted }">
+      <n-icon :component="latestFailedTask.interrupted ? InformationCircleOutline : AlertCircleOutline" />
       <div>
-        <span>{{ t('debug.latestFailure') }} · {{ new Date(latestFailedTask.updatedAt).toLocaleString() }}</span>
+        <span>{{ t(latestFailedTask.interrupted ? 'debug.latestInterrupted' : 'debug.latestFailure') }} · {{ new Date(latestFailedTask.updatedAt).toLocaleString() }}</span>
         <strong>{{ latestFailedTask.runConfig?.workflowName || latestFailedTask.model }}</strong>
         <p :title="latestFailedTask.error || latestFailedTask.message">{{ latestFailedTask.error || latestFailedTask.message }}</p>
       </div>
@@ -1627,7 +1681,7 @@ onBeforeUnmount(() => {
     </section>
 
     <details v-if="activeTab === 'overview'" class="debug-health-details" :open="diagnosticDetailsOpen" @toggle="diagnosticDetailsOpen = ($event.target as HTMLDetailsElement).open">
-    <summary>{{ t('debug.diagnosticDetails') }}<span>{{ t('debug.checkCounts', { ok: diagnosticSummary.ok, total: diagnostics.length }) }}</span></summary>
+    <summary>{{ t('debug.diagnosticDetails') }}<span>{{ t('debug.checkTotal', { count: diagnostics.length }) }}</span></summary>
     <section v-if="activeTab === 'overview'" class="debug-health-grid" :aria-busy="diagnosticBusy">
       <n-card v-for="group in diagnosticGroups" :key="group.key" class="debug-card" :bordered="true" size="small">
         <template #header>
@@ -1638,7 +1692,7 @@ onBeforeUnmount(() => {
         </template>
         <p class="debug-group-hint">{{ group.hint }}</p>
         <div class="diagnostic-list">
-          <div v-for="item in group.checks" :key="item.key" class="diagnostic-row" :class="`diagnostic-row--${item.state}`">
+          <div v-for="item in group.checks" :id="`diagnostic-check-${item.key}`" :key="item.key" class="diagnostic-row" :class="`diagnostic-row--${item.state}`" tabindex="-1">
             <n-icon :component="diagnosticIcon(item.state)" />
             <div class="diagnostic-row__main">
               <div class="diagnostic-row__head">
@@ -2615,15 +2669,11 @@ onBeforeUnmount(() => {
   border-radius: 0;
   background: transparent;
 }
-.debug-advanced-nav {
-  display: flex;
-  flex: 0 1 auto;
-  flex-wrap: wrap;
+.debug-advanced-trigger {
+  display: inline-flex;
+  align-items: center;
   gap: 4px;
-  min-width: 0;
-  padding-left: 8px;
   margin-left: 4px;
-  border-left: 1px solid var(--outline);
 }
 .debug-overview-summary { display: grid; gap: 14px; }
 .debug-latest-failure {
@@ -2637,6 +2687,31 @@ onBeforeUnmount(() => {
   background: var(--surface-1);
 }
 .debug-latest-failure > .n-icon { color: var(--danger); font-size: 22px; }
+.debug-latest-failure--interrupted { border-color: var(--outline); }
+.debug-latest-failure--interrupted > .n-icon { color: var(--on-surface-muted); }
+.debug-latest-failure--interrupted p { color: var(--on-surface-muted); }
+.debug-attention { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.debug-attention__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--outline);
+  border-radius: 8px;
+  background: var(--surface-1);
+  color: var(--on-surface-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.debug-attention__item strong { min-width: 0; overflow: hidden; color: var(--on-surface); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.debug-attention__item--warn { border-color: color-mix(in srgb, var(--warning) 40%, var(--outline)); }
+.debug-attention__item--warn > .n-icon { color: var(--warning); }
+.debug-attention__item--error { border-color: color-mix(in srgb, var(--danger) 40%, var(--outline)); }
+.debug-attention__item--error > .n-icon { color: var(--danger); }
+.debug-attention__item:hover { background-color: color-mix(in srgb, var(--primary) 7%, var(--surface-1)); }
+.debug-attention__item:focus-visible, .diagnostic-row:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .debug-latest-failure > div { display: grid; gap: 5px; min-width: 0; }
 .debug-latest-failure span, .debug-overview-empty { color: var(--on-surface-muted); font-size: 12px; }
 .debug-overview-empty { margin: 0; }
@@ -3055,7 +3130,7 @@ onBeforeUnmount(() => {
 }
 
 .debug-status-grid {
-  grid-template-columns: minmax(0, 1.4fr) repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
 }
 
 .debug-status-card {
@@ -3941,8 +4016,7 @@ onBeforeUnmount(() => {
     grid-template-columns: 1fr;
   }
 
-  .debug-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .debug-status-grid > :first-child { grid-column: 1 / -1; }
+  .debug-status-grid { grid-template-columns: minmax(0, 1fr); }
   .debug-latest-failure { grid-template-columns: auto minmax(0, 1fr); }
   .debug-latest-failure > .n-button { grid-column: 2; justify-self: start; }
   .debug-event-toolbar { grid-template-columns: 1fr; }

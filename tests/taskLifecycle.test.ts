@@ -8,6 +8,7 @@ import {
 import {
   isInterruptedTaskStatus,
   resolveJobStatus,
+  restoreTaskInterruption,
   selectQueuedJobGroups,
   sortJobTasks,
   type TaskLifecycleItem,
@@ -22,6 +23,14 @@ describe('task job lifecycle', () => {
   it('keeps queued work resumable while marking active stages interrupted', () => {
     assert.equal(isInterruptedTaskStatus('queued'), false)
     assert.equal(isInterruptedTaskStatus('separating'), true)
+  })
+
+  it('restores interruptions as failed tasks that stay distinguishable from real failures', () => {
+    assert.deepEqual(restoreTaskInterruption('separating', {}), { status: 'failed', interrupted: true, interruptedNow: true })
+    assert.deepEqual(restoreTaskInterruption('failed', { interrupted: true }), { status: 'failed', interrupted: true, interruptedNow: false })
+    assert.deepEqual(restoreTaskInterruption('failed', { error: '应用关闭或重启导致任务中断' }), { status: 'failed', interrupted: true, interruptedNow: false })
+    assert.deepEqual(restoreTaskInterruption('failed', { error: 'CUDA out of memory' }), { status: 'failed', interrupted: false, interruptedNow: false })
+    assert.deepEqual(restoreTaskInterruption('queued', { interrupted: true }), { status: 'queued', interrupted: false, interruptedNow: false })
   })
 
   it('does not report queued jobs as running', () => {

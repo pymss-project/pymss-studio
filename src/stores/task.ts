@@ -19,9 +19,9 @@ import {
   resolveWorkflowRuntimeDefaults,
 } from '@/workflows/runtimeDefinition'
 import {
-  isInterruptedTaskStatus,
   isTerminalTaskStatus,
   resolveJobStatus,
+  restoreTaskInterruption,
   selectQueuedJobGroups,
   sortJobTasks,
   taskJobId,
@@ -137,6 +137,8 @@ export type SeparationTask = {
   workflowParameterResults?: Record<string, WorkflowObservedParameters>
   currentNodeId?: string
   taskHidden?: boolean
+  /** Set when the app closed or restarted while the task was running. */
+  interrupted?: boolean
   resultHidden?: boolean
 }
 
@@ -427,12 +429,7 @@ function normalizeNodeValues(value: unknown): SeparationTask['nodeValues'] {
 }
 
 function normalizeTask(task: Partial<SeparationTask>, windows = /^[A-Za-z]:|^\\\\/.test(task.output || task.jobOutput || '')): SeparationTask {
-  let status = normalizeStatus(task.status)
-  let interrupted = false
-  if (isInterruptedTaskStatus(status)) {
-    status = 'failed'
-    interrupted = true
-  }
+  const { status, interrupted, interruptedNow } = restoreTaskInterruption(normalizeStatus(task.status), task)
   const normalizedRunConfig = normalizeRunConfig(task.runConfig)
   const normalizedOutput = normalizeOutputPath(task.output)
   const normalizedFiles = task.files || []
@@ -462,14 +459,14 @@ function normalizeTask(task: Partial<SeparationTask>, windows = /^[A-Za-z]:|^\\\
     output: normalizedOutput,
     ...(Array.isArray(task.outputDirectories) ? { outputDirectories: task.outputDirectories.filter(path => typeof path === 'string' && path.trim()) } : {}),
     status,
-    message: interrupted ? '上次运行未完成' : (task.message || meta.label),
+    message: interrupted ? i18n.global.t('tasks.interruptedMessage') : (task.message || meta.label),
     createdAt: task.createdAt || Date.now(),
     updatedAt: task.updatedAt || task.createdAt || Date.now(),
     startedAt,
     finishedAt,
     durationMs,
     progress: TERMINAL_STATUSES.includes(status) ? 100 : progress,
-    stageLabel: interrupted ? '已中断' : (task.stageLabel || meta.label),
+    stageLabel: interrupted ? i18n.global.t('tasks.interruptedStage') : (task.stageLabel || meta.label),
     progressCurrent: typeof task.progressCurrent === 'number' ? task.progressCurrent : undefined,
     progressTotal: typeof task.progressTotal === 'number' ? task.progressTotal : undefined,
     progressDetail: task.progressDetail || undefined,
@@ -481,10 +478,10 @@ function normalizeTask(task: Partial<SeparationTask>, windows = /^[A-Za-z]:|^\\\
     outputs: normalizedOutputs,
     nodeValues: normalizeNodeValues(task.nodeValues),
     workflowParameterResults: task.workflowParameterResults,
-    logs: interrupted
-      ? [...(task.logs || []), `${new Date().toLocaleTimeString()} 应用关闭或重启，任务已标记为中断。`].slice(-300)
+    logs: interruptedNow
+      ? [...(task.logs || []), `${new Date().toLocaleTimeString()} ${i18n.global.t('tasks.interruptedLog')}`].slice(-300)
       : (task.logs || []),
-    error: interrupted ? '应用关闭或重启导致任务中断' : task.error,
+    error: interrupted ? i18n.global.t('tasks.interruptedError') : task.error,
     runConfig: normalizedRunConfig,
     nodeStates: task.nodeStates,
     nodeExecutionOrder: Array.isArray(task.nodeExecutionOrder)
@@ -493,6 +490,7 @@ function normalizeTask(task: Partial<SeparationTask>, windows = /^[A-Za-z]:|^\\\
     currentNodeId: interrupted ? undefined : task.currentNodeId,
     taskHidden: task.taskHidden === true,
     resultHidden: task.resultHidden === true,
+    ...(interrupted ? { interrupted: true } : {}),
   }
 }
 
