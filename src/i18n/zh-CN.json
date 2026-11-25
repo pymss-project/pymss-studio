@@ -3186,5 +3186,30 @@
       "balanced": "平衡",
       "quality": "质量优先"
     }
+  },
+  "modelPreparation": {
+    "title": "准备第一个模型",
+    "description": "按用途筛选并选择模型，可直接在这里下载，完成后自动选中。",
+    "purpose": "想处理什么音源",
+    "selectModel": "选择要下载的模型",
+    "downloadSize": "模型下载大小：{size}",
+    "runtimeRequired": "请先准备好运行环境，再下载模型。",
+    "preparing": "正在准备下载",
+    "downloading": "正在下载模型",
+    "paused": "下载已暂停或中断，可以继续下载。",
+    "download": "下载并使用"
+  },
+  "taskRecovery": {
+    "runtimeHint": "检查或修复运行环境后，再回来重试。若要更换运行设备，请重新配置任务；普通重试沿用原任务配置。",
+    "runtimeAction": "打开运行环境",
+    "parametersHint": "检查此模型的推理参数；显存不足时可尝试减小批次或受支持的分块。修改后，请使用“按当前参数重跑”，普通重试仍使用原参数。",
+    "parametersAction": "查看模型参数",
+    "modelsHint": "检查并补全本次任务需要的模型文件后，再回来重试。",
+    "modelsAction": "打开模型库",
+    "inputHint": "检查输入文件是否仍存在且包含音频，或重新选择文件提交。",
+    "inputAction": "返回输入配置",
+    "retryFailedItems": "重试失败项（{count}）",
+    "retriedCount": "已将 {count} 个失败任务重新加入队列",
+    "retryFailedCount": "有 {count} 个任务未能重新入队：{detail}"
   }
 }
