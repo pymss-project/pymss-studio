@@ -3771,4 +3771,32 @@ trigger_worker_native_fault()
         assert_eq!(file_record.task_id.as_deref(), Some("first-file"));
         assert_eq!(file_record.context["operationId"], "batch-operation");
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn runtime_trash_purge_outlives_the_query_that_started_it() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        let root = tempfile::tempdir().unwrap();
+        let trash = root.path().join(".pymss-trash");
+        fs::create_dir_all(trash.join("cpu-deleted/Lib")).unwrap();
+        fs::write(trash.join("cpu-deleted/Lib/torch.bin"), vec![0u8; 4096]).unwrap();
+        let worker_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../python");
+        let mut command = Command::new("python");
+        command
+            .args(["-c", "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from worker_runtime_trash import start_purge; start_purge(Path(sys.argv[2]))"])
+            .arg(&worker_dir)
+            .arg(&trash)
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        // Same lifecycle as a timed worker query such as runtime_env_sizes.
+        let deadline = super::process_tree::QueryDeadline::spawn(&mut command, Duration::from_secs(60)).unwrap();
+        let status = deadline.child().lock().unwrap().wait().unwrap();
+        assert!(status.success());
+        assert!(!deadline.finish());
+        let until = Instant::now() + Duration::from_secs(20);
+        while trash.join("cpu-deleted").exists() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!trash.join("cpu-deleted").exists(), "the purge was terminated with the query job");
+    }
 }
