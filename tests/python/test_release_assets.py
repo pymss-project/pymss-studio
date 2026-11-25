@@ -213,6 +213,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         spec.loader.exec_module(updates)
         archive = self.file("Pymss-Studio-1.2.3-windows-x64-update.zip")
         with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("Pymss Studio.exe", b"app")
             bundle.writestr("pymss.exe", b"cli")
         self.file(archive.name + ".sig", b"signed-archive")
         self.file("Pymss-Studio-1.2.3-windows-x64-online-setup.exe")

@@ -8,6 +8,9 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+# The CLI launcher resolves Studio's active runtime, so both executables are always updated together.
+WINDOWS_BUNDLED_EXECUTABLES = frozenset({"Pymss Studio.exe", "pymss.exe"})
+
 
 def generate(artifacts: Path, environment: dict[str, str]) -> list[str]:
     tag = environment["RELEASE_TAG"]
@@ -39,14 +42,18 @@ def generate(artifacts: Path, environment: dict[str, str]) -> list[str]:
             if type(size) is not int or not 0 < size <= 16 * 1024**3 or not sidecar.get("pymss_runtime_contract"):
                 raise ValueError("Invalid macOS update runtime metadata")
             extra = {key: sidecar[key] for key in ("pymss_unpacked_size", "pymss_runtime_contract")}
-        generations = ("v1",)
+        generation = "v1"
         if slug == "windows-x64":
-            # Derive the channel from the actual signed payload. Full CLI updates
-            # leave the last v1 bridge published for clients skipping versions.
+            # Windows clients from 0.1.2 on read v2. The v1 Windows channel stays on 0.1.2,
+            # the last update older clients can apply, and is never written again.
+            generation = "v2"
             with zipfile.ZipFile(artifacts / asset) as archive:
-                includes_cli = "pymss.exe" in archive.namelist()
-            extra["pymss_windows_cli_update"] = includes_cli
-            generations = ("v2",) if includes_cli else ("v1", "v2")
+                missing = WINDOWS_BUNDLED_EXECUTABLES - set(archive.namelist())
+            if missing:
+                raise ValueError(f"The Windows update archive must contain {', '.join(sorted(missing))}")
+            # Read only by 0.1.2 and 0.1.3, which ask installs without CLI uninstall support
+            # to use the installer before downloading an update that contains pymss.exe.
+            extra["pymss_windows_cli_update"] = True
         for channel in channels:
             data = {
                 "version": version,
@@ -66,10 +73,9 @@ def generate(artifacts: Path, environment: dict[str, str]) -> list[str]:
                 },
                 **extra,
             }
-            for generation in generations:
-                name = f"{channel}-{generation}-{slug}-update.json"
-                (artifacts / name).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-                generated.append(name)
+            name = f"{channel}-{generation}-{slug}-update.json"
+            (artifacts / name).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            generated.append(name)
     if not generated:
         raise ValueError("No signed managed update archives were found")
     (artifacts / "managed-update-metadata.txt").write_text("\n".join(generated) + "\n", encoding="utf-8")

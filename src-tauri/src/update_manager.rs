@@ -57,7 +57,6 @@ const UPDATE_PUBLIC_KEY: &str = match option_env!("PYMSS_UPDATE_PUBLIC_KEY") {
 };
 // Replace the executable last so an interrupted update can still boot the old UI and recover.
 const MANAGED_PATHS: [&str; 4] = ["python", "bin", "pymss.exe", "Pymss Studio.exe"];
-const CLI_UNINSTALL_MARKER: &str = "pymss-studio.cli-uninstall-v1";
 const MAX_UPDATE_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_UPDATE_FILES: usize = 10_000;
 const MAX_UPDATE_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -295,21 +294,6 @@ pub fn update_supported() -> bool {
         && is_official_build() && current_distribution().is_some()
 }
 
-fn validate_cli_update_installation(root: &Path, distribution: DistributionKind, includes_cli: bool) -> AppResult<()> {
-    // Only Setup can register new files and cleanup actions in the Inno uninstall log.
-    if includes_cli && matches!(distribution, DistributionKind::Inno) && !root.join(CLI_UNINSTALL_MARKER).is_file() {
-        return Err(AppError::Worker(
-            "Install this update using the Windows installer to update command-line support. Subsequent updates can be installed in the app.".into(),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn update_includes_cli(raw_json: &serde_json::Value) -> bool {
-    raw_json.get("pymss_windows_cli_update").and_then(|value| value.as_bool()) == Some(true)
-}
-
 pub async fn check(
     app: &AppHandle,
     channel: UpdateChannel,
@@ -329,13 +313,8 @@ pub async fn check(
     let installation_error = crate::linux_update::current_image()
         .and_then(|image| crate::linux_update::check_location(&image))
         .err().map(|error| error.to_string());
-    #[cfg(windows)]
-    let installation_error = update.as_ref().and_then(|checked| {
-        current_app_root()
-            .and_then(|root| validate_cli_update_installation(&root, distribution, update_includes_cli(&checked.update.raw_json)))
-            .err().map(|error| error.to_string())
-    });
-    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    // Windows updates replace Pymss Studio.exe and pymss.exe together and need no installation check.
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let installation_error: Option<String> = None;
     Ok(update.map(|checked| {
         let update = checked.update;
@@ -390,9 +369,9 @@ pub async fn start(
     expected_version: String,
     source: UpdateSource,
 ) -> AppResult<()> {
-    let Some(_distribution) = current_distribution() else {
+    if current_distribution().is_none() {
         return Err(AppError::Worker("This application directory is not managed by an installer or portable package".into()));
-    };
+    }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let application_guard = {
         let guard = crate::python::worker::acquire_application_update()
@@ -416,9 +395,6 @@ pub async fn start(
     if update.version != expected_version {
         return Err(AppError::Worker("The available update changed. Check for updates again before installing.".into()));
     }
-    #[cfg(windows)]
-    validate_cli_update_installation(&current_app_root()?, _distribution, update_includes_cli(&update.raw_json))?;
-
     #[cfg(target_os = "macos")]
     {
         return crate::macos_update::start(app, &update, checked.provider, source).await;
@@ -1218,10 +1194,6 @@ fn apply_managed_update(
     let extraction = extract_portable_payload(&payload, &stage);
     let _ = fs::remove_file(&archive);
     if let Err(error) = extraction {
-        let _ = fs::remove_dir_all(&stage);
-        return Err(error);
-    }
-    if let Err(error) = validate_cli_update_installation(&root, distribution, stage.join("pymss.exe").exists()) {
         let _ = fs::remove_dir_all(&stage);
         return Err(error);
     }
@@ -2103,21 +2075,6 @@ mod tests {
             managed_endpoint(UpdateChannel::Stable).as_str(),
             format!("https://github.com/pymss-project/pymss-studio/releases/download/updater/{}", crate::update_sources::metadata_name("stable", if cfg!(windows) { "v2" } else { "v1" })),
         );
-    }
-
-    #[test]
-    fn cli_updates_require_an_installer_that_registered_uninstall_support() {
-        let root = tempfile::tempdir().unwrap();
-        let validate = |distribution, includes_cli| {
-            super::validate_cli_update_installation(root.path(), distribution, includes_cli)
-        };
-        assert!(validate(DistributionKind::Inno, false).is_ok());
-        assert!(validate(DistributionKind::Portable, true).is_ok());
-        assert!(validate(DistributionKind::Inno, true).is_err());
-        fs::write(root.path().join("pymss.exe"), []).unwrap();
-        assert!(validate(DistributionKind::Inno, true).is_err());
-        fs::write(root.path().join(super::CLI_UNINSTALL_MARKER), b"1").unwrap();
-        assert!(validate(DistributionKind::Inno, true).is_ok());
     }
 
     #[test]

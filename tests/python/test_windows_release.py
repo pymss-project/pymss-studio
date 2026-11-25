@@ -119,25 +119,27 @@ class WindowsReleaseTests(unittest.TestCase):
                     asset.with_name(asset.name + ".sig").write_text("signature", encoding="utf-8")
                     if slug.startswith("windows"):
                         with zipfile.ZipFile(asset, "w") as archive:
-                            archive.writestr("Pymss Studio.exe", b"bridge")
+                            archive.writestr("Pymss Studio.exe", b"app")
+                            archive.writestr("pymss.exe", b"cli")
                     if slug.startswith("macos"):
                         asset.with_name(asset.name + ".json").write_text(json.dumps({
                             "version": version, "pymss_unpacked_size": 1,
                             "pymss_runtime_contract": {"schemaVersion": 1},
                         }), encoding="utf-8")
                 files = modules["metadata"].generate(folder, environment)
-                self.assertEqual(len(files), 4 if mode == "prerelease" else 8)
+                self.assertEqual(len(files), 3 if mode == "prerelease" else 6)
                 for name in files:
                     metadata = json.loads((folder / name).read_text(encoding="utf-8"))
                     self.assertEqual(metadata["version"], version)
                     self.assertEqual(metadata["pymss_update_supported"], automatic)
                     self.assertEqual(metadata["pymss_requires_manual_install"], not automatic)
                     if "windows-x64" in name:
-                        self.assertIs(metadata["pymss_windows_cli_update"], False)
+                        self.assertIn("-v2-", name)
+                        self.assertIs(metadata["pymss_windows_cli_update"], True)
                     if mode == "prerelease":
                         self.assertEqual(metadata["channel"], "prerelease")
 
-    def test_cli_update_metadata_only_targets_compatible_generation(self):
+    def test_windows_updates_continue_on_v2_with_both_executables(self):
         spec = importlib.util.spec_from_file_location("update_metadata", ROOT / "scripts/generate-update-metadata.py")
         metadata = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(metadata)
@@ -154,6 +156,12 @@ class WindowsReleaseTests(unittest.TestCase):
                 data = json.loads((folder / name).read_text(encoding="utf-8"))
                 self.assertIs(data["pymss_windows_cli_update"], True)
                 self.assertIs(data["pymss_update_supported"], True)
+
+            # The two executables are bundled; an archive with only one of them is rejected.
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("Pymss Studio.exe", b"app")
+            with self.assertRaisesRegex(ValueError, "pymss.exe"):
+                metadata.generate(folder, {"RELEASE_TAG": "v1.2.3", "RELEASE_AUTO_UPDATE_SUPPORTED": "true"})
 
     @unittest.skipUnless(sys.platform == "win32" and shutil.which("pwsh") and SEVEN_ZIP.is_file(),
                          "Windows, PowerShell and 7-Zip are required to build the update archive")
