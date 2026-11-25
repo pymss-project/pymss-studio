@@ -26,6 +26,7 @@ from pip._vendor.packaging.utils import canonicalize_name
 from pip._vendor.packaging.version import Version
 
 from worker_runtime_lock import RuntimeLockBusy, runtime_lock
+from worker_runtime_trash import move_to_trash, start_purge, trash_root
 from worker_runtime_transactions import RocmTransaction, RuntimeRecoveryError, RuntimeSpaceError
 from worker_platform import machine
 from worker_runtime_profiles import (
@@ -2278,6 +2279,8 @@ def cmd_runtime_env_sizes(payload: dict[str, Any], *, repair: bool = True) -> in
     incomplete: list[str] = []
     if repair:
         _recover_runtime_transactions()
+        # Startup always measures sizes, which makes it the point to finish interrupted deletes.
+        start_purge(trash_root(RUNTIME_ENVS_DIR))
     manifest = _manifest()
     try:
         targets = _env_size_targets(manifest)
@@ -2499,10 +2502,11 @@ def cmd_delete_runtime(payload: dict[str, Any]) -> int:
     if active and active_python and _same_path(active_python, python_path):
         from worker_protocol import emit_error
         return emit_error("RUNTIME_DELETE_ACTIVE", f"Cannot delete the currently active runtime ({backend}). Switch to another environment first.")
-    import shutil
     try:
         if env_dir.is_dir():
-            shutil.rmtree(str(env_dir))
+            # Moving the directory is immediate and fails cleanly while files are in use;
+            # its contents are removed afterwards by a detached purge.
+            move_to_trash(env_dir)
         for selection in (_runtime_overlay_selection_path(backend), _runtime_overlay_selection_path(backend, python_path)):
             selected = _read_json_object(selection)
             if selected and _same_path(selected.get("pythonPath"), python_path):
@@ -2514,6 +2518,7 @@ def cmd_delete_runtime(payload: dict[str, Any]) -> int:
                 retained.add(overlay.parent)
         _cleanup_runtime_overlays(backend, retained)
         _emit("runtime_deleted", {"backend": backend})
+        start_purge(trash_root(env_dir.parent))
         return 0
     except Exception as exc:
         from worker_protocol import emit_error

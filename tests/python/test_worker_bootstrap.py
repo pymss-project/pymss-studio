@@ -16,6 +16,7 @@ else:
     import _bootstrap as _worker_test_bootstrap
 
 import worker_bootstrap
+from worker_runtime_trash import TRASH_DIR_NAME
 
 COMMON_PACKAGES = ("av", "librosa", "numpy", "pymss", "pymss-core")
 
@@ -204,6 +205,7 @@ class MultipleEnvironmentTests(unittest.TestCase):
              mock.patch.object(worker_bootstrap, "ACTIVE_RUNTIME_FILE", self.active_file), \
              mock.patch.object(worker_bootstrap, "_manifest", return_value=MANIFEST), \
              mock.patch.object(worker_bootstrap, "_probe_python_runtime", side_effect=probe_runtime), \
+             mock.patch.object(worker_bootstrap, "start_purge") as self.start_purge, \
              mock.patch.object(sys, "platform", "win32"), \
              contextlib.redirect_stdout(io.StringIO()):
             yield
@@ -399,6 +401,19 @@ class MultipleEnvironmentTests(unittest.TestCase):
         self.assertEqual([item["backend"] for item in remaining], ["cuda"])
         self.assertFalse((self.envs_dir / "cpu").exists())
         self.assertEqual(self._active()["backend"], "cuda")
+        trash = self.envs_dir / TRASH_DIR_NAME
+        self.assertEqual([path.name[:4] for path in trash.iterdir()], ["cpu-"])
+        self.start_purge.assert_called_once_with(trash)
+
+    def test_an_environment_in_use_is_kept_intact_when_it_cannot_be_moved(self):
+        self._make_env("cpu", "2.7.1")
+        self._make_env("cuda", "2.7.1+cu128")
+        with self._runtime():
+            worker_bootstrap.cmd_activate_runtime({"backend": "cuda"})
+            with mock.patch.object(Path, "rename", side_effect=PermissionError("in use")):
+                self.assertNotEqual(worker_bootstrap.cmd_delete_runtime({"backend": "cpu"}), 0)
+        self.assertTrue((self.envs_dir / "cpu" / "Scripts" / "python.exe").is_file())
+        self.start_purge.assert_not_called()
 
 
 class RuntimePathSafetyTests(unittest.TestCase):
@@ -641,6 +656,7 @@ class BundledRuntimeFallbackTests(unittest.TestCase):
              mock.patch.object(worker_bootstrap, "ACTIVE_RUNTIME_FILE", self.user_envs / "active-runtime.json"), \
              mock.patch.object(worker_bootstrap, "BUNDLED_RUNTIME_ENVS_DIR", self.bundled_envs), \
              mock.patch.object(worker_bootstrap, "_manifest", return_value=MANIFEST), \
+             mock.patch.object(worker_bootstrap, "start_purge"), \
              mock.patch.object(sys, "platform", "darwin"), \
              contextlib.redirect_stdout(io.StringIO()):
             result = worker_bootstrap.cmd_delete_runtime({"backend": "cpu", "pythonPath": str(python)})
