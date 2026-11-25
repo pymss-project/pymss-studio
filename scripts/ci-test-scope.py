@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 
 
-ALL = frozenset({"frontend", "backend", "native"})
+ALL = frozenset({"frontend", "backend", "native", "runtime"})
 NATIVE_SMOKES = {
     "tests/manual/aax_module_smoke.py",
     "tests/manual/test_vst_real_plugin_smoke.py",
@@ -20,6 +20,17 @@ BACKEND_SMOKES = {
     "tests/manual/worker_native_cancellation_smoke.py",
 }
 DOCUMENTS = {"README.md", "README.zh-CN.md", "CONTRIBUTING.md"}
+# Worker modules exercised by the runtime packaging tests, which build real virtual
+# environments; keep in sync with RUNTIME_PACKAGING_MODULES in run-python-tests.py.
+RUNTIME_WORKER_MODULES = {
+    "worker_bootstrap", "worker_optional_packages", "worker_platform", "worker_protocol", "worker_proxy",
+}
+RUNTIME_TESTS = {
+    "tests/python/test_runtime_core_pip.py",
+    "tests/python/test_rocm_runtime_packaging.py",
+    "tests/python/test_runtime_artifacts.py",
+    "tests/python/test_worker_optional_packages.py",
+}
 
 
 def scope_for_path(path: str) -> frozenset[str]:
@@ -27,6 +38,8 @@ def scope_for_path(path: str) -> frozenset[str]:
         return frozenset()
     if path in NATIVE_SMOKES:
         return frozenset({"native"})
+    if path in RUNTIME_TESTS:
+        return frozenset({"backend", "runtime"})
     if path in BACKEND_SMOKES or path.startswith("tests/python/"):
         return frozenset({"backend"})
     # These frontend tests also round-trip workflows through the real Python core.
@@ -41,7 +54,11 @@ def scope_for_path(path: str) -> frozenset[str]:
         return frozenset({"frontend"})
     if re.fullmatch(r"tests/[^/]+\.(?:ts|mjs|js)", path):
         return frozenset({"frontend"})
-    if path == "python/worker.py" or re.fullmatch(r"python/worker_[^/]+\.py", path):
+    worker = re.fullmatch(r"python/(worker(?:_[^/]+)?)\.py", path)
+    if worker:
+        name = worker.group(1)
+        if name in RUNTIME_WORKER_MODULES or name.startswith(("worker_runtime_", "worker_rocm")):
+            return frozenset({"frontend", "backend", "runtime"})
         return frozenset({"frontend", "backend"})
     return ALL
 
