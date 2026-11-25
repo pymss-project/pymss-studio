@@ -64,24 +64,28 @@ def start_purge(root: Path) -> None:
     """Purge ``root`` in a detached process so the caller can return immediately."""
     if not has_pending(root):
         return
-    options: dict[str, object] = {}
     if os.name == "nt":
-        options["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+        detached = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+        # Query workers run in a job that is terminated when the query returns; the purge leaves
+        # it. A job that does not permit breakaway rejects the flag, so retry without it.
+        attempts = [{"creationflags": detached | subprocess.CREATE_BREAKAWAY_FROM_JOB}, {"creationflags": detached}]
     else:
-        options["start_new_session"] = True
-    try:
-        # The child must not inherit the worker's stdout: the host reads it until EOF.
-        subprocess.Popen(
-            [sys.executable, str(Path(__file__).resolve()), str(root)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-            **options,
-        )
-    except OSError:
-        # The trash stays in place and is purged on the next start.
-        return
+        attempts = [{"start_new_session": True}]
+    for options in attempts:
+        try:
+            # The child must not inherit the worker's stdout: the host reads it until EOF.
+            subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve()), str(root)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                **options,
+            )
+            return
+        except OSError:
+            continue
+    # The trash stays in place and is purged on the next start.
 
 
 if __name__ == "__main__":

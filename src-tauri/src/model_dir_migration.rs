@@ -410,24 +410,25 @@ fn path_is_ancestor_of(ancestor: &Path, descendant: &Path) -> bool {
 }
 
 fn validate_migration_directory(root: &Path, directory: &Path) -> AppResult<()> {
-    if path_eq(root, directory) || path_is_ancestor_of(root, directory) {
-        for ancestor in directory.ancestors() {
-            match fs::symlink_metadata(ancestor) {
-                Ok(metadata) => {
-                    if metadata.is_dir() && path_eq(&ancestor.canonicalize()?, ancestor) {
-                        return Ok(());
-                    }
-                    break;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.into()),
-            }
+    let linked = || AppError::Worker(format!("模型迁移无法使用链接目录：{}", display_path(directory)));
+    if !path_eq(root, directory) && !path_is_ancestor_of(root, directory) {
+        return Err(linked());
+    }
+    // Links at or below the migration root could redirect files elsewhere. The location of the
+    // root itself is the user's choice: mapped or substituted drives and linked parent folders
+    // resolve to other paths without redirecting anything inside the root.
+    for ancestor in directory.ancestors() {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => return Err(linked()),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        if path_eq(ancestor, root) {
+            break;
         }
     }
-    Err(AppError::Worker(format!(
-        "模型迁移无法使用链接目录：{}",
-        display_path(directory)
-    )))
+    Ok(())
 }
 
 fn target_dir_empty(path: &Path) -> AppResult<bool> {
@@ -1183,6 +1184,20 @@ mod tests {
         assert!(external_file.is_file());
         assert!(link.is_dir());
         assert!(!outside.join("new").exists());
+    }
+
+    #[test]
+    fn migration_accepts_a_target_whose_parent_folder_is_a_link() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let real = sandbox.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let linked_parent = sandbox.path().join("drive");
+        link_directory(&linked_parent, &real);
+
+        let target = normalize_target_model_dir_path(&display_path(&linked_parent.join("pymss"))).unwrap();
+        assert!(path_eq(&target, &linked_parent.join("pymss").join("models")));
+        fs::create_dir_all(&target).unwrap();
+        validate_migration_directory(&target, &target.join("vocals/new")).unwrap();
     }
 
     #[test]

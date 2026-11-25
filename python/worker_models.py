@@ -553,6 +553,12 @@ def load_model_catalog() -> dict[str, Any]:
     return {**data, "models": models, "debug_status": _inactive_debug_status()}
 
 
+def reset_model_catalog_cache() -> None:
+    """Forget the cached catalog so a long-lived worker sees catalog and model changes."""
+    load_model_catalog.cache_clear()
+    _model_index.cache_clear()
+
+
 @lru_cache(maxsize=1)
 def _model_index() -> dict[str, ModelEntry]:
     entries = load_model_catalog()["models"]

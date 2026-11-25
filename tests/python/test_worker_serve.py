@@ -48,6 +48,14 @@ class WarmWorkerProtocolTests(unittest.TestCase):
             ],
         )
 
+    def test_each_request_reads_the_current_model_catalog(self):
+        import worker_models
+
+        with mock.patch.object(worker_models, "reset_model_catalog_cache") as reset:
+            code, _, _ = self.serve(lambda _name, _payload: 0)
+        self.assertEqual(code, 0)
+        self.assertEqual(reset.call_count, 2)
+
     def test_poisoned_context_exits_even_when_inference_returns_an_error_code(self):
         def command(_name, payload):
             return worker.emit_error("ROCM_CONTEXT_LOST", "Context lost", task_id=payload["taskId"])

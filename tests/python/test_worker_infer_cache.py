@@ -1,5 +1,7 @@
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import worker_infer
@@ -47,6 +49,23 @@ class SeparatorCacheTests(unittest.TestCase):
             device="xpu", device_ids=[0], use_tta=False, inference_params={"chunk_size": 1}, audio_params={},
         )
         self.assertNotEqual(first, second)
+
+    def test_cache_key_changes_when_a_model_file_is_replaced_at_the_same_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model = Path(directory) / "model.ckpt"
+            model.write_bytes(b"first")
+            resolved = {"model_type": "bs_roformer", "model_path": str(model), "config_path": ""}
+
+            def key():
+                return worker_infer._separator_cache_key(
+                    resolved, device="cpu", device_ids=[], use_tta=False, inference_params={}, audio_params={},
+                )
+
+            before = key()
+            self.assertEqual(before, key())
+            model.write_bytes(b"replaced weights")
+            os.utime(model, ns=(1_000_000_000, 1_000_000_000))
+            self.assertNotEqual(before, key())
 
     def test_cache_miss_releases_old_model_before_loading_new_model(self):
         previous = _Separator()

@@ -576,11 +576,24 @@ def _keep_loaded_model() -> bool:
     return os.environ.get("PYMSS_STUDIO_KEEP_MODEL") == "1"
 
 
+def _file_identity(path_value: Any) -> tuple[int, int] | None:
+    """Size and modification time, so a file replaced at the same path is loaded again."""
+    if not path_value:
+        return None
+    try:
+        stat = Path(path_value).stat()
+    except OSError:
+        return None
+    return stat.st_size, stat.st_mtime_ns
+
+
 def _separator_cache_key(resolved: dict[str, Any], *, device: str, device_ids: list[int], use_tta: bool, inference_params: dict[str, Any], audio_params: dict[str, Any]) -> tuple[Any, ...]:
     return (
         resolved.get("model_type"),
         resolved.get("model_path"),
+        _file_identity(resolved.get("model_path")),
         resolved.get("config_path"),
+        _file_identity(resolved.get("config_path")),
         resolved.get("target_instrument_override"),
         device,
         tuple(device_ids),

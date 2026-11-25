@@ -12,7 +12,8 @@ use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
     JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
     TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
 use windows_sys::Win32::System::Threading::{
@@ -130,7 +131,10 @@ impl QueryJob {
             }
             let job = Self(OwnedHandle::from_raw_handle(handle));
             let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // Descendants stay in the job unless they explicitly request breakaway, which
+            // only the detached runtime trash purge does so it can outlive a query.
+            limits.BasicLimitInformation.LimitFlags =
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
             if SetInformationJobObject(
                 handle,
                 JobObjectExtendedLimitInformation,
@@ -404,5 +408,29 @@ mod tests {
             WAIT_OBJECT_0
         );
         assert!(!marker.0.exists());
+    }
+
+    #[test]
+    fn runtime_trash_purge_outlives_the_query_job_that_started_it() {
+        let root = tempfile::tempdir().unwrap();
+        let trash = root.path().join(".pymss-trash");
+        std::fs::create_dir_all(trash.join("cpu-deleted/Lib")).unwrap();
+        std::fs::write(trash.join("cpu-deleted/Lib/torch.bin"), vec![0u8; 4096]).unwrap();
+        let worker_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../python");
+        let mut command = Command::new("python");
+        command
+            .args(["-c", "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from worker_runtime_trash import start_purge; start_purge(Path(sys.argv[2]))"])
+            .arg(&worker_dir)
+            .arg(&trash)
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        let (mut child, job) = QueryJob::spawn(&mut command).unwrap();
+        assert!(child.wait().unwrap().success());
+        // A finished query closes its job, which terminates every process still inside it.
+        drop(job);
+        let until = Instant::now() + Duration::from_secs(20);
+        while trash.join("cpu-deleted").exists() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!trash.join("cpu-deleted").exists(), "the purge was terminated with the query job");
     }
 }

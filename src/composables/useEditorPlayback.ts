@@ -452,7 +452,8 @@ export function useEditorPlayback(options: PlaybackOptions) {
   }
 
   function hasMissingSourcesInUse() {
-    return editor.missingSourcesInUse({ suppressedTrackIds: playback.suppressedTrackIds }).length > 0
+    // Silent tracks and clips are skipped, as export and the native host skip them.
+    return editor.missingSourcesInUse({ suppressedTrackIds: playback.suppressedTrackIds, skipZeroGain: true }).length > 0
   }
 
   function trackSignature() {

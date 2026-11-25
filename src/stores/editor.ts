@@ -10,6 +10,7 @@ import i18n, { getCurrentLocale } from '@/i18n'
 import {
   clipColor,
   clipsForTrack,
+  fitClipsToSource,
   hasLockedClipInRange,
   overwriteClipsInRange,
   syncSingleClipFadeCompatibility,
@@ -1484,9 +1485,17 @@ export const useEditorStore = defineStore('editor', () => {
     if (!hasUsableAudioMetadata(metadata)) throw new Error(String(i18n.global.t('editor.assetMetadataInvalid')))
     if (existing) {
       // The file at this path may have been replaced since the asset was first imported.
-      existing.duration = Number(metadata.duration)
-      existing.sampleRate = Number(metadata.sampleRate)
-      existing.channels = Number(metadata.channels)
+      const duration = Number(metadata.duration)
+      const sampleRate = Number(metadata.sampleRate)
+      const channels = Number(metadata.channels)
+      if (existing.duration !== duration || existing.sampleRate !== sampleRate || existing.channels !== channels) {
+        pushHistory()
+        existing.duration = duration
+        existing.sampleRate = sampleRate
+        existing.channels = channels
+        fitClipsToSource(session.value.tracks, existing)
+        scheduleSave()
+      }
       existing.missing = false
       ensurePeaksInBackground(existing.id, { refresh: true })
       return existing

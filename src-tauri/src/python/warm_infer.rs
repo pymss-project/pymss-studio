@@ -19,7 +19,8 @@ use crate::state::{AppState, SharedChild};
 use super::{
     acquire_application_operation, acquire_worker_runtime_access, build_worker_command,
     emit_batch_stderr, emit_task_error_details_to_all, emit_task_error_to_all,
-    forward_python_terminal_log, is_background_terminal_event, log_worker_event_with_scope,
+    forward_python_terminal_log, is_background_terminal_event, is_rocm_offload_arch_diagnostic,
+    log_worker_event_with_scope,
     log_worker_parse_error, mark_task_terminal, native_fault_status, native_worker_failure,
     read_lossy_lines, registered_task_ids, runtime_idle_release_event, runtime_release_event,
     take_cancelled_tasks, terminate_worker, worker_error_message, BackgroundTask, BACKGROUND_TASKS,
@@ -374,6 +375,12 @@ fn collect_job(
     terminal: &mut HashSet<String>,
     last_event: &mut Option<WorkerEnvelope>,
 ) -> AppResult<i64> {
+    // Output written after the previous request finished belongs to no task of this request.
+    while let Ok(stale) = session.lines.try_recv() {
+        if !stale.trim().is_empty() {
+            emit_batch_stderr(app, &[], stale);
+        }
+    }
     let message =
         serde_json::json!({ "requestId": operation_id, "command": "infer", "payload": payload });
     writeln!(session.stdin, "{message}")?;
@@ -388,10 +395,18 @@ fn collect_job(
                 ))
             }
         };
-        let mut envelope = serde_json::from_str::<WorkerEnvelope>(&line).map_err(|error| {
-            log_worker_parse_error(app, "infer", Some(task_id), operation_id, &error, &line);
-            AppError::Worker(format!("Invalid worker event: {error}"))
-        })?;
+        let mut envelope = match serde_json::from_str::<WorkerEnvelope>(&line) {
+            Ok(envelope) => envelope,
+            // The ROCm SDK launcher writes these diagnostics to stdout while a model loads.
+            Err(_) if is_rocm_offload_arch_diagnostic(&line) => {
+                emit_batch_stderr(app, registered_ids, line);
+                continue;
+            }
+            Err(error) => {
+                log_worker_parse_error(app, "infer", Some(task_id), operation_id, &error, &line);
+                return Err(AppError::Worker(format!("Invalid worker event: {error}")));
+            }
+        };
         validate_request_event(&envelope, operation_id)?;
         if envelope.event_type == "command_finished" {
             return envelope

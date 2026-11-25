@@ -6,6 +6,7 @@ import {
   clipMediaTime,
   clipTrimBounds,
   clipsForTrack,
+  fitClipsToSource,
   overlappingClipRanges,
   overwriteClipsInRange,
   resolveClipTimingEdit,
@@ -279,5 +280,36 @@ describe('editor clip timeline helpers', () => {
     assert.ok(Math.abs(right.start + right.duration - duration) < 1 / sampleRate)
     assert.ok(left.fadeIn <= left.duration)
     assert.ok(right.fadeOut <= right.duration)
+  })
+})
+
+describe('fitting clips to a shortened source', () => {
+  const clip = (id: string, assetId: string, offset: number, duration: number) => ({
+    id, assetId, start: 0, offset, duration, volume: 1, fadeIn: 2, fadeOut: 3, muted: false, locked: false,
+  })
+  const track = (clips: ReturnType<typeof clip>[]) => ({
+    id: 't', sourceId: 'song', role: 'reference', name: 'Song', color: '', volume: 1, pan: 0,
+    muted: false, solo: false, fadeIn: 0, fadeOut: 0, clips,
+  }) as unknown as Parameters<typeof fitClipsToSource>[0][number]
+
+  it('trims and removes clips beyond the new end and keeps fades inside the clip', () => {
+    const tracks = [track([clip('whole', 'song', 0, 180), clip('tail', 'song', 150, 30), clip('other', 'other', 0, 300)])]
+    assert.equal(fitClipsToSource(tracks, { id: 'song', duration: 120 }), true)
+    assert.deepEqual(tracks[0]!.clips.map(item => [item.id, item.offset, item.duration]), [['whole', 0, 120], ['other', 0, 300]])
+  })
+
+  it('leaves clips that still fit untouched', () => {
+    const tracks = [track([clip('intro', 'song', 10, 20)])]
+    const before = tracks[0]!.clips[0]
+    assert.equal(fitClipsToSource(tracks, { id: 'song', duration: 120 }), false)
+    assert.equal(tracks[0]!.clips[0], before)
+  })
+
+  it('shrinks fades with the clip and mirrors them on single-clip tracks', () => {
+    const tracks = [track([clip('short', 'song', 0, 60)])]
+    fitClipsToSource(tracks, { id: 'song', duration: 1.5 })
+    const [only] = tracks[0]!.clips
+    assert.deepEqual([only!.duration, only!.fadeIn, only!.fadeOut], [1.5, 1.5, 1.5])
+    assert.deepEqual([tracks[0]!.fadeIn, tracks[0]!.fadeOut], [1.5, 1.5])
   })
 })

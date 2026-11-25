@@ -206,6 +206,9 @@ def serve() -> int:
         except (AttributeError, ValueError) as exc:
             emit_error("INVALID_REQUEST", str(exc))
             return 1
+        # The resident worker outlives catalog edits, downloads and deletions made by other commands.
+        from worker_models import reset_model_catalog_cache
+        reset_model_catalog_cache()
         with bind_request_id(request_id):
             if command != "infer":
                 emit_error("UNKNOWN_COMMAND", f"Unknown command: {command}", task_id=payload.get("taskId"))

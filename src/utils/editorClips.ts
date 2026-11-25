@@ -42,6 +42,37 @@ export function timelineDuration(tracks: EditorTrack[], sourceMap: Map<string, E
   return duration
 }
 
+/**
+ * Keep clips inside their source after the source file became shorter. Clips that start past
+ * the new end are removed. Returns whether any clip changed.
+ */
+export function fitClipsToSource(tracks: EditorTrack[], source: Pick<EditorSource, 'id' | 'duration'>) {
+  const length = Math.max(0, Number(source.duration || 0))
+  let changed = false
+  for (const track of tracks) {
+    if (!track.clips?.some(clip => clip.assetId === source.id)) continue
+    const clips: EditorClip[] = []
+    for (const clip of track.clips) {
+      if (clip.assetId !== source.id) {
+        clips.push(clip)
+        continue
+      }
+      const offset = Math.min(Math.max(0, clip.offset), length)
+      const duration = Math.min(clip.duration, length - offset)
+      if (offset === clip.offset && duration === clip.duration) {
+        clips.push(clip)
+        continue
+      }
+      changed = true
+      if (duration <= TIMELINE_EPSILON) continue
+      clips.push({ ...clip, offset, duration, fadeIn: Math.min(clip.fadeIn, duration), fadeOut: Math.min(clip.fadeOut, duration) })
+    }
+    track.clips = clips
+    syncSingleClipFadeCompatibility(track)
+  }
+  return changed
+}
+
 export function syncSingleClipFadeCompatibility(track: EditorTrack) {
   if (track.clips?.length !== 1) return
   const clip = track.clips[0]
