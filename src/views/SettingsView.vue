@@ -510,6 +510,21 @@ const runtimeBackendCards = computed(() => {
   return cards
 })
 
+// Backends with nothing on disk, nothing in progress and no matching hardware are listed
+// as compact rows so installed and recommended environments stay in view.
+function isCompactRuntimeCard(card: RuntimeBackendCard) {
+  return card.state === 'not_installed' && !card.recommended && !card.installing && !card.leftover
+}
+const runtimeFullCards = computed(() => runtimeBackendCards.value.filter(card => !isCompactRuntimeCard(card)))
+const runtimeCompactCards = computed(() => runtimeBackendCards.value.filter(isCompactRuntimeCard))
+
+function runtimeManifestHint(card: RuntimeBackendCard) {
+  if (card.env?.coreUpdateSupported === false) {
+    return t(card.manifestNewer ? 'settings.runtimeManifestNewerBundledHint' : 'settings.runtimeManifestOutdatedBundledHint')
+  }
+  return t(card.manifestNewer ? 'settings.runtimeManifestNewerHint' : 'settings.runtimeManifestOutdatedHint')
+}
+
 function runtimeCoreVersionLabel(card: { pymssVersion?: string; pymssCoreVersion?: string }) {
   return t('settings.runtimeCoreVersion', {
     pymss: card.pymssVersion || t('settings.runtimeCoreVersionUnknown'),
@@ -1941,7 +1956,7 @@ onMounted(async () => {
             </div>
             <div v-else key="ready" class="runtime-envs-list">
               <div
-                v-for="card in runtimeBackendCards"
+                v-for="card in runtimeFullCards"
                 :key="card.key"
                 class="runtime-env-card"
                 :data-runtime-backend="card.backend"
@@ -1968,7 +1983,14 @@ onMounted(async () => {
                   <n-tag v-if="card.recommended" :bordered="false" size="small" type="warning" round>
                     {{ t('settings.runtimeRecommended') }}
                   </n-tag>
-                  <n-tag v-if="card.manifestOutdated" :bordered="false" size="small" type="warning" round>
+                  <n-tag
+                    v-if="card.manifestOutdated"
+                    :bordered="false"
+                    size="small"
+                    type="warning"
+                    round
+                    :title="card.state === 'active' ? undefined : runtimeManifestHint(card)"
+                  >
                     {{ t('settings.runtimeManifestOutdated') }}
                   </n-tag>
                   <n-tag v-if="card.workflowGraphUnavailable" :bordered="false" size="small" type="warning" round>
@@ -1980,10 +2002,8 @@ onMounted(async () => {
                 <p v-if="card.offCatalog" class="runtime-env-card__desc">{{ t('settings.runtimeBackendUnsupported') }}</p>
                 <p v-if="card.vendorMissing" class="runtime-env-card__desc">{{ t('settings.runtimeVendorNotDetected') }}</p>
                 <p v-if="card.health === 'broken'" class="runtime-env-card__desc">{{ t('settings.runtimeHealthBrokenHint') }}</p>
-                <p v-if="card.manifestOutdated" class="runtime-env-card__desc">
-                  {{ card.env?.coreUpdateSupported === false
-                    ? t(card.manifestNewer ? 'settings.runtimeManifestNewerBundledHint' : 'settings.runtimeManifestOutdatedBundledHint')
-                    : t(card.manifestNewer ? 'settings.runtimeManifestNewerHint' : 'settings.runtimeManifestOutdatedHint') }}
+                <p v-if="card.manifestOutdated && card.state === 'active'" class="runtime-env-card__desc">
+                  {{ runtimeManifestHint(card) }}
                 </p>
                 <p v-if="card.workflowGraphUnavailable" class="runtime-env-card__desc">
                   {{ card.env?.coreUpdateSupported === false
@@ -2161,6 +2181,33 @@ onMounted(async () => {
                   </n-button>
                 </div>
               </div>
+              <section v-if="runtimeCompactCards.length" class="runtime-env-compact" :aria-label="t('settings.runtimeAvailableSection')">
+                <h4 class="runtime-env-compact__title">{{ t('settings.runtimeAvailableSection') }}</h4>
+                <div
+                  v-for="card in runtimeCompactCards"
+                  :key="card.key"
+                  class="runtime-env-row"
+                  :class="{ 'runtime-env-row--requested': route.query.backend === card.backend }"
+                  :data-runtime-backend="card.backend"
+                >
+                  <strong class="runtime-env-card__backend">{{ card.label }}</strong>
+                  <span class="runtime-env-row__desc" :title="card.description">{{ card.description }}</span>
+                  <span class="runtime-env-row__meta">
+                    <template v-if="card.vendorMissing">{{ t('settings.runtimeVendorNotDetectedShort') }} · </template>{{ t('settings.runtimeInstallSizeShort', { size: card.sizeHint }) }}
+                  </span>
+                  <n-button
+                    v-if="app.runtimeManagementSupported"
+                    size="tiny"
+                    secondary
+                    type="primary"
+                    :disabled="runtimeBusy || !app.runtimeInfo"
+                    @click="card.backend === 'rocm' && app.runtimeInfo?.platform !== 'linux' ? openRocmInstaller() : installBackend(card.backend)"
+                  >
+                    <template #icon><n-icon :component="DownloadOutline" /></template>
+                    {{ t('settings.runtimeInstallBackend') }}
+                  </n-button>
+                </div>
+              </section>
             </div>
             </Transition>
             <n-alert v-if="runtimeRecoveryNeeded && app.runtimeManagementSupported" type="warning" :bordered="false">
@@ -3651,6 +3698,55 @@ onMounted(async () => {
   border-style: solid;
   border-color: var(--primary-border);
   box-shadow: inset 2px 0 0 var(--primary);
+}
+
+.runtime-env-compact {
+  display: grid;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.runtime-env-compact__title {
+  margin: 0 0 2px;
+  color: var(--on-surface-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.runtime-env-row {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 8px 12px 8px 16px;
+  border-radius: 12px;
+  border: 1px dashed color-mix(in srgb, var(--outline) 42%, transparent);
+  background: color-mix(in srgb, var(--surface-2) 18%, transparent);
+  transition: border-color 180ms ease;
+}
+
+.runtime-env-row--requested {
+  border-style: solid;
+  border-color: var(--primary-border);
+  box-shadow: inset 2px 0 0 var(--primary);
+}
+
+.runtime-env-row__desc,
+.runtime-env-row__meta {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--on-surface-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 1100px) {
+  .runtime-env-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .runtime-env-row__desc { display: none; }
+  .runtime-env-row__meta { grid-column: 1; grid-row: 2; }
+  .runtime-env-row :deep(.n-button) { grid-column: 2; grid-row: 1 / span 2; }
 }
 
 .runtime-env-card__desc {
