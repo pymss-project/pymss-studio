@@ -89,8 +89,8 @@
     return promise
   }
 
-  // Handshake: tell the host this page is alive; it replies host.ready (and
-  // typically follows with host.theme).
+  // Handshake: tell the host this page is alive; it replies with host.theme
+  // followed by host.ready, so pages can render with the host theme.
   post({ jsonrpc: '2.0', method: 'pymss.ready' })
 
   window.pymss = {

@@ -11,6 +11,7 @@ import { loadPluginToolState, updatePluginToolState } from '@/features/plugin-ma
 import { usePluginMarketplace } from '@/features/plugin-marketplace/composable'
 import PluginViewHost from '@/features/plugin-marketplace/PluginViewHost.vue'
 import { pluginToolEntries, type PluginToolEntry } from '@/features/plugin-marketplace/toolEntries'
+import { reconcileMountedTools, type MountedTool } from '@/features/plugin-marketplace/toolInstances'
 import { pluginLocale } from '@/features/plugin-marketplace/presentation'
 import { recordFeatureVisit } from '@/utils/logger'
 import { useSettingsStore } from '@/stores/settings'
@@ -25,13 +26,18 @@ const settings = useSettingsStore()
 const preparingTool = ref(false)
 const selectedPreparationSource = ref<string | null>(null)
 
+// Recently used tools stay mounted so switching back is immediate and running tasks survive
+// a switch. A busy instance is never evicted and keeps its entry until its task settles.
+const MAX_MOUNTED_TOOLS = 4
+
 const activePluginTool = ref('')
-const mountedPluginTool = ref<{ entry: PluginToolEntry; pluginsRoot: string } | null>(null)
-const pluginToolBusy = ref(false)
+const toolInstances = ref<MountedTool<PluginToolEntry>[]>([])
+let instanceUseCounter = 0
 const unavailableToolId = ref('')
 const restored = ref(false)
 const collapsedToolCategories = ref<string[]>([])
-const inventoryLoading = computed(() => !restored.value || pluginMarket.loading.value)
+// Background refreshes keep the current tool on screen; only a missing inventory shows the spinner.
+const inventoryLoading = computed(() => !restored.value || (pluginMarket.loading.value && !pluginMarket.snapshot.value))
 let lastVisitedTool = ''
 
 const categoryDefinitions = [
@@ -51,36 +57,42 @@ const categories = computed(() => {
   return groups
 })
 const hasInstalledPlugins = computed(() => pluginMarket.snapshot.value?.installed.some(plugin => plugin.managed))
-const switchingDisabled = computed(() => pluginToolBusy.value && Boolean(activePluginTool.value))
+const pluginsRoot = computed(() => pluginMarket.snapshot.value?.pluginsDir || '')
+const anyToolBusy = computed(() => toolInstances.value.some(instance => instance.busy))
 const mobileToolOptions = computed(() => pluginTools.value.map(entry => ({ label: toolLabel(entry), value: entry.key })))
 
-function resolveActivePluginHost(
-  entries: readonly PluginToolEntry[],
-  key: string,
-  busy: boolean,
-  mounted: { entry: PluginToolEntry; pluginsRoot: string } | null,
-  pluginsRoot: string,
-) {
-  if (busy && mounted?.entry.key === key) return mounted
-  const entry = entries.find(item => item.key === key)
-  return entry ? { entry, pluginsRoot } : null
+function isReadyTool(entry: PluginToolEntry) {
+  return !entry.availability || entry.availability === 'ready'
 }
 
-const activePluginHost = computed(() => resolveActivePluginHost(
-  pluginTools.value,
-  activePluginTool.value,
-  pluginToolBusy.value,
-  mountedPluginTool.value,
-  pluginMarket.snapshot.value?.pluginsDir || '',
-))
+function toolInstanceId(entry: PluginToolEntry, root: string) {
+  return `${root}/${entry.key}/${entry.view.revision || ''}`
+}
+
+const runningActiveInstance = computed(() =>
+  toolInstances.value.find(instance => instance.busy && instance.entry.key === activePluginTool.value))
+const activePluginHost = computed(() => {
+  const running = runningActiveInstance.value
+  if (running) return { entry: running.entry, pluginsRoot: running.pluginsRoot }
+  const entry = pluginTools.value.find(item => item.key === activePluginTool.value)
+  return entry ? { entry, pluginsRoot: pluginsRoot.value } : null
+})
+const shownInstanceId = computed(() => {
+  if (runningActiveInstance.value) return runningActiveInstance.value.id
+  const host = activePluginHost.value
+  return host && isReadyTool(host.entry) && host.pluginsRoot ? toolInstanceId(host.entry, host.pluginsRoot) : ''
+})
 const mobileSelectedValue = computed(() => activePluginTool.value || undefined)
-const activeToolPanelKey = computed(() => activePluginHost.value
-  ? `${activePluginHost.value.pluginsRoot}/${activePluginTool.value}/${activePluginHost.value.entry.view.revision || ''}/${activePluginHost.value.entry.availability || 'ready'}`
-  : 'empty')
 
-function deactivateLeavingTool(element: Element) {
-  (element as HTMLElement).inert = true
+function syncToolInstances() {
+  const root = pluginsRoot.value
+  const currentIds = new Set(pluginTools.value.filter(isReadyTool).map(entry => toolInstanceId(entry, root)))
+  const host = activePluginHost.value
+  const shown = shownInstanceId.value && host ? { id: shownInstanceId.value, ...host } : null
+  toolInstances.value = reconcileMountedTools(toolInstances.value, currentIds, shown, MAX_MOUNTED_TOOLS, ++instanceUseCounter)
 }
+
+watch([pluginTools, pluginsRoot, shownInstanceId], syncToolInstances, { immediate: true })
 
 function toolLabel(entry: PluginToolEntry) {
   return pluginLocale(entry.locales, locale.value).title || entry.view.title || entry.view.id
@@ -111,10 +123,8 @@ function persistPluginSelection(entry: PluginToolEntry) {
 }
 
 function activatePluginTool(entry: PluginToolEntry, replaceRoute = true) {
-  if (switchingDisabled.value && activePluginTool.value) return
   unavailableToolId.value = ''
   activePluginTool.value = entry.key
-  mountedPluginTool.value = { entry, pluginsRoot: pluginMarket.snapshot.value?.pluginsDir || '' }
   if (replaceRoute) replaceQuery({ pluginView: entry.routeId })
   persistPluginSelection(entry)
   if (restored.value && entry.routeId !== lastVisitedTool) {
@@ -125,7 +135,6 @@ function activatePluginTool(entry: PluginToolEntry, replaceRoute = true) {
 
 function markUnavailable(routeId: string) {
   activePluginTool.value = ''
-  mountedPluginTool.value = null
   unavailableToolId.value = routeId
 }
 
@@ -133,9 +142,8 @@ function applyRequestedPluginView() {
   const routeId = route.query.pluginView
   const entry = typeof routeId === 'string' ? pluginTools.value.find(item => item.routeId === routeId) : null
   if (entry) activatePluginTool(entry, false)
-  else if (!(pluginToolBusy.value && activePluginHost.value)) {
+  else if (!runningActiveInstance.value) {
     activePluginTool.value = ''
-    mountedPluginTool.value = null
     if (typeof routeId === 'string') markUnavailable(routeId)
   }
 }
@@ -172,10 +180,12 @@ async function enableDefaultTools() {
   catch { /* The shared plugin activity retains the failure. */ }
 }
 
-function onPluginBusy(value: boolean) {
-  pluginToolBusy.value = value
+function onPluginBusy(instanceId: string, value: boolean) {
+  const instance = toolInstances.value.find(item => item.id === instanceId)
+  if (!instance || instance.busy === value) return
+  instance.busy = value
   if (value) return
-  mountedPluginTool.value = null
+  syncToolInstances()
   if (activePluginTool.value && !pluginTools.value.some(entry => entry.key === activePluginTool.value)) {
     markUnavailable(String(route.query.pluginView || ''))
   }
@@ -194,7 +204,7 @@ watch([() => route.query.pluginView, pluginTools], () => {
 }, { immediate: true })
 
 watch(pluginTools, entries => {
-  if (!restored.value || pluginToolBusy.value || activePluginHost.value) return
+  if (!restored.value || activePluginHost.value) return
   const requested = route.query.pluginView
   const entry = entries.find(item => item.category === 'convert') || entries[0]
   if (typeof requested === 'string') markUnavailable(requested)
@@ -204,7 +214,7 @@ watch(pluginTools, entries => {
 
 watch(() => route.name,
   (name, previousName) => {
-    if (!restored.value || pluginToolBusy.value) return
+    if (!restored.value || anyToolBusy.value) return
     if (name === 'tools' && previousName !== 'tools') {
       void pluginMarket.refreshInventory()
     }
@@ -252,7 +262,6 @@ onMounted(async () => {
     <template v-else>
     <AppSelect :aria-label="t('tools.toolNavigation')"
       :value="mobileSelectedValue"
-      :disabled="switchingDisabled"
       :options="mobileToolOptions"
       class="audio-tools-mobile-select"
       data-guide="audio-tools"
@@ -281,7 +290,6 @@ onMounted(async () => {
                 v-for="entry in category.entries"
                 :key="entry.key"
                 type="button"
-                :disabled="switchingDisabled && activePluginTool !== entry.key"
                 :class="{ active: activePluginTool === entry.key }"
                 @click="activatePluginTool(entry)"
               >
@@ -304,16 +312,25 @@ onMounted(async () => {
         </div>
         <div v-show="!inventoryLoading && !unavailableToolId">
           <n-alert v-if="pluginMarket.error.value" type="warning" :bordered="false">{{ pluginMarket.error.value }}</n-alert>
-          <Transition name="tool-panel" mode="out-in" @before-leave="deactivateLeavingTool">
-            <div :key="activeToolPanelKey" class="audio-tool-panel">
+          <div class="audio-tool-instances">
+            <div
+              v-for="instance in toolInstances"
+              :key="instance.id"
+              class="audio-tool-panel"
+              :class="{ 'audio-tool-panel--hidden': instance.id !== shownInstanceId }"
+              :inert="instance.id !== shownInstanceId"
+            >
               <PluginViewHost
-                v-if="activePluginHost && (!activePluginHost.entry.availability || activePluginHost.entry.availability === 'ready')"
-                :plugin-name="activePluginHost.entry.pluginName"
-                :plugins-root="activePluginHost.pluginsRoot"
-                :view="activePluginHost.entry.view"
-                @busy-change="onPluginBusy"
+                :plugin-name="instance.entry.pluginName"
+                :plugins-root="instance.pluginsRoot"
+                :view="instance.entry.view"
+                @busy-change="value => onPluginBusy(instance.id, value)"
               />
-              <section v-else-if="activePluginHost" class="plugin-tool-unavailable">
+            </div>
+          </div>
+          <Transition name="tool-panel" mode="out-in">
+            <div v-if="!shownInstanceId" :key="activePluginHost ? `${activePluginTool}/${activePluginHost.entry.availability}` : 'empty'" class="audio-tool-panel">
+              <section v-if="activePluginHost" class="plugin-tool-unavailable">
                 <h2>{{ toolLabel(activePluginHost.entry) }}</h2>
                 <p>{{ t(activePluginHost.entry.availability === 'not_prepared' ? 'plugins.prepareRuntimeHint' : 'plugins.unavailableRuntimeHint') }}</p>
                 <p v-if="activePluginHost.entry.error">{{ activePluginHost.entry.error }}</p>

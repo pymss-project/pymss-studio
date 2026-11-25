@@ -91,8 +91,12 @@ fn main() {
     #[cfg(target_os = "linux")]
     let builder = builder.plugin(linux_font_dpi::init());
     let builder = builder
-        .register_uri_scheme_protocol("pymss-plugin", |ctx, request| {
-            plugin_views::serve_view(ctx.app_handle(), &request)
+        .register_asynchronous_uri_scheme_protocol("pymss-plugin", |ctx, request, responder| {
+            // Manifest parsing and file reads stay off the webview thread.
+            let app = ctx.app_handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                responder.respond(plugin_views::serve_view(&app, &request));
+            });
         })
         .on_page_load(|webview, _payload| {
             let window = webview.window();

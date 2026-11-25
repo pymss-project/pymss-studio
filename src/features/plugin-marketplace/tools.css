@@ -18,6 +18,10 @@
 .audio-tools-nav .audio-tools-group-toggle.has-active-tool { color: var(--primary-strong); }
 .audio-tools-content { min-width: 0; }
 .audio-tool-panel { min-width: 0; }
+/* Mounted tools that are not shown keep their size, so their pages are not resized. */
+.audio-tool-instances > .audio-tool-panel:not(.audio-tool-panel--hidden) { animation: tool-panel-in 140ms ease-out; }
+.audio-tool-panel--hidden { height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
+@keyframes tool-panel-in { from { opacity: 0; } to { opacity: 1; } }
 .tool-panel-enter-active { transition: opacity 140ms ease-out; }
 .tool-panel-leave-active { transition: opacity 80ms ease-in; pointer-events: none; }
 .tool-panel-enter-from, .tool-panel-leave-to { opacity: 0; }
@@ -36,5 +40,6 @@
 @media (prefers-reduced-motion: reduce) {
   .audio-tools-page--active { animation: none; }
   .tool-panel-enter-active, .tool-panel-leave-active { transition: none; }
+  .audio-tool-instances > .audio-tool-panel:not(.audio-tool-panel--hidden) { animation: none; }
   .audio-tools-nav .audio-tools-group-chevron { transition: none; }
 }

@@ -36,6 +36,9 @@ type PluginViewContribution = {
   requiredCapabilities?: string[]
 }
 
+// Last reported content height per view, so reopening a tool starts at its real size.
+const lastViewHeights = new Map<string, number>()
+
 const props = defineProps<{ pluginName: string; pluginsRoot: string; view: PluginViewContribution }>()
 const emit = defineEmits<{ 'busy-change': [busy: boolean] }>()
 const { t, locale } = useI18n()
@@ -47,9 +50,13 @@ const frame = ref<HTMLIFrameElement | null>(null)
 const status = ref<'loading' | 'ready' | 'error'>('loading')
 const errorText = ref('')
 const src = ref('')
-const measuredHeight = ref(640)
+const viewKey = `${props.pluginName}/${props.view.id}`
+const measuredHeight = ref(lastViewHeights.get(viewKey) ?? 640)
 const overlayOpen = ref(false)
 const frameLoaded = ref(false)
+// The frame stays transparent until the page has rendered with the host theme.
+const revealed = ref(false)
+let revealTimer: ReturnType<typeof setTimeout> | undefined
 let pendingOverlayGeneration = 0
 let disposed = false
 let dropHovered = false
@@ -81,9 +88,19 @@ function onNativeFileDrop(payload: DragDropEvent) {
   } })
 }
 
+// Pages that never report readiness or size are still shown once loading has settled.
+const REVEAL_FALLBACK_MS = 1500
+
+function reveal() {
+  if (revealTimer !== undefined) clearTimeout(revealTimer)
+  revealTimer = undefined
+  revealed.value = true
+}
+
 function onFrameLoad() {
   frameLoaded.value = true
   pushTheme()
+  if (!revealed.value) revealTimer = setTimeout(reveal, REVEAL_FALLBACK_MS)
 }
 
 const MIN_VIEW_HEIGHT = 120
@@ -113,6 +130,15 @@ type RunHandlers = {
   kind: 'operation' | 'package'
 }
 const runRequests = new Map<string, RunHandlers>()
+
+// The frame starts loading before the worker event listener is registered; tasks wait for it.
+let resolveWorkerEvents!: () => void
+let rejectWorkerEvents!: (failure: unknown) => void
+const workerEventsReady = new Promise<void>((resolve, reject) => {
+  resolveWorkerEvents = resolve
+  rejectWorkerEvents = reject
+})
+void workerEventsReady.catch(() => undefined)
 
 class TaskCancelledError extends Error {
   readonly code = 'TASK_CANCELLED'
@@ -197,6 +223,7 @@ async function startBackground(
   kind: RunHandlers['kind'],
   payload: Record<string, unknown>,
 ) {
+  await workerEventsReady
   const requestId = `plugin_view_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
   let resolveStartAcknowledged!: (started: boolean) => void
   const startAcknowledged = new Promise<boolean>((resolve) => { resolveStartAcknowledged = resolve })
@@ -477,14 +504,18 @@ function onWindowMessage(event: MessageEvent) {
     const height = data.params?.height
     if (!overlayOpen.value && typeof height === 'number' && Number.isFinite(height) && height >= MIN_VIEW_HEIGHT && height <= MAX_VIEW_HEIGHT) {
       measuredHeight.value = Math.round(height)
+      lastViewHeights.set(viewKey, measuredHeight.value)
+      // The page mounts after host.ready; its first size report means content is laid out.
+      if (status.value === 'ready' && !revealed.value) reveal()
     }
     return
   }
   // Page signals readiness; the host may pre-send cached state in response.
   if (typeof data.method === 'string' && data.method === 'pymss.ready') {
     status.value = 'ready'
-    postToFrame({ jsonrpc: '2.0', method: 'host.ready', params: sdkInfo() })
+    // Theme first: the page mounts as soon as it receives host.ready.
     pushTheme()
+    postToFrame({ jsonrpc: '2.0', method: 'host.ready', params: sdkInfo() })
     return
   }
   const id = Number(data.id)
@@ -528,6 +559,10 @@ onMounted(async () => {
     if (!props.pluginsRoot) throw new Error('plugins root not ready')
     await invoke('set_plugin_view_root', { root: props.pluginsRoot })
     if (disposed) return
+    src.value = isTutorialFrame() ? tutorialAdapter().assetUrl(`pymss-tutorial-plugin:${props.pluginName}/${props.view.id}`) : pluginViewUrl(
+      props.pluginName, props.view.id, props.view.entryPath || props.view.entry, convertFileSrc,
+    )
+    status.value = 'loading'
     const unlisten = await listen<{ type: string; requestId?: string; taskId?: string; payload: Record<string, unknown> }>(
       'pymss://worker-event',
       ({ payload: workerEvent }) => {
@@ -554,6 +589,7 @@ onMounted(async () => {
     )
     if (disposed) { unlisten(); return }
     unlistenWorker = unlisten
+    resolveWorkerEvents()
     if (allowed('files.drop')) {
       try {
         const removeDrop = await getCurrentWebview().onDragDropEvent(event => onNativeFileDrop(event.payload))
@@ -563,11 +599,8 @@ onMounted(async () => {
         log.warn('Failed to register plugin file drop events', failure)
       }
     }
-    src.value = isTutorialFrame() ? tutorialAdapter().assetUrl(`pymss-tutorial-plugin:${props.pluginName}/${props.view.id}`) : pluginViewUrl(
-      props.pluginName, props.view.id, props.view.entryPath || props.view.entry, convertFileSrc,
-    )
-    status.value = 'loading'
   } catch (failure) {
+    rejectWorkerEvents(failure)
     if (disposed) return
     status.value = 'error'
     errorText.value = String(failure)
@@ -579,6 +612,8 @@ onBeforeUnmount(() => {
   pendingOverlayGeneration = 0
   overlayOpen.value = false
   disposed = true
+  if (revealTimer !== undefined) clearTimeout(revealTimer)
+  rejectWorkerEvents(new Error('PLUGIN_VIEW_CLOSED'))
   window.removeEventListener('message', onWindowMessage)
   window.removeEventListener('resize', syncOverlayLayout)
   window.removeEventListener('scroll', syncOverlayLayout, true)
@@ -599,7 +634,7 @@ onBeforeUnmount(() => {
       v-if="src && status !== 'error'"
       ref="frame"
       class="plugin-view-frame"
-      :class="{ 'plugin-view-frame--overlay': overlayOpen, 'plugin-view-frame--loaded': frameLoaded }"
+      :class="{ 'plugin-view-frame--overlay': overlayOpen, 'plugin-view-frame--loaded': revealed }"
       :style="{ height: overlayOpen ? '100dvh' : `${measuredHeight}px` }"
       :src="src"
       sandbox="allow-scripts allow-forms"
