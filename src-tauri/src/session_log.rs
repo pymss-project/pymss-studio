@@ -22,6 +22,7 @@ const REPORT_TAIL_BYTES: u64 = 96 * 1024;
 const MAX_DIAGNOSTIC_VALUE_CHARS: usize = 4 * 1024;
 const MAX_REPORT_STORE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_REPORT_SECTION_CHARS: usize = 64 * 1024;
+const MAX_REPORT_TOTAL_CHARS: usize = 1024 * 1024;
 
 static LOG_CAP_REACHED: AtomicBool = AtomicBool::new(false);
 static FILE_LOG_WARNING: AtomicBool = AtomicBool::new(false);
@@ -86,6 +87,12 @@ struct TorchDiagnostics {
     device_count_error: String,
     device_names: Vec<String>,
     device_names_error: String,
+    xpu_available: bool,
+    xpu_available_error: String,
+    xpu_device_count: u64,
+    xpu_device_count_error: String,
+    xpu_device_names: Vec<String>,
+    xpu_device_names_error: String,
 }
 
 #[derive(serde::Serialize)]
@@ -182,7 +189,7 @@ pub(crate) fn record_operation_failure(app: &AppHandle, command: &str, operation
 }
 
 pub(crate) fn record_environment_probe(command: &str, payload: &serde_json::Value) {
-    if !matches!(command, "env_info" | "runtime_info" | "optional_package_status" | "runtime_core_versions" | "plugin_diagnostics" | "network_diagnostics") {
+    if !matches!(command, "env_info" | "runtime_info" | "runtime_hardware_inventory" | "optional_package_status" | "runtime_core_versions" | "plugin_diagnostics" | "network_diagnostics") {
         return;
     }
     let summary = diagnostic_report::summarize_probe(command, payload);
@@ -198,8 +205,52 @@ pub(crate) fn record_editor_project(project: &serde_json::Value) {
     summary["observedAt"] = timestamp().into();
     summary["trackCount"] = tracks.map(Vec::len).unwrap_or(0).into();
     summary["sourceCount"] = sources.map(Vec::len).unwrap_or(0).into();
-    summary["clipCount"] = tracks.map(|items| items.iter().map(|track| track.get("clips").and_then(serde_json::Value::as_array).map(Vec::len).unwrap_or(0)).sum::<usize>()).unwrap_or(0).into();
-    summary["recordingTrackCount"] = tracks.map(|items| items.iter().filter(|track| track["type"] == "recording").count()).unwrap_or(0).into();
+    let empty = Vec::new();
+    let tracks = tracks.unwrap_or(&empty);
+    let flag = |value: &serde_json::Value, key: &str| value.get(key).and_then(serde_json::Value::as_bool) == Some(true);
+    let plugin_slots = |track: &serde_json::Value| track.get("pluginChain").and_then(serde_json::Value::as_array).map(Vec::len).unwrap_or(0);
+    let clip_counts = |clips: &[serde_json::Value]| {
+        let positive = |clip: &serde_json::Value, key: &str| clip.get(key).and_then(serde_json::Value::as_f64).is_some_and(|value| value > 0.0);
+        clips.iter().fold((0usize, 0usize, 0usize), |(muted, fade_in, fade_out), clip| (
+            muted + usize::from(flag(clip, "muted")),
+            fade_in + usize::from(positive(clip, "fadeIn")),
+            fade_out + usize::from(positive(clip, "fadeOut")),
+        ))
+    };
+    let (mut clip_count, mut muted_clips, mut fade_in_clips, mut fade_out_clips) = (0, 0, 0, 0);
+    let mut track_items = Vec::new();
+    for (index, track) in tracks.iter().enumerate() {
+        let clips = track.get("clips").and_then(serde_json::Value::as_array).map(Vec::as_slice).unwrap_or_default();
+        let (muted, fade_in, fade_out) = clip_counts(clips);
+        clip_count += clips.len();
+        muted_clips += muted;
+        fade_in_clips += fade_in;
+        fade_out_clips += fade_out;
+        if index < 24 {
+            let mut item = scalar_snapshot(track, &["id", "type", "role", "muted", "solo", "volume", "pan", "fadeIn", "fadeOut"]);
+            item["clipCount"] = clips.len().into();
+            item["mutedClipCount"] = muted.into();
+            item["fadeInClipCount"] = fade_in.into();
+            item["fadeOutClipCount"] = fade_out.into();
+            item["pluginSlotCount"] = plugin_slots(track).into();
+            track_items.push(item);
+        }
+    }
+    summary["clipCount"] = clip_count.into();
+    summary["recordingTrackCount"] = tracks.iter().filter(|track| track["type"] == "recording").count().into();
+    summary["mutedTrackCount"] = tracks.iter().filter(|track| flag(track, "muted")).count().into();
+    summary["soloTrackCount"] = tracks.iter().filter(|track| flag(track, "solo")).count().into();
+    summary["mutedClipCount"] = muted_clips.into();
+    summary["fadeInClipCount"] = fade_in_clips.into();
+    summary["fadeOutClipCount"] = fade_out_clips.into();
+    summary["pluginTrackCount"] = tracks.iter().filter(|track| plugin_slots(track) > 0).count().into();
+    if let Some(limiter) = project.get("masterLimiter").filter(|value| value.is_object()) {
+        summary["masterLimiter"] = scalar_snapshot(limiter, &["enabled", "gainDb", "ceilingDb", "attackMs", "releaseMs"]);
+    }
+    if project["tracks"].is_array() {
+        summary["trackSummary"] = serde_json::Value::Array(track_items);
+        summary["trackSummaryOmitted"] = tracks.len().saturating_sub(24).into();
+    }
     summary["source"] = "Last loaded or saved editor project; media contents and project names are omitted".into();
     if let Ok(mut context) = report_context().lock() {
         context.editor(summary);
@@ -403,6 +454,12 @@ pub fn record_torch_diagnostics(app: &AppHandle, payload: &serde_json::Value) {
             ("cudaDeviceCountError", diagnostics.device_count_error),
             ("cudaDeviceNames", diagnostics.device_names.join(" | ")),
             ("cudaDeviceNamesError", diagnostics.device_names_error),
+            ("xpuAvailable", diagnostics.xpu_available.to_string()),
+            ("xpuAvailableError", diagnostics.xpu_available_error),
+            ("xpuDeviceCount", diagnostics.xpu_device_count.to_string()),
+            ("xpuDeviceCountError", diagnostics.xpu_device_count_error),
+            ("xpuDeviceNames", diagnostics.xpu_device_names.join(" | ")),
+            ("xpuDeviceNamesError", diagnostics.xpu_device_names_error),
         ],
     );
 }
@@ -410,6 +467,17 @@ pub fn record_torch_diagnostics(app: &AppHandle, payload: &serde_json::Value) {
 fn torch_diagnostics_from_payload(payload: &serde_json::Value) -> TorchDiagnostics {
     let device_names = payload
         .get("cudaDevices")
+        .and_then(serde_json::Value::as_array)
+        .map(|devices| {
+            devices
+                .iter()
+                .filter_map(|device| device.get("name").and_then(serde_json::Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let xpu_device_names = payload
+        .get("xpuDevices")
         .and_then(serde_json::Value::as_array)
         .map(|devices| {
             devices
@@ -458,6 +526,12 @@ fn torch_diagnostics_from_payload(payload: &serde_json::Value) -> TorchDiagnosti
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_string(),
+        xpu_available: payload.get("xpuAvailable").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        xpu_available_error: payload.get("xpuAvailableError").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+        xpu_device_count: payload.get("xpuDeviceCount").and_then(serde_json::Value::as_u64).unwrap_or_default(),
+        xpu_device_count_error: payload.get("xpuDeviceCountError").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+        xpu_device_names,
+        xpu_device_names_error: payload.get("xpuDeviceNamesError").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
     }
 }
 
@@ -689,7 +763,8 @@ fn write_diagnostic_report_with_trigger(
             "persistentLog": info.persistent_path, "persistentLogBytes": info.persistent_size_bytes,
             "report": path.to_string_lossy()},
         "limits": {"storeReadBytes": MAX_REPORT_STORE_BYTES,
-            "sectionChars": MAX_REPORT_SECTION_CHARS, "logTailBytes": REPORT_TAIL_BYTES},
+            "sectionChars": MAX_REPORT_SECTION_CHARS, "totalReportChars": MAX_REPORT_TOTAL_CHARS,
+            "logTailBytes": REPORT_TAIL_BYTES},
         "activityLimits": activity.get("limits"),
     });
     let mut sections = vec![
@@ -724,10 +799,29 @@ fn write_diagnostic_report_with_trigger(
     if let Some(snapshot) = snapshot {
         sections.push(("Diagnostic Page Snapshot", diagnostic_report::summarize_diagnostic_page(snapshot)));
     }
+    let (session_tail, persistent_tail, persistent_backups) = {
+        let _log_guard = LOG_WRITE_LOCK
+            .lock()
+            .map_err(|_| AppError::Worker("session log lock poisoned".into()))?;
+        let persistent_path = persistent_log_path(app)?;
+        let backups = (1..=PERSISTENT_LOG_BACKUPS)
+            .filter_map(|index| {
+                let path = persistent_backup_path(&persistent_path, index);
+                read_tail_path(path, REPORT_TAIL_BYTES).ok().map(|tail| (index, tail))
+            })
+            .filter(|(_, tail)| tail.size_bytes > 0)
+            .collect();
+        (
+            read_tail_path(session_log_path(app)?, REPORT_TAIL_BYTES)?,
+            read_tail_path(persistent_path, REPORT_TAIL_BYTES)?,
+            backups,
+        )
+    };
     let data = DiagnosticReportData {
         metadata, sections, torch: torch_diagnostics_markdown(), trigger: trigger_line.to_string(),
-        session: read_tail_path(session_log_path(app)?, REPORT_TAIL_BYTES)?,
-        persistent: read_tail_path(persistent_log_path(app)?, REPORT_TAIL_BYTES)?,
+        session: session_tail,
+        persistent: persistent_tail,
+        persistent_backups,
     };
     let content = render_diagnostic_report(data);
     std::fs::write(&path, content)?;
@@ -746,6 +840,7 @@ struct DiagnosticReportData {
     trigger: String,
     session: DebugLogContent,
     persistent: DebugLogContent,
+    persistent_backups: Vec<(usize, DebugLogContent)>,
 }
 
 fn scalar_snapshot(value: &serde_json::Value, keys: &[&str]) -> serde_json::Value {
@@ -901,6 +996,27 @@ fn append_report_block(output: &mut String, title: &str, language: &str, content
     output.push_str(&format!("{fence}{language}\n{content}\n{fence}\n"));
 }
 
+fn close_open_report_fences(text: &mut String) {
+    let mut active: Option<(char, usize)> = None;
+    for line in text.lines() {
+        let Some(marker @ ('`' | '~')) = line.chars().next() else { continue; };
+        let width = line.chars().take_while(|value| *value == marker).count();
+        if width < 3 { continue; }
+        if let Some((active_marker, active_width)) = active {
+            if active_marker == marker && width >= active_width && line.chars().skip(width).all(char::is_whitespace) {
+                active = None;
+            }
+        } else {
+            active = Some((marker, width));
+        }
+    }
+    if let Some((marker, width)) = active {
+        text.push('\n');
+        text.extend(std::iter::repeat_n(marker, width));
+        text.push('\n');
+    }
+}
+
 fn render_diagnostic_report(data: DiagnosticReportData) -> String {
     let mut output = "# Pymss Studio Diagnostic Report\n\nReport schema: 2. Runtime observations and navigation cover the current process. Task history and preferences come from saved snapshots and may lag active work. Empty observations mean no data was captured, not that the feature was never used.\n\nRequest summaries omit credentials, transcript text, audio contents and arbitrary graph text. Collection and section limits are reported below. Check custom names and remaining paths before sharing.\n".to_string();
     append_report_json(&mut output, "Build, Session and Paths", data.metadata);
@@ -913,7 +1029,16 @@ fn render_diagnostic_report(data: DiagnosticReportData) -> String {
         output.push_str(&format!("\nLog source: {} bytes; read tail truncated: {}.\n", tail.size_bytes, tail.truncated));
         append_report_block(&mut output, title, "text", &tail.content, true);
     }
-    output
+    for (index, tail) in data.persistent_backups {
+        output.push_str(&format!("\nLog source: rotated persistent backup {}; {} bytes; read tail truncated: {}.\n", index, tail.size_bytes, tail.truncated));
+        append_report_block(&mut output, &format!("Recent Persistent Log Backup {index}"), "text", &tail.content, true);
+    }
+    if output.chars().count() <= MAX_REPORT_TOTAL_CHARS {
+        return output;
+    }
+    let mut retained: String = output.chars().take(MAX_REPORT_TOTAL_CHARS).collect();
+    close_open_report_fences(&mut retained);
+    format!("{retained}\n## Report size limit\n\nThe report was capped at {MAX_REPORT_TOTAL_CHARS} characters. Later sections and log tails may be incomplete.\n")
 }
 
 fn torch_diagnostics_markdown() -> String {
@@ -934,7 +1059,7 @@ fn torch_diagnostics_markdown_for(diagnostics: Option<&TorchDiagnostics>) -> Str
         diagnostics.device_names.join(", ")
     };
     format!(
-        "- Torch available: {}\n- Torch version: {}\n- Torch error: {}\n- CUDA/ROCm available: {}\n- CUDA/ROCm availability error: {}\n- Device count: {}\n- Device count error: {}\n- Device names: {}\n- Device names error: {}",
+        "- Torch available: {}\n- Torch version: {}\n- Torch error: {}\n- CUDA/ROCm available: {}\n- CUDA/ROCm availability error: {}\n- Device count: {}\n- Device count error: {}\n- Device names: {}\n- Device names error: {}\n- XPU available: {}\n- XPU availability error: {}\n- XPU device count: {}\n- XPU device count error: {}\n- XPU device names: {}\n- XPU device names error: {}",
         diagnostics.available,
         diagnostic_value(&diagnostics.version, "Unknown"),
         diagnostic_value(&diagnostics.error, "None"),
@@ -944,6 +1069,12 @@ fn torch_diagnostics_markdown_for(diagnostics: Option<&TorchDiagnostics>) -> Str
         diagnostic_value(&diagnostics.device_count_error, "None"),
         diagnostic_value(&device_names, "None"),
         diagnostic_value(&diagnostics.device_names_error, "None"),
+        diagnostics.xpu_available,
+        diagnostic_value(&diagnostics.xpu_available_error, "None"),
+        diagnostics.xpu_device_count,
+        diagnostic_value(&diagnostics.xpu_device_count_error, "None"),
+        diagnostic_value(&diagnostics.xpu_device_names.join(", "), "None"),
+        diagnostic_value(&diagnostics.xpu_device_names_error, "None"),
     )
 }
 
@@ -1255,6 +1386,68 @@ mod tests {
     }
 
     #[test]
+    fn report_includes_rotated_backups_and_caps_total_size_with_closed_fences() {
+        let content = render_diagnostic_report(DiagnosticReportData {
+            metadata: json!({"reportVersion": 2}), sections: vec![], torch: String::new(), trigger: String::new(),
+            session: diagnostic_tail(""), persistent: diagnostic_tail(""),
+            persistent_backups: vec![(2, diagnostic_tail("rotated INFO app.start"))],
+        });
+        assert!(content.contains("rotated persistent backup 2"));
+        assert!(content.contains("## Recent Persistent Log Backup 2"));
+        assert!(content.contains("rotated INFO app.start"));
+        assert!(!content.contains("Report size limit"));
+
+        let large = "x".repeat(MAX_REPORT_SECTION_CHARS * 2);
+        let content = render_diagnostic_report(DiagnosticReportData {
+            metadata: json!({"reportVersion": 2}),
+            sections: (0..24).map(|_| ("Large Section", json!({"value": large}))).collect(),
+            torch: String::new(), trigger: String::new(),
+            session: diagnostic_tail(""), persistent: diagnostic_tail(""), persistent_backups: Vec::new(),
+        });
+        let (retained, note) = content.split_once("\n## Report size limit\n").expect("size limit note");
+        assert!(note.contains(&MAX_REPORT_TOTAL_CHARS.to_string()));
+        assert!(retained.chars().count() <= MAX_REPORT_TOTAL_CHARS + 8);
+        let mut balanced = retained.to_string();
+        close_open_report_fences(&mut balanced);
+        assert_eq!(balanced, retained, "truncated report left an open fence");
+    }
+
+    #[test]
+    fn editor_project_summary_counts_track_and_clip_states() {
+        record_editor_project(&json!({
+            "id": "project-1", "masterLimiter": {"enabled": true, "gainDb": 0.0, "ceilingDb": -1.0, "attackMs": 5.0, "releaseMs": 100.0},
+            "tracks": [
+                {"id": "t1", "type": "stem", "muted": true, "pluginChain": [{"id": "p"}],
+                    "clips": [{"muted": true, "fadeIn": 0.5}, {"fadeOut": 1.0}]},
+                {"id": "t2", "type": "recording", "solo": true, "clips": [{"fadeIn": 0.0}]}
+            ]
+        }));
+        let editor = report_context().lock().unwrap().snapshot()["editor"].clone();
+        for (key, value) in [("trackCount", 2), ("clipCount", 3), ("recordingTrackCount", 1), ("mutedTrackCount", 1),
+            ("soloTrackCount", 1), ("mutedClipCount", 1), ("fadeInClipCount", 1), ("fadeOutClipCount", 1), ("pluginTrackCount", 1)] {
+            assert_eq!(editor[key], value, "{key}");
+        }
+        assert_eq!(editor["masterLimiter"]["enabled"], true);
+        assert_eq!(editor["masterLimiter"]["ceilingDb"], -1.0);
+        assert_eq!(editor["masterLimiter"]["releaseMs"], 100.0);
+        assert_eq!(editor["trackSummary"][0]["mutedClipCount"], 1);
+        assert_eq!(editor["trackSummary"][0]["pluginSlotCount"], 1);
+        assert_eq!(editor["trackSummary"][1]["clipCount"], 1);
+        assert_eq!(editor["trackSummaryOmitted"], 0);
+    }
+
+    #[test]
+    fn close_open_report_fences_matches_marker_and_width() {
+        let mut text = "````text\ninner\n```\n~~~\nstill inside".to_string();
+        close_open_report_fences(&mut text);
+        assert!(text.ends_with("still inside\n````\n"));
+
+        let mut closed = "```json\n{}\n```\nplain".to_string();
+        close_open_report_fences(&mut closed);
+        assert_eq!(closed, "```json\n{}\n```\nplain");
+    }
+
+    #[test]
     fn report_store_failures_are_explicit_and_do_not_prevent_other_sections() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("tasks.json");
@@ -1292,7 +1485,7 @@ mod tests {
             ],
             torch: "- Torch available: true".into(),
             trigger: "Allocation failed\n```\n## embedded heading\n~~~\nRuntimeError: OOM".into(),
-            session: diagnostic_tail(&old_log), persistent: diagnostic_tail("legacy INFO app.start version=0.0.12"),
+            session: diagnostic_tail(&old_log), persistent: diagnostic_tail("legacy INFO app.start version=0.0.12"), persistent_backups: Vec::new(),
         });
         for value in ["Recent Operations and Running Parameters", "task-1", "step-7", "batch_size", "damaged task store", "torchVersion", "Allocation failed", "RuntimeError: OOM", "Recent Persistent Log"] {
             assert!(content.contains(value), "report omitted {value}");
@@ -1362,7 +1555,7 @@ mod tests {
         let line = serde_json::to_string(&record).unwrap();
         let content = render_diagnostic_report(DiagnosticReportData {
             metadata: json!({"reportVersion": 2}), sections: vec![], torch: String::new(),
-            trigger: line.clone(), session: diagnostic_tail(&line), persistent: diagnostic_tail(&line),
+            trigger: line.clone(), session: diagnostic_tail(&line), persistent: diagnostic_tail(&line), persistent_backups: Vec::new(),
         });
         for secret in ["alice", "p'ass", "private-signature"] {
             assert!(!content.contains(secret), "report leaked {secret}");
@@ -1392,7 +1585,7 @@ mod tests {
         let line = serde_json::to_string(&record).unwrap();
         let content = render_diagnostic_report(DiagnosticReportData {
             metadata: json!({"reportVersion": 2}), sections: vec![], torch: String::new(),
-            trigger: line.clone(), session: diagnostic_tail(&line), persistent: diagnostic_tail(&line),
+            trigger: line.clone(), session: diagnostic_tail(&line), persistent: diagnostic_tail(&line), persistent_backups: Vec::new(),
         });
         for secret in ["prefix", "private-suffix", "private-tail"] {
             assert!(!line.contains(secret), "record leaked {secret}");
@@ -1588,6 +1781,12 @@ mod tests {
             device_count_error: String::new(),
             device_names: Vec::new(),
             device_names_error: String::new(),
+            xpu_available: false,
+            xpu_available_error: String::new(),
+            xpu_device_count: 0,
+            xpu_device_count_error: String::new(),
+            xpu_device_names: Vec::new(),
+            xpu_device_names_error: String::new(),
         };
 
         let report = torch_diagnostics_markdown_for(Some(&diagnostics));
@@ -1611,6 +1810,12 @@ mod tests {
                 "x".repeat(MAX_DIAGNOSTIC_VALUE_CHARS)
             )],
             device_names_error: String::new(),
+            xpu_available: false,
+            xpu_available_error: String::new(),
+            xpu_device_count: 0,
+            xpu_device_count_error: String::new(),
+            xpu_device_names: Vec::new(),
+            xpu_device_names_error: String::new(),
         };
 
         let report = torch_diagnostics_markdown_for(Some(&diagnostics));

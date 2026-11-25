@@ -643,6 +643,25 @@ interface CliPathDetails {
   processCommand: string | null
 }
 
+const DEBUG_REPORT_HARDWARE_TIMEOUT_MS = 15_000
+
+// The inventory query goes through the store's runtime queue; the backend records the
+// result as an environment probe, so the report reads it from the cached observations.
+async function ensureReportHardwareInventory(): Promise<void> {
+  if (!isTauriRuntime()) return
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      app.loadRuntimeHardwareInventory().catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timeout = setTimeout(resolve, DEBUG_REPORT_HARDWARE_TIMEOUT_MS)
+      }),
+    ])
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout)
+  }
+}
+
 const showCliPathDiagnostics = computed(() => developerMode.value
   && activeTab.value === 'runtime' && !!settings.appPaths?.cliPathSupported
   && (settings.appPaths.cliPlatform ?? 'windows') === 'windows' && isTauriRuntime())
@@ -1258,6 +1277,17 @@ async function createDebugLogReport() {
   if (!developerMode.value || debugLogReportLoading.value || debugLogClearing.value) return
   debugLogReportLoading.value = true
   try {
+    const [, cliResult] = await Promise.allSettled([
+      app.runtimeHardwareInventory ? Promise.resolve() : ensureReportHardwareInventory(),
+      settings.appPaths?.cliPathSupported
+        && (settings.appPaths.cliPlatform ?? 'windows') === 'windows'
+        && isTauriRuntime()
+        ? invoke<{ status?: string; owned?: boolean; diagnostics: CliPathDetails }>('manage_cli_path', { action: 'diagnostics' })
+        : Promise.resolve(null),
+    ])
+    const cliPathDiagnostics = cliResult.status === 'fulfilled' && cliResult.value
+      ? { ...cliResult.value.diagnostics, status: cliResult.value.status, owned: cliResult.value.owned }
+      : cliPathDetails.value
     const report = await invoke<DebugLogReport>('debug_log_create_report', { payload: {
       observedAt: new Date().toISOString(),
       pluginDiagnostics: { snapshot: pluginDiagnostics.snapshot.value, error: pluginDiagnostics.error.value, loading: pluginDiagnostics.loading.value },
@@ -1268,6 +1298,7 @@ async function createDebugLogReport() {
       networkDiagnostics: networkDiagnostics.snapshot.value,
       storageDiagnostics: storageDiagnostics.snapshot.value,
       rendererDiagnostics: rendererDiagnostics.snapshot.value,
+      cliPathDiagnostics,
     } })
     message.success(t('debug.reportCreated'))
     await loadDebugLog()

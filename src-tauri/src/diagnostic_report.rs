@@ -1441,6 +1441,71 @@ fn summarize_network(payload: &Value) -> Value {
     summary.finish(result)
 }
 
+fn summarize_runtime_hardware_inventory(payload: &Value) -> Value {
+    let mut summary = Summary::default();
+    let mut result = summary.pick(payload, &["schemaVersion", "platform", "detectorStatus", "defaultProfileId"]);
+    let devices = payload.get("devices").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+    let device_items: Vec<_> = devices.iter().take(MAX_ITEMS).map(|device| {
+            let mut item = summary.pick(device, &[
+                "vendor", "name", "driverVersion", "gfx", "architectureSource",
+                "architectureConfidence", "memoryBytes", "isDiscrete",
+            ]);
+            if let Some(id) = device.get("id").and_then(Value::as_str) {
+                item["idKind"] = summary.text(id.split_once(':').map(|(kind, _)| kind).unwrap_or("unknown"), MAX_TEXT);
+            }
+            item["hardwareIdPresent"] = json!(device.get("hardwareId").and_then(Value::as_str).is_some_and(|value| !value.is_empty()));
+            item["pciBusIdPresent"] = json!(device.get("pciBusId").and_then(Value::as_str).is_some_and(|value| !value.is_empty()));
+            item
+        }).collect();
+    result["devices"] = summary.list(devices.len(), device_items);
+    let profiles = payload.get("profiles").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+    let profile_items: Vec<_> = profiles.iter().take(MAX_ITEMS).map(|profile| {
+            let mut item = summary.pick(profile, &[
+                "id", "revision", "releaseState", "installationEnabled", "validationStatus", "torchVersion",
+            ]);
+            item["availableTargets"] = summary.scalars(profile.get("availableTargets").unwrap_or(&Value::Null));
+            item["validatedTargets"] = summary.scalars(profile.get("validatedTargets").unwrap_or(&Value::Null));
+            item
+        }).collect();
+    result["profiles"] = summary.list(profiles.len(), profile_items);
+    let errors = payload.get("errors").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+    let error_items: Vec<_> = errors.iter().take(MAX_ITEMS).map(|error| match error {
+            Value::String(text) => summary.text(text, MAX_ERROR),
+            Value::Object(_) => {
+                let mut item = summary.pick(error, &["code"]);
+                if let Some(message) = error.get("message").and_then(Value::as_str) {
+                    item["message"] = summary.text(message, MAX_ERROR);
+                }
+                item
+            }
+            _ => Value::Null,
+        }).collect();
+    result["errors"] = summary.list(errors.len(), error_items);
+    summary.finish(result)
+}
+
+fn summarize_cli_path(payload: &Value) -> Value {
+    let mut summary = Summary::default();
+    let mut result = summary.pick(payload, &[
+        "launcherExists", "userPathContainsStudio", "systemPathContainsStudio", "status", "owned",
+    ]);
+    let normalize = |value: Option<&str>| value.map(|value| value.replace('\\', "/").trim_end_matches('/').to_ascii_lowercase());
+    let launcher = normalize(payload.get("launcher").and_then(Value::as_str));
+    let persisted = normalize(payload.get("persistedCommand").and_then(Value::as_str));
+    let process = normalize(payload.get("processCommand").and_then(Value::as_str));
+    let launcher_dir = launcher.as_deref().and_then(|value| value.rsplit_once('/').map(|(dir, _)| dir.to_string()));
+    let registered_dir = normalize(payload.get("registeredDirectory").and_then(Value::as_str));
+    result["persistedMatchesLauncher"] = json!(launcher.is_some() && persisted == launcher);
+    result["processMatchesLauncher"] = json!(launcher.is_some() && process == launcher);
+    result["registeredDirMatchesLauncherDir"] = json!(launcher_dir.is_some() && registered_dir == launcher_dir);
+    for key in ["launcher", "registeredDirectory", "persistedCommand", "processCommand"] {
+        if let Some(value) = payload.get(key) {
+            result[key] = summary.basename(value);
+        }
+    }
+    summary.finish(result)
+}
+
 pub(crate) fn summarize_native_host(payload: &Value) -> Value {
     let mut summary = Summary::default();
     let mut result = summary.pick(payload, &["stopping"]);
@@ -1703,6 +1768,12 @@ pub(crate) fn summarize_diagnostic_page(payload: &Value) -> Value {
         );
         result["rendererDiagnostics"] = item;
     }
+    if let Some(cli) = payload
+        .get("cliPathDiagnostics")
+        .filter(|value| value.is_object())
+    {
+        result["cliPathDiagnostics"] = summarize_cli_path(cli);
+    }
     summary.finish(result)
 }
 
@@ -1775,6 +1846,9 @@ pub(crate) fn summarize_probe(command: &str, payload: &Value) -> Value {
     if command == "plugin_diagnostics" {
         return summarize_plugin_diagnostics(payload);
     }
+    if command == "runtime_hardware_inventory" {
+        return summarize_runtime_hardware_inventory(payload);
+    }
     let mut summary = Summary::default();
     let mut result = summary.pick(
         payload,
@@ -1798,6 +1872,8 @@ pub(crate) fn summarize_probe(command: &str, payload: &Value) -> Value {
             "hipVersion",
             "cudaAvailable",
             "cudaDeviceCount",
+            "xpuAvailable",
+            "xpuDeviceCount",
             "mpsAvailable",
             "mlxAvailable",
             "acceleratorAvailable",
@@ -1827,6 +1903,9 @@ pub(crate) fn summarize_probe(command: &str, payload: &Value) -> Value {
         "cudaAvailableError",
         "cudaDeviceCountError",
         "cudaDeviceNamesError",
+        "xpuAvailableError",
+        "xpuDeviceCountError",
+        "xpuDeviceNamesError",
     ] {
         if let Some(error) = payload.get(field).and_then(Value::as_str) {
             result[field] = summary.text(error, MAX_ERROR);
@@ -1859,6 +1938,14 @@ pub(crate) fn summarize_probe(command: &str, payload: &Value) -> Value {
             })
             .collect();
         result["cudaDevices"] = summary.list(devices.len(), items);
+    }
+    if let Some(devices) = payload.get("xpuDevices").and_then(Value::as_array) {
+        let items = devices.iter().take(MAX_ITEMS).map(|device| {
+            let mut item = summary.pick(device, &["id", "name", "totalMemoryBytes"]);
+            item["deviceNamePresent"] = json!(device.get("name").and_then(Value::as_str).is_some_and(|value| !value.is_empty()));
+            item
+        }).collect();
+        result["xpuDevices"] = summary.list(devices.len(), items);
     }
     let environment_fields = [
         "backend",
@@ -2458,5 +2545,39 @@ mod tests {
         assert_eq!(probe["pymssGraphAvailable"], true);
         assert!(!probe.to_string().contains("private"));
         assert!(!probe.to_string().contains("SECRET"));
+    }
+
+    #[test]
+    fn xpu_and_hardware_inventory_diagnostics_keep_device_facts_without_paths() {
+        let env = summarize_probe("env_info", &json!({
+            "torchBackend": "xpu", "torchAvailable": true, "torchVersion": "2.7.1+xpu",
+            "xpuAvailable": true, "xpuDeviceCount": 1,
+            "xpuDevices": [{"id": 0, "name": "Intel Arc A580", "totalMemoryBytes": 8589934592i64}],
+            "xpuDeviceNamesError": "token=private",
+        }));
+        assert_eq!(env["xpuAvailable"], true);
+        assert_eq!(env["xpuDevices"]["items"][0]["name"], "Intel Arc A580");
+        assert!(!env.to_string().contains("private"));
+
+        let inventory = summarize_probe("runtime_hardware_inventory", &json!({
+            "schemaVersion": 1, "platform": "win32", "detectorStatus": "ready",
+            "devices": [{"id": "session:0", "vendor": "intel", "name": "Intel Arc A580",
+                "driverVersion": "32.0.101", "hardwareId": "PCI/PRIVATE", "memoryBytes": 8589934592i64}],
+            "profiles": [{"id": "profile", "revision": 1, "releaseState": "stable",
+                "installationEnabled": true, "availableTargets": ["gfx1100"], "validatedTargets": []}],
+            "errors": []
+        }));
+        assert_eq!(inventory["devices"]["items"][0]["vendor"], "intel");
+        assert_eq!(inventory["devices"]["items"][0]["hardwareIdPresent"], true);
+        assert!(!inventory.to_string().contains("PCI/PRIVATE"));
+
+        let page = summarize_diagnostic_page(&json!({
+            "cliPathDiagnostics": {"launcher": "C:/Users/private/App/pymss.exe", "launcherExists": true,
+                "userPathContainsStudio": true, "systemPathContainsStudio": false,
+                "registeredDirectory": "C:/Users/private/App", "persistedCommand": "C:/Users/private/App/pymss.exe"}
+        }));
+        assert_eq!(page["cliPathDiagnostics"]["launcher"], "pymss.exe");
+        assert_eq!(page["cliPathDiagnostics"]["persistedMatchesLauncher"], true);
+        assert!(!page.to_string().contains("C:/Users/private"));
     }
 }
