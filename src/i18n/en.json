@@ -3186,5 +3186,31 @@
       "balanced": "Balanced",
       "quality": "Quality first"
     }
+  },
+  "modelPreparation": {
+    "title": "Prepare your first model",
+    "description": "Filter by purpose, choose a model and download it here. It will be selected when ready.",
+    "purpose": "What do you want to separate?",
+    "selectModel": "Choose a model to download",
+    "downloadSize": "Model download size: {size}",
+    "runtimeRequired": "Set up an active runtime before downloading a model.",
+    "preparing": "Preparing download",
+    "downloading": "Downloading model",
+    "paused": "The download was paused or interrupted. You can resume it.",
+    "download": "Download and use",
+    "resume": "Resume download"
+  },
+  "taskRecovery": {
+    "runtimeHint": "Check or repair the runtime, then return to retry. To change the execution device, configure a new task; a normal retry keeps the original configuration.",
+    "runtimeAction": "Open runtime settings",
+    "parametersHint": "Check this model’s inference parameters. For insufficient memory, try a smaller batch or a supported chunk size. After changes, use “Run with current parameters”; a normal retry keeps the original parameters.",
+    "parametersAction": "View model parameters",
+    "modelsHint": "Check and download any missing model files, then return to retry this task.",
+    "modelsAction": "Open model library",
+    "inputHint": "Check that the input file still exists and contains audio, or choose another file to submit.",
+    "inputAction": "Back to input",
+    "retryFailedItems": "Retry failed items ({count})",
+    "retriedCount": "Queued {count} failed tasks for retry",
+    "retryFailedCount": "Could not queue {count} tasks: {detail}"
   }
 }

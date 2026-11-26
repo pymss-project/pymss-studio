@@ -57,6 +57,9 @@ import { audioTrackLanguageLabel } from '@/utils/audioTracks'
 import AppBrandMark from '@/components/AppBrandMark.vue'
 import AudioTrackPicker from '@/components/AudioTrackPicker.vue'
 import ModelCategorySelect from '@/components/ModelCategorySelect.vue'
+import ModelPreparationPanel from '@/components/ModelPreparationPanel.vue'
+import TaskRecoveryActions from '@/components/TaskRecoveryActions.vue'
+import { failedTasksToRetry } from '@/features/tasks/recovery'
 import TaskLogConsole from '@/components/TaskLogConsole.vue'
 import InferenceParameterLesson from '@/components/InferenceParameterLesson.vue'
 import { parameterHelpTopics } from '@/features/inference/parameterHelp'
@@ -1061,6 +1064,9 @@ const currentBatchTasks = computed(() => focusedBatchTasks.value.length ? focuse
 const currentBatchTotal = computed(() => currentBatchTasks.value.length)
 const currentBatchDoneCount = computed(() => currentBatchTasks.value.filter(item => item.status === 'done').length)
 const currentBatchFailedCount = computed(() => currentBatchTasks.value.filter(item => item.status === 'failed').length)
+const failedBatchTasks = computed(() => currentBatchTasks.value.filter(item => item.status === 'failed'))
+const retryableBatchTasks = computed(() => failedTasksToRetry(currentBatchTasks.value, task.tasks))
+const retryingFailed = ref(false)
 const currentBatchCancelledCount = computed(() => currentBatchTasks.value.filter(item => item.status === 'cancelled').length)
 const currentBatchFinishedCount = computed(() => currentBatchDoneCount.value + currentBatchFailedCount.value + currentBatchCancelledCount.value)
 const currentBatchIsMulti = computed(() => currentBatchTotal.value > 1)
@@ -2247,6 +2253,17 @@ function handleCompletedAction(key: string | number) {
 }
 
 async function rerunCurrentParameters() {
+  if (taskPanelState.value === 'failed' && currentBatchIsMulti.value) {
+    const result = await task.rerunFailedTasksWithCurrentParameters(retryableBatchTasks.value.map(item => item.id))
+    if (result.tasks.length) {
+      focusedSeparationJobId.value = result.tasks[0]!.jobId || result.tasks[0]!.id
+      message.success(t('separate.batchStarted', { count: result.tasks.length }))
+    }
+    if (result.errors.length) message.error(t('taskRecovery.retryFailedCount', {
+      count: result.errors.length, detail: result.errors[0]!.message,
+    }))
+    return
+  }
   const item = currentTask.value
   if (!item) return
   try {
@@ -2302,6 +2319,21 @@ async function retryCurrentTask() {
       }
     },
   })
+}
+
+async function retryFailedBatch() {
+  if (retryingFailed.value) return
+  const ids = retryableBatchTasks.value.map(item => item.id)
+  if (!ids.length) return
+  retryingFailed.value = true
+  try {
+    const result = task.retryFailedTasks(ids)
+    if (result.tasks.length) message.success(t('taskRecovery.retriedCount', { count: result.tasks.length }))
+    if (result.errors.length) message.error(t('taskRecovery.retryFailedCount', {
+      count: result.errors.length, detail: result.errors[0]!.message,
+    }))
+    if (result.tasks.length) { stopAllPreviewAudio(); showQueueModal.value = true }
+  } finally { retryingFailed.value = false }
 }
 </script>
 
@@ -2642,6 +2674,7 @@ async function retryCurrentTask() {
                 </n-button>
               </div>
               <div v-else-if="taskSubMessage(currentTask)" class="result-note">{{ taskSubMessage(currentTask) }}</div>
+              <TaskRecoveryActions v-if="taskPanelState === 'failed'" :tasks="failedBatchTasks" @select-input="beginNextSeparation" />
               <section v-if="taskPanelState === 'done' && playableOutputs.length" class="result-preview-panel">
                 <div class="result-preview-panel__head">
                   <strong>{{ t('separate.previewTitle') }}</strong>
@@ -2699,11 +2732,16 @@ async function retryCurrentTask() {
                 </n-button>
               </template>
               <template v-else-if="taskPanelState === 'failed'">
+                <n-button v-if="currentBatchIsMulti" type="primary" size="large" :loading="retryingFailed"
+                  :disabled="!retryableBatchTasks.length" @click="retryFailedBatch">
+                  {{ t('taskRecovery.retryFailedItems', { count: retryableBatchTasks.length }) }}
+                </n-button>
                 <n-button secondary size="large" @click="beginNextSeparation">
                   {{ t('separate.newSeparation') }}
 </n-button>
-                <n-button v-if="currentTask?.runConfig?.runMode !== 'workflow'" secondary size="large" :title="t('parameterEditor.rerunCurrentHint')" @click="rerunCurrentParameters">{{ t('parameterEditor.rerunCurrent') }}</n-button>
-                <n-button type="primary" size="large" class="stage-actions__primary" @click="retryCurrentTask">
+                <n-button v-if="currentTask?.runConfig?.runMode !== 'workflow'" secondary size="large" :title="t('parameterEditor.rerunCurrentHint')"
+                  :disabled="currentBatchIsMulti && !retryableBatchTasks.length" @click="rerunCurrentParameters">{{ t('parameterEditor.rerunCurrent') }}</n-button>
+                <n-button v-if="!currentBatchIsMulti" type="primary" size="large" class="stage-actions__primary" @click="retryCurrentTask">
                   <template #icon><n-icon :component="PlayOutline" /></template>
                   {{ t('common.retry') }}
                 </n-button>
@@ -2873,9 +2911,7 @@ async function retryCurrentTask() {
                   </div>
                   <strong>{{ modelPanelLoading ? t('separate.modelPanelLoadingTitle') : t('separate.modelPanelEmptyTitle') }}</strong>
                   <p>{{ modelPanelLoading ? t('separate.modelPanelLoadingDesc') : t('separate.modelPanelEmptyDesc') }}</p>
-                  <n-button v-if="!modelPanelLoading" secondary @click="router.push('/models')">
-                    {{ t('separate.modelPanelPrimaryAction') }}
-                  </n-button>
+                  <ModelPreparationPanel v-if="!modelPanelLoading" />
                 </div>
               </div>
 

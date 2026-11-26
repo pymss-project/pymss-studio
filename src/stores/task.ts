@@ -42,6 +42,7 @@ import { emit } from '@tauri-apps/api/event'
 import { findWorkflowModel, replayWorkflowParameters, resolveWorkflowNode, workflowParameterTargets, type WorkflowParameterContext, type WorkflowParameterPlan, type WorkflowObservedParameters } from '@/workflows/inferencePolicy'
 import type { ComfyExportParameterPlan } from '@/workflows/comfyExport'
 import { describeTaskReminder, showTaskNotification } from '@/features/tasks/reminders'
+import { failedTasksToRetry } from '@/features/tasks/recovery'
 
 const studioLog = createLogger('ui.stores.task')
 
@@ -131,6 +132,8 @@ export type SeparationTask = {
   logs: LogEntry[]
   nodeLogs?: WorkflowNodeLogs
   error?: string
+  errorCode?: string
+  retryOf?: string
   runConfig?: SeparationRunConfig
   nodeStates?: Record<string, WorkflowNodeState>
   nodeExecutionOrder?: string[]
@@ -482,6 +485,8 @@ function normalizeTask(task: Partial<SeparationTask>, windows = /^[A-Za-z]:|^\\\
       ? [...(task.logs || []), `${new Date().toLocaleTimeString()} ${i18n.global.t('tasks.interruptedLog')}`].slice(-300)
       : (task.logs || []),
     error: interrupted ? i18n.global.t('tasks.interruptedError') : task.error,
+    errorCode: typeof task.errorCode === 'string' ? task.errorCode : undefined,
+    retryOf: typeof task.retryOf === 'string' && task.retryOf !== task.id ? task.retryOf : undefined,
     runConfig: normalizedRunConfig,
     nodeStates: task.nodeStates,
     nodeExecutionOrder: Array.isArray(task.nodeExecutionOrder)
@@ -1903,6 +1908,7 @@ export const useTaskStore = defineStore('task', () => {
         errorRecord)
       const recoverable = Boolean(event.payload?.recoverable)
       task.error = message
+      task.errorCode = typeof codeValue === 'string' ? codeValue : undefined
       task.message = message
       task.progressCurrent = undefined
       task.progressTotal = undefined
@@ -2610,7 +2616,7 @@ export const useTaskStore = defineStore('task', () => {
     return { jobId, tasks: createdTasks, total: createdTasks.length }
   }
 
-  async function retryTask(taskId: string) {
+  function enqueueRetryTask(taskId: string, group?: { jobId: string; batchIndex: number }) {
     const existing = tasks.value.find((t) => t.id === taskId)
     if (!existing) return
     if (existing.runConfig?.workbench && existing.runConfig.workflowDefinition) {
@@ -2621,10 +2627,10 @@ export const useTaskStore = defineStore('task', () => {
         id: config.workflowId!, name: config.workflowName || existing.model, description: '',
         definition: snapshot.sourceDefinition, format: detectWorkflowFormat(snapshot.sourceDefinition),
         formatVersion: WORKFLOW_FORMAT_VERSION, createdAt: existing.createdAt, updatedAt: snapshot.sourceUpdatedAt,
-      }, undefined, existing.jobOutput || existing.output, config.outputLayout, config.outputNaming, undefined, config)
+      }, group?.jobId, existing.jobOutput || existing.output, config.outputLayout, config.outputNaming, group?.batchIndex, config)
       const queued = tasks.value.find(task => task.id === created.id)!
       queued.output = existing.output
-      scheduleQueue()
+      queued.retryOf = existing.id
       return created
     }
     const outputLayout = normalizeOutputLayout(existing.runConfig?.outputLayout)
@@ -2660,8 +2666,8 @@ export const useTaskStore = defineStore('task', () => {
         formatVersion: WORKFLOW_FORMAT_VERSION,
         createdAt: existing.createdAt,
         updatedAt: existing.updatedAt,
-      }, undefined, jobOutput, outputLayout, config.outputNaming, undefined, config)
-      scheduleQueue()
+      }, group?.jobId, jobOutput, outputLayout, config.outputNaming, group?.batchIndex, config)
+      task.retryOf = existing.id
       return task
     }
     const modelStore = useModelStore()
@@ -2669,13 +2675,42 @@ export const useTaskStore = defineStore('task', () => {
     const persistedModelType = existing.runConfig?.modelType ?? null
     const modelEntry = modelStore.models.find((item) => item.name === existing.model) || null
     const modelType = modelEntry?.modelType || persistedModelType || null
-    const task = createQueuedTask(existing.input, existing.model, retryParams, modelType, undefined, jobOutput, outputLayout, existing.runConfig?.outputNaming, undefined, undefined, existing.audioTracks)
+    const task = createQueuedTask(existing.input, existing.model, retryParams, modelType, group?.jobId, jobOutput, outputLayout, existing.runConfig?.outputNaming, group?.batchIndex, undefined, existing.audioTracks)
     if (existing.runConfig) task.runConfig = JSON.parse(JSON.stringify(existing.runConfig))
-    scheduleQueue()
+    task.retryOf = existing.id
     return task
   }
 
-  async function rerunTaskWithCurrentParameters(taskId: string) {
+  async function retryTask(taskId: string) {
+    const task = enqueueRetryTask(taskId)
+    if (task) scheduleQueue()
+    return task
+  }
+
+  function retryFailedTasks(taskIds: string[]) {
+    const ids = new Set(taskIds)
+    const candidates = failedTasksToRetry(tasks.value.filter(task => ids.has(task.id)), tasks.value)
+    const groups = new Map<string, { jobId: string; batchIndex: number }>()
+    const created: SeparationTask[] = []
+    const errors: { taskId: string; message: string }[] = []
+    for (const previous of sortJobTasks(candidates)) {
+      const key = JSON.stringify([taskJobId(previous), previous.model, previous.jobOutput,
+        previous.runConfig, previous.workflowParameterResults])
+      const group = groups.get(key) || { jobId: createRunId('job'), batchIndex: 0 }
+      groups.set(key, group)
+      try {
+        const next = enqueueRetryTask(previous.id, group)
+        if (next) { created.push(next); group.batchIndex++ }
+      } catch (error) {
+        errors.push({ taskId: previous.id, message: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    // Preserve complete retry groups before handing any of them to a Worker.
+    if (created.length) scheduleQueue()
+    return { tasks: created, errors }
+  }
+
+  async function rerunTaskWithCurrentParameters(taskId: string, group?: { jobId: string; batchIndex: number }) {
     const previous = tasks.value.find(item => item.id === taskId)
     if (!previous || previous.runConfig?.runMode === 'workflow') return
     const oldStems = [...(previous.runConfig?.selectedStems || [])]
@@ -2685,9 +2720,29 @@ export const useTaskStore = defineStore('task', () => {
     const entry = useModelStore().models.find(item => item.name === previous.model)
     const config = buildRunConfig(snapshot.parameters, entry?.modelType || previous.runConfig?.modelType, outputLayout, undefined, snapshot)
     config.selectedStems = oldStems
-    const created = createQueuedTask(previous.input, previous.model, snapshot.parameters, config.modelType, undefined, outputRoot, outputLayout, undefined, undefined, config, previous.audioTracks)
-    scheduleQueue()
+    const created = createQueuedTask(previous.input, previous.model, snapshot.parameters, config.modelType, group?.jobId, outputRoot, outputLayout, undefined, group?.batchIndex, config, previous.audioTracks)
+    created.retryOf = previous.id
+    if (!group) scheduleQueue()
     return created
+  }
+
+  async function rerunFailedTasksWithCurrentParameters(taskIds: string[]) {
+    const ids = new Set(taskIds)
+    const candidates = failedTasksToRetry(tasks.value.filter(task => ids.has(task.id)), tasks.value)
+      .filter(task => task.runConfig?.runMode !== 'workflow')
+    const group = { jobId: createRunId('job'), batchIndex: 0 }
+    const created: SeparationTask[] = []
+    const errors: { taskId: string; message: string }[] = []
+    for (const previous of sortJobTasks(candidates)) {
+      try {
+        const next = await rerunTaskWithCurrentParameters(previous.id, group)
+        if (next) { created.push(next); group.batchIndex++ }
+      } catch (error) {
+        errors.push({ taskId: previous.id, message: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    if (created.length) scheduleQueue()
+    return { tasks: created, errors }
   }
 
   return {
@@ -2801,7 +2856,9 @@ export const useTaskStore = defineStore('task', () => {
     startSeparation,
     startWorkflowInference,
     retryTask,
+    retryFailedTasks,
     rerunTaskWithCurrentParameters,
+    rerunFailedTasksWithCurrentParameters,
     scheduleQueue,
     applySelectedModelDefaults,
     saveCurrentModelState,
