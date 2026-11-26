@@ -31,12 +31,13 @@ runs:
     - name: Install Inno Setup 7 x64
       shell: pwsh
       run: |
-        $innoVersion = "7.1.0"
+        # 7.1.1 fixes 64-bit installers reporting each checklist item's state from the item above it to screen readers.
+        $innoVersion = "7.1.1"
         $innoTag = "is-" + $innoVersion.Replace(".", "_")
         $innoDir = Join-Path $env:RUNNER_TEMP "inno-setup-$innoVersion-x64"
         $installer = Join-Path $env:RUNNER_TEMP "innosetup-$innoVersion-x64.exe"
         Invoke-WebRequest -Uri "https://github.com/jrsoftware/issrc/releases/download/$innoTag/innosetup-$innoVersion-x64.exe" -OutFile $installer
-        $expectedHash = "0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f"
+        $expectedHash = "8a5a6711c3766a6e5fb74f280ba0e3551e719ce94538d901fdbd1f8f9920b3f0"
         if ((Get-FileHash -Path $installer -Algorithm SHA256).Hash -ne $expectedHash) {
           throw "Inno Setup installer SHA256 verification failed"
         }
