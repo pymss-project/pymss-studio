@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, h, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { EllipsisHorizontal, LockClosedOutline, Magnet, Navigate } from '@vicons/ionicons5'
-import type { DropdownOption } from 'naive-ui'
+import { AddOutline, EllipsisHorizontal, FolderOpenOutline, LockClosedOutline, MicOutline, RemoveOutline, ScanOutline, SwapHorizontalOutline, SwapVerticalOutline } from '@vicons/ionicons5'
+import { NIcon, type DropdownOption } from 'naive-ui'
 import type { EditorClip, EditorClipDrop, EditorSource, EditorTimelineTool, EditorTrack } from '@/types/editor'
 import EditorWaveform from '@/components/editor/EditorWaveform.vue'
+import { formatVolumeDb } from '@/utils/editorMeter'
 import { editorClipShortcutLabel, type EditorClipCommand } from '@/utils/editorClipShortcuts'
 import { formatTime, formatTimecode } from '@/utils/editorTime'
 import {
@@ -32,6 +33,8 @@ const props = defineProps<{
   trackLevels: Record<string, [number, number]>
   clipCommandState: Record<EditorClipCommand, boolean>
   timelineTool: EditorTimelineTool
+  /** Width of the track header column in CSS pixels. */
+  headerWidth: number
   snappingEnabled: boolean
   editingDisabled?: boolean
   externalDragging?: boolean
@@ -53,13 +56,22 @@ const emit = defineEmits<{
   clipCommand: [command: EditorClipCommand]
   setClipLocked: [trackId: string, clipId: string, locked: boolean]
   setClipMuted: [trackId: string, clipId: string, muted: boolean]
-  setTool: [tool: EditorTimelineTool]
-  toggleSnapping: []
+  importTracks: []
+  addRecordingTrack: []
+  resizeHeader: [width: number]
+  resetHeaderWidth: []
+  renameTrack: [trackId: string, name: string, commit?: boolean]
   splitAt: [payload: { trackId: string; clipId: string; time: number }]
   dropClip: [drop: EditorClipDrop]
   revealTrack: [trackId: string]
   showInspector: []
   zoomAt: [payload: { direction?: 'in' | 'out'; anchorRatio: number; deltaY?: number }]
+  zoomIn: []
+  zoomOut: []
+  zoomFit: []
+  setTrackHeights: [heights: Record<string, number | null>]
+  beginTrackResize: []
+  commitTrackResize: []
   'scroll-ready': [element: HTMLElement]
   addTrackFromAsset: [sourceId: string]
   beginClipEdit: []
@@ -72,13 +84,23 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
-const HEADER_WIDTH = 180
+const headerWidth = computed(() => props.headerWidth)
 const SNAP_DISTANCE_PX = 7
 const EDGE_SCROLL_ZONE_PX = 40
 const EDGE_SCROLL_SPEED_PX = 750
 const CLIP_LABEL_HEIGHT = 15
+const RULER_HEIGHT = 34
+// Rows without a stored height share the view, each growing to at most this height.
+const MAX_FIT_ROW_HEIGHT = 160
+const MAX_TRACK_SCALE = 4
+const TRACK_SCALE_STEP = 1.25
+const TRACK_HEIGHT_NUDGE = 10
+const WHEEL_RESIZE_SETTLE_MS = 400
 const scrollEl = ref<HTMLElement | null>(null)
 const scrollViewportWidth = ref(0)
+const scrollViewportHeight = ref(0)
+let trackResize: { trackId: string; startY: number; startHeight: number } | null = null
+let wheelResizeTimer: ReturnType<typeof setTimeout> | null = null
 let resizeObserver: ResizeObserver | null = null
 
 watch(
@@ -91,6 +113,7 @@ watch(
     if (value) {
       const syncViewportWidth = () => {
         scrollViewportWidth.value = value.clientWidth
+        scrollViewportHeight.value = value.clientHeight
       }
       syncViewportWidth()
       if (typeof ResizeObserver !== 'undefined') {
@@ -106,13 +129,14 @@ watch(
 )
 
 const laneWidth = computed(() => {
-  const viewportLaneWidth = Math.max(0, scrollViewportWidth.value - HEADER_WIDTH)
+  const viewportLaneWidth = Math.max(0, scrollViewportWidth.value - headerWidth.value)
   const contentWidth = props.duration > 0 ? props.duration * props.pixelsPerSecond : 0
   // Always fill at least the visible lane area so the track/timeline reaches the
   // inspector edge instead of being cut off where the audio content ends.
-  return Math.max(1, Math.ceil(Math.max(contentWidth, viewportLaneWidth)))
+  // Rounding keeps a fitted lane from overflowing the viewport by a fraction of a pixel.
+  return Math.max(1, Math.round(Math.max(contentWidth, viewportLaneWidth)))
 })
-const playheadLeft = computed(() => HEADER_WIDTH + Math.max(0, props.currentTime * props.pixelsPerSecond))
+const playheadLeft = computed(() => headerWidth.value + Math.max(0, props.currentTime * props.pixelsPerSecond))
 const hasSolo = computed(() => props.tracks.some((track) => track.solo))
 const dropTargetTrackId = ref<string | null>(null)
 const fallbackDropSourceId = ref<string | null>(null)
@@ -153,10 +177,6 @@ let clipScrollFrame: number | null = null
 let lastClipScrollTime = 0
 
 const isMac = /Mac/i.test(navigator.platform)
-const timelineTools = [
-  { id: 'selection', label: 'editor.selectionTool', shortcut: 'V' },
-  { id: 'razor', label: 'editor.razorTool', shortcut: 'C' },
-] as const
 const clipCommandLabels = {
   cut: 'editor.cutClip', copy: 'editor.copyClip', paste: 'editor.pasteClip',
   split: 'editor.splitClip', splitAll: 'editor.splitAllClips', delete: 'editor.removeClip',
@@ -290,8 +310,91 @@ function trackChannels(track: EditorTrack) {
   }, 0)
 }
 
+function baseRowHeight(track: EditorTrack) {
+  return trackChannels(track) >= 2 ? 70 : 50
+}
+
+const fitTrackScale = computed(() => {
+  const total = props.tracks.reduce((sum, track) => sum + baseRowHeight(track), 0)
+  const available = scrollViewportHeight.value - RULER_HEIGHT - props.tracks.length
+  if (!total || available <= 0) return 1
+  const tallestBase = Math.max(...props.tracks.map(baseRowHeight))
+  return Math.max(1, Math.min(available / total, MAX_FIT_ROW_HEIGHT / tallestBase))
+})
+const tracksFitView = computed(() => props.tracks.every(track => track.height === undefined))
+const trackHeightsAtMinimum = computed(() => props.tracks.every(track => rowHeight(track) <= baseRowHeight(track)))
+const trackHeightsAtMaximum = computed(() => props.tracks.every(track => rowHeight(track) >= baseRowHeight(track) * MAX_TRACK_SCALE))
+
+function clampTrackHeight(track: EditorTrack, height: number) {
+  const base = baseRowHeight(track)
+  return Math.round(Math.min(base * MAX_TRACK_SCALE, Math.max(base, height)))
+}
+
+function rowHeight(track: EditorTrack) {
+  return clampTrackHeight(track, track.height ?? baseRowHeight(track) * fitTrackScale.value)
+}
+
 function trackWaveHeight(track: EditorTrack) {
-  return (trackChannels(track) >= 2 ? 61 : 41) - CLIP_LABEL_HEIGHT
+  // The clip keeps 4px above and below, and the row has a 1px divider.
+  return rowHeight(track) - 9 - CLIP_LABEL_HEIGHT
+}
+
+function beginTrackResize(event: PointerEvent, track: EditorTrack) {
+  if (event.button !== 0 || props.editingDisabled) return
+  event.preventDefault()
+  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+  trackResize = { trackId: track.id, startY: event.clientY, startHeight: rowHeight(track) }
+  emit('beginTrackResize')
+}
+
+function updateTrackResize(event: PointerEvent, track: EditorTrack) {
+  if (trackResize?.trackId !== track.id) return
+  const height = clampTrackHeight(track, trackResize.startHeight + event.clientY - trackResize.startY)
+  if (height !== rowHeight(track) || track.height === undefined) emit('setTrackHeights', { [track.id]: height })
+}
+
+function finishTrackResize() {
+  if (!trackResize) return
+  trackResize = null
+  emit('commitTrackResize')
+}
+
+function resetTrackHeight(track: EditorTrack) {
+  if (!props.editingDisabled) emit('setTrackHeights', { [track.id]: null })
+}
+
+function nudgeTrackHeight(event: KeyboardEvent, track: EditorTrack) {
+  const direction = event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0
+  if (!direction || props.editingDisabled) return
+  event.preventDefault()
+  event.stopPropagation()
+  emit('setTrackHeights', { [track.id]: clampTrackHeight(track, rowHeight(track) + direction * TRACK_HEIGHT_NUDGE) })
+}
+
+/** Scales every row from its current height, as one undoable step. */
+function scaleTrackHeights(direction: 'in' | 'out') {
+  if (props.editingDisabled) return
+  const factor = direction === 'in' ? TRACK_SCALE_STEP : 1 / TRACK_SCALE_STEP
+  emit('setTrackHeights', Object.fromEntries(props.tracks.map(track => [track.id, clampTrackHeight(track, rowHeight(track) * factor)])))
+}
+
+function fitTrackHeights() {
+  if (!props.editingDisabled) emit('setTrackHeights', Object.fromEntries(props.tracks.map(track => [track.id, null])))
+}
+
+function scaleTrackHeightsFromWheel(direction: 'in' | 'out') {
+  // Consecutive wheel steps form one undoable change.
+  if (wheelResizeTimer) clearTimeout(wheelResizeTimer)
+  else emit('beginTrackResize')
+  scaleTrackHeights(direction)
+  wheelResizeTimer = setTimeout(finishWheelResize, WHEEL_RESIZE_SETTLE_MS)
+}
+
+function finishWheelResize() {
+  if (!wheelResizeTimer) return
+  clearTimeout(wheelResizeTimer)
+  wheelResizeTimer = null
+  emit('commitTrackResize')
 }
 
 function clipWaveWidth(clip: EditorClip) {
@@ -485,7 +588,7 @@ function scrollAtClipPointer(now: number) {
   const element = scrollEl.value
   if (!active || !pointer || !element) return
   const bounds = element.getBoundingClientRect()
-  const left = bounds.left + HEADER_WIDTH
+  const left = bounds.left + headerWidth.value
   const right = bounds.left + element.clientWidth
   const bottom = bounds.top + element.clientHeight
   if (pointer.clientX < left || pointer.clientX > right
@@ -573,6 +676,38 @@ function rowClass(track: EditorTrack) {
   }
 }
 
+const renamingTrackId = ref<string | null>(null)
+const renameDraft = ref('')
+
+async function beginTrackRename(track: EditorTrack) {
+  if (props.editingDisabled) return
+  renameDraft.value = track.name
+  renamingTrackId.value = track.id
+  await nextTick()
+  const input = mixerRootEl.value?.querySelector<HTMLInputElement>('.track-row__rename')
+  input?.focus()
+  input?.select()
+}
+
+function commitTrackRename() {
+  const track = props.tracks.find(item => item.id === renamingTrackId.value)
+  const name = renameDraft.value.trim()
+  renamingTrackId.value = null
+  if (track && name && name !== track.name) emit('renameTrack', track.id, name, true)
+}
+
+function handleRenameKeydown(event: KeyboardEvent) {
+  event.stopPropagation()
+  if (event.isComposing || event.keyCode === 229) return
+  if (event.key === 'Enter') {
+    event.preventDefault()
+    commitTrackRename()
+  } else if (event.key === 'Escape') {
+    event.preventDefault()
+    renamingTrackId.value = null
+  }
+}
+
 function trackMetaLabel(track: EditorTrack) {
   if (sourceMissing(track)) return t('editor.laneAudioOffline')
   if (track.role === 'recording' && !clipsForTrack(track).length) return t('editor.recordingTrackReady')
@@ -590,6 +725,12 @@ function seekFromEvent(event: MouseEvent) {
 function handleTimelineWheel(event: WheelEvent) {
   const element = scrollEl.value
   if (!element) return
+
+  if (event.altKey && !event.ctrlKey && !event.metaKey) {
+    if (event.cancelable) event.preventDefault()
+    if (event.deltaY && !props.editingDisabled) scaleTrackHeightsFromWheel(event.deltaY < 0 ? 'in' : 'out')
+    return
+  }
 
   if (event.ctrlKey || event.metaKey) {
     if (event.cancelable) event.preventDefault()
@@ -613,6 +754,8 @@ function handleTimelineWheel(event: WheelEvent) {
 }
 
 onBeforeUnmount(() => {
+  finishWheelResize()
+  finishTrackResize()
   resizeObserver?.disconnect()
   resizeObserver = null
   cancelClipPointer()
@@ -658,14 +801,39 @@ function containsPoint(x: number, y: number) {
   return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
 }
 
-function toggleTimelineSnapping() {
-  focusTimeline()
-  emit('toggleSnapping')
+let headerResize: { startX: number; startWidth: number } | null = null
+
+function beginHeaderResize(event: PointerEvent) {
+  if (event.button !== 0) return
+  event.preventDefault()
+  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+  headerResize = { startX: event.clientX, startWidth: props.headerWidth }
 }
 
-function useTimelineTool(tool: EditorTimelineTool) {
-  focusTimeline()
-  emit('setTool', tool)
+function updateHeaderResize(event: PointerEvent) {
+  if (headerResize) emit('resizeHeader', headerResize.startWidth + event.clientX - headerResize.startX)
+}
+
+function finishHeaderResize() {
+  headerResize = null
+}
+
+function nudgeHeaderWidth(event: KeyboardEvent) {
+  const direction = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : 0
+  if (!direction) return
+  event.preventDefault()
+  event.stopPropagation()
+  emit('resizeHeader', props.headerWidth + direction * 10)
+}
+
+const addTrackOptions = computed<DropdownOption[]>(() => [
+  { key: 'import', label: t('editor.addTrackImport'), icon: () => h(NIcon, null, { default: () => h(FolderOpenOutline) }) },
+  { key: 'recording', label: t('editor.addTrackRecording'), icon: () => h(NIcon, null, { default: () => h(MicOutline) }) },
+])
+
+function handleAddTrack(key: string | number) {
+  if (key === 'import') emit('importTracks')
+  else if (key === 'recording') emit('addRecordingTrack')
 }
 
 function focusTimeline() {
@@ -761,6 +929,7 @@ defineExpose({
       'editor-mixer--external-drop': externalDragging,
       'editor-mixer--razor': timelineTool === 'razor' && !editingDisabled,
     }"
+    :style="{ '--track-head-width': `${headerWidth}px` }"
   >
     <div v-if="externalDragging || externalImporting" class="external-drop-hint" role="status">
       <n-spin v-if="externalImporting" size="small" />
@@ -779,37 +948,12 @@ defineExpose({
       <div class="ruler">
         <div class="ruler__head">
           <span>{{ t('editor.tracks') }}</span>
-          <div class="ruler__tools">
-            <button
-              v-for="tool in timelineTools"
-              :key="tool.id"
-              type="button"
-              class="ruler__tool"
-              :class="{ 'ruler__tool--selection': tool.id === 'selection' }"
-              :aria-pressed="tool.id === timelineTool"
-              :aria-label="t(tool.label)"
-              :aria-keyshortcuts="tool.shortcut"
-              :title="t(tool.label) + ' (' + tool.shortcut + ')'"
-              @keydown.space.stop
-              @click="useTimelineTool(tool.id)"
-            >
-              <n-icon v-if="tool.id === 'selection'" :component="Navigate" aria-hidden="true" />
-              <span v-else class="ruler__razor-icon" aria-hidden="true" />
+          <n-dropdown trigger="click" placement="bottom-start" :options="addTrackOptions" :disabled="editingDisabled" @select="handleAddTrack">
+            <button type="button" class="ruler__add" :disabled="editingDisabled" :title="t('editor.addTrack')" @keydown.space.stop>
+              <n-icon :component="AddOutline" aria-hidden="true" />
+              <span>{{ t('editor.addTrack') }}</span>
             </button>
-            <button
-              type="button"
-              class="ruler__tool ruler__tool--snap"
-              :aria-pressed="snappingEnabled"
-              :aria-label="t('editor.snapToEdges')"
-              aria-keyshortcuts="S"
-              :title="t('editor.snapToEdges') + ' (S)'"
-              @keydown.space.stop
-              @click="toggleTimelineSnapping"
-            >
-              <n-icon :component="Magnet" aria-hidden="true" />
-            </button>
-          </div>
-          <small>{{ tracks.length }}</small>
+          </n-dropdown>
         </div>
         <div class="ruler__track" :style="{ width: `${laneWidth}px` }" @click="seekFromEvent">
           <div class="ruler__grid">
@@ -827,15 +971,45 @@ defineExpose({
           class="track-row"
           :data-track-id="track.id"
           :class="rowClass(track)"
+          :style="{ height: `${rowHeight(track)}px` }"
           @mousedown.left="selectTrackRow($event, track.id)"
           @contextmenu.stop.prevent="openTrackContextMenu($event, track)"
           @mouseenter="allowAssetDrop(track.id)"
         >
+          <div
+            class="track-row__resize"
+            role="separator"
+            aria-orientation="horizontal"
+            tabindex="0"
+            :aria-label="t('editor.trackHeightResize', { name: track.name })"
+            :aria-valuenow="rowHeight(track)"
+            :aria-valuemin="baseRowHeight(track)"
+            :aria-valuemax="baseRowHeight(track) * MAX_TRACK_SCALE"
+            :title="t('editor.trackHeightResizeHint')"
+            @mousedown.stop
+            @click.stop
+            @pointerdown.stop="beginTrackResize($event, track)"
+            @pointermove="updateTrackResize($event, track)"
+            @pointerup="finishTrackResize"
+            @lostpointercapture="finishTrackResize"
+            @dblclick.stop="resetTrackHeight(track)"
+            @keydown="nudgeTrackHeight($event, track)"
+          />
           <div class="track-row__head">
             <div class="track-row__body">
               <div class="track-row__title">
                 <span class="track-dot" :style="{ background: track.color || '#7aa2ff' }" />
-                <strong :title="track.name">{{ track.name }}</strong>
+                <input
+                  v-if="renamingTrackId === track.id"
+                  v-model="renameDraft"
+                  class="track-row__rename"
+                  :aria-label="t('editor.inspectorFieldName')"
+                  maxlength="120"
+                  @mousedown.stop
+                  @blur="commitTrackRename"
+                  @keydown="handleRenameKeydown"
+                >
+                <strong v-else :title="`${track.name} · ${trackMetaLabel(track)}\n${t('editor.trackRenameHint')}`" @dblclick.stop="beginTrackRename(track)">{{ track.name }}</strong>
               </div>
               <div class="track-row__subline">
                 <div class="track-row__buttons">
@@ -863,9 +1037,10 @@ defineExpose({
                     @click.stop="openTrackContextMenu($event, track)"
                   ><n-icon :component="EllipsisHorizontal" /></button>
                 </div>
-                <span class="track-row__meta" :class="{ 'track-row__meta--offline': sourceMissing(track) }">
+                <span v-if="sourceMissing(track) || !clipsForTrack(track).length" class="track-row__meta" :class="{ 'track-row__meta--offline': sourceMissing(track) }">
                   {{ trackMetaLabel(track) }}
                 </span>
+                <small v-if="!sourceMissing(track) && clipsForTrack(track).length" class="track-row__gain">{{ formatVolumeDb(track.volume) }}</small>
               </div>
             </div>
             <div
@@ -1034,7 +1209,7 @@ defineExpose({
           v-if="snappingEnabled && clipSnapTime !== null"
           class="clip-snap-line"
           aria-hidden="true"
-          :style="{ transform: `translateX(${HEADER_WIDTH + clipSnapTime * pixelsPerSecond}px)` }"
+          :style="{ transform: `translateX(${headerWidth + clipSnapTime * pixelsPerSecond}px)` }"
         />
       </div>
 
@@ -1053,6 +1228,40 @@ defineExpose({
       </div>
 
       <span class="global-playhead" :style="{ transform: `translateX(${playheadLeft}px)` }" />
+    </div>
+
+    <div
+      class="track-head-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      tabindex="0"
+      :aria-label="t('editor.trackHeaderResize')"
+      :aria-valuenow="headerWidth"
+      :title="t('editor.panelResizeHint')"
+      :style="{ left: `${headerWidth - 3}px` }"
+      @mousedown.stop
+      @pointerdown.stop="beginHeaderResize"
+      @pointermove="updateHeaderResize"
+      @pointerup="finishHeaderResize"
+      @lostpointercapture="finishHeaderResize"
+      @dblclick.stop="emit('resetHeaderWidth')"
+      @keydown="nudgeHeaderWidth"
+    />
+
+    <div v-if="tracks.length" class="timeline-zoom" role="toolbar" :aria-label="t('editor.viewZoom')">
+      <div class="timeline-zoom__group" role="group" :aria-label="t('editor.timeZoom')" :title="`${t('editor.timeZoom')} (Ctrl + ${t('editor.mouseWheel')})`">
+        <n-icon :component="SwapHorizontalOutline" class="timeline-zoom__icon" aria-hidden="true" />
+        <button type="button" class="timeline-zoom__button" :aria-label="t('editor.zoomOut')" :title="t('editor.zoomOut')" @keydown.space.stop @click="emit('zoomOut')"><n-icon :component="RemoveOutline" /></button>
+        <button type="button" class="timeline-zoom__button" :aria-label="t('editor.zoomFitTime')" :title="t('editor.zoomFitTime')" @keydown.space.stop @click="emit('zoomFit')"><n-icon :component="ScanOutline" /></button>
+        <button type="button" class="timeline-zoom__button" :aria-label="t('editor.zoomIn')" :title="t('editor.zoomIn')" @keydown.space.stop @click="emit('zoomIn')"><n-icon :component="AddOutline" /></button>
+      </div>
+      <span class="timeline-zoom__divider" aria-hidden="true" />
+      <div class="timeline-zoom__group" role="group" :aria-label="t('editor.trackHeight')" :title="`${t('editor.trackHeight')} (Alt + ${t('editor.mouseWheel')})`">
+        <n-icon :component="SwapVerticalOutline" class="timeline-zoom__icon" aria-hidden="true" />
+        <button type="button" class="timeline-zoom__button" :disabled="editingDisabled || trackHeightsAtMinimum" :aria-label="t('editor.trackHeightDecrease')" :title="t('editor.trackHeightDecrease')" @keydown.space.stop @click="scaleTrackHeights('out')"><n-icon :component="RemoveOutline" /></button>
+        <button type="button" class="timeline-zoom__button" :disabled="editingDisabled" :aria-pressed="tracksFitView" :aria-label="t('editor.trackHeightFit')" :title="t('editor.trackHeightFit')" @keydown.space.stop @click="fitTrackHeights"><n-icon :component="ScanOutline" /></button>
+        <button type="button" class="timeline-zoom__button" :disabled="editingDisabled || trackHeightsAtMaximum" :aria-label="t('editor.trackHeightIncrease')" :title="t('editor.trackHeightIncrease')" @keydown.space.stop @click="scaleTrackHeights('in')"><n-icon :component="AddOutline" /></button>
+      </div>
     </div>
 
     <n-dropdown
@@ -1122,6 +1331,104 @@ defineExpose({
   pointer-events: none;
 }
 
+.track-head-resizer {
+  position: absolute;
+  z-index: 9;
+  top: 0;
+  bottom: 12px;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.track-head-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background 120ms ease;
+}
+
+.track-head-resizer:hover::after,
+.track-head-resizer:focus-visible::after {
+  background: var(--primary);
+}
+
+.track-head-resizer:focus-visible {
+  outline: none;
+}
+
+.timeline-zoom {
+  position: absolute;
+  z-index: 8;
+  right: 14px;
+  bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border: 1px solid color-mix(in srgb, var(--outline) 70%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.1);
+  backdrop-filter: blur(6px);
+}
+
+.timeline-zoom__group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.timeline-zoom__icon {
+  margin-inline: 2px 4px;
+  color: var(--on-surface-muted);
+  font-size: 14px;
+}
+
+.timeline-zoom__divider {
+  width: 1px;
+  height: 18px;
+  background: color-mix(in srgb, var(--outline) 80%, transparent);
+}
+
+.timeline-zoom__button {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--on-surface);
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.timeline-zoom__button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--on-surface) 8%, transparent);
+}
+
+.timeline-zoom__button[aria-pressed='true'] {
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+}
+
+.timeline-zoom__button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.timeline-zoom__button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
 .editor-mixer__scroll {
   position: relative;
   min-height: 0;
@@ -1167,7 +1474,7 @@ defineExpose({
   top: 0;
   z-index: 5;
   display: grid;
-  grid-template-columns: 180px auto;
+  grid-template-columns: var(--track-head-width) auto;
   width: max-content;
   min-width: 100%;
   height: var(--ruler-height);
@@ -1179,7 +1486,7 @@ defineExpose({
   position: sticky;
   left: 0;
   z-index: 6;
-  width: 180px;
+  width: var(--track-head-width);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1196,56 +1503,33 @@ defineExpose({
   text-transform: uppercase;
 }
 
-.ruler__tools {
-  display: flex;
+.ruler__add {
+  display: inline-flex;
+  align-items: center;
   gap: 3px;
-  margin-left: auto;
-  margin-right: 7px;
-}
-
-.ruler__tool {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: 1px solid var(--outline-strong);
-  border-radius: 5px;
+  height: 24px;
+  padding: 0 8px 0 6px;
+  border: 1px solid color-mix(in srgb, var(--outline) 80%, transparent);
+  border-radius: 6px;
   background: var(--surface-1);
   color: var(--on-surface);
-  font-size: 19px;
-  line-height: 1;
+  font-size: 12px;
   cursor: pointer;
 }
 
-.ruler__tool:hover {
-  background: var(--surface-2);
-}
-
-.ruler__tool[aria-pressed='true'] {
+.ruler__add:hover:not(:disabled) {
   border-color: var(--primary);
-  background: color-mix(in srgb, var(--primary) 19%, var(--surface-1));
   color: var(--primary-strong);
 }
 
-.ruler__tool:focus-visible {
+.ruler__add:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.ruler__add:focus-visible {
   outline: 2px solid var(--primary);
-  outline-offset: -2px;
-}
-
-.ruler__tool--selection :deep(svg) {
-  transform: rotate(-90deg);
-}
-
-.ruler__razor-icon {
-  width: 1em;
-  height: 1em;
-  background: currentColor;
-  mask: url('@/assets/editor-razor.svg') center / contain no-repeat;
-}
-
-.ruler__tool--snap {
-  margin-inline-start: 4px;
+  outline-offset: 1px;
 }
 
 .ruler__grid {
@@ -1280,8 +1564,9 @@ defineExpose({
 }
 
 .track-row {
+  position: relative;
   display: grid;
-  grid-template-columns: 180px auto;
+  grid-template-columns: var(--track-head-width) auto;
   width: max-content;
   min-width: 100%;
   min-height: 50px;
@@ -1293,6 +1578,37 @@ defineExpose({
   min-height: 70px;
 }
 
+.track-row__resize {
+  position: absolute;
+  z-index: 7;
+  right: 0;
+  bottom: -4px;
+  left: 0;
+  height: 8px;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.track-row__resize::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  left: 0;
+  top: 3px;
+  height: 2px;
+  background: transparent;
+  transition: background 120ms ease;
+}
+
+.track-row__resize:hover::after,
+.track-row__resize:focus-visible::after {
+  background: var(--primary);
+}
+
+.track-row__resize:focus-visible {
+  outline: none;
+}
+
 .tracks {
   position: relative;
   display: flex;
@@ -1301,17 +1617,17 @@ defineExpose({
   min-width: 100%;
   min-height: calc(100% - var(--ruler-height));
   background-image:
-    linear-gradient(90deg, transparent 179px, color-mix(in srgb, var(--outline) 82%, transparent) 179px 180px, transparent 180px),
+    linear-gradient(90deg, transparent calc(var(--track-head-width) - 1px), color-mix(in srgb, var(--outline) 82%, transparent) calc(var(--track-head-width) - 1px) var(--track-head-width), transparent var(--track-head-width)),
     linear-gradient(90deg, transparent 0 calc(var(--lane-step) - 1px), color-mix(in srgb, var(--outline) 18%, transparent) calc(var(--lane-step) - 1px) var(--lane-step));
   background-size: 100% 100%, var(--lane-step) 100%;
-  background-position: 0 0, 180px 0;
+  background-position: 0 0, var(--track-head-width) 0;
   background-repeat: no-repeat, repeat;
 }
 
 .new-clip-track-lane {
   flex: 1 0 70px;
   width: var(--lane-width);
-  margin-inline-start: 180px;
+  margin-inline-start: var(--track-head-width);
 }
 
 .new-clip-track-preview {
@@ -1351,7 +1667,7 @@ defineExpose({
   left: 0;
   z-index: 3;
   isolation: isolate;
-  width: 180px;
+  width: var(--track-head-width);
   display: grid;
   grid-template-columns: minmax(0, 1fr) 8px;
   align-items: stretch;
@@ -1362,7 +1678,10 @@ defineExpose({
 }
 
 .track-row--selected .track-row__head {
-  background: color-mix(in srgb, var(--primary-soft) 40%, color-mix(in srgb, var(--surface) 82%, var(--surface-2)));
+  /* --primary-soft is translucent; keep an opaque base so scrolled clips stay hidden behind the header. */
+  background:
+    linear-gradient(color-mix(in srgb, var(--primary-soft) 40%, transparent), color-mix(in srgb, var(--primary-soft) 40%, transparent)),
+    color-mix(in srgb, var(--surface) 82%, var(--surface-2));
 }
 
 .track-row--selected .track-row__head::before {
@@ -1433,6 +1752,31 @@ defineExpose({
   gap: 4px;
   justify-content: flex-start;
   flex-shrink: 0;
+}
+
+.track-row__gain {
+  flex: none;
+  margin-inline-start: auto;
+  color: var(--on-surface-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.track-row__rename {
+  min-width: 0;
+  flex: 1;
+  height: 22px;
+  padding: 0 5px;
+  border: 1px solid var(--primary);
+  border-radius: 4px;
+  background: var(--surface-1);
+  color: var(--on-surface);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  outline: none;
+  user-select: text;
 }
 
 .track-row__meta {

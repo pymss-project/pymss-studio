@@ -36,3 +36,27 @@ export function extrapolateTransportPosition(anchor: TransportAnchor, now: numbe
   if (loop) return position % anchor.duration
   return Math.min(position, anchor.duration)
 }
+
+/** Seconds as m:ss.mmm (or h:mm:ss.mmm), for editable timing fields. */
+export function formatTimecodeMs(value: number): string {
+  const totalMs = Math.round((Number.isFinite(value) && value > 0 ? value : 0) * 1000)
+  const ms = totalMs % 1000
+  const totalSeconds = Math.floor(totalMs / 1000)
+  const seconds = totalSeconds % 60
+  const minutes = Math.floor(totalSeconds / 60) % 60
+  const hours = Math.floor(totalSeconds / 3600)
+  const tail = `${String(seconds).padStart(2, '0')}.${String(ms).padStart(3, '0')}`
+  return hours ? `${hours}:${String(minutes).padStart(2, '0')}:${tail}` : `${minutes}:${tail}`
+}
+
+/** Parses h:mm:ss.mmm, m:ss.mmm or plain seconds; returns null for anything else. */
+export function parseTimecode(input: string): number | null {
+  const text = input.trim()
+  if (!text) return null
+  const parts = text.split(':')
+  if (parts.length > 3 || parts.some(part => !/^\d+(?:[.,]\d+)?$/.test(part))) return null
+  if (parts.slice(0, -1).some(part => /[.,]/.test(part))) return null
+  const values = parts.map(part => Number(part.replace(',', '.')))
+  if (values.length > 1 && values[values.length - 1] >= 60) return null
+  return values.reduce((total, value) => total * 60 + value, 0)
+}

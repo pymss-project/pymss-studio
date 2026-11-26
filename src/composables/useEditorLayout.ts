@@ -4,6 +4,20 @@ import { calculateEditorPanelCapacity, resolveEditorPanelLayout } from '@/utils/
 
 type ResizeSide = 'assets' | 'inspector'
 
+export const TRACK_HEADER_DEFAULT_WIDTH = 180
+export const TRACK_HEADER_MIN_WIDTH = 150
+export const TRACK_HEADER_MAX_WIDTH = 360
+export const MIXER_PANEL_MIN_HEIGHT = 260
+export const MIXER_PANEL_MAX_HEIGHT = 560
+
+function clampTrackHeaderWidth(width: number) {
+  return Math.round(Math.min(TRACK_HEADER_MAX_WIDTH, Math.max(TRACK_HEADER_MIN_WIDTH, width)))
+}
+
+function clampMixerPanelHeight(height: number) {
+  return Math.round(Math.min(MIXER_PANEL_MAX_HEIGHT, Math.max(MIXER_PANEL_MIN_HEIGHT, height)))
+}
+
 type ResizeState = {
   side: ResizeSide
   startX: number
@@ -28,6 +42,9 @@ type UseEditorLayoutOptions = {
 type EditorUiState = {
   assetCollapsed?: boolean
   inspectorCollapsed?: boolean
+  mixerCollapsed?: boolean
+  trackHeaderWidth?: number
+  mixerPanelHeight?: number | null
   assetPanelWidth?: number
   inspectorPanelWidth?: number
   panelPriority?: ResizeSide
@@ -54,6 +71,10 @@ export function useEditorLayout(options: UseEditorLayoutOptions) {
   const panelPriority = ref<ResizeSide>('inspector')
   const isAssetCollapsed = ref(false)
   const isInspectorCollapsed = ref(true)
+  const isMixerCollapsed = ref(true)
+  const trackHeaderWidth = ref(TRACK_HEADER_DEFAULT_WIDTH)
+  // null keeps the console at the natural height of its channel strips.
+  const mixerPanelHeight = ref<number | null>(null)
   const activeResize = ref<ResizeState | null>(null)
   const initialized = ref(false)
 
@@ -140,6 +161,9 @@ export function useEditorLayout(options: UseEditorLayoutOptions) {
     void saveAppStore('editor-ui', {
       assetCollapsed: isAssetCollapsed.value,
       inspectorCollapsed: isInspectorCollapsed.value,
+      mixerCollapsed: isMixerCollapsed.value,
+      trackHeaderWidth: trackHeaderWidth.value,
+      mixerPanelHeight: mixerPanelHeight.value,
       assetPanelWidth: preferredAssetWidth.value,
       inspectorPanelWidth: preferredInspectorWidth.value,
       panelPriority: panelPriority.value,
@@ -203,6 +227,10 @@ export function useEditorLayout(options: UseEditorLayoutOptions) {
     isInspectorCollapsed.value = typeof stored?.inspectorCollapsed === 'boolean'
       ? stored.inspectorCollapsed
       : true
+    isMixerCollapsed.value = stored?.mixerCollapsed !== false
+    trackHeaderWidth.value = clampTrackHeaderWidth(Number(stored?.trackHeaderWidth) || TRACK_HEADER_DEFAULT_WIDTH)
+    const storedConsoleHeight = Number(stored?.mixerPanelHeight)
+    mixerPanelHeight.value = Number.isFinite(storedConsoleHeight) && storedConsoleHeight > 0 ? clampMixerPanelHeight(storedConsoleHeight) : null
     preferredAssetWidth.value = clamp(
       Number(stored?.assetPanelWidth || initialAssetWidth),
       minAssetWidth,
@@ -238,6 +266,23 @@ export function useEditorLayout(options: UseEditorLayoutOptions) {
     if (!shouldExpand && isInspectorCollapsed.value) return
     if (shouldExpand) panelPriority.value = 'inspector'
     isInspectorCollapsed.value = !shouldExpand
+    savePanelWidths()
+  }
+
+  function setTrackHeaderWidth(width: number) {
+    trackHeaderWidth.value = clampTrackHeaderWidth(width)
+    savePanelWidths()
+  }
+
+  function setMixerPanelHeight(height: number | null) {
+    mixerPanelHeight.value = height === null ? null : clampMixerPanelHeight(height)
+    savePanelWidths()
+  }
+
+  function toggleMixerPanel(expanded?: boolean) {
+    const shouldExpand = typeof expanded === 'boolean' ? expanded : isMixerCollapsed.value
+    if (shouldExpand === !isMixerCollapsed.value) return
+    isMixerCollapsed.value = !shouldExpand
     savePanelWidths()
   }
 
@@ -279,5 +324,11 @@ export function useEditorLayout(options: UseEditorLayoutOptions) {
     stopResize,
     toggleAssetPanel,
     toggleInspectorPanel,
+    mixerPanelVisible: computed(() => !isMixerCollapsed.value),
+    trackHeaderWidth,
+    setTrackHeaderWidth,
+    mixerPanelHeight,
+    setMixerPanelHeight,
+    toggleMixerPanel,
   }
 }

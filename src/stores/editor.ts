@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { masterLimiterRenderRate, normalizeMasterLimiter } from '@/utils/masterLimiter'
 import { createLogger } from '@/utils/logger'
+import { normalizeTrackHeight } from '@/utils/editorTrackHeight'
 import { clonePluginChain, hasEditorPlugins, neutralPluginRenderProject, normalizePluginChain, pluginProcessingProject, projectPluginSlots, pluginProjectVersion } from '@/utils/editorPlugins'
 import { assertPluginProjectSupported, currentPluginSession, discardUnavailablePluginSession, observePluginSession, PluginHostDialogPendingError, pluginHostCapabilities, reloadPluginSession, snapshotPluginStates, unloadPendingPluginLoad, unloadPluginSession, type PluginSessionState } from '@/utils/pluginHost'
 import { computed, onScopeDispose, ref, watch } from 'vue'
@@ -474,6 +475,7 @@ function normalizeTrack(
     solo: Boolean(track.solo),
     fadeIn,
     fadeOut,
+    height: normalizeTrackHeight(track.height),
     effects: cloneLegacyTrackEffects(track.effects),
     pluginChain: normalizePluginChain(track.pluginChain),
     type: track.type === 'recording' || role === 'recording'
@@ -1824,6 +1826,24 @@ export const useEditorStore = defineStore('editor', () => {
     if (interactionDepth.value === 0) scheduleSave()
   }
 
+  /** Sets row heights by track; `null` returns a track to the automatic height. */
+  function setTrackHeights(heights: Record<string, number | null>) {
+    const tracks = session.value?.tracks
+    if (!tracks) return
+    const changes = tracks.flatMap((track) => {
+      if (!(track.id in heights)) return []
+      const height = normalizeTrackHeight(heights[track.id])
+      return height === track.height ? [] : [{ track, height }]
+    })
+    if (!changes.length) return
+    pushHistory()
+    for (const { track, height } of changes) {
+      if (height === undefined) delete track.height
+      else track.height = height
+    }
+    if (interactionDepth.value === 0) scheduleSave()
+  }
+
   function setTrackPan(trackId: string, value: number) {
     const track = session.value?.tracks.find((item) => item.id === trackId)
     if (!track) return
@@ -2477,6 +2497,7 @@ export const useEditorStore = defineStore('editor', () => {
     toggleTrackFlag,
     setTrackVolume,
     setTrackPan,
+    setTrackHeights,
     setClipFades,
     setClipTiming,
     setClipMuted,

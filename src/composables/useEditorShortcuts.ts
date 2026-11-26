@@ -1,4 +1,4 @@
-import type { EditorTimelineTool } from '@/types/editor'
+import type { EditorPanel, EditorTimelineTool } from '@/types/editor'
 import { matchEditorClipShortcut, type EditorClipCommand } from '@/utils/editorClipShortcuts'
 import { onBeforeUnmount, onMounted } from 'vue'
 
@@ -20,7 +20,10 @@ export type EditorShortcutHandlers = {
   setTimelineTool: (tool: EditorTimelineTool) => void
   toggleSnapping: () => void
   seekClipEdge: (direction: -1 | 1) => void
+  togglePanel: (panel: EditorPanel) => void
 }
+
+const PANEL_SHORTCUTS: Record<string, EditorPanel> = { 1: 'assets', 2: 'mixer', 3: 'inspector' }
 
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false
@@ -73,6 +76,12 @@ export function useEditorShortcuts(handlers: EditorShortcutHandlers) {
       if (key === 's') {
         event.preventDefault()
         handlers.save()
+        return
+      }
+      const panel = !event.shiftKey && !event.altKey ? PANEL_SHORTCUTS[event.key] : undefined
+      if (panel) {
+        event.preventDefault()
+        if (!event.repeat) handlers.togglePanel(panel)
         return
       }
       if (key === 'z' && !event.shiftKey) {

@@ -1,11 +1,11 @@
-import { onBeforeUnmount, watch, type Ref } from 'vue'
+import { onBeforeUnmount, toValue, watch, type MaybeRefOrGetter, type Ref } from 'vue'
 import type { useEditorStore } from '@/stores/editor'
 
 type EditorStore = ReturnType<typeof useEditorStore>
 
 type UseEditorMixerViewOptions = {
   editor: EditorStore
-  trackHeaderWidth: number
+  trackHeaderWidth: MaybeRefOrGetter<number>
   scrollEl: Ref<HTMLElement | null>
   playbackLoop: Ref<boolean>
 }
@@ -17,7 +17,7 @@ export function useEditorMixerView(options: UseEditorMixerViewOptions) {
   function minZoomForViewport() {
     const viewportWidth = scrollEl.value?.clientWidth || 0
     if (!viewportWidth || editor.duration <= 0) return 4
-    const laneViewportWidth = Math.max(1, viewportWidth - trackHeaderWidth)
+    const laneViewportWidth = Math.max(1, viewportWidth - toValue(trackHeaderWidth))
     return Math.max(4, laneViewportWidth / Math.max(editor.duration, 0.01))
   }
 
@@ -26,10 +26,15 @@ export function useEditorMixerView(options: UseEditorMixerViewOptions) {
     return Math.min(240, Math.max(minZoom, value))
   }
 
-  function ensureMinimumZoom() {
+  // A timeline showing the whole project keeps doing so when the lane area resizes.
+  // Duration changes never refit: recording and clip edits would rescale the view while working.
+  let lastMinZoom: number | null = null
+  function ensureMinimumZoom(refitWhenFitted = false) {
     if (editor.duration <= 0) return
     const minZoom = minZoomForViewport()
-    if (editor.pixelsPerSecond < minZoom) {
+    const fitted = refitWhenFitted && lastMinZoom !== null && Math.abs(editor.pixelsPerSecond - lastMinZoom) < 0.001
+    lastMinZoom = minZoom
+    if (editor.pixelsPerSecond < minZoom || fitted) {
       editor.setZoom(minZoom)
     }
   }
@@ -51,13 +56,13 @@ export function useEditorMixerView(options: UseEditorMixerViewOptions) {
       return
     }
 
-    const anchorX = element.scrollLeft + element.clientWidth * payload.anchorRatio - trackHeaderWidth
+    const anchorX = element.scrollLeft + element.clientWidth * payload.anchorRatio - toValue(trackHeaderWidth)
     const anchorTime = Math.max(0, anchorX / Math.max(1, currentZoom))
     editor.setZoom(nextZoom)
     requestAnimationFrame(() => {
       element.scrollLeft = Math.max(
         0,
-        trackHeaderWidth + anchorTime * editor.pixelsPerSecond - element.clientWidth * payload.anchorRatio,
+        toValue(trackHeaderWidth) + anchorTime * editor.pixelsPerSecond - element.clientWidth * payload.anchorRatio,
       )
     })
   }
@@ -78,7 +83,7 @@ export function useEditorMixerView(options: UseEditorMixerViewOptions) {
       }
       if (!element || typeof ResizeObserver === 'undefined') return
       resizeObserver = new ResizeObserver(() => {
-        ensureMinimumZoom()
+        ensureMinimumZoom(true)
       })
       resizeObserver.observe(element)
       ensureMinimumZoom()
@@ -93,6 +98,8 @@ export function useEditorMixerView(options: UseEditorMixerViewOptions) {
     },
     { immediate: true },
   )
+
+  watch(() => toValue(trackHeaderWidth), () => ensureMinimumZoom(true))
 
   onBeforeUnmount(() => {
     resizeObserver?.disconnect()

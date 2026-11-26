@@ -7,7 +7,12 @@ import {
   ArrowUndoOutline,
   ChevronDownOutline,
   DownloadOutline,
+  FileTrayFullOutline,
+  InformationCircleOutline,
+  Magnet,
   Mic,
+  Navigate,
+  OptionsOutline,
   PlaySkipBackOutline,
   StopOutline,
   RefreshOutline,
@@ -17,8 +22,20 @@ import {
   VolumeMuteOutline,
 } from '@vicons/ionicons5'
 import { formatTime } from '@/utils/editorTime'
+import { formatVolumeDb } from '@/utils/editorMeter'
 import type { TransportPendingAction, TransportVisualState } from '@/stores/editorPlayback'
+import type { EditorPanel, EditorTimelineTool } from '@/types/editor'
 import EditorParameterSlider from '@/components/editor/EditorParameterSlider.vue'
+
+const timelineTools = [
+  { id: 'selection', label: 'editor.selectionTool', shortcut: 'V' },
+  { id: 'razor', label: 'editor.razorTool', shortcut: 'C' },
+] as const
+const panelToggles = [
+  { id: 'assets', label: 'editor.assetLibrary', icon: FileTrayFullOutline, shortcut: 'Ctrl+1' },
+  { id: 'mixer', label: 'editor.mixerPanel', icon: OptionsOutline, shortcut: 'Ctrl+2' },
+  { id: 'inspector', label: 'editor.inspectorTitle', icon: InformationCircleOutline, shortcut: 'Ctrl+3' },
+] as const
 
 const props = defineProps<{
   sessionName: string
@@ -46,6 +63,9 @@ const props = defineProps<{
   recordingInputLevel?: number
   recordingElapsed?: number
   recordingError?: string | null
+  timelineTool: EditorTimelineTool
+  snappingEnabled: boolean
+  panels: Record<EditorPanel, boolean>
 }>()
 
 const emit = defineEmits<{
@@ -69,6 +89,9 @@ const emit = defineEmits<{
   refreshRecordingDevices: []
   addRecordingTrack: []
   'update:recordingDeviceId': [value: string]
+  setTool: [tool: EditorTimelineTool]
+  toggleSnapping: []
+  togglePanel: [panel: EditorPanel]
 }>()
 
 const { t } = useI18n()
@@ -83,7 +106,7 @@ const transportPressed = ref(false)
 const sessionMeta = computed(() => `${props.trackCount} ${t('editor.tracks')}`)
 const timecode = computed(() => `${formatTime(props.currentTime)} / ${formatTime(props.duration)}`)
 const volumeIcon = computed(() => props.masterVolume <= 0.01 ? VolumeMuteOutline : VolumeMediumOutline)
-const masterVolumePercent = computed(() => `${Math.round(props.masterVolume * 100)}%`)
+const masterVolumeDb = computed(() => formatVolumeDb(props.masterVolume))
 const missingPreviewText = computed(() => (props.missingAssetPreview || []).filter(Boolean).join(' · '))
 const offlineDetailsOpen = ref(false)
 const recordingPopoverOpen = ref(false)
@@ -134,6 +157,40 @@ function clearTransportPressed() {
       </div>
 
       <div class="editor-transport__center">
+        <div class="transport-tools" role="toolbar" :aria-label="t('editor.editTools')">
+          <button
+            v-for="tool in timelineTools"
+            :key="tool.id"
+            type="button"
+            class="transport-chip transport-tool"
+            :class="{ 'transport-tool--selection': tool.id === 'selection' }"
+            :aria-pressed="tool.id === timelineTool"
+            :aria-label="t(tool.label)"
+            :aria-keyshortcuts="tool.shortcut"
+            :title="`${t(tool.label)} (${tool.shortcut})`"
+            :disabled="disabled"
+            @keydown.space.stop
+            @click="emit('setTool', tool.id)"
+          >
+            <n-icon v-if="tool.id === 'selection'" :component="Navigate" aria-hidden="true" />
+            <span v-else class="transport-tool__razor" aria-hidden="true" />
+          </button>
+          <span class="transport-divider" aria-hidden="true" />
+          <button
+            type="button"
+            class="transport-chip transport-tool"
+            :aria-pressed="snappingEnabled"
+            :aria-label="t('editor.snapToEdges')"
+            aria-keyshortcuts="S"
+            :title="`${t('editor.snapToEdges')} (S)`"
+            :disabled="disabled"
+            @keydown.space.stop
+            @click="emit('toggleSnapping')"
+          >
+            <n-icon :component="Magnet" aria-hidden="true" />
+          </button>
+        </div>
+
         <div class="transport-history">
           <button
             class="transport-chip"
@@ -299,21 +356,38 @@ function clearTransportPressed() {
       </div>
 
       <div class="editor-transport__actions">
+        <div class="panel-toggles" role="group" :aria-label="t('editor.panels')">
+          <button
+            v-for="panel in panelToggles"
+            :key="panel.id"
+            type="button"
+            class="panel-toggle"
+            :aria-pressed="panels[panel.id]"
+            :aria-label="t(panel.label)"
+            :aria-keyshortcuts="panel.shortcut"
+            :title="`${t(panel.label)} (${panel.shortcut})`"
+            :disabled="disabled"
+            @keydown.space.stop
+            @click="emit('togglePanel', panel.id)"
+          >
+            <n-icon :component="panel.icon" aria-hidden="true" />
+          </button>
+        </div>
         <n-popover trigger="click" placement="bottom-end" :show-arrow="false">
           <template #trigger>
             <button class="master-summary" type="button" :disabled="disabled">
               <n-icon :component="volumeIcon" />
               <span>{{ t('editor.masterVolume') }}</span>
-              <strong>{{ masterVolumePercent }}</strong>
+              <strong>{{ masterVolumeDb }}</strong>
             </button>
           </template>
           <div class="master-popover">
             <div class="master-popover__head">
               <strong>{{ t('editor.masterVolume') }}</strong>
-              <span>{{ masterVolumePercent }}</span>
+              <span>{{ masterVolumeDb }}</span>
             </div>
             <EditorParameterSlider
-              :value="masterVolume" :value-text="masterVolumePercent"
+              :value="masterVolume" :value-text="masterVolumeDb"
               :reset-value="1"
               :label="t('editor.masterVolume')"
               :reset-label="t('editor.sliderDefaultVolume')"
@@ -490,7 +564,7 @@ function clearTransportPressed() {
 
 .editor-transport__center {
   display: grid;
-  grid-template-columns: 128px auto max-content;
+  grid-template-columns: max-content 96px auto max-content;
   align-items: center;
   gap: 12px;
   min-width: 0;
@@ -509,9 +583,89 @@ function clearTransportPressed() {
   justify-content: flex-end;
 }
 
+.transport-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid color-mix(in srgb, var(--outline) 60%, transparent);
+  border-radius: 8px;
+}
+
+.transport-tool {
+  font-size: 16px;
+}
+
+.transport-tool[aria-pressed='true'] {
+  background: color-mix(in srgb, var(--primary) 18%, transparent);
+  color: var(--primary-strong);
+}
+
+.transport-tool--selection :deep(svg) {
+  transform: rotate(-90deg);
+}
+
+.transport-tool__razor {
+  width: 1em;
+  height: 1em;
+  background: currentColor;
+  mask: url('@/assets/editor-razor.svg') center / contain no-repeat;
+}
+
+.transport-divider {
+  width: 1px;
+  height: 16px;
+  margin-inline: 2px;
+  background: color-mix(in srgb, var(--outline) 80%, transparent);
+}
+
+.panel-toggles {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid color-mix(in srgb, var(--outline) 60%, transparent);
+  border-radius: 8px;
+}
+
+.panel-toggle {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--on-surface-muted);
+  font-size: 16px;
+  cursor: pointer;
+  transition: color 140ms ease, background 140ms ease;
+}
+
+.panel-toggle:hover:not(:disabled) {
+  color: var(--on-surface);
+  background: var(--surface-2);
+}
+
+.panel-toggle[aria-pressed='true'] {
+  background: color-mix(in srgb, var(--primary) 18%, transparent);
+  color: var(--primary-strong);
+}
+
+.panel-toggle:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.panel-toggle:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
 @container editor-shell (max-width: 1100px) {
   .editor-transport__brand { flex: 1 1 140px; }
-  .editor-transport__center { grid-template-columns: auto auto max-content; gap: 8px; }
+  .editor-transport__center { grid-template-columns: auto auto auto max-content; gap: 8px; }
   .editor-transport__actions { gap: 6px; }
 }
 

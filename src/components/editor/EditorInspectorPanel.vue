@@ -6,11 +6,12 @@ import { useNumberInputAccessibility } from '@/composables/useNumberInputAccessi
 import { PencilOutline } from '@vicons/ionicons5'
 import { useEditorPlaybackStore } from '@/stores/editorPlayback'
 import type { EditorClip, EditorMasterLimiter as MasterLimiterSettings, EditorSession, EditorSource } from '@/types/editor'
-import { formatTime } from '@/utils/editorTime'
+import { formatTime, formatTimecodeMs, parseTimecode } from '@/utils/editorTime'
+import { formatLevel, formatPanShort, formatVolumeDb, meterScale, normalizeLevel } from '@/utils/editorMeter'
 import { clipTrimBounds } from '@/utils/editorClips'
 import EditorMasterLimiter from '@/components/editor/EditorMasterLimiter.vue'
 import EditorParameterSlider from '@/components/editor/EditorParameterSlider.vue'
-import EditorPluginPanel from '@/components/editor/EditorPluginPanel.vue'
+import EditorInsertList from '@/components/editor/EditorInsertList.vue'
 
 const props = defineProps<{
   session: EditorSession
@@ -20,11 +21,12 @@ const props = defineProps<{
   duration: number
   lastExportPath: string | null
   compact?: boolean
+  /** Changes when the timeline asks to show a page, even for an unchanged selection. */
+  focusRequest?: { tab: 'track' | 'clip'; serial: number }
 }>()
 
 const emit = defineEmits<{
   selectTrack: [trackId: string | null]
-  togglePlayback: []
   setMasterVolume: [value: number]
   setMasterPan: [value: number]
   setMasterLimiter: [patch: Partial<MasterLimiterSettings>]
@@ -81,6 +83,22 @@ const channelPeak = computed(() => Math.max(...channelLevels.value))
 const selectedClip = computed(() => (
   selectedTrack.value?.clips?.find((clip) => clip.id === props.selectedClipId) || null
 ))
+type InspectorTab = 'track' | 'clip' | 'source'
+const activeTab = ref<InspectorTab>('track')
+const tabs = computed(() => [
+  { id: 'track' as const, label: t('editor.inspectorTabTrack'), disabled: false },
+  { id: 'clip' as const, label: t('editor.inspectorTabClip'), disabled: !selectedClip.value },
+  { id: 'source' as const, label: t('editor.inspectorTabSource'), disabled: !props.selectedSource },
+])
+// Clicking a clip shows its timing; clicking a track header shows the channel.
+watch(() => props.focusRequest?.serial, () => {
+  if (props.focusRequest) activeTab.value = props.focusRequest.tab
+})
+// A page whose subject disappears falls back to the channel page instead of showing nothing.
+watch(tabs, (list) => {
+  if (list.find(tab => tab.id === activeTab.value)?.disabled) activeTab.value = 'track'
+})
+const channelMeterWidths = computed(() => channelLevels.value.map(value => `${meterScale(value) * 100}%`))
 const clipStartInput = ref<InputNumberInst | null>(null)
 let cancellingClipStart = false
 const renameDraft = ref('')
@@ -120,36 +138,6 @@ function commitChannelPan() {
 function toggleTrackFlag(flag: 'muted' | 'solo') {
   if (selectedTrack.value) emit('toggleTrackFlag', selectedTrack.value.id, flag)
 }
-function normalizeLevel(value: number | undefined) {
-  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0
-}
-function levelDb(value: number) {
-  return value > 0 ? 20 * Math.log10(value) : -Infinity
-}
-const meterTicks = [
-  { db: 0, position: 1 },
-  { db: -3, position: 0.88 },
-  { db: -6, position: 0.76 },
-  { db: -9, position: 0.64 },
-  { db: -12, position: 0.52 },
-  { db: -15, position: 0.4 },
-  { db: -24, position: 0.24 },
-  { db: -30, position: 0.12 },
-  { db: -60, position: 0 },
-]
-function meterValue(value: number) { return Math.max(-60, levelDb(value)) }
-function meterDbScale(db: number) {
-  if (db >= 0) return 1
-  for (let index = 1; index < meterTicks.length; index++) {
-    const lower = meterTicks[index]
-    const upper = meterTicks[index - 1]
-    if (db >= lower.db) return lower.position + (db - lower.db) / (upper.db - lower.db) * (upper.position - lower.position)
-  }
-  return 0
-}
-function meterScale(value: number) { return meterDbScale(meterValue(value)) }
-function formatLevel(value: number) { return value > 0 ? levelDb(value).toFixed(1) : '−∞' }
-
 watch(
   selectedTrack,
   (track) => {
@@ -205,19 +193,6 @@ function formatTrackVolume(value: number) {
   return `${percent} · ${normalized}`
 }
 
-function formatVolumeDb(value: number) {
-  const volume = Math.max(0, Number(value || 0))
-  if (volume <= 0.0001) return '−∞ dB'
-  const db = 20 * Math.log10(volume)
-  return `${db > 0.05 ? '+' : ''}${db.toFixed(1)} dB`
-}
-
-function formatPanShort(value: number) {
-  const pan = Number(value || 0)
-  if (Math.abs(pan) < 0.025) return 'C'
-  return `${pan < 0 ? 'L' : 'R'}${Math.round(Math.abs(pan) * 100)}`
-}
-
 function formatTrackPan(value: number) {
   const pan = Number(value || 0)
   if (Math.abs(pan) < 0.025) return t('editor.panCenter')
@@ -228,11 +203,10 @@ function formatTrackPan(value: number) {
 const sourceMeta = computed(() => [
   props.selectedSource ? formatTime(props.selectedSource.duration || 0) : '',
   props.selectedSource ? `${props.selectedSource.channels || 0}ch` : '',
-  props.selectedSource ? `${props.selectedSource.sampleRate || 0}` : '',
+  props.selectedSource?.sampleRate ? `${Number((props.selectedSource.sampleRate / 1000).toFixed(1))} kHz` : '',
 ].filter(Boolean).join(' · '))
 
 const fadeMax = computed(() => selectedClip.value?.duration || props.selectedSource?.duration || 0)
-const usesTrackFadeLabel = computed(() => (selectedTrack.value?.clips?.length || 0) === 1)
 const fadeInValue = computed(() => selectedClip.value?.fadeIn || 0)
 const fadeOutValue = computed(() => selectedClip.value?.fadeOut || 0)
 const clipOffsetMax = computed(() => Math.max(0, Number(props.selectedSource?.duration || 0) - Number(selectedClip.value?.duration || 0)))
@@ -249,11 +223,27 @@ const clipDurationMax = computed(() => {
 
 function updateClipTiming(patch: Partial<Pick<EditorClip, 'start' | 'offset' | 'duration'>>) {
   if (!selectedTrack.value || !selectedClip.value) return
+  const clip = selectedClip.value
+  if ((Object.keys(patch) as (keyof typeof patch)[]).every(key => showsSameSeconds(patch[key], clip[key]))) return
   emit('setClipTiming', {
     trackId: selectedTrack.value.id,
     clipId: selectedClip.value.id,
     patch,
   })
+}
+
+// Clip timing is stored at sample precision; fields show milliseconds. Leaving a field
+// re-reads its rounded text, which must not move the clip.
+// Bounds at display resolution: a millisecond-rounded value must never read as out of range.
+const toDisplayMin = (value: number) => Math.floor(value * 1000 + 1e-6) / 1000
+const toDisplayMax = (value: number | undefined) => value === undefined ? undefined : Math.ceil(value * 1000 - 1e-6) / 1000
+
+function formatSeconds(value: number | null) {
+  return value === null ? '' : formatTimecodeMs(value)
+}
+
+function showsSameSeconds(next: number | undefined, current: number) {
+  return next !== undefined && Math.abs(next - current) < 0.0005
 }
 
 function updateClipDuration(value: number | null) {
@@ -263,6 +253,7 @@ function updateClipDuration(value: number | null) {
 
 function moveClip(start: number | null) {
   if (cancellingClipStart || !selectedTrack.value || !selectedClip.value || start === null) return
+  if (showsSameSeconds(start, selectedClip.value.start)) return
   emit('moveClip', { trackId: selectedTrack.value.id, clipId: selectedClip.value.id, start })
 }
 
@@ -331,13 +322,44 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
       <span class="editor-inspector__channel-context" :title="selectedTrack ? sourceMeta : session.name">{{ selectedTrack ? (sourceMeta || t('editor.laneNoAudio')) : session.name }}</span>
     </div>
 
+    <div v-if="selectedTrack" class="editor-inspector__tabs" role="tablist" :aria-label="t('editor.channelInspector')">
+      <button
+        v-for="tab in tabs"
+        :key="tab.id"
+        type="button"
+        role="tab"
+        class="editor-inspector__tab"
+        :aria-selected="activeTab === tab.id"
+        :disabled="tab.disabled"
+        @keydown.space.stop
+        @click="activeTab = tab.id"
+      >{{ tab.label }}</button>
+    </div>
+
     <div class="editor-inspector__scroll">
-      <section class="inspector-strip" :aria-label="selectedTrack ? selectedTrack.name : t('editor.plugins.masterOutput')">
-        <div class="inspector-strip__controls">
-          <div class="inspector-strip__pan" :title="`${t('editor.balance')} · ${formatTrackPan(channelPan)}`">
-            <div class="inspector-strip__caption"><span>{{ t('editor.balance') }}</span><strong>{{ formatPanShort(channelPan) }}</strong></div>
+      <template v-if="!selectedTrack || activeTab === 'track'">
+        <section class="inspector-group inspector-channel" :aria-label="selectedTrack ? selectedTrack.name : t('editor.plugins.masterOutput')">
+          <div class="inspector-channel__row">
+            <div class="inspector-channel__caption"><span>{{ channelVolumeLabel }}</span><strong>{{ formatVolumeDb(channelVolume) }}</strong></div>
             <EditorParameterSlider
-              :key="channelValue"
+              :key="`volume-${channelValue}`"
+              :value="channelVolume" :value-text="formatTrackVolume(channelVolume)"
+              :reset-value="1"
+              :label="channelVolumeLabel"
+              :reset-label="t('editor.sliderDefaultVolume')"
+              :min="0"
+              :max="2"
+              :step="0.01"
+              :tooltip="false"
+              @update:value="updateChannelVolume"
+              @dragstart="beginChannelVolume"
+              @dragend="commitChannelVolume"
+            />
+          </div>
+          <div class="inspector-channel__row">
+            <div class="inspector-channel__caption"><span>{{ t('editor.balance') }}</span><strong>{{ formatPanShort(channelPan) }}</strong></div>
+            <EditorParameterSlider
+              :key="`pan-${channelValue}`"
               :value="channelPan" :value-text="formatTrackPan(channelPan)"
               :reset-value="0"
               :label="t('editor.balance')"
@@ -351,66 +373,67 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
               @dragend="commitChannelPan"
             />
           </div>
-
-          <div v-if="selectedTrack" class="inspector-strip__flags">
-            <button type="button" class="inspector-strip__flag inspector-strip__flag--mute" :class="{ 'inspector-strip__flag--active': selectedTrack.muted }" :aria-pressed="selectedTrack.muted" :title="t(selectedTrack.muted ? 'editor.unmuteTrack' : 'editor.muteTrack')" :aria-label="t(selectedTrack.muted ? 'editor.unmuteTrack' : 'editor.muteTrack')" @keydown.space.stop @click="toggleTrackFlag('muted')">M</button>
-            <button type="button" class="inspector-strip__flag inspector-strip__flag--solo" :class="{ 'inspector-strip__flag--active': selectedTrack.solo }" :aria-pressed="selectedTrack.solo" :title="t(selectedTrack.solo ? 'editor.unsoloTrack' : 'editor.soloTrack')" :aria-label="t(selectedTrack.solo ? 'editor.unsoloTrack' : 'editor.soloTrack')" @keydown.space.stop @click="toggleTrackFlag('solo')">S</button>
-          </div>
-
-          <div class="inspector-strip__fader-area" :title="t('editor.channelLevelStereo', { left: formatLevel(channelLevels[0]), right: formatLevel(channelLevels[1]) })">
-            <div class="inspector-strip__fader">
-            <EditorParameterSlider
-              :key="channelValue"
-              vertical
-              :value="channelVolume" :value-text="Math.round(channelVolume * 100) + '%'"
-              :reset-value="1"
-              :label="channelVolumeLabel"
-              :reset-label="t('editor.sliderDefaultVolume')"
-              :min="0"
-              :max="2"
-              :step="0.01"
-              :tooltip="false"
-              @update:value="updateChannelVolume"
-              @dragstart="beginChannelVolume"
-              @dragend="commitChannelVolume"
-            />
+          <div class="inspector-channel__status">
+            <div v-if="selectedTrack" class="inspector-channel__flags">
+              <button type="button" class="inspector-channel__flag inspector-channel__flag--mute" :class="{ 'inspector-channel__flag--active': selectedTrack.muted }" :aria-pressed="selectedTrack.muted" :title="t(selectedTrack.muted ? 'editor.unmuteTrack' : 'editor.muteTrack')" :aria-label="t(selectedTrack.muted ? 'editor.unmuteTrack' : 'editor.muteTrack')" @keydown.space.stop @click="toggleTrackFlag('muted')">M</button>
+              <button type="button" class="inspector-channel__flag inspector-channel__flag--solo" :class="{ 'inspector-channel__flag--active': selectedTrack.solo }" :aria-pressed="selectedTrack.solo" :title="t(selectedTrack.solo ? 'editor.unsoloTrack' : 'editor.soloTrack')" :aria-label="t(selectedTrack.solo ? 'editor.unsoloTrack' : 'editor.soloTrack')" @keydown.space.stop @click="toggleTrackFlag('solo')">S</button>
             </div>
-            <div class="inspector-strip__meter">
-              <div v-for="(value, index) in channelLevels" :key="index" class="inspector-strip__meter-bar" role="meter" :aria-label="`${t('editor.channelLevel')} · ${t(index === 0 ? 'editor.panLeft' : 'editor.panRight')}`" :aria-valuemin="-60" :aria-valuemax="0" :aria-valuenow="meterValue(value)" :aria-valuetext="`${formatLevel(value)} dBFS`">
-                <span :class="{ 'inspector-strip__meter-fill--full': value >= 1 }" :style="{ clipPath: `inset(${(1 - meterScale(value)) * 100}% 0 0)` }" />
-              </div>
-              <div class="inspector-strip__meter-scale" aria-hidden="true">
-                <span v-for="tick in meterTicks" :key="tick.db" :class="{ 'inspector-strip__meter-tick--major': tick.db >= -12 }" :style="{ top: `${(1 - tick.position) * 100}%` }">{{ tick.db === 0 ? '0' : `−${Math.abs(tick.db)}` }}</span>
+            <div class="inspector-channel__meter" role="group" :aria-label="t('editor.channelLevel')" :title="t('editor.channelLevelStereo', { left: formatLevel(channelLevels[0]), right: formatLevel(channelLevels[1]) })">
+              <span v-for="(width, index) in channelMeterWidths" :key="index" class="inspector-channel__meter-bar"><i :style="{ width }" /></span>
+            </div>
+            <small class="inspector-channel__peak">{{ formatLevel(channelPeak) }} dBFS</small>
+          </div>
+        </section>
+
+        <section class="inspector-group inspector-group--inserts">
+          <EditorInsertList :track-id="selectedTrack?.id ?? null" :chain="(selectedTrack ? selectedTrack.pluginChain : session.pluginChain) || []" />
+        </section>
+
+        <template v-if="!selectedTrack">
+          <EditorMasterLimiter
+            :value="session.masterLimiter"
+            @update="emit('setMasterLimiter', $event)"
+            @begin="emit('beginMasterLimiter')"
+            @commit="emit('commitMasterLimiter')"
+          />
+          <section class="inspector-group inspector-group--project">
+            <div class="inspector-group__header">
+              <strong>{{ t('editor.projectInfo') }}</strong>
+            </div>
+            <div class="inspector-group__body">
+              <dl class="stats-grid" :class="{ 'stats-grid--compact': compact }">
+                <div class="meta-cell"><dt>{{ t('editor.tracks') }}</dt><dd>{{ session.tracks.length }}</dd></div>
+                <div class="meta-cell"><dt>{{ t('editor.assets') }}</dt><dd>{{ session.sources.length }}</dd></div>
+                <div class="meta-cell"><dt>{{ t('editor.totalDuration') }}</dt><dd>{{ formatTime(duration) }}</dd></div>
+              </dl>
+              <div v-if="lastExportPath" class="last-export">
+                <span class="panel-field__label">{{ t('editor.inspectorSectionExport') }}</span>
+                <strong>{{ t('editor.lastExport') }}</strong>
+                <span>{{ shortPath(lastExportPath) }}</span>
+                <n-button size="small" secondary @click="emit('openLocation')">{{ t('editor.openLocation') }}</n-button>
               </div>
             </div>
+          </section>
+        </template>
+      </template>
+
+      <template v-else-if="activeTab === 'clip' && selectedClip">
+        <section class="inspector-group inspector-group--clip">
+          <div class="inspector-group__header">
+            <strong>{{ t('editor.inspectorClipTiming') }}</strong>
+            <span v-if="selectedClip.locked">{{ t('editor.status.clipLocked') }}</span>
           </div>
-
-          <div class="inspector-strip__readout" :title="`${channelVolumeLabel} · ${formatTrackVolume(channelVolume)}`">
-            <strong>{{ formatVolumeDb(channelVolume) }}</strong>
-            <small>{{ formatLevel(channelPeak) }} dBFS</small>
-          </div>
-        </div>
-
-        <div class="inspector-strip__inserts">
-          <EditorPluginPanel :session="session" :selected-track-id="selectedTrackId" @select-target="(id) => emit('selectTrack', id)" @toggle-playback="emit('togglePlayback')" />
-        </div>
-      </section>
-
-      <section v-if="selectedTrack && selectedClip" class="inspector-group inspector-group--clip">
-        <div class="inspector-group__header">
-          <strong>{{ t('editor.inspectorSectionClip') }}</strong>
-          <span>{{ t('editor.inspectorClipTiming') }}</span>
-        </div>
-        <div class="inspector-group__body inspector-group__body--dense">
-          <div class="dual-fields">
+          <div class="inspector-group__body inspector-group__body--dense">
             <label class="panel-field panel-field--compact">
               <span class="panel-field__label">{{ t('editor.clipStart') }}</span>
-              <n-input-number v-number-a11y="t('editor.clipStart') + ' (s)'"
+              <n-input-number v-number-a11y="t('editor.clipStart')"
                 ref="clipStartInput"
                 :value="selectedClip.start"
                 :disabled="selectedClip.locked"
                 :min="0"
                 :step="CLIP_START_STEP"
+                :format="formatSeconds"
+                :parse="parseTimecode"
                 :update-value-on-input="false"
                 size="small"
                 @keydown.capture="handleClipStartKeydown"
@@ -419,127 +442,101 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
             </label>
             <label class="panel-field panel-field--compact">
               <span class="panel-field__label">{{ t('editor.clipDuration') }}</span>
-              <n-input-number v-number-a11y="t('editor.clipDuration') + ' (s)'"
+              <n-input-number v-number-a11y="t('editor.clipDuration')"
                 :value="selectedClip.duration"
                 :disabled="selectedClip.locked"
-                :min="clipDurationMin"
-                :max="clipDurationMax"
+                :min="toDisplayMin(clipDurationMin)"
+                :max="toDisplayMax(clipDurationMax)"
                 :step="0.01"
+                :format="formatSeconds"
+                :parse="parseTimecode"
+                :update-value-on-input="false"
                 size="small"
                 @focus="emit('beginClipTiming')"
                 @blur="emit('commitClipTiming')"
                 @update:value="updateClipDuration"
               />
             </label>
-          </div>
-          <label class="panel-field panel-field--compact">
-            <span class="panel-field__label">{{ t('editor.clipSourceOffset') }}</span>
-            <n-input-number v-number-a11y="t('editor.clipSourceOffset') + ' (s)'"
-              :value="selectedClip.offset"
-              :disabled="selectedClip.locked"
-              :min="0"
-              :max="clipOffsetMax"
-              :step="0.01"
-              size="small"
-              @focus="emit('beginClipTiming')"
-              @blur="emit('commitClipTiming')"
-              @update:value="(value: number | null) => updateClipTiming({ offset: numberOrZero(value) })"
-            />
-          </label>
-        </div>
-      </section>
-
-      <details v-if="selectedTrack && selectedClip" class="inspector-group inspector-group--secondary">
-        <summary class="inspector-group__header">
-          <strong>{{ t('editor.inspectorSectionAdvanced') }}</strong>
-          <span>{{ t(usesTrackFadeLabel ? 'editor.inspectorTrackTuning' : 'editor.inspectorClipTuning') }}</span>
-        </summary>
-
-        <div class="inspector-group__body inspector-group__body--dense">
-          <div class="dual-fields">
             <label class="panel-field panel-field--compact">
-              <span class="panel-field__label">{{ t('editor.fieldFadeIn') }}</span>
-              <n-input-number v-number-a11y="t('editor.fieldFadeIn') + ' (s)'"
-                :value="fadeInValue"
+              <span class="panel-field__label">{{ t('editor.clipSourceOffset') }}</span>
+              <n-input-number v-number-a11y="t('editor.clipSourceOffset')"
+                :value="selectedClip.offset"
                 :disabled="selectedClip.locked"
                 :min="0"
-                :max="fadeMax"
-                :step="0.1"
+                :max="toDisplayMax(clipOffsetMax)"
+                :step="0.01"
+                :format="formatSeconds"
+                :parse="parseTimecode"
+                :update-value-on-input="false"
                 size="small"
-                @update:value="(value: number | null) => updateFades({ fadeIn: numberOrZero(value) })"
-              />
-            </label>
-            <label class="panel-field panel-field--compact">
-              <span class="panel-field__label">{{ t('editor.fieldFadeOut') }}</span>
-              <n-input-number v-number-a11y="t('editor.fieldFadeOut') + ' (s)'"
-                :value="fadeOutValue"
-                :disabled="selectedClip.locked"
-                :min="0"
-                :max="fadeMax"
-                :step="0.1"
-                size="small"
-                @update:value="(value: number | null) => updateFades({ fadeOut: numberOrZero(value) })"
+                @focus="emit('beginClipTiming')"
+                @blur="emit('commitClipTiming')"
+                @update:value="(value: number | null) => updateClipTiming({ offset: Math.min(clipOffsetMax, numberOrZero(value)) })"
               />
             </label>
           </div>
-        </div>
-      </details>
+        </section>
 
-      <div v-if="selectedTrack && selectedSource?.missing" class="source-missing-card">
-        <strong>{{ t('editor.assetMissing') }}</strong>
-        <span>{{ t('editor.assetMissingHint') }}</span>
-        <n-button size="small" type="warning" ghost @click="emit('relinkSource')">
-          {{ t('editor.assetRelink') }}
-        </n-button>
-      </div>
-
-      <details v-if="selectedTrack" class="inspector-group inspector-group--source" :open="Boolean(selectedSource?.missing)">
-        <summary class="inspector-group__header">
-          <strong>{{ t('editor.inspectorSectionSource') }}</strong>
-          <span>{{ t('editor.inspectorSourceContext') }}</span>
-        </summary>
-
-        <div class="inspector-group__body inspector-group__body--dense">
-          <label class="panel-field panel-field--compact">
-            <span class="panel-field__label">{{ t('editor.trackSourcePath') }}</span>
-            <n-input :value="selectedSource?.path || '-'" size="small" readonly />
-          </label>
-
-          <dl class="stats-grid" :class="{ 'stats-grid--compact': compact }">
-            <div class="meta-cell"><dt>{{ t('editor.trackSourceDuration') }}</dt><dd>{{ formatTime(selectedSource?.duration || 0) }}</dd></div>
-            <div class="meta-cell"><dt>{{ t('editor.trackSourceChannels') }}</dt><dd>{{ selectedSource?.channels || 0 }}</dd></div>
-            <div class="meta-cell"><dt>{{ t('editor.trackSourceSampleRate') }}</dt><dd>{{ selectedSource?.sampleRate || 0 }}</dd></div>
-          </dl>
-        </div>
-      </details>
-
-      <section v-else class="inspector-group inspector-group--project">
-        <div class="inspector-group__header">
-          <strong>{{ t('editor.projectInfo') }}</strong>
-        </div>
-
-        <div class="inspector-group__body">
-          <dl class="stats-grid" :class="{ 'stats-grid--compact': compact }">
-            <div class="meta-cell"><dt>{{ t('editor.tracks') }}</dt><dd>{{ session.tracks.length }}</dd></div>
-            <div class="meta-cell"><dt>{{ t('editor.assets') }}</dt><dd>{{ session.sources.length }}</dd></div>
-            <div class="meta-cell"><dt>{{ t('editor.totalDuration') }}</dt><dd>{{ formatTime(duration) }}</dd></div>
-          </dl>
-
-          <div v-if="lastExportPath" class="last-export">
-            <span class="panel-field__label">{{ t('editor.inspectorSectionExport') }}</span>
-            <strong>{{ t('editor.lastExport') }}</strong>
-            <span>{{ shortPath(lastExportPath) }}</span>
-            <n-button size="small" secondary @click="emit('openLocation')">{{ t('editor.openLocation') }}</n-button>
+        <section class="inspector-group">
+          <div class="inspector-group__header">
+            <strong>{{ t('editor.inspectorClipFades') }}</strong>
           </div>
+          <div class="inspector-group__body inspector-group__body--dense">
+            <div class="dual-fields">
+              <label class="panel-field panel-field--compact">
+                <span class="panel-field__label">{{ t('editor.fieldFadeIn') }}</span>
+                <n-input-number v-number-a11y="t('editor.fieldFadeIn') + ' (s)'"
+                  :value="fadeInValue"
+                  :disabled="selectedClip.locked"
+                  :min="0"
+                  :max="fadeMax"
+                  :step="0.1"
+                  size="small"
+                  @update:value="(value: number | null) => updateFades({ fadeIn: numberOrZero(value) })"
+                ><template #suffix>s</template></n-input-number>
+              </label>
+              <label class="panel-field panel-field--compact">
+                <span class="panel-field__label">{{ t('editor.fieldFadeOut') }}</span>
+                <n-input-number v-number-a11y="t('editor.fieldFadeOut') + ' (s)'"
+                  :value="fadeOutValue"
+                  :disabled="selectedClip.locked"
+                  :min="0"
+                  :max="fadeMax"
+                  :step="0.1"
+                  size="small"
+                  @update:value="(value: number | null) => updateFades({ fadeOut: numberOrZero(value) })"
+                ><template #suffix>s</template></n-input-number>
+              </label>
+            </div>
+          </div>
+        </section>
+      </template>
+
+      <template v-else-if="activeTab === 'source' && selectedSource">
+        <div v-if="selectedSource.missing" class="source-missing-card">
+          <strong>{{ t('editor.assetMissing') }}</strong>
+          <span>{{ t('editor.assetMissingHint') }}</span>
+          <n-button size="small" type="warning" ghost @click="emit('relinkSource')">
+            {{ t('editor.assetRelink') }}
+          </n-button>
         </div>
-      </section>
-      <EditorMasterLimiter
-        v-if="!selectedTrack"
-        :value="session.masterLimiter"
-        @update="emit('setMasterLimiter', $event)"
-        @begin="emit('beginMasterLimiter')"
-        @commit="emit('commitMasterLimiter')"
-      />
+        <section class="inspector-group inspector-group--source">
+          <div class="inspector-group__header">
+            <strong>{{ selectedSource.name }}</strong>
+          </div>
+          <div class="inspector-group__body inspector-group__body--dense">
+            <label class="panel-field panel-field--compact">
+              <span class="panel-field__label">{{ t('editor.trackSourcePath') }}</span>
+              <n-input :value="selectedSource.path || '-'" size="small" readonly />
+            </label>
+            <dl class="stats-grid" :class="{ 'stats-grid--compact': compact }">
+              <div class="meta-cell"><dt>{{ t('editor.trackSourceDuration') }}</dt><dd>{{ formatTime(selectedSource.duration || 0) }}</dd></div>
+              <div class="meta-cell"><dt>{{ t('editor.trackSourceChannels') }}</dt><dd>{{ selectedSource.channels || 0 }}</dd></div>
+              <div class="meta-cell"><dt>{{ t('editor.trackSourceSampleRate') }}</dt><dd>{{ selectedSource.sampleRate ? `${selectedSource.sampleRate} Hz` : '-' }}</dd></div>
+            </dl>
+          </div>
+        </section>
+      </template>
     </div>
   </aside>
 </template>
@@ -548,8 +545,8 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
 .editor-inspector {
   container: channel-inspector / inline-size;
   min-height: 0;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 0;
   padding: 0;
   border-left: 0;
@@ -566,9 +563,9 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
 
 .editor-inspector__eyebrow {
   color: var(--on-surface-muted);
-  font-size: 9px;
-  line-height: 1;
-  letter-spacing: 0.08em;
+  font-size: 11px;
+  line-height: 1.2;
+  letter-spacing: 0.04em;
 }
 
 .editor-inspector__channel-select { display: flex; align-items: center; gap: 4px; min-width: 0; }
@@ -576,7 +573,7 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
 .editor-inspector__master-button { flex-shrink: 0; }
 .editor-inspector__channel-context {
   color: var(--on-surface-muted);
-  font-size: 10px;
+  font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -604,6 +601,7 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
 .editor-inspector__name-input :deep(input) { font-size: 14px; font-weight: 600; }
 
 .editor-inspector__scroll {
+  flex: 1;
   min-height: 0;
   overflow: auto;
   display: grid;
@@ -632,86 +630,66 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
 }
 
 /* Channel strip: fader column on the left, insert slots on the right. */
-.inspector-strip {
+.editor-inspector__tabs {
   display: grid;
-  grid-template-columns: 74px minmax(0, 1fr);
-  height: clamp(216px, 36dvh, 380px);
-  min-height: 0;
-  border: 1px solid color-mix(in srgb, var(--outline) 78%, transparent);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px;
+  margin: 8px 12px 0;
+  padding: 2px;
   border-radius: 8px;
-  background: var(--surface-1);
-  overflow: hidden;
+  background: var(--surface-2);
 }
-.editor-inspector--compact .inspector-strip { grid-template-columns: 66px minmax(0, 1fr); }
-.inspector-strip__controls {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 0;
-  min-height: 0;
-  padding: 8px 7px;
-  border-right: 1px solid color-mix(in srgb, var(--outline) 70%, transparent);
-  background: color-mix(in srgb, var(--surface-2) 40%, var(--surface-1));
+.editor-inspector__tab {
+  height: 26px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--on-surface-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
 }
-.inspector-strip__caption { display: flex; justify-content: space-between; align-items: baseline; gap: 2px; font-size: 9px; color: var(--on-surface-muted); }
-.inspector-strip__caption > span { min-width: 0; overflow-wrap: anywhere; }
-.inspector-strip__caption > strong { color: var(--on-surface); font-size: 10px; font-weight: 500; font-variant-numeric: tabular-nums; }
-.inspector-strip__pan :deep(.editor-parameter-slider) { gap: 0; }
-.inspector-strip__pan :deep(.editor-parameter-slider__reset) { display: none; }
-.inspector-strip__flags { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
-.inspector-strip__flag {
-  height: 20px;
+.editor-inspector__tab:hover:not(:disabled) { color: var(--on-surface); }
+.editor-inspector__tab[aria-selected='true'] { background: var(--surface-1); color: var(--on-surface); font-weight: 600; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08); }
+.editor-inspector__tab:disabled { cursor: default; opacity: 0.45; }
+.editor-inspector__tab:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.inspector-channel { display: grid; gap: 10px; }
+.inspector-channel__row { display: grid; gap: 2px; }
+.inspector-channel__caption { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; color: var(--on-surface-muted); font-size: 12px; }
+.inspector-channel__caption > strong { color: var(--on-surface); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.inspector-channel__row :deep(.editor-parameter-slider__reset) { font-size: 11px; }
+.inspector-channel__status { display: flex; align-items: center; gap: 8px; }
+.inspector-channel__flags { display: grid; grid-template-columns: 28px 28px; gap: 4px; }
+.inspector-channel__flag {
+  height: 22px;
   padding: 0;
   border: 1px solid var(--outline);
   border-radius: 4px;
   background: var(--surface-1);
   color: var(--on-surface-muted);
   font: inherit;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
 }
-.inspector-strip__flag:hover { color: var(--on-surface); border-color: var(--outline-strong); }
-.inspector-strip__flag:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
-.inspector-strip__flag--mute.inspector-strip__flag--active { border-color: transparent; background: var(--warning); color: #1b1b1b; }
-.inspector-strip__flag--solo.inspector-strip__flag--active { border-color: transparent; background: var(--primary); color: #fff; }
-.inspector-strip__fader-area { position: relative; display: flex; justify-content: center; gap: 5px; flex: 1; min-height: 150px; padding-bottom: 23px; }
-.inspector-strip__fader { display: flex; flex-direction: column; }
-.inspector-strip__fader :deep(.editor-parameter-slider) { flex-direction: column; flex: 1; min-height: 0; gap: 0; }
-.inspector-strip__fader :deep(.editor-parameter-slider__control) { display: flex; justify-content: center; flex: 1; min-height: 0; }
-.inspector-strip__fader :deep(.n-slider) { height: 100%; }
-.inspector-strip__fader :deep(.editor-parameter-slider__reset) { position: absolute; bottom: 0; inset-inline: 0; margin-inline: auto; width: max-content; min-height: 18px; padding: 0 3px; font-size: 9px; white-space: nowrap; }
-.inspector-strip__meter { display: grid; grid-template-columns: 5px 5px 16px; gap: 2px; }
-.inspector-strip__meter-bar { position: relative; overflow: hidden; background: var(--surface-2); border: 1px solid var(--outline); border-radius: 2px; }
-.inspector-strip__meter-bar > span { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(255, 106, 106, 0.95), rgba(255, 170, 102, 0.92) 24%, rgba(92, 214, 132, 0.9) 60%); }
-.inspector-strip__meter-bar > .inspector-strip__meter-fill--full { background: var(--error, var(--warning)); }
-.inspector-strip__meter-scale { position: relative; color: var(--on-surface-muted); font-size: 8px; line-height: 1; font-variant-numeric: tabular-nums; }
-.inspector-strip__meter-scale > span { position: absolute; left: 0; white-space: nowrap; transform: translateY(-50%); }
-.inspector-strip__meter-scale > span::before { content: ''; position: absolute; top: 50%; left: -3px; width: 2px; height: 1px; background: var(--outline-strong); }
-.inspector-strip__meter-scale > .inspector-strip__meter-tick--major { color: var(--on-surface); font-size: 9px; font-weight: 600; }
-.inspector-strip__readout { display: grid; justify-items: center; gap: 1px; padding: 4px 0 1px; border-top: 1px solid color-mix(in srgb, var(--outline) 60%, transparent); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.inspector-strip__readout > strong { font-size: 11px; font-weight: 600; }
-.inspector-strip__readout > small { color: var(--on-surface-muted); font-size: 8px; }
-.inspector-strip__inserts { min-width: 0; min-height: 0; overflow: auto; }
+.inspector-channel__flag:hover { color: var(--on-surface); border-color: var(--outline-strong); }
+.inspector-channel__flag:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.inspector-channel__flag--mute.inspector-channel__flag--active { border-color: transparent; background: var(--warning); color: #1b1b1b; }
+.inspector-channel__flag--solo.inspector-channel__flag--active { border-color: transparent; background: var(--primary); color: #fff; }
+.inspector-channel__meter { display: grid; flex: 1; gap: 2px; min-width: 0; }
+.inspector-channel__meter-bar { position: relative; height: 4px; overflow: hidden; border-radius: 2px; background: var(--surface-2); }
+.inspector-channel__meter-bar > i { position: absolute; inset: 0 auto 0 0; background: linear-gradient(90deg, rgba(92, 214, 132, 0.9) 40%, rgba(255, 170, 102, 0.92) 76%, rgba(255, 106, 106, 0.95)); }
+.inspector-channel__peak { flex: none; min-width: 64px; color: var(--on-surface-muted); font-size: 11px; font-variant-numeric: tabular-nums; text-align: end; }
+.inspector-group--inserts { min-width: 0; }
 
 .inspector-group--clip {
   background: color-mix(in srgb, var(--surface-2) 20%, var(--surface-1));
 }
 
-.inspector-group--secondary {
-  background: color-mix(in srgb, var(--surface-2) 30%, var(--surface-1));
-}
-
 .inspector-group--source {
   background: color-mix(in srgb, var(--surface-2) 36%, var(--surface-1));
-}
-
-details.inspector-group {
-  gap: 0;
-}
-
-details.inspector-group[open] {
-  gap: 8px;
 }
 
 .inspector-group:first-child {
@@ -719,7 +697,8 @@ details.inspector-group[open] {
 }
 
 .inspector-group__header strong {
-  font-size: 11px;
+  flex: none;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
   color: color-mix(in srgb, var(--on-surface) 88%, var(--on-surface-muted));
@@ -728,7 +707,6 @@ details.inspector-group[open] {
 .inspector-group__header {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
   gap: 8px;
   min-width: 0;
   padding: 4px 6px 6px;
@@ -738,40 +716,10 @@ details.inspector-group[open] {
   background: transparent;
 }
 
-summary.inspector-group__header {
-  min-height: 16px;
-  cursor: pointer;
-  list-style: none;
-  transition: background 160ms ease, color 160ms ease;
-}
-
-summary.inspector-group__header:hover {
-  background: color-mix(in srgb, var(--surface-2) 56%, transparent);
-}
-
-summary.inspector-group__header:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--primary) 72%, transparent);
-  outline-offset: 2px;
-}
-
-summary.inspector-group__header::-webkit-details-marker {
-  display: none;
-}
-
-summary.inspector-group__header::after {
-  content: '+';
-  color: var(--on-surface-muted);
-  font-size: 13px;
-  line-height: 1;
-}
-
-details.inspector-group[open] > summary.inspector-group__header::after {
-  content: '−';
-}
-
 .inspector-group__header span {
+  min-width: 0;
   color: var(--on-surface-muted);
-  font-size: 9px;
+  font-size: 11px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -940,36 +888,13 @@ details.inspector-group[open] > summary.inspector-group__header::after {
 
 @container channel-inspector (max-width: 250px) {
   .editor-inspector__titlebar { padding-inline: 8px; }
-  .editor-inspector__channel-select { flex-wrap: wrap; }
-  .editor-inspector__channel-picker, .editor-inspector__name-input { flex-basis: calc(100% - 30px); }
-  .editor-inspector__master-button { margin-left: auto; }
+  .editor-inspector__tabs { margin-inline: 8px; }
   .editor-inspector__scroll { padding-inline: 8px; }
-  .inspector-strip { grid-template-columns: 66px minmax(0, 1fr); }
   .inspector-group { padding-inline: 8px; }
   .inspector-group--clip .dual-fields { flex-direction: column; }
-}
-@container channel-inspector (min-width: 300px) {
-  .inspector-strip { grid-template-columns: 84px minmax(0, 1fr); }
-  .inspector-strip__controls { padding-inline: 8px; }
-  .inspector-strip__caption { font-size: 10px; }
-  .inspector-strip__readout > strong { font-size: 12px; }
-}
-@media (max-height: 760px) {
-  .inspector-strip__controls { gap: 6px; padding-block: 6px; }
-  .inspector-strip__fader-area { min-height: 104px; }
 }
 @media (max-height: 640px) {
   .editor-inspector__titlebar { gap: 2px; padding-block: 7px; }
   .editor-inspector__scroll { gap: 6px; padding-block: 6px; }
-  .inspector-strip { height: clamp(204px, 35dvh, 224px); }
-  .inspector-strip__controls { gap: 4px; }
-  .inspector-strip__fader-area { min-height: 76px; }
-  .inspector-strip__meter-scale > span:nth-child(even) { display: none; }
-  .inspector-strip__flag { height: 18px; }
-  .inspector-strip__readout { padding-top: 2px; }
-}
-@media (max-height: 520px) {
-  .inspector-strip { height: 200px; }
-  .inspector-strip__fader-area { min-height: 68px; }
 }
 </style>

@@ -2,19 +2,25 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
+  AddOutline,
   AlertCircleOutline,
+  FunnelOutline,
   MusicalNoteOutline,
   SearchOutline,
 } from '@vicons/ionicons5'
 import type { DropdownOption } from 'naive-ui'
 import type { EditorAssetTreeNode, EditorSource } from '@/types/editor'
 import { formatTime } from '@/utils/editorTime'
+import { sortEditorSources, type EditorAssetSort } from '@/utils/editorAssetSort'
 import EditorAssetTreeBranch from '@/components/editor/EditorAssetTreeBranch.vue'
 
 const props = defineProps<{
   sources: EditorSource[]
   tree: EditorAssetTreeNode[]
   externalDragging: boolean
+  /** Colors of the tracks that use each source, keyed by source ID. */
+  trackColors: Record<string, string[]>
+  importing?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -23,6 +29,7 @@ const emit = defineEmits<{
   sourceRelink: [source: EditorSource]
   sourceRemove: [source: EditorSource]
   sourcePointerGrab: [payload: { source: EditorSource; x: number; y: number }]
+  import: []
 }>()
 
 const { t } = useI18n()
@@ -35,11 +42,25 @@ const contextSource = ref<EditorSource | null>(null)
 const localSources = computed(() => props.sources.filter((source) => source.role === 'stem'))
 const externalSources = computed(() => props.sources.filter((source) => source.role === 'reference'))
 const totalCount = computed(() => props.sources.length)
+const sortOrder = ref<EditorAssetSort>('added')
+const sortOptions = computed<DropdownOption[]>(() => ([
+  ['added', 'editor.assetSortAdded'],
+  ['name', 'editor.assetSortName'],
+  ['duration', 'editor.assetSortDuration'],
+] as const).map(([key, label]) => ({ key, label: t(label), disabled: sortOrder.value === key })))
+
+function selectSort(key: string | number) {
+  sortOrder.value = key as EditorAssetSort
+}
 
 const menuOptions = computed<DropdownOption[]>(() => {
   const source = contextSource.value
   if (!source) return []
   const options: DropdownOption[] = [{
+    key: 'add',
+    label: t('editor.addAssetAsTrack'),
+    disabled: Boolean(source.missing),
+  }, {
     key: 'reveal',
     label: t('editor.menuRevealAsset'),
   }]
@@ -60,14 +81,12 @@ const menuOptions = computed<DropdownOption[]>(() => {
 
 const filteredLocalSources = computed(() => {
   const query = search.value.trim().toLowerCase()
-  if (!query) return localSources.value
-  return localSources.value.filter((source) => `${source.name} ${source.path}`.toLowerCase().includes(query))
+  return sortEditorSources(localSources.value.filter((source) => `${source.name} ${source.path}`.toLowerCase().includes(query)), sortOrder.value)
 })
 
 const filteredExternalSources = computed(() => {
   const query = search.value.trim().toLowerCase()
-  if (!query) return externalSources.value
-  return externalSources.value.filter((source) => `${source.name} ${source.path}`.toLowerCase().includes(query))
+  return sortEditorSources(externalSources.value.filter((source) => `${source.name} ${source.path}`.toLowerCase().includes(query)), sortOrder.value)
 })
 
 function createVisibleTree(role: EditorSource['role']) {
@@ -78,7 +97,7 @@ function createVisibleTree(role: EditorSource['role']) {
     const children = node.children
       .map(filterNode)
       .filter((child): child is EditorAssetTreeNode => Boolean(child))
-    const assets = node.assets.filter((asset) => activeIds.has(asset.id))
+    const assets = sortEditorSources(node.assets.filter((asset) => activeIds.has(asset.id)), sortOrder.value)
     if (!children.length && !assets.length) return null
     return {
       ...node,
@@ -130,6 +149,7 @@ function handleMenuSelect(key: string | number) {
   showMenu.value = false
   if (!source) return
 
+  if (key === 'add' && !source.missing) emit('sourceAdd', source)
   if (key === 'relink') emit('sourceRelink', source)
   if (key === 'reveal') emit('sourceReveal', source)
   if (key === 'remove' && source.role === 'reference') emit('sourceRemove', source)
@@ -155,6 +175,7 @@ function formatAssetMeta(source: EditorSource) {
 function rowClass(source: EditorSource) {
   return {
     'asset-row--missing': Boolean(source.missing),
+    'asset-row--unused': !source.missing && !props.trackColors[source.id]?.length,
   }
 }
 
@@ -174,8 +195,19 @@ function hasSectionContent(type: 'local' | 'external') {
     }"
   >
     <div class="editor-assets__head">
-      <strong>{{ t('editor.assetLibrary') }}</strong>
-      <span class="editor-assets__summary">{{ t('editor.assetCount', { count: totalCount }) }}</span>
+      <div class="editor-assets__title">
+        <strong>{{ t('editor.assetLibrary') }}</strong>
+        <span class="editor-assets__summary">{{ t('editor.assetCount', { count: totalCount }) }}</span>
+      </div>
+      <n-dropdown trigger="click" placement="bottom-end" :options="sortOptions" @select="selectSort">
+        <button type="button" class="editor-assets__action" :aria-label="t('editor.assetSort')" :title="t('editor.assetSort')">
+          <n-icon :component="FunnelOutline" aria-hidden="true" />
+        </button>
+      </n-dropdown>
+      <button type="button" class="editor-assets__action editor-assets__action--primary" :disabled="importing" :title="t('editor.importAudio')" @click="emit('import')">
+        <n-icon :component="AddOutline" aria-hidden="true" />
+        <span>{{ t('editor.importAudioShort') }}</span>
+      </button>
     </div>
 
     <n-input v-model:value="search" size="small" clearable :placeholder="t('editor.assetSearch')">
@@ -199,6 +231,9 @@ function hasSectionContent(type: 'local' | 'external') {
             <strong>{{ source.name }}</strong>
             <small>{{ formatAssetMeta(source) }}</small>
           </span>
+          <span v-if="trackColors[source.id]?.length" class="asset-row__usage" :title="t('editor.assetUsedOnTracks', { count: trackColors[source.id].length })">
+            <i v-for="(color, index) in trackColors[source.id].slice(0, 3)" :key="index" :style="{ background: color }" />
+          </span>
         </div>
 
         <div
@@ -216,6 +251,9 @@ function hasSectionContent(type: 'local' | 'external') {
             <strong>{{ source.name }}</strong>
             <small>{{ formatAssetMeta(source) }}</small>
           </span>
+          <span v-if="trackColors[source.id]?.length" class="asset-row__usage" :title="t('editor.assetUsedOnTracks', { count: trackColors[source.id].length })">
+            <i v-for="(color, index) in trackColors[source.id].slice(0, 3)" :key="index" :style="{ background: color }" />
+          </span>
         </div>
       </template>
 
@@ -224,6 +262,7 @@ function hasSectionContent(type: 'local' | 'external') {
           v-if="localTree.length"
           :nodes="localTree"
           :expanded-keys="expandedKeys"
+          :track-colors="trackColors"
           @toggle-folder="toggleFolder"
           @source-add="(source) => emit('sourceAdd', source)"
           @source-context="({ event, source }) => openContextMenu(event, source)"
@@ -233,6 +272,7 @@ function hasSectionContent(type: 'local' | 'external') {
           v-if="externalTree.length"
           :nodes="externalTree"
           :expanded-keys="expandedKeys"
+          :track-colors="trackColors"
           @toggle-folder="toggleFolder"
           @source-add="(source) => emit('sourceAdd', source)"
           @source-context="({ event, source }) => openContextMenu(event, source)"
@@ -295,17 +335,59 @@ function hasSectionContent(type: 'local' | 'external') {
   white-space: nowrap;
 }
 
+.editor-assets__title {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+
 .editor-assets__head strong {
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.06em;
-  color: var(--on-surface-muted);
+  color: var(--on-surface);
 }
 
 .editor-assets__summary {
   color: var(--on-surface-muted);
-  font-size: 10px;
-  opacity: 0.8;
+  font-size: 11px;
+}
+
+.editor-assets__action {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid color-mix(in srgb, var(--outline) 80%, transparent);
+  border-radius: 6px;
+  background: var(--surface-1);
+  color: var(--on-surface);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.editor-assets__action:hover:not(:disabled) {
+  border-color: var(--primary);
+  color: var(--primary-strong);
+}
+
+.editor-assets__action:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.editor-assets__action:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+.editor-assets__action--primary {
+  border-color: transparent;
+  background: var(--primary-soft);
+  color: var(--primary-strong);
 }
 
 .editor-assets__list {
@@ -338,7 +420,7 @@ function hasSectionContent(type: 'local' | 'external') {
 .asset-row {
   position: relative;
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: 22px minmax(0, 1fr) auto;
   gap: 6px;
   align-items: center;
   padding: 4px 6px;
@@ -398,13 +480,13 @@ function hasSectionContent(type: 'local' | 'external') {
 }
 
 .asset-row__body strong {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
 }
 
 .asset-row__body small {
   color: var(--on-surface-muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .asset-row__menu-indicator {
@@ -422,5 +504,21 @@ function hasSectionContent(type: 'local' | 'external') {
 
 .asset-row__menu-indicator--lock {
   opacity: 0.42;
+}
+.asset-row__usage {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.asset-row__usage i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.asset-row--unused .asset-row__body strong {
+  color: var(--on-surface-muted);
+  font-weight: 500;
 }
 </style>

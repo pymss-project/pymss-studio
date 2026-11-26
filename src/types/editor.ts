@@ -56,6 +56,9 @@ export type EditorPluginSlot = {
   [key: string]: unknown
 }
 
+/** Panels around the editor timeline that can be shown or hidden. */
+export type EditorPanel = 'assets' | 'mixer' | 'inspector'
+
 export type EditorTrack = {
   id: string
   sourceId: string
@@ -70,6 +73,8 @@ export type EditorTrack = {
   solo: boolean
   fadeIn: number
   fadeOut: number
+  /** Timeline row height in CSS pixels; automatic when absent. */
+  height?: number
   /** Retained for older project versions; excluded from playback and export. */
   effects?: Record<string, unknown>
   pluginChain?: EditorPluginSlot[]

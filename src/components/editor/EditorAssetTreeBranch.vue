@@ -18,6 +18,7 @@ defineOptions({
 const props = withDefaults(defineProps<{
   nodes: EditorAssetTreeNode[]
   expandedKeys: string[]
+  trackColors: Record<string, string[]>
   depth?: number
 }>(), {
   depth: 0,
@@ -72,6 +73,7 @@ function formatAssetMeta(source: EditorSource) {
             v-if="node.children.length"
             :nodes="node.children"
             :expanded-keys="expandedKeys"
+            :track-colors="trackColors"
             :depth="depth + 1"
             @toggle-folder="(child) => emit('toggleFolder', child)"
             @source-add="(source) => emit('sourceAdd', source)"
@@ -83,7 +85,7 @@ function formatAssetMeta(source: EditorSource) {
             v-for="source in node.assets"
             :key="source.id"
             class="asset-row asset-row--nested"
-            :class="{ 'asset-row--missing': source.missing }"
+            :class="{ 'asset-row--missing': source.missing, 'asset-row--unused': !source.missing && !trackColors[source.id]?.length }"
             :title="source.path"
             @mousedown="handleAssetPointerDown($event, source)"
             @dblclick="emit('sourceAdd', source)"
@@ -93,6 +95,9 @@ function formatAssetMeta(source: EditorSource) {
             <span class="asset-row__body">
               <strong>{{ source.name }}</strong>
               <small>{{ formatAssetMeta(source) }}</small>
+            </span>
+            <span v-if="trackColors[source.id]?.length" class="asset-row__usage" :title="t('editor.assetUsedOnTracks', { count: trackColors[source.id].length })">
+              <i v-for="(color, index) in trackColors[source.id].slice(0, 3)" :key="index" :style="{ background: color }" />
             </span>
           </div>
         </div>
@@ -144,15 +149,13 @@ function formatAssetMeta(source: EditorSource) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 .asset-folder__head span {
   color: var(--on-surface-muted);
-  font-size: 9px;
+  font-size: 11px;
   min-width: 16px;
   text-align: right;
 }
@@ -169,7 +172,7 @@ function formatAssetMeta(source: EditorSource) {
 .asset-row {
   position: relative;
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: 22px minmax(0, 1fr) auto;
   gap: 6px;
   align-items: center;
   padding: 5px 6px;
@@ -226,11 +229,28 @@ function formatAssetMeta(source: EditorSource) {
 
 .asset-row__body small {
   color: var(--on-surface-muted);
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .asset-row__body strong {
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 600;
+}
+
+.asset-row__usage {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.asset-row__usage i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.asset-row--unused .asset-row__body strong {
+  color: var(--on-surface-muted);
+  font-weight: 500;
 }
 </style>

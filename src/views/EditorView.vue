@@ -4,7 +4,7 @@ import { computed, nextTick, onScopeDispose, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { useDialog, useMessage } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
-import { FolderOpenOutline, MusicalNotesOutline, OptionsOutline } from '@vicons/ionicons5'
+import { FolderOpenOutline, MusicalNotesOutline } from '@vicons/ionicons5'
 import { useEditorStore } from '@/stores/editor'
 import { currentPluginSession, observePluginTransport } from '@/utils/pluginHost'
 import { useTaskStore } from '@/stores/task'
@@ -13,19 +13,22 @@ import EditorAssetPanel from '@/components/editor/EditorAssetPanel.vue'
 import EditorExportDialog from '@/components/editor/EditorExportDialog.vue'
 import EditorInspectorPanel from '@/components/editor/EditorInspectorPanel.vue'
 import EditorMixer from '@/components/editor/EditorMixer.vue'
+import EditorMixerConsole from '@/components/editor/EditorMixerConsole.vue'
+import EditorPluginPanel from '@/components/editor/EditorPluginPanel.vue'
 import EditorStatusToasts from '@/components/editor/EditorStatusToasts.vue'
 import EditorTransportBar from '@/components/editor/EditorTransportBar.vue'
 import { useEditorAssetDrag } from '@/composables/useEditorAssetDrag'
 import { useEditorAssets } from '@/composables/useEditorAssets'
 import { useEditorExport } from '@/composables/useEditorExport'
-import { useEditorLayout } from '@/composables/useEditorLayout'
+import { TRACK_HEADER_DEFAULT_WIDTH, useEditorLayout } from '@/composables/useEditorLayout'
 import { useEditorMixerView } from '@/composables/useEditorMixerView'
+import { provideEditorInsertHost } from '@/composables/useEditorInsertHost'
 import { useEditorPlayback } from '@/composables/useEditorPlayback'
 import { useEditorProjectBridge } from '@/composables/useEditorProjectBridge'
 import { useEditorRecording } from '@/composables/useEditorRecording'
 import { useDiagnosticWindowState } from '@/features/diagnostics/windowState'
 import { adjacentClipEdge, timelineClipEdges } from '@/utils/editorClips'
-import type { EditorClipDrop, EditorMasterLimiter, EditorTimelineTool } from '@/types/editor'
+import type { EditorClipDrop, EditorMasterLimiter, EditorPanel, EditorTimelineTool } from '@/types/editor'
 import type { EditorClipCommand } from '@/utils/editorClipShortcuts'
 import { useEditorShortcuts } from '@/composables/useEditorShortcuts'
 
@@ -35,12 +38,15 @@ const message = useMessage()
 const dialog = useDialog()
 const { t, locale } = useI18n()
 const editor = useEditorStore()
+// The plugin manager stays mounted with the editor so inspector and mixer inserts share one host.
+const pluginPanel = ref<InstanceType<typeof EditorPluginPanel> | null>(null)
+provideEditorInsertHost(computed(() => pluginPanel.value?.insertHost ?? null))
 const task = useTaskStore()
 const settings = useSettingsStore()
 
-const MIXER_HEAD_WIDTH = 180
-const ASSET_RAIL_WIDTH = 34
-const INSPECTOR_RAIL_WIDTH = 34
+// Panels are toggled from the transport bar, so neither side keeps a launcher rail.
+const ASSET_RAIL_WIDTH = 0
+const INSPECTOR_RAIL_WIDTH = 0
 const ASSET_PANEL_WIDTH = 218
 const RESIZER_WIDTH = 10
 const hasTauriApis = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -53,6 +59,15 @@ const statusToasts = ref<InstanceType<typeof EditorStatusToasts> | null>(null)
 const session = computed(() => editor.session)
 const routeProjectId = computed(() => String(route.query.projectId || ''))
 const sessionName = computed(() => session.value?.name || t('editor.fallbackTitle'))
+// Track colors per source, so the asset list can show where each file is used.
+const sourceTrackColors = computed(() => {
+  const colors: Record<string, string[]> = {}
+  for (const track of session.value?.tracks || []) {
+    const sourceIds = new Set((track.clips || []).map(clip => clip.assetId))
+    for (const sourceId of sourceIds) (colors[sourceId] ||= []).push(track.color || 'var(--primary)')
+  }
+  return colors
+})
 const {
   activeResize,
   assetPanelVisible,
@@ -64,6 +79,12 @@ const {
   startResize,
   toggleAssetPanel,
   toggleInspectorPanel,
+  mixerPanelVisible,
+  toggleMixerPanel,
+  trackHeaderWidth,
+  setTrackHeaderWidth,
+  mixerPanelHeight,
+  setMixerPanelHeight,
 } = useEditorLayout({
   shellEl,
   assetRailWidth: ASSET_RAIL_WIDTH,
@@ -103,7 +124,7 @@ const {
   session,
   clearAssetPointerDrag,
 })
-const { isDraggingExternal, isDraggingExternalOnMixer, isImportingExternal } = useEditorProjectBridge({
+const { isDraggingExternal, isDraggingExternalOnMixer, isImportingExternal, importAudioFiles } = useEditorProjectBridge({
   routeProjectId,
   hasTauriApis,
   editor,
@@ -144,7 +165,7 @@ const {
   message,
   t,
 })
-const playback = useEditorPlayback({ editor, scrollEl: mixerScrollEl, trackHeaderWidth: MIXER_HEAD_WIDTH })
+const playback = useEditorPlayback({ editor, scrollEl: mixerScrollEl, trackHeaderWidth })
 const {
   transportVisualState,
   transportPendingAction,
@@ -220,7 +241,7 @@ const {
   handleMixerScrollReady,
 } = useEditorMixerView({
   editor,
-  trackHeaderWidth: MIXER_HEAD_WIDTH,
+  trackHeaderWidth,
   scrollEl: mixerScrollEl,
   playbackLoop,
 })
@@ -489,6 +510,48 @@ function openSelectedTrackInspector() {
   toggleInspectorPanel(true)
 }
 
+// The console keeps at least this much timeline above it.
+const MIN_TIMELINE_HEIGHT = 200
+let consoleResize: { startY: number; startHeight: number; maxHeight: number } | null = null
+
+function currentConsoleHeight(resizer: HTMLElement) {
+  return mixerPanelHeight.value ?? (resizer.nextElementSibling as HTMLElement | null)?.offsetHeight ?? 0
+}
+
+function beginConsoleResize(event: PointerEvent) {
+  if (event.button !== 0) return
+  event.preventDefault()
+  const resizer = event.currentTarget as HTMLElement
+  resizer.setPointerCapture(event.pointerId)
+  const centerHeight = resizer.parentElement?.clientHeight || 0
+  consoleResize = { startY: event.clientY, startHeight: currentConsoleHeight(resizer), maxHeight: Math.max(0, centerHeight - MIN_TIMELINE_HEIGHT) }
+}
+
+function updateConsoleResize(event: PointerEvent) {
+  if (!consoleResize) return
+  setMixerPanelHeight(Math.min(consoleResize.maxHeight, consoleResize.startHeight + consoleResize.startY - event.clientY))
+}
+
+function finishConsoleResize() {
+  consoleResize = null
+}
+
+function nudgeConsoleHeight(event: KeyboardEvent) {
+  const direction = event.key === 'ArrowUp' ? 1 : event.key === 'ArrowDown' ? -1 : 0
+  if (!direction) return
+  event.preventDefault()
+  event.stopPropagation()
+  const resizer = event.currentTarget as HTMLElement
+  const maxHeight = Math.max(0, (resizer.parentElement?.clientHeight || 0) - MIN_TIMELINE_HEIGHT)
+  setMixerPanelHeight(Math.min(maxHeight, currentConsoleHeight(resizer) + direction * 20))
+}
+
+function togglePanel(panel: EditorPanel) {
+  if (panel === 'assets') toggleAssetPanel()
+  else if (panel === 'inspector') toggleInspectorPanel()
+  else toggleMixerPanel()
+}
+
 function handleTransportToggleRequest() {
   void togglePlayback()
 }
@@ -539,8 +602,20 @@ function setClipFades(payload: {
   editor.setClipFades(payload.trackId, payload.clipId, payload.patch)
 }
 
+const inspectorFocus = ref<{ tab: 'track' | 'clip'; serial: number }>({ tab: 'track', serial: 0 })
+
+function focusInspector(tab: 'track' | 'clip') {
+  inspectorFocus.value = { tab, serial: inspectorFocus.value.serial + 1 }
+}
+
 function handleSelectClip(payload: { trackId: string; clipId: string }) {
   editor.selectClip(payload.trackId, payload.clipId)
+  focusInspector('clip')
+}
+
+function handleSelectTrack(trackId: string) {
+  editor.selectTrack(trackId, false)
+  focusInspector('track')
 }
 
 function handleClipTiming(payload: {
@@ -591,6 +666,7 @@ useEditorShortcuts({
   setTimelineTool,
   toggleSnapping,
   seekClipEdge,
+  togglePanel,
 })
 
 watch(() => editor.session?.id, () => {
@@ -648,6 +724,12 @@ watch(
         :recording-input-level="recordingInputLevel"
         :recording-elapsed="recordingElapsed"
         :recording-error="recordingError"
+        :timeline-tool="timelineTool"
+        :snapping-enabled="snappingEnabled"
+        :panels="{ assets: assetPanelVisible, mixer: mixerPanelVisible, inspector: inspectorPanelVisible }"
+        @set-tool="setTimelineTool"
+        @toggle-snapping="toggleSnapping"
+        @toggle-panel="togglePanel"
         @reset="resetPlayhead"
         @stop="stopPlaybackAndReset"
         @toggle-transport="handleTransportToggleRequest"
@@ -690,24 +772,11 @@ watch(
           class="editor-shell__assets"
           :class="{ 'editor-shell__assets--collapsed': !assetPanelVisible }"
         >
-          <div class="editor-shell__asset-rail">
-            <button
-              type="button"
-              class="editor-shell__asset-toggle"
-              :aria-pressed="assetPanelVisible"
-              :aria-label="assetPanelVisible ? t('common.collapse') : t('editor.assetLibrary')"
-              @click="toggleAssetPanel()"
-            >
-              <span class="editor-shell__asset-toggle-icon">
-                <span />
-              </span>
-              <em>{{ t('editor.assetLibrary') }}</em>
-            </button>
-          </div>
-
           <div ref="assetPanelEl" class="editor-shell__asset-panel" :inert="!assetPanelVisible" :aria-hidden="!assetPanelVisible">
             <EditorAssetPanel
               :sources="librarySources"
+              :track-colors="sourceTrackColors"
+              :importing="isImportingExternal"
               :tree="editor.assetTree"
               :external-dragging="isDraggingExternal"
               @source-add="addSourceAsReference"
@@ -715,6 +784,7 @@ watch(
               @source-reveal="revealSource"
               @source-relink="relinkSource"
               @source-remove="removeSource"
+              @import="importAudioFiles(false)"
             />
           </div>
         </aside>
@@ -740,13 +810,14 @@ watch(
             :track-levels="trackLevels"
             :clip-command-state="clipCommandState"
             :timeline-tool="timelineTool"
+            :header-width="trackHeaderWidth"
             :snapping-enabled="snappingEnabled"
             :editing-disabled="recordingBusy"
             :external-dragging="isDraggingExternalOnMixer"
             :external-importing="isImportingExternal"
             :recording-preview="recordingPreview"
             @scroll-ready="handleMixerScrollReady"
-            @select-track="(id) => editor.selectTrack(id, false)"
+            @select-track="handleSelectTrack"
             @select-clip="handleSelectClip"
             @begin-clip-edit="editor.beginInteraction"
             @update-clip-timing="handleClipTiming"
@@ -756,8 +827,11 @@ watch(
             @seek="seekTimeline"
             @remove-track="removeTrack"
             @clip-command="runClipCommand"
-            @set-tool="setTimelineTool"
-            @toggle-snapping="toggleSnapping"
+            @import-tracks="importAudioFiles(true)"
+            @resize-header="setTrackHeaderWidth"
+            @reset-header-width="setTrackHeaderWidth(TRACK_HEADER_DEFAULT_WIDTH)"
+            @rename-track="editor.renameTrack"
+            @add-recording-track="handleAddRecordingTrack"
             @split-at="splitAtPointer"
             @drop-clip="dropClip"
             @set-clip-locked="setClipLocked"
@@ -767,8 +841,45 @@ watch(
             @zoom-out="editor.zoomOut"
             @zoom-fit="zoomFit"
             @zoom-at="zoomAt"
+            @set-track-heights="editor.setTrackHeights"
+            @begin-track-resize="editor.beginInteraction"
+            @commit-track-resize="editor.commitInteraction()"
             @add-track-from-asset="addTrackFromAsset"
             @show-inspector="openSelectedTrackInspector"
+          />
+          <div
+            v-if="mixerPanelVisible"
+            class="editor-shell__console-resizer"
+            role="separator"
+            aria-orientation="horizontal"
+            tabindex="0"
+            :aria-label="t('editor.mixerPanelResize')"
+            :aria-valuenow="mixerPanelHeight ?? undefined"
+            :title="t('editor.panelResizeHint')"
+            @pointerdown="beginConsoleResize"
+            @pointermove="updateConsoleResize"
+            @pointerup="finishConsoleResize"
+            @lostpointercapture="finishConsoleResize"
+            @dblclick="setMixerPanelHeight(null)"
+            @keydown="nudgeConsoleHeight"
+          />
+          <EditorMixerConsole
+            v-if="mixerPanelVisible"
+            :height="mixerPanelHeight"
+            :tracks="session.tracks"
+            :master-volume="editor.masterVolume"
+            :master-pan="editor.masterPan"
+            :master-plugin-chain="session.pluginChain"
+            :selected-track-id="editor.selectedTrackId"
+            :disabled="recordingBusy"
+            @select-track="(id) => editor.selectTrack(id, false)"
+            @toggle-track-flag="toggleTrackFlag"
+            @set-track-volume="setTrackVolume"
+            @set-track-pan="setTrackPan"
+            @set-master-volume="setMasterVolume"
+            @set-master-pan="setMasterPan"
+            @begin-edit="editor.beginInteraction"
+            @commit-edit="editor.commitInteraction()"
           />
         </div>
 
@@ -785,16 +896,6 @@ watch(
           class="editor-shell__inspector"
           :class="{ 'editor-shell__inspector--collapsed': !inspectorPanelVisible }"
         >
-          <button
-            type="button"
-            class="editor-shell__inspector-toggle"
-            :aria-pressed="inspectorPanelVisible"
-            :aria-label="inspectorPanelVisible ? t('common.collapse') : t('editor.inspectorTitle')"
-            @click="toggleInspectorPanel()"
-          >
-            <n-icon :component="OptionsOutline" />
-            <em>{{ t('editor.inspectorTitle') }}</em>
-          </button>
           <div class="editor-shell__inspector-panel" :inert="!inspectorPanelVisible" :aria-hidden="!inspectorPanelVisible">
             <EditorInspectorPanel
               :session="session"
@@ -804,8 +905,8 @@ watch(
               :duration="displayedTimelineDuration"
               :last-export-path="editor.lastExport?.path || null"
               :compact="inspectorPanelWidth <= 248"
+              :focus-request="inspectorFocus"
               @select-track="editor.selectTrack"
-              @toggle-playback="togglePlayback"
               @set-master-volume="setMasterVolume"
               @set-master-pan="setMasterPan"
               @set-master-limiter="setMasterLimiter"
@@ -833,6 +934,13 @@ watch(
             />
           </div>
         </aside>
+        <EditorPluginPanel
+          ref="pluginPanel"
+          :session="session"
+          :selected-track-id="editor.selectedTrackId"
+          @select-target="editor.selectTrack"
+          @toggle-playback="togglePlayback"
+        />
       </template>
     </div>
     <div
@@ -930,7 +1038,7 @@ watch(
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: var(--asset-rail-width) minmax(0, var(--asset-panel-width));
+  grid-template-columns: minmax(0, var(--asset-panel-width));
   border-right: 1px solid var(--outline);
   background: color-mix(in srgb, var(--surface) 90%, var(--surface-1));
   transition: grid-template-columns 220ms ease, border-color 180ms ease;
@@ -945,81 +1053,6 @@ watch(
   pointer-events: none;
 }
 
-.editor-shell__asset-rail {
-  min-height: 0;
-  padding: 6px 4px;
-  border-right: 1px solid var(--outline);
-  background: color-mix(in srgb, var(--surface) 88%, var(--surface-1));
-}
-
-.editor-shell__asset-toggle {
-  width: 100%;
-  display: grid;
-  justify-items: center;
-  gap: 0;
-  padding: 4px 0;
-  border: 0;
-  border-radius: 8px;
-  color: var(--on-surface-muted);
-  background: transparent;
-  cursor: pointer;
-  transition: color 180ms ease, background 180ms ease;
-}
-
-.editor-shell__asset-toggle:hover {
-  color: var(--on-surface);
-  background: var(--surface-2);
-}
-
-.editor-shell__asset-toggle-icon {
-  width: 22px;
-  height: 22px;
-  display: grid;
-  place-items: center;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--surface-2) 92%, transparent);
-  border: 1px solid color-mix(in srgb, var(--outline) 54%, transparent);
-}
-
-.editor-shell__asset-toggle-icon span {
-  width: 12px;
-  height: 10px;
-  position: relative;
-  display: block;
-}
-
-.editor-shell__asset-toggle-icon span::before,
-.editor-shell__asset-toggle-icon span::after,
-.editor-shell__asset-toggle-icon span {
-  border-radius: 999px;
-  background: currentColor;
-}
-
-.editor-shell__asset-toggle-icon span::before,
-.editor-shell__asset-toggle-icon span::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  width: 12px;
-  height: 2px;
-}
-
-.editor-shell__asset-toggle-icon span {
-  height: 2px;
-}
-
-.editor-shell__asset-toggle-icon span::before {
-  top: -5px;
-}
-
-.editor-shell__asset-toggle-icon span::after {
-  top: 5px;
-}
-
-.editor-shell__asset-toggle em {
-  display: none;
-}
-
 .editor-shell__asset-panel {
   min-width: 0;
   min-height: 0;
@@ -1032,8 +1065,35 @@ watch(
   min-width: 0;
   min-height: 0;
   display: grid;
+  grid-template-rows: minmax(0, 1fr) auto auto;
   overflow: hidden;
   background: var(--surface-1);
+}
+
+.editor-shell__console-resizer {
+  position: relative;
+  z-index: 4;
+  height: 6px;
+  margin-block: -3px;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.editor-shell__console-resizer::after {
+  content: '';
+  position: absolute;
+  inset: 2px 0;
+  background: transparent;
+  transition: background 120ms ease;
+}
+
+.editor-shell__console-resizer:hover::after,
+.editor-shell__console-resizer:focus-visible::after {
+  background: var(--primary);
+}
+
+.editor-shell__console-resizer:focus-visible {
+  outline: none;
 }
 
 .editor-shell__inspector {
@@ -1052,39 +1112,6 @@ watch(
   border-left-color: color-mix(in srgb, var(--outline) 48%, transparent);
 }
 
-.editor-shell__inspector-toggle {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 2;
-  width: 26px;
-  height: 26px;
-  display: grid;
-  place-items: center;
-  gap: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  color: var(--on-surface-muted);
-  background: transparent;
-  cursor: pointer;
-  transition: color 180ms ease, background 180ms ease;
-}
-
-.editor-shell__inspector-toggle:hover {
-  color: var(--on-surface);
-  background: var(--surface-2);
-}
-
-.editor-shell__inspector-toggle:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--primary) 72%, transparent);
-  outline-offset: 2px;
-}
-
-.editor-shell__inspector-toggle em {
-  display: none;
-}
-
 .editor-shell__inspector-panel {
   position: relative;
   display: grid;
@@ -1092,15 +1119,6 @@ watch(
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-}
-
-.editor-shell__inspector:not(.editor-shell__inspector--collapsed) :deep(.editor-inspector__titlebar) {
-  padding-right: 44px;
-}
-
-.editor-shell__inspector--collapsed .editor-shell__inspector-toggle {
-  top: 6px;
-  right: 4px;
 }
 
 .editor-shell__inspector--collapsed .editor-shell__inspector-panel {
@@ -1144,8 +1162,8 @@ watch(
 .editor-shell__resizer--right span {
   width: 2px;
   height: 38px;
-  opacity: 0;
-  background: color-mix(in srgb, var(--on-surface-muted) 14%, transparent);
+  opacity: 1;
+  background: color-mix(in srgb, var(--on-surface-muted) 38%, transparent);
 }
 
 .editor-shell__resizer--right:hover {
@@ -1164,8 +1182,8 @@ watch(
 .editor-shell__resizer--left span {
   width: 2px;
   height: 38px;
-  opacity: 0;
-  background: color-mix(in srgb, var(--on-surface-muted) 14%, transparent);
+  opacity: 1;
+  background: color-mix(in srgb, var(--on-surface-muted) 38%, transparent);
 }
 
 .editor-shell__resizer--left:hover {

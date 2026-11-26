@@ -1,4 +1,4 @@
-import { onBeforeUnmount, type Ref, watch } from 'vue'
+import { onBeforeUnmount, toValue, type MaybeRefOrGetter, type Ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import i18n from '@/i18n'
@@ -17,7 +17,7 @@ type EditorStore = ReturnType<typeof useEditorStore>
 type PlaybackOptions = {
   editor: EditorStore
   scrollEl: Ref<HTMLElement | null>
-  trackHeaderWidth?: number
+  trackHeaderWidth?: MaybeRefOrGetter<number>
 }
 
 type ActiveClipEntry = {
@@ -64,7 +64,6 @@ function clamp(value: number, min: number, max: number) {
 
 export function useEditorPlayback(options: PlaybackOptions) {
   const { editor, scrollEl } = options
-  const trackHeaderWidth = options.trackHeaderWidth ?? 0
   // Desktop previews share the FFmpeg downmix and one output clock. Independent
   // media clocks require correction seeks that restart decoding while scrubbing.
   const useScheduledAudio = typeof window !== 'undefined' && /Mac|Win|Linux/i.test(window.navigator?.platform || '')
@@ -741,6 +740,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
     if (mode === 'playback' && intent.value !== 'play') return
     const el = scrollEl.value
     if (!el) return
+    const trackHeaderWidth = toValue(options.trackHeaderWidth ?? 0)
     const x = trackHeaderWidth + currentTime.value * editor.pixelsPerSecond
     const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth)
     // The timeline can grow while recording. Clamp to the rendered scroll

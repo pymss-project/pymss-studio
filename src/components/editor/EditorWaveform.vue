@@ -69,9 +69,8 @@ function drawTile(canvas: HTMLCanvasElement, tileIndex: number) {
   const endIdx = Math.min(total, Math.ceil(endRatio * total))
   const span = Math.max(1, endIdx - startIdx)
   const color = resolveColor()
-  const barWidth = 2
-  const gap = 1
-  const step = barWidth + gap
+  // One column per device pixel draws a continuous outline at the true amplitude.
+  const step = 1 / scaleX
 
   ctx.fillStyle = color
 
@@ -97,8 +96,8 @@ function drawTile(canvas: HTMLCanvasElement, tileIndex: number) {
         envelope = Math.min(envelope, (props.duration - tSec) / props.fadeOut)
       }
 
-      const barHeight = Math.max(1, peak * envelope * (height * 0.78))
-      ctx.fillRect(localX, mid - barHeight / 2, barWidth, barHeight)
+      const barHeight = Math.max(1 / ratio, Math.min(1, peak) * envelope * (height * 0.8))
+      ctx.fillRect(localX, mid - barHeight / 2, step, barHeight)
     }
   }
 
@@ -107,8 +106,8 @@ function drawTile(canvas: HTMLCanvasElement, tileIndex: number) {
     const channelHeight = Math.max(1, (totalHeight - laneGap) / 2)
     drawChannel(channels[0], 0, channelHeight)
     drawChannel(channels[1], channelHeight + laneGap, channelHeight)
-    ctx.fillStyle = 'rgba(255,255,255,0.18)'
-    ctx.fillRect(0, channelHeight + laneGap / 2, tileWidth, 1)
+    ctx.fillStyle = 'rgba(128,128,128,0.12)'
+    ctx.fillRect(0, channelHeight + laneGap / 2, tileWidth, 1 / ratio)
   } else {
     drawChannel(primaryPeaks, 0, totalHeight)
   }

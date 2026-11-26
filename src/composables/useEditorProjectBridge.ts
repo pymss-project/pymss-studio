@@ -1,4 +1,5 @@
 import { onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type { MessageApiInjection } from 'naive-ui/es/message/src/MessageProvider'
@@ -88,6 +89,19 @@ export function useEditorProjectBridge(options: UseEditorProjectBridgeOptions) {
     }
   }
 
+  /** Opens the audio file picker and imports the selection as assets or new tracks. */
+  async function importAudioFiles(addTracks: boolean) {
+    if (!hasTauriApis || !editor.session || editor.loading || isImportingExternal.value) return
+    let paths: string[]
+    try {
+      paths = await invoke<string[]>('pick_audio_files')
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : String(error))
+      return
+    }
+    await handleExternalDrop(paths, addTracks)
+  }
+
   onMounted(async () => {
     if (!hasTauriApis) return
 
@@ -145,6 +159,7 @@ export function useEditorProjectBridge(options: UseEditorProjectBridgeOptions) {
     isDraggingExternal,
     isDraggingExternalOnMixer,
     isImportingExternal,
+    importAudioFiles,
     loadProject,
   }
 }

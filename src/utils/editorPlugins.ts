@@ -183,7 +183,8 @@ export function applyPluginStates(project: EditorSession, states: Record<string,
 export function pluginProcessingProject(project: EditorSession): EditorSession {
   return {
     ...project,
-    tracks: project.tracks.map(({ effects: _effects, ...track }) => track),
+    // Row height is timeline layout only and must not reach the audio host.
+    tracks: project.tracks.map(({ effects: _effects, height: _height, ...track }) => track),
   }
 }
 
