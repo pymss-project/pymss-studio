@@ -112,6 +112,9 @@ async function navigateToStep() {
       } else document.querySelector<HTMLElement>(`.simple-node-editor__actions button[aria-label="${t('workflows.settingsAction')}"]`)?.click()
     }
     if (id === 'editorExport') document.querySelector<HTMLElement>('.transport-export')?.click()
+    // Open the panel the step describes; the shortcut attribute keeps the lookup locale independent.
+    const panelShortcut = id === 'editorMix' ? 'Ctrl+3' : id === 'editorConsole' ? 'Ctrl+2' : null
+    if (panelShortcut) document.querySelector<HTMLElement>(`.panel-toggle[aria-keyshortcuts="${panelShortcut}"][aria-pressed="false"]`)?.click()
     await nextTick()
   } catch (error) {
     if (!disposed) message.error(error instanceof Error ? error.message : String(error))

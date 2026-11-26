@@ -865,6 +865,7 @@ watch(
           />
           <EditorMixerConsole
             v-if="mixerPanelVisible"
+            data-guide="demo-editor-console"
             :height="mixerPanelHeight"
             :tracks="session.tracks"
             :master-volume="editor.masterVolume"

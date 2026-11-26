@@ -683,6 +683,8 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
 .inspector-channel__meter-bar > i { position: absolute; inset: 0 auto 0 0; background: linear-gradient(90deg, rgba(92, 214, 132, 0.9) 40%, rgba(255, 170, 102, 0.92) 76%, rgba(255, 106, 106, 0.95)); }
 .inspector-channel__peak { flex: none; min-width: 64px; color: var(--on-surface-muted); font-size: 11px; font-variant-numeric: tabular-nums; text-align: end; }
 .inspector-group--inserts { min-width: 0; }
+/* The insert list renders nothing while the plugin host is unavailable. */
+.inspector-group--inserts:empty { display: none; }
 
 .inspector-group--clip {
   background: color-mix(in srgb, var(--surface-2) 20%, var(--surface-1));

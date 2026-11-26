@@ -45,6 +45,7 @@ export const BEGINNER_GUIDE_STEPS: readonly BeginnerGuideStep[] = [
   { id: 'resultEditor', chapter: 'results', route: '/results', anchor: 'result-actions', fallback: 'results-empty', title: 'beginnerGuide.editorTitle', description: 'beginnerGuide.editorDescription' },
   { id: 'editorPlayback', chapter: 'results', route: '/results', anchor: 'demo-editor-transport', title: 'beginnerGuide.editorPlaybackTitle', description: 'beginnerGuide.editorPlaybackDescription' },
   { id: 'editorMix', chapter: 'results', route: '/results', anchor: 'demo-editor-mixer', title: 'beginnerGuide.editorMixTitle', description: 'beginnerGuide.editorMixDescription' },
+  { id: 'editorConsole', chapter: 'results', route: '/results', anchor: 'demo-editor-console', title: 'beginnerGuide.editorConsoleTitle', description: 'beginnerGuide.editorConsoleDescription' },
   { id: 'editorClips', chapter: 'results', route: '/results', anchor: 'demo-editor-clip', title: 'beginnerGuide.editorClipsTitle', description: 'beginnerGuide.editorClipsDescription' },
   { id: 'editorExport', chapter: 'results', route: '/results', anchor: 'demo-editor-export', title: 'beginnerGuide.editorExportTitle', description: 'beginnerGuide.editorExportDescription' },
   { id: 'ensemble', chapter: 'workflows', route: '/', anchor: 'model-mode', fallback: 'separation-modes', title: 'beginnerGuide.ensembleTitle', description: 'beginnerGuide.ensembleDescription' },
