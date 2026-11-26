@@ -1064,7 +1064,7 @@ const currentBatchTasks = computed(() => focusedBatchTasks.value.length ? focuse
 const currentBatchTotal = computed(() => currentBatchTasks.value.length)
 const currentBatchDoneCount = computed(() => currentBatchTasks.value.filter(item => item.status === 'done').length)
 const currentBatchFailedCount = computed(() => currentBatchTasks.value.filter(item => item.status === 'failed').length)
-const failedBatchTask = computed(() => currentBatchTasks.value.find(item => item.status === 'failed'))
+const failedBatchTasks = computed(() => currentBatchTasks.value.filter(item => item.status === 'failed'))
 const retryableBatchTasks = computed(() => failedTasksToRetry(currentBatchTasks.value, task.tasks))
 const retryingFailed = ref(false)
 const currentBatchCancelledCount = computed(() => currentBatchTasks.value.filter(item => item.status === 'cancelled').length)
@@ -2253,7 +2253,18 @@ function handleCompletedAction(key: string | number) {
 }
 
 async function rerunCurrentParameters() {
-  const item = taskPanelState.value === 'failed' ? failedBatchTask.value || currentTask.value : currentTask.value
+  if (taskPanelState.value === 'failed' && currentBatchIsMulti.value) {
+    const result = await task.rerunFailedTasksWithCurrentParameters(retryableBatchTasks.value.map(item => item.id))
+    if (result.tasks.length) {
+      focusedSeparationJobId.value = result.tasks[0]!.jobId || result.tasks[0]!.id
+      message.success(t('separate.batchStarted', { count: result.tasks.length }))
+    }
+    if (result.errors.length) message.error(t('taskRecovery.retryFailedCount', {
+      count: result.errors.length, detail: result.errors[0]!.message,
+    }))
+    return
+  }
+  const item = currentTask.value
   if (!item) return
   try {
     const next = await task.rerunTaskWithCurrentParameters(item.id)
@@ -2663,7 +2674,7 @@ async function retryFailedBatch() {
                 </n-button>
               </div>
               <div v-else-if="taskSubMessage(currentTask)" class="result-note">{{ taskSubMessage(currentTask) }}</div>
-              <TaskRecoveryActions v-if="failedBatchTask && taskPanelState === 'failed'" :task="failedBatchTask" @select-input="beginNextSeparation" />
+              <TaskRecoveryActions v-if="taskPanelState === 'failed'" :tasks="failedBatchTasks" @select-input="beginNextSeparation" />
               <section v-if="taskPanelState === 'done' && playableOutputs.length" class="result-preview-panel">
                 <div class="result-preview-panel__head">
                   <strong>{{ t('separate.previewTitle') }}</strong>
@@ -2728,7 +2739,8 @@ async function retryFailedBatch() {
                 <n-button secondary size="large" @click="beginNextSeparation">
                   {{ t('separate.newSeparation') }}
 </n-button>
-                <n-button v-if="currentTask?.runConfig?.runMode !== 'workflow'" secondary size="large" :title="t('parameterEditor.rerunCurrentHint')" @click="rerunCurrentParameters">{{ t('parameterEditor.rerunCurrent') }}</n-button>
+                <n-button v-if="currentTask?.runConfig?.runMode !== 'workflow'" secondary size="large" :title="t('parameterEditor.rerunCurrentHint')"
+                  :disabled="currentBatchIsMulti && !retryableBatchTasks.length" @click="rerunCurrentParameters">{{ t('parameterEditor.rerunCurrent') }}</n-button>
                 <n-button v-if="!currentBatchIsMulti" type="primary" size="large" class="stage-actions__primary" @click="retryCurrentTask">
                   <template #icon><n-icon :component="PlayOutline" /></template>
                   {{ t('common.retry') }}

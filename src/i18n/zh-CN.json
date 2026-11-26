@@ -3197,7 +3197,8 @@
     "preparing": "正在准备下载",
     "downloading": "正在下载模型",
     "paused": "下载已暂停或中断，可以继续下载。",
-    "download": "下载并使用"
+    "download": "下载并使用",
+    "resume": "继续下载"
   },
   "taskRecovery": {
     "runtimeHint": "检查或修复运行环境后，再回来重试。若要更换运行设备，请重新配置任务；普通重试沿用原任务配置。",

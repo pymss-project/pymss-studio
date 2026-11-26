@@ -34,6 +34,7 @@ const runtimeMissing = computed(() => app.runtimeInfo !== null && app.runtimeInf
 const progress = computed(() => Math.max(0, Math.min(100, Math.round(download.value?.progress || 0))))
 const downloadLabel = computed(() => download.value?.status === 'preparing'
   ? t('modelPreparation.preparing') : t('modelPreparation.downloading'))
+const resumable = computed(() => ['paused', 'interrupted'].includes(download.value?.status || ''))
 
 watch(options, items => {
   if (!busy.value && !items.some(item => item.value === selectedName.value)) selectedName.value = ''
@@ -45,6 +46,9 @@ watch(() => model.models.find(item => item.name === pendingName.value)?.download
   try { await model.selectModel(name) }
   catch (error) { message.error(error instanceof Error ? error.message : String(error)) }
 }, { flush: 'sync' })
+watch(() => model.downloadTasks[pendingName.value]?.status, status => {
+  if (status === 'error' || status === 'cancelled') pendingName.value = ''
+})
 
 async function prepareModel() {
   if (!selected.value || busy.value || runtimeMissing.value) return
@@ -84,8 +88,10 @@ async function pauseDownload() {
         <template #actions><n-button size="small" :disabled="submitting" @click="pauseDownload">{{ t('common.pause') }}</n-button></template>
       </ModelProgressBlock>
       <p v-else-if="download?.status === 'error'" role="alert">{{ model.downloadErrors[selectedName] || download.errorMessage }}</p>
-      <p v-else-if="download && ['paused', 'interrupted', 'cancelled'].includes(download.status)" role="status">{{ t('modelPreparation.paused') }}</p>
-      <n-button v-if="!runtimeMissing" type="primary" :disabled="!selected || busy" @click="prepareModel">{{ t('modelPreparation.download') }}</n-button>
+      <p v-else-if="resumable" role="status">{{ t('modelPreparation.paused') }}</p>
+      <n-button v-if="!runtimeMissing" type="primary" :disabled="!selected || busy" @click="prepareModel">
+        {{ resumable ? t('modelPreparation.resume') : t('modelPreparation.download') }}
+      </n-button>
     </template>
     <n-button quaternary @click="router.push('/models')">{{ t('separate.modelPanelPrimaryAction') }}</n-button>
   </section>

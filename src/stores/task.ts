@@ -2710,7 +2710,7 @@ export const useTaskStore = defineStore('task', () => {
     return { tasks: created, errors }
   }
 
-  async function rerunTaskWithCurrentParameters(taskId: string) {
+  async function rerunTaskWithCurrentParameters(taskId: string, group?: { jobId: string; batchIndex: number }) {
     const previous = tasks.value.find(item => item.id === taskId)
     if (!previous || previous.runConfig?.runMode === 'workflow') return
     const oldStems = [...(previous.runConfig?.selectedStems || [])]
@@ -2720,9 +2720,29 @@ export const useTaskStore = defineStore('task', () => {
     const entry = useModelStore().models.find(item => item.name === previous.model)
     const config = buildRunConfig(snapshot.parameters, entry?.modelType || previous.runConfig?.modelType, outputLayout, undefined, snapshot)
     config.selectedStems = oldStems
-    const created = createQueuedTask(previous.input, previous.model, snapshot.parameters, config.modelType, undefined, outputRoot, outputLayout, undefined, undefined, config, previous.audioTracks)
-    scheduleQueue()
+    const created = createQueuedTask(previous.input, previous.model, snapshot.parameters, config.modelType, group?.jobId, outputRoot, outputLayout, undefined, group?.batchIndex, config, previous.audioTracks)
+    created.retryOf = previous.id
+    if (!group) scheduleQueue()
     return created
+  }
+
+  async function rerunFailedTasksWithCurrentParameters(taskIds: string[]) {
+    const ids = new Set(taskIds)
+    const candidates = failedTasksToRetry(tasks.value.filter(task => ids.has(task.id)), tasks.value)
+      .filter(task => task.runConfig?.runMode !== 'workflow')
+    const group = { jobId: createRunId('job'), batchIndex: 0 }
+    const created: SeparationTask[] = []
+    const errors: { taskId: string; message: string }[] = []
+    for (const previous of sortJobTasks(candidates)) {
+      try {
+        const next = await rerunTaskWithCurrentParameters(previous.id, group)
+        if (next) { created.push(next); group.batchIndex++ }
+      } catch (error) {
+        errors.push({ taskId: previous.id, message: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    if (created.length) scheduleQueue()
+    return { tasks: created, errors }
   }
 
   return {
@@ -2838,6 +2858,7 @@ export const useTaskStore = defineStore('task', () => {
     retryTask,
     retryFailedTasks,
     rerunTaskWithCurrentParameters,
+    rerunFailedTasksWithCurrentParameters,
     scheduleQueue,
     applySelectedModelDefaults,
     saveCurrentModelState,

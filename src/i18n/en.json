@@ -3197,7 +3197,8 @@
     "preparing": "Preparing download",
     "downloading": "Downloading model",
     "paused": "The download was paused or interrupted. You can resume it.",
-    "download": "Download and use"
+    "download": "Download and use",
+    "resume": "Resume download"
   },
   "taskRecovery": {
     "runtimeHint": "Check or repair the runtime, then return to retry. To change the execution device, configure a new task; a normal retry keeps the original configuration.",
@@ -3207,7 +3208,7 @@
     "modelsHint": "Check and download any missing model files, then return to retry this task.",
     "modelsAction": "Open model library",
     "inputHint": "Check that the input file still exists and contains audio, or choose another file to submit.",
-    "inputAction": "Return to input settings",
+    "inputAction": "Back to input",
     "retryFailedItems": "Retry failed items ({count})",
     "retriedCount": "Queued {count} failed tasks for retry",
     "retryFailedCount": "Could not queue {count} tasks: {detail}"
