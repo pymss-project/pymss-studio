@@ -401,6 +401,26 @@ class RuntimeOverlayUpdateTests(unittest.TestCase):
     def test_macos_bundled_bootstrap_uses_a_user_overlay(self):
         self.check_bundled_platform_update("darwin", "mlx", bootstrap=True)
 
+    def test_application_replaced_bundled_base_does_not_block_core_update(self):
+        # An earlier application recorded the accelerators of the base it shipped.
+        stale = {"torch": "2.7.1", "mlx": "0.31.0", "mlx-metal": "0.31.0"}
+        result, _commands, *_ = self.run_update(
+            "mlx", platform="darwin", bundled=True, state_overrides={"resolvedAcceleratorPackages": stale},
+        )
+        self.assertEqual(result, 0)
+        active = json.loads(self.active.read_text(encoding="utf-8"))
+        self.assertEqual(active["resolvedAcceleratorPackages"], {"mlx": "0.32.0", "torch": "2.7.1"})
+
+    def test_managed_environment_with_changed_accelerators_is_rejected(self):
+        stale = {"torch": "2.7.1", "mlx": "0.31.0", "mlx-metal": "0.31.0"}
+        result, commands, _env, _python, events = self.run_update(
+            "mlx", platform="darwin", state_overrides={"resolvedAcceleratorPackages": stale},
+        )
+        self.assertNotEqual(result, 0)
+        self.assertEqual(commands, [])
+        errors = [event["payload"]["message"] for event in events if event["type"] == "error"]
+        self.assertTrue(any("Base accelerator packages changed: mlx, mlx-metal" in message for message in errors))
+
     def test_success_builds_overlay_without_torch_or_base_mutation(self):
         result, commands, _env, python, events = self.run_update("cuda")
         self.assertEqual(result, 0)

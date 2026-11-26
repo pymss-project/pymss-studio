@@ -660,6 +660,19 @@ class OptionalRuntimePackageTests(unittest.TestCase):
         self.assertEqual(runtime.profile_id, "win-rocm100-multiarch")
         self.assertEqual(dict(runtime.frozen_packages), frozen)
 
+    def test_bundled_base_snapshot_from_an_earlier_application_is_not_enforced(self):
+        executable = self.root / "Pymss Studio.app/Contents/Resources/python-runtime/bin/python3"
+        executable.parent.mkdir(parents=True)
+        executable.touch()
+        self.active_file.write_text(json.dumps({
+            "backend": "mlx", "pythonPath": str(executable), "source": "bundled",
+            "resolvedAcceleratorPackages": {"torch": "2.7.1", "mlx": "0.32.4", "mlx-metal": "0.32.4"},
+        }), encoding="utf-8")
+        with mock.patch.object(sys, "executable", str(executable)), \
+             mock.patch.object(optional_packages, "_runtime_state_for_executable", side_effect=self.read_runtime_state):
+            runtime = optional_packages._runtime_context()
+        self.assertEqual(runtime.frozen_packages, ())
+
     def test_custom_frozen_distribution_cannot_be_shadowed_by_a_component(self):
         frozen = {"custom-kernel": "1.2.0"}
         runtime = optional_packages.RuntimeContext(

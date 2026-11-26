@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -926,6 +926,32 @@ fn native_worker_failure(code: Option<i32>, fault: Option<i32>) -> Option<String
     None
 }
 
+/// A fatal signal is the only record of crashes that bypass Python's faulthandler,
+/// such as the SIGTRAP raised when a native library cannot initialize on this system.
+/// Termination requested by Studio (SIGKILL/SIGTERM) is not a crash.
+fn native_signal_failure(status: &ExitStatus) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        let signal = status.signal()?;
+        let reason = match signal {
+            libc::SIGTRAP => "Trace/breakpoint trap (SIGTRAP)",
+            libc::SIGABRT => "Abort (SIGABRT)",
+            libc::SIGSEGV => "Segmentation fault (SIGSEGV)",
+            libc::SIGBUS => "Bus error (SIGBUS)",
+            libc::SIGILL => "Illegal instruction (SIGILL)",
+            libc::SIGFPE => "Floating-point exception (SIGFPE)",
+            _ => return None,
+        };
+        Some(format!("{reason}, signal {signal}"))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        None
+    }
+}
+
 fn worker_stage(envelope: &WorkerEnvelope, fallback_task_id: &str) -> Option<(String, String)> {
     if !matches!(envelope.event_type.as_str(), "task_stage" | "runtime_gpu_probe_stage") { return None; }
     let stage = envelope.payload.get("stage")?.as_str()?;
@@ -1641,7 +1667,9 @@ fn execute_worker_with_payload(
     }
     if !status.success() {
         let fault = stderr_fault.load(Ordering::Acquire);
-        if let Some(message) = native_worker_failure(status.code(), (fault != 0).then_some(fault)) {
+        if let Some(message) = native_worker_failure(status.code(), (fault != 0).then_some(fault))
+            .or_else(|| native_signal_failure(&status))
+        {
             return Err(AppError::Worker(format!(
                 "WORKER_NATIVE_CRASH: {message}. Export diagnostics and check system application error events for the faulting module."
             )));
@@ -2083,7 +2111,9 @@ fn spawn_worker_background_inner(
             match exit_status {
                 Some(status) if !status.success() => {
                     let fault = stderr_fault.load(Ordering::Acquire);
-                    if let Some(message) = native_worker_failure(status.code(), (fault != 0).then_some(fault)) {
+                    if let Some(message) = native_worker_failure(status.code(), (fault != 0).then_some(fault))
+                        .or_else(|| native_signal_failure(&status))
+                    {
                         let mut details = serde_json::json!({ "exitStatus": status.to_string(), "exitCode": status.code() });
                         if let Some((stage_task_id, stage)) = &last_stage {
                             details["lastStage"] = stage.clone().into();
@@ -2151,6 +2181,19 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::path::Path;
+
+    #[cfg(unix)]
+    #[test]
+    fn crash_signals_are_reported_but_studio_terminations_are_not() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::ExitStatus;
+        let trap = super::native_signal_failure(&ExitStatus::from_raw(libc::SIGTRAP)).unwrap();
+        assert!(trap.contains("SIGTRAP") && trap.contains(&format!("signal {}", libc::SIGTRAP)));
+        assert!(super::native_signal_failure(&ExitStatus::from_raw(libc::SIGABRT)).unwrap().contains("SIGABRT"));
+        for raw in [libc::SIGKILL, libc::SIGTERM, 0, 1 << 8] {
+            assert!(super::native_signal_failure(&ExitStatus::from_raw(raw)).is_none());
+        }
+    }
 
     #[test]
     fn native_worker_exit_codes_preserve_status_without_guessing_the_driver() {

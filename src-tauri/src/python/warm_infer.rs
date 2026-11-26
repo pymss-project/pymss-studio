@@ -21,7 +21,8 @@ use super::{
     emit_batch_stderr, emit_task_error_details_to_all, emit_task_error_to_all,
     forward_python_terminal_log, is_background_terminal_event, is_rocm_offload_arch_diagnostic,
     log_worker_event_with_scope,
-    log_worker_parse_error, mark_task_terminal, native_fault_status, native_worker_failure,
+    log_worker_parse_error, mark_task_terminal, native_fault_status, native_signal_failure,
+    native_worker_failure,
     read_lossy_lines, registered_task_ids, runtime_idle_release_event, runtime_release_event,
     take_cancelled_tasks, terminate_worker, worker_error_message, BackgroundTask, BACKGROUND_TASKS,
     RUNTIME_ACCESS,
@@ -251,6 +252,7 @@ pub(super) fn spawn_background(
                 let fault = session.stderr_fault.load(Ordering::Acquire);
                 if let Some(message) =
                     native_worker_failure(exit_code, (fault != 0).then_some(fault))
+                        .or_else(|| status.as_ref().and_then(native_signal_failure))
                 {
                     emit_task_error_details_to_all(
                         &app,

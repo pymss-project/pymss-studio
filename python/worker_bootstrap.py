@@ -40,6 +40,7 @@ from worker_runtime_profiles import (
     assert_no_accelerator_overlay,
     backend_spec,
     is_base_accelerator_package,
+    recorded_accelerator_identity,
     resolve_profile_for_runtime,
     runtime_fingerprints,
     runtime_state_from_artifact_plan,
@@ -3408,7 +3409,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
     runtime_facts["torchVersion"] = torch_version
     frozen_accelerators = _probed_accelerator_versions({**base_probe, "torchVersion": torch_version})
     try:
-        recorded_accelerators = state.get("resolvedAcceleratorPackages")
+        recorded_accelerators = recorded_accelerator_identity(state)
         if recorded_accelerators:
             verify_accelerator_versions(recorded_accelerators, frozen_accelerators)
     except (ValueError, RuntimeError) as error:

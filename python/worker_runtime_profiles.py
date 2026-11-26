@@ -131,6 +131,18 @@ def accelerator_versions(versions: dict[str, Any], additional: Iterable[str] = (
     return dict(sorted(result.items()))
 
 
+def recorded_accelerator_identity(state: dict[str, Any]) -> dict[str, Any]:
+    """Return the frozen accelerator identity a runtime record may enforce.
+
+    A bundled base is replaced only together with the signed application, so a
+    snapshot written under an earlier application version cannot describe it.
+    Its live packages are authoritative; user-managed environments keep the record.
+    """
+    if str(state.get("source") or "").strip().lower() == "bundled":
+        return {}
+    return state.get("resolvedAcceleratorPackages") or {}
+
+
 def accelerator_constraints(versions: dict[str, str]) -> str:
     fixed = accelerator_versions(versions, versions)
     return "".join(f"{name}=={version}\n" for name, version in fixed.items())

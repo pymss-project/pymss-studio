@@ -178,7 +178,28 @@ if [[ "${#MANIFEST_BACKEND_EXTRAS[@]}" -gt 0 ]]; then
 fi
 runtime_python -m pip install --no-cache-dir --upgrade "$MANIFEST_PYMSS_REQUIREMENT" "$MANIFEST_PYMSS_CORE_REQUIREMENT"
 
+MACOS_BINARY_COMPAT="$(dirname "$0")/macos-binary-compat.py"
+if [[ "$OSTYPE" == darwin* ]]; then
+  # pip selects wheels for the build host. Reinstall any distribution whose binaries
+  # require a newer macOS than the release supports from the deployment-target wheel.
+  MACOS_INCOMPATIBLE=()
+  while IFS= read -r requirement; do
+    [[ -n "$requirement" ]] && MACOS_INCOMPATIBLE+=("$requirement")
+  done < <(runtime_python -s -B "$MACOS_BINARY_COMPAT" --distributions)
+  if [[ "${#MACOS_INCOMPATIBLE[@]}" -gt 0 ]]; then
+    MACOS_WHEELS="$(mktemp -d)"
+    runtime_python -m pip download --no-cache-dir --no-deps --only-binary=:all: \
+      --platform "$(runtime_python -s -B "$MACOS_BINARY_COMPAT" --platform-tag)" \
+      --dest "$MACOS_WHEELS" "${MACOS_INCOMPATIBLE[@]}"
+    runtime_python -m pip install --no-cache-dir --no-deps --force-reinstall "$MACOS_WHEELS"/*.whl
+    rm -rf "$MACOS_WHEELS"
+  fi
+fi
+
 bash "$(dirname "$0")/prune-python-runtime.sh" "$RUNTIME_DIR" --keep-venv
+if [[ "$OSTYPE" == darwin* ]]; then
+  runtime_python -s -B "$MACOS_BINARY_COMPAT" --check "$RUNTIME_DIR"
+fi
 runtime_python -m pip --version
 verify_bootstrap_runtime
 

@@ -32,6 +32,7 @@ from worker_runtime_profiles import (
     accelerator_versions,
     backend_spec,
     is_base_accelerator_package,
+    recorded_accelerator_identity,
     resolve_profile_for_runtime,
     runtime_fingerprints,
     verify_accelerator_versions,
@@ -157,7 +158,7 @@ def _runtime_context() -> RuntimeContext:
     if len(fingerprint) != 64 or any(value not in "0123456789abcdef" for value in fingerprint):
         fingerprint = ""
     profile_id = state.get("profileId") or None
-    recorded = state.get("resolvedAcceleratorPackages") or {}
+    recorded = recorded_accelerator_identity(state)
     frozen = accelerator_versions(recorded, recorded)
     if backend == "rocm" and not fingerprint:
         # Old component directories were only scoped by backend. Bind their
