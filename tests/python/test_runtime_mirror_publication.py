@@ -49,9 +49,12 @@ class RuntimeMirrorPublicationTests(unittest.TestCase):
 
     def test_both_mirrors_publish_before_the_release_and_after_tag_verification(self):
         verify = self.steps.index(self.step("Verify release tag commit"))
-        hf = self.steps.index(self.step("Upload release files to HuggingFace dataset"))
-        ms = self.steps.index(self.step("Upload release files to ModelScope dataset"))
+        hf = self.steps.index(self.step("Upload release files to HuggingFace"))
+        ms = self.steps.index(self.step("Upload release files to ModelScope"))
+        legacy = self.steps.index(self.step("Upload update files to the legacy ModelScope dataset"))
         publication = next(index for index, step in enumerate(self.steps) if step.get("id") == "publish_release")
+        self.assertLess(ms, legacy)
+        self.assertLess(legacy, publication)
         check = self.steps.index(self.step("Verify both runtime mirrors before publication"))
         self.assertLess(verify, hf)
         self.assertLess(verify, ms)
@@ -70,14 +73,18 @@ class RuntimeMirrorPublicationTests(unittest.TestCase):
         self.assertEqual(guard["if"], "steps.plan.outputs.publish == 'true'")
         self.assertEqual(guard["env"]["HF_TOKEN"], "${{ secrets.HF_TOKEN }}")
         self.assertEqual(guard["env"]["MODELSCOPE_API_TOKEN"], "${{ secrets.MODELSCOPE_API_TOKEN }}")
+        self.assertEqual(guard["env"]["MODELSCOPE_LEGACY_TOKEN"], "${{ secrets.MODELSCOPE_LEGACY_TOKEN }}")
         with tempfile.TemporaryDirectory() as directory:
-            for hf, ms, expected in (("", "", False), ("private-hf", "", False),
-                                     ("", "private-ms", False), ("private-hf", "private-ms", True)):
-                with self.subTest(hf=bool(hf), ms=bool(ms)):
-                    result = self.run_bash(guard["run"], directory, HF_TOKEN=hf, MODELSCOPE_API_TOKEN=ms)
+            for hf, ms, legacy, expected in (("", "", "", False), ("private-hf", "", "private-old", False),
+                                             ("", "private-ms", "private-old", False),
+                                             ("private-hf", "private-ms", "", False),
+                                             ("private-hf", "private-ms", "private-old", True)):
+                with self.subTest(hf=bool(hf), ms=bool(ms), legacy=bool(legacy)):
+                    result = self.run_bash(guard["run"], directory, HF_TOKEN=hf, MODELSCOPE_API_TOKEN=ms,
+                                           MODELSCOPE_LEGACY_TOKEN=legacy)
                     self.assertEqual(result.returncode == 0, expected, result.stderr)
-                    self.assertNotIn("private-hf", result.stdout + result.stderr)
-                    self.assertNotIn("private-ms", result.stdout + result.stderr)
+                    for secret in ("private-hf", "private-ms", "private-old"):
+                        self.assertNotIn(secret, result.stdout + result.stderr)
 
     def test_mirror_staging_includes_wheels_without_adding_them_to_github_files(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -91,6 +98,31 @@ class RuntimeMirrorPublicationTests(unittest.TestCase):
             self.assertEqual((root / "pms/1.2.3/studio setup.exe").read_bytes(), b"installer")
             self.assertFalse((root / "pms/1.2.3/runtime.whl").exists())
             self.assertEqual([path.name for path in (root / "artifacts").iterdir()], ["studio setup.exe"])
+
+    def test_update_metadata_is_staged_at_a_fixed_path_and_uploaded_after_release_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "artifacts").mkdir()
+            (root / "artifacts/stable-v2-windows-x64-update.json").write_bytes(b"metadata")
+            (root / "artifacts/Pymss-Studio-1.2.3-windows-x64-update.zip").write_bytes(b"archive")
+            result = self.run_bash(self.step("Stage artifacts for mirror uploads")["run"], root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((root / "pms/updater/stable-v2-windows-x64-update.json").read_bytes(), b"metadata")
+            self.assertEqual([path.name for path in (root / "pms/updater").iterdir()], ["stable-v2-windows-x64-update.json"])
+        for provider in ("HuggingFace", "ModelScope"):
+            commands = [line.strip() for line in self.step(f"Upload release files to {provider}")["run"].splitlines()
+                        if "pymss-project/pymss-studio-releases" in line]
+            self.assertEqual(len(commands), 2)
+            self.assertIn('"pms/${RELEASE_VERSION}" "${RELEASE_VERSION}"', commands[0])
+            self.assertTrue(commands[1].endswith("pms/updater updater"))
+
+    def test_legacy_modelscope_dataset_receives_only_update_files(self):
+        run = self.step("Upload update files to the legacy ModelScope dataset")["run"]
+        self.assertIn("--repo-type dataset huanlinoto/Pymss-Studio-Dist", run)
+        step = self.step("Upload update files to the legacy ModelScope dataset")
+        self.assertEqual(step["env"]["MODELSCOPE_API_TOKEN"], "${{ secrets.MODELSCOPE_LEGACY_TOKEN }}")
+        self.assertIn("--include", run)
+        self.assertNotIn("updater", run)
 
     def test_runtime_locks_are_versioned_separately_from_app_assets(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -125,5 +157,5 @@ class RuntimeMirrorPublicationTests(unittest.TestCase):
         roots = [line for line in resolver.splitlines() if "'--base-url'" in line]
         self.assertEqual(len(roots), 2)
         for line in roots:
-            self.assertIn("https://www.modelscope.cn/datasets/huanlinoto/Pymss-Studio-Dist/resolve/master/wheels", line)
+            self.assertIn("https://www.modelscope.cn/models/pymss-project/pymss-studio-releases/resolve/master/wheels", line)
             self.assertNotIn("github.com", line)

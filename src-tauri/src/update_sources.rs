@@ -1,18 +1,14 @@
-use crate::error::{AppError, AppResult};
+use crate::error::AppError;
 use reqwest::Client;
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use url::Url;
 
-const MODELSCOPE_TREE: &str =
-    "https://www.modelscope.cn/api/v1/datasets/huanlinoto/Pymss-Studio-Dist/repo/tree";
+const MODELSCOPE_REPOSITORY: &str =
+    "https://www.modelscope.cn/models/pymss-project/pymss-studio-releases";
 const MODELSCOPE_ROOT: &str =
-    "https://www.modelscope.cn/datasets/huanlinoto/Pymss-Studio-Dist/resolve/master";
+    "https://www.modelscope.cn/models/pymss-project/pymss-studio-releases/resolve/master";
 const GITHUB_ROOT: &str = "https://github.com/pymss-project/pymss-studio/releases/download";
-const CATALOG_PAGE_SIZE: usize = 200;
-const MAX_CATALOG_PAGES: usize = 20;
-const MAX_CATALOG_PAGE_BYTES: usize = 1024 * 1024;
 
 pub fn platform_slug() -> &'static str {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
@@ -29,7 +25,7 @@ pub fn metadata_name(channel: &str, generation: &str) -> String {
 }
 
 #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
-pub fn repair_manifest_endpoints(version: &str, filename: &str, provider: UpdateProvider) -> AppResult<Vec<Url>> {
+pub fn repair_manifest_endpoints(version: &str, filename: &str, provider: UpdateProvider) -> crate::error::AppResult<Vec<Url>> {
     Version::parse(version)
         .map_err(|error| AppError::Worker(format!("Invalid repair version: {error}")))?;
     match provider {
@@ -70,11 +66,6 @@ impl UpdateSource {
     }
 }
 
-pub struct MirrorManifest {
-    pub endpoint: Url,
-    pub version: String,
-}
-
 pub fn http_client_builder() -> reqwest::ClientBuilder {
     // ModelScope discovery can run before the updater plugin initializes TLS.
     if rustls::crypto::CryptoProvider::get_default().is_none() {
@@ -94,119 +85,12 @@ pub(crate) fn metadata_request_error(error: reqwest::Error) -> AppError {
     AppError::Worker(format!("{code}: {}", error.without_url()))
 }
 
-pub async fn modelscope_manifest(
-    client: &Client,
-    filename: &str,
-) -> AppResult<MirrorManifest> {
-    modelscope_manifest_at(client, &Url::parse(MODELSCOPE_TREE).unwrap(), filename).await
-}
-
-async fn modelscope_manifest_at(
-    client: &Client,
-    tree: &Url,
-    filename: &str,
-) -> AppResult<MirrorManifest> {
-    let mut paths = HashSet::new();
-    let mut received = 0;
-    for page in 1..=MAX_CATALOG_PAGES {
-        let mut endpoint = tree.clone();
-        endpoint.query_pairs_mut().extend_pairs([
-            ("Revision", "master".to_string()),
-            ("Recursive", "True".to_string()),
-            ("Root", "/".to_string()),
-            ("PageNumber", page.to_string()),
-            ("PageSize", CATALOG_PAGE_SIZE.to_string()),
-        ]);
-        let mut response = client
-            .get(endpoint)
-            .send()
-            .await
-            .map_err(metadata_request_error)?
-            .error_for_status()
-            .map_err(metadata_request_error)?;
-        let mut body = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(metadata_request_error)?
-        {
-            if body.len().saturating_add(chunk.len()) > MAX_CATALOG_PAGE_BYTES {
-                return Err(AppError::Worker(
-                    "ModelScope update catalog exceeds the size limit".into(),
-                ));
-            }
-            body.extend_from_slice(&chunk);
-        }
-        let data: serde_json::Value = serde_json::from_slice(&body)?;
-        if data.get("Code").and_then(|value| value.as_u64()) != Some(200) {
-            return Err(AppError::Worker(
-                "ModelScope returned an invalid update catalog".into(),
-            ));
-        }
-        let files = data
-            .pointer("/Data/Files")
-            .and_then(|value| value.as_array())
-            .ok_or_else(|| {
-                AppError::Worker("ModelScope returned an invalid update file list".into())
-            })?;
-        received += files.len();
-        for file in files {
-            if file.get("Type").and_then(|value| value.as_str()) == Some("blob") {
-                if let Some(path) = file.get("Path").and_then(|value| value.as_str()) {
-                    paths.insert(path.to_string());
-                }
-            }
-        }
-        let total = data
-            .pointer("/Data/TotalCount")
-            .and_then(|value| value.as_u64());
-        if total.map_or(files.len() < CATALOG_PAGE_SIZE, |total| {
-            received as u64 >= total
-        }) {
-            return latest_mirror_manifest(&paths, filename).ok_or_else(|| {
-                AppError::Worker(format!(
-                    "UPDATE_METADATA_UNAVAILABLE: ModelScope has no complete update release for {filename}"
-                ))
-            });
-        }
-        if files.is_empty() {
-            return Err(AppError::Worker(
-                "ModelScope update catalog pagination is incomplete".into(),
-            ));
-        }
-    }
-    Err(AppError::Worker(
-        "ModelScope update catalog exceeds the supported page limit".into(),
-    ))
-}
-
-fn latest_mirror_manifest(paths: &HashSet<String>, filename: &str) -> Option<MirrorManifest> {
-    paths
-        .iter()
-        .filter_map(|path| {
-            let (folder, file) = path.split_once('/')?;
-            if file != filename {
-                return None;
-            }
-            let version = Version::parse(folder).ok()?;
-            // A partially uploaded release must not advertise an unavailable update archive.
-            let archive = if filename.ends_with("-macos-arm64-update.json") {
-                archive_name_for(folder, "macos-arm64")
-            } else if filename.ends_with("-linux-x64-update.json") {
-                archive_name_for(folder, "linux-x64")
-            } else {
-                archive_name_for(folder, "windows-x64")
-            };
-            if !paths.contains(&format!("{folder}/{archive}")) {
-                return None;
-            }
-            Some((version, folder))
-        })
-        .max_by(|left, right| left.0.cmp(&right.0))
-        .map(|(_, folder)| MirrorManifest {
-            endpoint: mirror_url(folder, filename),
-            version: folder.to_string(),
-        })
+/// ModelScope mirrors the GitHub `updater` release under a fixed directory. CI
+/// uploads it after the release directory, so it never names a missing archive.
+pub fn modelscope_metadata_url(filename: &str) -> Url {
+    let mut url = Url::parse(MODELSCOPE_ROOT).unwrap();
+    url.path_segments_mut().unwrap().push("updater").push(filename);
+    url
 }
 
 pub fn archive_name(version: &str) -> String {
@@ -234,10 +118,8 @@ fn mirror_url(version: &str, filename: &str) -> Url {
 
 pub fn release_page(version: &str) -> Option<String> {
     Version::parse(version).ok()?;
-    let mut url =
-        Url::parse("https://www.modelscope.cn/datasets/huanlinoto/Pymss-Studio-Dist/tree/master")
-            .ok()?;
-    url.path_segments_mut().ok()?.push(version);
+    let mut url = Url::parse(MODELSCOPE_REPOSITORY).ok()?;
+    url.path_segments_mut().ok()?.extend(["tree", "master", version]);
     Some(url.to_string())
 }
 
@@ -264,10 +146,6 @@ fn archive_url_for(original: &Url, version: &str, provider: UpdateProvider, plat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::thread;
-    use std::time::{Duration, Instant};
 
     #[test]
     fn repair_metadata_is_pinned_to_the_official_installed_release() {
@@ -282,14 +160,20 @@ mod tests {
     }
 
     #[test]
-    fn macos_update_sources_require_the_matching_archive_and_architecture() {
-        let files = paths(&[
-            "1.0.0/stable-v1-macos-arm64-update.json",
-            "1.0.0/Pymss-Studio-1.0.0-macos-arm64-update.app.tar.gz",
-            "2.0.0/stable-v1-macos-arm64-update.json",
-            "2.0.0/Pymss-Studio-2.0.0-windows-x64-update.zip",
-        ]);
-        assert_eq!(latest_mirror_manifest(&files, "stable-v1-macos-arm64-update.json").unwrap().version, "1.0.0");
+    fn modelscope_metadata_and_release_pages_use_the_release_repository() {
+        assert_eq!(
+            modelscope_metadata_url("stable-v2-windows-x64-update.json").as_str(),
+            "https://www.modelscope.cn/models/pymss-project/pymss-studio-releases/resolve/master/updater/stable-v2-windows-x64-update.json"
+        );
+        assert_eq!(
+            release_page("1.2.3-rc.1").unwrap(),
+            "https://www.modelscope.cn/models/pymss-project/pymss-studio-releases/tree/master/1.2.3-rc.1"
+        );
+        assert!(release_page("../updater").is_none());
+    }
+
+    #[test]
+    fn macos_update_archives_require_the_matching_architecture() {
         let github = Url::parse("https://github.com/pymss-project/pymss-studio/releases/download/v1.0.0/Pymss-Studio-1.0.0-macos-arm64-update.app.tar.gz").unwrap();
         let mirror = archive_url_for(&github, "1.0.0", UpdateProvider::Modelscope, "macos-arm64").unwrap();
         assert!(mirror.path().ends_with("/1.0.0/Pymss-Studio-1.0.0-macos-arm64-update.app.tar.gz"));
@@ -297,64 +181,11 @@ mod tests {
         assert!(archive_url_for(&github, "2.0.0", UpdateProvider::Github, "macos-arm64").is_none());
     }
 
-    fn paths(values: &[&str]) -> HashSet<String> {
-        values.iter().map(|value| value.to_string()).collect()
-    }
-
     #[test]
-    fn linux_update_sources_require_an_appimage_instead_of_a_windows_archive() {
-        let files = paths(&[
-            "1.0.0/stable-v1-linux-x64-update.json",
-            "1.0.0/Pymss-Studio-1.0.0-linux-x64.AppImage",
-            "2.0.0/stable-v1-linux-x64-update.json",
-            "2.0.0/Pymss-Studio-2.0.0-windows-x64-update.zip",
-        ]);
-        assert_eq!(latest_mirror_manifest(&files, "stable-v1-linux-x64-update.json").unwrap().version, "1.0.0");
+    fn linux_update_archives_are_appimages_instead_of_windows_archives() {
         let github = Url::parse("https://github.com/pymss-project/pymss-studio/releases/download/v1.0.0/Pymss-Studio-1.0.0-linux-x64.AppImage").unwrap();
         assert!(archive_url_for(&github, "1.0.0", UpdateProvider::Modelscope, "linux-x64").is_some());
         assert!(archive_url_for(&github, "1.0.0", UpdateProvider::Github, "windows-x64").is_none());
-    }
-
-    #[test]
-    fn discovery_respects_channel_versions_and_complete_uploads() {
-        let files = paths(&[
-            "0.0.19/stable-v1-windows-x64-update.json",
-            "0.0.19/Pymss-Studio-0.0.19-windows-x64-update.zip",
-            "0.0.20/prerelease-v1-windows-x64-update.json",
-            "0.0.20/Pymss-Studio-0.0.20-windows-x64-update.zip",
-            "0.0.21/stable-v1-windows-x64-update.json",
-            "../stable-v1-windows-x64-update.json",
-        ]);
-        assert_eq!(
-            latest_mirror_manifest(&files, "stable-v1-windows-x64-update.json")
-                .unwrap()
-                .version,
-            "0.0.19"
-        );
-        let latest =
-            latest_mirror_manifest(&files, "prerelease-v1-windows-x64-update.json").unwrap();
-        assert_eq!(latest.version, "0.0.20");
-        assert!(latest
-            .endpoint
-            .as_str()
-            .contains("/resolve/master/0.0.20/prerelease-"));
-        assert!(latest_mirror_manifest(&files, "unknown.json").is_none());
-    }
-
-    #[test]
-    fn discovery_supports_semver_prereleases_and_build_metadata() {
-        let files = paths(&[
-            "1.0.0-rc.1/prerelease.json",
-            "1.0.0-rc.1/Pymss-Studio-1.0.0-rc.1-windows-x64-update.zip",
-            "1.0.0+build.2/prerelease.json",
-            "1.0.0+build.2/Pymss-Studio-1.0.0+build.2-windows-x64-update.zip",
-        ]);
-        assert_eq!(
-            latest_mirror_manifest(&files, "prerelease.json")
-                .unwrap()
-                .version,
-            "1.0.0+build.2"
-        );
     }
 
     #[test]
@@ -390,164 +221,5 @@ mod tests {
             &[UpdateProvider::Modelscope]
         );
         assert_eq!(UpdateSource::Auto.providers().len(), 2);
-    }
-
-    fn catalog_server(responses: Vec<String>) -> (Url, thread::JoinHandle<Vec<String>>) {
-        catalog_server_with_status(responses, "200 OK")
-    }
-
-    fn catalog_server_with_status(responses: Vec<String>, status: &'static str) -> (Url, thread::JoinHandle<Vec<String>>) {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let endpoint =
-            Url::parse(&format!("http://{}/tree", listener.local_addr().unwrap())).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let server = thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let mut requests = Vec::new();
-            for body in responses {
-                let (mut stream, _) = loop {
-                    match listener.accept() {
-                        Ok(connection) => break connection,
-                        Err(error)
-                            if error.kind() == std::io::ErrorKind::WouldBlock
-                                && Instant::now() < deadline =>
-                        {
-                            thread::sleep(Duration::from_millis(5))
-                        }
-                        Err(error) => panic!("Catalog fixture failed: {error}"),
-                    }
-                };
-                stream.set_nonblocking(false).unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(2)))
-                    .unwrap();
-                let mut request = vec![0; 8192];
-                let size = stream.read(&mut request).unwrap();
-                requests.push(String::from_utf8_lossy(&request[..size]).to_string());
-                write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
-            }
-            requests
-        });
-        (endpoint, server)
-    }
-
-    #[test]
-    fn catalog_fetch_uses_documented_parameters_and_follows_pagination() {
-        let (endpoint, server) = catalog_server(vec![
-            serde_json::json!({"Code": 200, "Data": {"TotalCount": 3, "Files": [
-                {"Type":"blob", "Path":"0.0.20/prerelease.json"},
-            ]}})
-            .to_string(),
-            serde_json::json!({"Code": 200, "Data": {"TotalCount": 3, "Files": [
-                {"Type":"blob", "Path":"0.0.20/Pymss-Studio-0.0.20-windows-x64-update.zip"},
-                {"Type":"blob", "Path":"0.0.21/prerelease.json"},
-            ]}})
-            .to_string(),
-        ]);
-        let selected = tauri::async_runtime::block_on(async {
-            let client = http_client_builder()
-                .no_proxy()
-                .timeout(Duration::from_secs(2))
-                .build()
-                .unwrap();
-            modelscope_manifest_at(&client, &endpoint, "prerelease.json")
-                .await
-                .unwrap()
-        });
-        assert_eq!(selected.version, "0.0.20");
-        let requests = server.join().unwrap();
-        assert_eq!(requests.len(), 2);
-        assert!(requests[0].contains("Revision=master"));
-        assert!(requests[0].contains("Recursive=True"));
-        assert!(requests[0].contains("PageNumber=1"));
-        assert!(requests[1].contains("PageNumber=2"));
-    }
-
-    #[test]
-    fn metadata_http_failures_keep_status_without_recording_endpoint_secrets() {
-        let (mut endpoint, server) = catalog_server_with_status(vec!["{}".into()], "404 Not Found");
-        endpoint.set_query(Some("token=private-endpoint-token"));
-        let error = tauri::async_runtime::block_on(async {
-            let client = http_client_builder().no_proxy().timeout(Duration::from_secs(2)).build().unwrap();
-            modelscope_manifest_at(&client, &endpoint, "stable.json").await.err().expect("404 must fail")
-        });
-        server.join().unwrap();
-        let message = error.to_string();
-        assert!(message.contains("UPDATE_HTTP_NOT_FOUND"));
-        assert!(message.contains("404"));
-        assert!(!message.contains("private-endpoint-token"));
-        assert!(!message.contains("127.0.0.1"));
-    }
-
-    #[test]
-    fn catalog_missing_channel_is_unavailable() {
-        for files in [
-            serde_json::json!([]),
-            serde_json::json!([
-                {"Type":"blob", "Path":"0.0.20/prerelease-v1-windows-x64-update.json"},
-                {"Type":"blob", "Path":"0.0.20/Pymss-Studio-0.0.20-windows-x64-update.zip"},
-            ]),
-            serde_json::json!([
-                {"Type":"blob", "Path":"0.0.21/stable-v1-windows-x64-update.json"},
-            ]),
-        ] {
-            let (endpoint, server) = catalog_server(vec![serde_json::json!({
-                "Code": 200, "Data": {"TotalCount": files.as_array().unwrap().len(), "Files": files},
-            }).to_string()]);
-            let result = tauri::async_runtime::block_on(async {
-                let client = http_client_builder()
-                    .no_proxy()
-                    .timeout(Duration::from_secs(2))
-                    .build()
-                    .unwrap();
-                modelscope_manifest_at(&client, &endpoint, "stable-v1-windows-x64-update.json").await
-            });
-            server.join().unwrap();
-            let error = result.err().expect("Missing channel metadata must not complete the update check");
-            assert!(error.to_string().contains("UPDATE_METADATA_UNAVAILABLE"));
-        }
-    }
-
-    #[test]
-    fn catalog_errors_do_not_turn_into_a_successful_no_update_result() {
-        for body in [
-            r#"{"Code":500,"Data":{}}"#,
-            r#"{"Code":200,"Data":{"TotalCount":1,"Files":[]}}"#,
-            "<html>Unavailable</html>",
-        ] {
-            let (endpoint, server) = catalog_server(vec![body.to_string()]);
-            let failed = tauri::async_runtime::block_on(async {
-                let client = http_client_builder()
-                    .no_proxy()
-                    .timeout(Duration::from_secs(2))
-                    .build()
-                    .unwrap();
-                modelscope_manifest_at(&client, &endpoint, "stable.json")
-                    .await
-                    .is_err()
-            });
-            server.join().unwrap();
-            assert!(failed, "Invalid catalog was accepted: {body}");
-        }
-    }
-
-    #[test]
-    #[ignore = "Read-only check against the public ModelScope update catalog"]
-    fn live_modelscope_update_catalog() {
-        let manifest = tauri::async_runtime::block_on(async {
-            let client = http_client_builder()
-                .user_agent("Pymss-Studio-Updater")
-                .timeout(Duration::from_secs(10))
-                .build()
-                .unwrap();
-            modelscope_manifest(&client, "prerelease-v1-windows-x64-update.json")
-                .await
-                .unwrap()
-        });
-        println!(
-            "ModelScope prerelease: {} ({})",
-            manifest.version, manifest.endpoint
-        );
-        assert!(Version::parse(&manifest.version).is_ok());
     }
 }

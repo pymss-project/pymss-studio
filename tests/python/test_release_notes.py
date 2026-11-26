@@ -30,8 +30,8 @@ class ReleaseNotesTests(unittest.TestCase):
         (self.artifacts / name).write_bytes(b"a" * 1024)
         with mock.patch.object(NOTES, "GITHUB_ASSET_LIMIT", 1024):
             rendered = NOTES.render_release_notes(self.artifacts, self.notes, "v1.2.3")
-        self.assertIn("https://huggingface.co/datasets/HuanLin/Pymss-Studio-Dist/resolve/main/1.2.3/" + name, rendered)
-        self.assertIn("https://www.modelscope.cn/datasets/huanlinoto/Pymss-Studio-Dist/resolve/master/1.2.3/" + name, rendered)
+        self.assertIn("https://huggingface.co/pymss-project/pymss-studio-releases/resolve/main/1.2.3/" + name, rendered)
+        self.assertIn("https://www.modelscope.cn/models/pymss-project/pymss-studio-releases/resolve/master/1.2.3/" + name, rendered)
         self.assertNotIn("releases/download/v1.2.3/" + name, rendered)
         self.assertIn("No split downloads", rendered)
 

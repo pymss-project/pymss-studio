@@ -79,8 +79,8 @@ def previous_checksums(version: str, repository: str) -> tuple[dict[str, str], l
     folder = quote(version, safe="")
     public = fetch_checksums(f"https://github.com/{repository}/releases/download/v{folder}/SHA256SUMS", "GitHub")
     mirrors = [
-        fetch_checksums(f"https://huggingface.co/datasets/HuanLin/Pymss-Studio-Dist/resolve/main/{folder}/SHA256SUMS", "Hugging Face"),
-        fetch_checksums(f"https://www.modelscope.cn/datasets/huanlinoto/Pymss-Studio-Dist/resolve/master/{folder}/SHA256SUMS", "ModelScope"),
+        fetch_checksums(f"https://huggingface.co/pymss-project/pymss-studio-releases/resolve/main/{folder}/SHA256SUMS", "Hugging Face"),
+        fetch_checksums(f"https://www.modelscope.cn/models/pymss-project/pymss-studio-releases/resolve/master/{folder}/SHA256SUMS", "ModelScope"),
     ]
     return public, mirrors
 

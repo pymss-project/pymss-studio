@@ -556,14 +556,12 @@ async fn check_sources(
         let github = endpoint.clone();
         requests.push(tauri::async_runtime::spawn(async move {
             let started = Instant::now();
-            let checked = async { Ok::<_, AppError>(if provider == UpdateProvider::Modelscope {
-                let client = source_client(&app)?;
-                let filename = update_sources::metadata_name(channel.endpoint_name(), UPDATE_GENERATION);
-                let manifest = update_sources::modelscope_manifest(&client, &filename).await?;
-                check_endpoint(&app, manifest.endpoint, channel, provider, Some(&manifest.version), false).await?
+            let endpoint = if provider == UpdateProvider::Modelscope {
+                update_sources::modelscope_metadata_url(&update_sources::metadata_name(channel.endpoint_name(), UPDATE_GENERATION))
             } else {
-                check_endpoint(&app, github, channel, provider, None, false).await?
-            }) }.await;
+                github
+            };
+            let checked = check_endpoint(&app, endpoint, channel, provider, None, false).await;
             let checked = checked.map(|checked: Option<CheckedUpdate>| checked.map(|mut checked| {
                 checked.elapsed = started.elapsed(); checked
             }));
@@ -2163,8 +2161,8 @@ mod tests {
     fn live_modelscope_signed_package() {
         tauri::async_runtime::block_on(async {
             let client = crate::update_sources::http_client_builder().user_agent("Pymss-Studio-Updater").timeout(std::time::Duration::from_secs(45)).build().unwrap();
-            let manifest = crate::update_sources::modelscope_manifest(&client, "prerelease-v1-windows-x64-update.json").await.unwrap();
-            let raw: serde_json::Value = client.get(manifest.endpoint).send().await.unwrap().json().await.unwrap();
+            let endpoint = crate::update_sources::modelscope_metadata_url(&crate::update_sources::metadata_name("prerelease", super::UPDATE_GENERATION));
+            let raw: serde_json::Value = client.get(endpoint).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
             let version = raw["version"].as_str().unwrap();
             let signature = raw["platforms"]["windows-x86_64"]["signature"].as_str().unwrap();
             let original = url::Url::parse(raw["platforms"]["windows-x86_64"]["url"].as_str().unwrap()).unwrap();

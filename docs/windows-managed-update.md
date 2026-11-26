@@ -45,8 +45,13 @@ executable.
 
 ## Metadata
 
-Metadata is published under the CI-managed `updater` release and mirrored with the release
-packages. Each file has the regular Tauri static JSON shape. A client builds its endpoint from the
+Metadata is published under the CI-managed `updater` release. The release repository
+`pymss-project/pymss-studio-releases` on ModelScope and Hugging Face mirrors it under `updater/`,
+next to one directory per version. CI uploads the version directory first, so `updater/` never
+names an archive that is not available yet. Clients from 0.1.4 on read ModelScope at
+`updater/<file>`. Clients 0.1.3 and earlier scan the legacy dataset `huanlinoto/Pymss-Studio-Dist`
+for the newest version directory, so each release also uploads its update files there until that
+step is removed. Each file has the regular Tauri static JSON shape. A client builds its endpoint from the
 selected channel and a generation compiled into the client, so every file below has a fixed set of
 readers that cannot change after release.
 

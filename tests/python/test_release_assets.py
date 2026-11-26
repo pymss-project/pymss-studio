@@ -244,7 +244,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         verify = names.index("Verify both runtime mirrors before publication")
         for provider in ("HuggingFace", "ModelScope"):
             wheel = names.index(f"Publish immutable runtime wheels to {provider}")
-            version = names.index(f"Upload release files to {provider} dataset")
+            version = names.index(f"Upload release files to {provider}")
             self.assertLess(wheel, verify)
             self.assertLess(verify, version)
             self.assertLess(version, steps.index(publish))

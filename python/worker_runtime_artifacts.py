@@ -33,8 +33,8 @@ _IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9.-]{0,95}\Z")
 _RELEASE_VERSION = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\Z")
 _GITHUB_RELEASE_ROOT = "https://github.com/pymss-project/pymss-studio/releases/download"
 _RUNTIME_MIRRORS = (
-    ("ModelScope", "https://www.modelscope.cn/datasets/huanlinoto/Pymss-Studio-Dist/resolve/master"),
-    ("Hugging Face", "https://huggingface.co/datasets/HuanLin/Pymss-Studio-Dist/resolve/main"),
+    ("ModelScope", "https://www.modelscope.cn/models/pymss-project/pymss-studio-releases/resolve/master"),
+    ("Hugging Face", "https://huggingface.co/pymss-project/pymss-studio-releases/resolve/main"),
 )
 
 

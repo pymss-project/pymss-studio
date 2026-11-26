@@ -172,7 +172,7 @@ class RuntimeWheelPublicationTests(unittest.TestCase):
                 self.assertEqual(mirror.files(), {"wheels/file.whl": (23, "digest")})
                 mirror.upload(self.root)
                 self.assertEqual(api.upload_folder.call_args.kwargs["path_in_repo"], "wheels")
-                self.assertEqual(api.upload_folder.call_args.kwargs["repo_type"], "dataset")
+                self.assertEqual(api.upload_folder.call_args.kwargs["repo_type"], "model")
 
     def test_small_blob_size_is_bounded_and_actual_digest_checked(self):
         mirror = publication.Mirror.__new__(publication.Mirror)

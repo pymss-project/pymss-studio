@@ -87,9 +87,10 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           MODELSCOPE_API_TOKEN: ${{ secrets.MODELSCOPE_API_TOKEN }}
+          MODELSCOPE_LEGACY_TOKEN: ${{ secrets.MODELSCOPE_LEGACY_TOKEN }}
         run: |
-          if [[ -z "$HF_TOKEN" || -z "$MODELSCOPE_API_TOKEN" ]]; then
-            echo "Release publication requires HF_TOKEN and MODELSCOPE_API_TOKEN for complete package mirrors." >&2
+          if [[ -z "$HF_TOKEN" || -z "$MODELSCOPE_API_TOKEN" || -z "$MODELSCOPE_LEGACY_TOKEN" ]]; then
+            echo "Release publication requires HF_TOKEN, MODELSCOPE_API_TOKEN and MODELSCOPE_LEGACY_TOKEN for complete package mirrors." >&2
             exit 1
           fi
       - name: Preserve the published legacy runtime links
@@ -339,6 +340,11 @@ jobs:
             mkdir -p "$staging/runtime-locks"
             ln "$file" "$staging/runtime-locks/"
           done
+          # Mirror the GitHub updater release at a fixed path for in-app update checks.
+          for file in artifacts/*-v*-*-update.json; do
+            mkdir -p pms/updater
+            ln -f "$file" pms/updater/
+          done
           echo "Staged $copied file(s) under $staging/"
       - name: Verify release tag commit
         id: verify_release_tag
@@ -361,19 +367,39 @@ jobs:
           uv run --no-project --with huggingface_hub==2.4.0 --with modelscope-hub==0.7.1 --with pip python scripts/publish-runtime-wheels.py --provider huggingface --wheelhouse runtime-artifacts --locks runtime-artifacts --verify-only
           uv run --no-project --with huggingface_hub==2.4.0 --with modelscope-hub==0.7.1 --with pip python scripts/publish-runtime-wheels.py --provider modelscope --wheelhouse runtime-artifacts --locks runtime-artifacts --verify-only
 
-      - name: Upload release files to HuggingFace dataset
+      # Release files are uploaded before updater/, so update metadata never names a missing archive.
+      - name: Upload release files to HuggingFace
         if: ${{ success() && steps.setup_mirror_uploads.outcome == 'success' && env.HF_TOKEN != '' }}
         shell: bash
         run: |
           set -euo pipefail
-          uvx --from "huggingface_hub[cli]" hf upload --type dataset HuanLin/Pymss-Studio-Dist "pms/${RELEASE_VERSION}" "${RELEASE_VERSION}"
+          uvx --from "huggingface_hub[cli]" hf upload pymss-project/pymss-studio-releases "pms/${RELEASE_VERSION}" "${RELEASE_VERSION}"
+          if [[ -d pms/updater ]]; then
+            uvx --from "huggingface_hub[cli]" hf upload pymss-project/pymss-studio-releases pms/updater updater
+          fi
 
-      - name: Upload release files to ModelScope dataset
+      - name: Upload release files to ModelScope
         if: ${{ success() && steps.setup_mirror_uploads.outcome == 'success' && env.MODELSCOPE_API_TOKEN != '' }}
         shell: bash
         run: |
           set -euo pipefail
-          uvx modelscope upload --repo-type dataset huanlinoto/Pymss-Studio-Dist "pms/${RELEASE_VERSION}" "${RELEASE_VERSION}"
+          uvx modelscope upload --repo-type model pymss-project/pymss-studio-releases "pms/${RELEASE_VERSION}" "${RELEASE_VERSION}"
+          if [[ -d pms/updater ]]; then
+            uvx modelscope upload --repo-type model pymss-project/pymss-studio-releases pms/updater updater
+          fi
+
+      # Clients 0.1.3 and earlier discover ModelScope updates only in this dataset.
+      # Publishing the update files lets them reach a client that reads the release repository.
+      - name: Upload update files to the legacy ModelScope dataset
+        if: ${{ success() && steps.setup_mirror_uploads.outcome == 'success' }}
+        shell: bash
+        env:
+          # The legacy dataset belongs to a personal account and needs that account's token.
+          MODELSCOPE_API_TOKEN: ${{ secrets.MODELSCOPE_LEGACY_TOKEN }}
+        run: |
+          set -euo pipefail
+          uvx modelscope upload --repo-type dataset huanlinoto/Pymss-Studio-Dist "pms/${RELEASE_VERSION}" "${RELEASE_VERSION}" \
+            --include "*-update.json" "*-update.zip" "*-update.app.tar.gz" "*.AppImage" "*-online-setup.exe"
 
       - uses: softprops/action-gh-release@v2
         id: publish_release

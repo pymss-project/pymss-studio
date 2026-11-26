@@ -39,8 +39,8 @@ def update_metadata_name(artifacts: Path, slug: str) -> str:
 def mirror_download_roots(version: str):
     folder = quote(version, safe="")
     return (
-        ("Hugging Face", f"https://huggingface.co/datasets/HuanLin/Pymss-Studio-Dist/resolve/main/{folder}"),
-        ("魔搭 / ModelScope", f"https://www.modelscope.cn/datasets/huanlinoto/Pymss-Studio-Dist/resolve/master/{folder}"),
+        ("Hugging Face", f"https://huggingface.co/pymss-project/pymss-studio-releases/resolve/main/{folder}"),
+        ("魔搭 / ModelScope", f"https://www.modelscope.cn/models/pymss-project/pymss-studio-releases/resolve/master/{folder}"),
     )
 
 
@@ -202,7 +202,7 @@ def render_release_notes(
             "New Windows users can choose Online and install a runtime on first launch. Offline packages include their runtime.", "",
             "达到 2 GiB 的完整包仅在 Hugging Face 和魔搭提供，GitHub 附件不包含这些包，无需下载分卷。",
             "Complete packages of 2 GiB or larger are available on Hugging Face and ModelScope instead of GitHub assets. No split downloads are required.", "",
-            f"完整下载 / All downloads: [Hugging Face](https://huggingface.co/datasets/HuanLin/Pymss-Studio-Dist/tree/main/{quote(version, safe='')}) · [魔搭 / ModelScope](https://www.modelscope.cn/datasets/huanlinoto/Pymss-Studio-Dist/tree/master/{quote(version, safe='')})", "",
+            f"完整下载 / All downloads: [Hugging Face](https://huggingface.co/pymss-project/pymss-studio-releases/tree/main/{quote(version, safe='')}) · [魔搭 / ModelScope](https://www.modelscope.cn/models/pymss-project/pymss-studio-releases/tree/master/{quote(version, safe='')})", "",
             "首次安装请选择上表中的完整安装包；更新归档和签名文件不用于首次安装。",
             "For a first installation, use a complete package listed above. Update archives and signature files are not installers.",
         ]),

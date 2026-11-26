@@ -1,4 +1,4 @@
-"""Publish immutable runtime wheels to the two existing distribution datasets."""
+"""Publish immutable runtime wheels to both distribution repositories."""
 from __future__ import annotations
 
 import argparse
@@ -19,10 +19,10 @@ from worker_runtime_artifacts import (  # noqa: E402
 )
 
 PROVIDERS = {
-    "huggingface": ("HuanLin/Pymss-Studio-Dist", "main", "HF_TOKEN",
-                    "https://huggingface.co/datasets/HuanLin/Pymss-Studio-Dist/resolve/main"),
-    "modelscope": ("huanlinoto/Pymss-Studio-Dist", "master", "MODELSCOPE_API_TOKEN",
-                   "https://www.modelscope.cn/datasets/huanlinoto/Pymss-Studio-Dist/resolve/master"),
+    "huggingface": ("pymss-project/pymss-studio-releases", "main", "HF_TOKEN",
+                    "https://huggingface.co/pymss-project/pymss-studio-releases/resolve/main"),
+    "modelscope": ("pymss-project/pymss-studio-releases", "master", "MODELSCOPE_API_TOKEN",
+                   "https://www.modelscope.cn/models/pymss-project/pymss-studio-releases/resolve/master"),
 }
 
 
@@ -76,9 +76,9 @@ class Mirror:
         # Listing the repository root also works before wheels/ first exists.
         # Both SDKs handle the provider's pagination before returning all files.
         if self.provider == "huggingface":
-            entries = self.api.list_repo_tree(self.repo, repo_type="dataset", revision=self.revision, recursive=True)
+            entries = self.api.list_repo_tree(self.repo, repo_type="model", revision=self.revision, recursive=True)
         else:
-            entries = self.api.list_repo_files(self.repo, repo_type="dataset", revision=self.revision, recursive=True)
+            entries = self.api.list_repo_files(self.repo, repo_type="model", revision=self.revision, recursive=True)
         result = {}
         for entry in entries:
             if not entry.path.startswith("wheels/") or not hasattr(entry, "size"):
@@ -89,7 +89,7 @@ class Mirror:
         return result
 
     def upload(self, directory: Path) -> None:
-        self.api.upload_folder(repo_id=self.repo, repo_type="dataset", revision=self.revision,
+        self.api.upload_folder(repo_id=self.repo, repo_type="model", revision=self.revision,
                                folder_path=str(directory), path_in_repo="wheels",
                                commit_message="Add verified runtime wheels")
 
