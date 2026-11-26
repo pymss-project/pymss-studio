@@ -3,6 +3,7 @@ import i18n from '@/i18n'
 import type { useEditorStore } from '@/stores/editor'
 import { useEditorPlaybackStore } from '@/stores/editorPlayback'
 import { hasEditorPlugins, pluginProjectSignature } from '@/utils/editorPlugins'
+import { extrapolateTransportPosition, type TransportAnchor } from '@/utils/editorTime'
 import { ensurePluginSession, PluginHostDialogPendingError, pluginHostCapabilities, pluginHostRequest, type PluginHostStatus } from '@/utils/pluginHost'
 
 type PlaybackHandoff = {
@@ -26,6 +27,8 @@ export function useEditorNativePlayback(editor: ReturnType<typeof useEditorStore
   let polling = false
   let pollingEnabled = false
   let timer: ReturnType<typeof setTimeout> | null = null
+  let anchor: TransportAnchor | null = null
+  let frame: number | null = null
   let releaseTask: Promise<void> | null = null
 
   function clearPoll() {
@@ -36,6 +39,21 @@ export function useEditorNativePlayback(editor: ReturnType<typeof useEditorStore
   function stopPoll() {
     pollingEnabled = false
     clearPoll()
+    stopFrame()
+  }
+
+  function stopFrame() {
+    anchor = null
+    if (frame !== null) cancelAnimationFrame(frame)
+    frame = null
+  }
+
+  function advanceFrame() {
+    frame = null
+    if (!anchor || disposed || playback.intent !== 'play' || playback.status !== 'playing') return
+    playback.setCurrentTime(extrapolateTransportPosition(anchor, performance.now(), playback.loop))
+    followPlayhead()
+    frame = requestAnimationFrame(advanceFrame)
   }
 
   async function retryAfterDialog<T>(current: () => boolean, operation: () => Promise<T>) {
@@ -109,6 +127,12 @@ export function useEditorNativePlayback(editor: ReturnType<typeof useEditorStore
     playback.setLevel((master[0] + master[1]) / 2)
     if (result.playing || (recording && playback.intent === 'play')) playback.finishPlay(id)
     else playback.finishPause(id)
+    // The host reports from its UI thread, which a plugin window can block while it is dragged.
+    // The playhead follows elapsed time between reports, and each report corrects it.
+    if (result.playing && !recording && !preservePosition && playback.status === 'playing') {
+      anchor = { position: result.position, duration: result.duration, at: performance.now() }
+      if (frame === null && typeof requestAnimationFrame === 'function') frame = requestAnimationFrame(advanceFrame)
+    } else stopFrame()
     followPlayhead()
   }
 
