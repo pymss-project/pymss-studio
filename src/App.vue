@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { createLogger } from '@/utils/logger'
 
-import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { darkTheme, zhCN, enUS } from 'naive-ui'
 import TitleBar from '@/components/TitleBar.vue'
@@ -29,6 +29,7 @@ import { activeRuntimeEnvironment, runtimeBackendLabel, runtimeCoreSyncAvailable
 import { connectWorkerEvents } from '@/utils/events'
 import { useRenderDiagnosticState } from '@/features/diagnostics/renderState'
 import { usePluginMarketplace } from '@/features/plugin-marketplace/composable'
+import { documentTitle, routeNavKey } from '@/utils/routeTitle'
 
 const studioLog = createLogger('ui.App')
 
@@ -74,6 +75,28 @@ const isWorkflowNodeEditorRoute = computed(() => route.path === '/workflow-node-
 const isWorkflowSimpleEditorRoute = computed(() => route.path === '/workflow-simple-editor')
 const isWorkflowEditorRoute = computed(() => isWorkflowNodeEditorRoute.value || isWorkflowSimpleEditorRoute.value)
 const isMacOS = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform)
+const mainContent = ref<HTMLElement | null>(null)
+const pageTitle = computed(() => {
+  const key = routeNavKey(route.name)
+  return key ? t(`nav.${key}`) : ''
+})
+watchEffect(() => { document.title = documentTitle(pageTitle.value) })
+
+function focusMainContent() {
+  mainContent.value?.focus({ preventScroll: true })
+}
+
+// Screen readers only follow a client-side navigation when focus moves with it. The first
+// resolution is the initial load, which keeps focus at the start of the document. Overlays
+// that navigate on their own (guides, onboarding, dialogs) keep their focus.
+function focusMainAfterNavigation() {
+  const active = document.activeElement
+  if (active && active !== document.body && !active.closest('.side-nav, .title-bar, #main-content')) return
+  focusMainContent()
+}
+watch(() => route.name, (name, previous) => {
+  if (previous && name && name !== previous && !isStandaloneRoute.value) void nextTick(focusMainAfterNavigation)
+})
 const resolvedTheme = computed(() => {
   void isDark.value
   return getResolvedThemeTokens(settings.themeMode, settings.themeAccent)
@@ -373,6 +396,7 @@ const themeOverrides = computed(() => {
         <AppAnnouncements />
         <WorkflowRecoveryNotice />
         <div class="app-shell" :inert="beginnerGuide.demoActive || undefined" :class="{ 'app-shell--editor': isStandaloneRoute, 'app-shell--workflow-node-editor': isStandaloneRoute && isWorkflowEditorRoute, 'app-shell--native-titlebar': isMacOS, 'no-animations': !settings.animationsEnabled }">
+          <a v-if="!isStandaloneRoute" class="skip-link" href="#main-content" @click.prevent="focusMainContent">{{ t('accessibility.skipToContent') }}</a>
           <div class="app-backdrop" />
           <TitleBar v-if="!isWorkflowEditorRoute || isMainTaskOwner()" />
           <div v-if="app.workerEventConnectionStatus === 'error'" class="worker-event-alert">
@@ -393,7 +417,7 @@ const themeOverrides = computed(() => {
           </div>
           <div class="app-body" :inert="showStartupOnboarding || beginnerGuide.demoActive || undefined">
             <SideNav v-if="!isStandaloneRoute" />
-            <main class="app-content">
+            <main id="main-content" ref="mainContent" class="app-content" tabindex="-1" :aria-label="pageTitle || undefined">
               <!-- Keep the iframe document attached so navigation preserves running plugin tasks. -->
               <ToolsView v-if="toolsOpened" v-show="route.name === 'tools'" />
               <router-view v-slot="{ Component, route }">

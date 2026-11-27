@@ -28,7 +28,8 @@ export default defineConfig({
     },
     vue(),
     Components({
-      resolvers: [NaiveUiResolver()],
+      // `<n-icon>` resolves to the accessible wrapper; the first matching resolver wins.
+      resolvers: [name => name === 'NIcon' ? { name: 'default', from: '@/components/AppIcon.vue' } : undefined, NaiveUiResolver()],
       dts: false,
       types: [],
     }),

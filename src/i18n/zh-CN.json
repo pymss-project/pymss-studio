@@ -8,7 +8,9 @@
     "taskStatus": "任务{status}：{name}",
     "tasksStatus": "{count} 个任务{status}",
     "downloadStatus": "模型{status}：{name}",
-    "downloadsStatus": "{count} 个模型{status}"
+    "downloadsStatus": "{count} 个模型{status}",
+    "skipToContent": "跳到主内容",
+    "primaryNavigation": "主导航"
   },
   "app": {
     "name": "Pymss Studio",

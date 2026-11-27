@@ -2567,7 +2567,7 @@ async function retryFailedBatch() {
         </section>
       </aside>
 
-      <main class="console__stage">
+      <div class="console__stage">
         <transition name="stage-swap" mode="out-in">
           <section v-if="taskPanelState === 'running' && currentTask" key="running" class="stage-view stage-view--running">
             <div class="stage-hero">
@@ -2993,7 +2993,7 @@ async function retryFailedBatch() {
             </footer>
           </section>
         </transition>
-      </main>
+      </div>
     </div>
 
     <n-dropdown

@@ -883,7 +883,6 @@ function configureGraphNode(node: LGraphNode) {
 
 <style scoped>
 .canvas-help-popover { margin: 0; font-size: 12px; line-height: 1.6; }
-.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 
 .canvas-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--on-surface-muted); }
 .litegraph-editor { display: flex; flex-direction: column; height: 100%; min-height: 0; gap: 8px; color: var(--on-surface); }

@@ -8,7 +8,9 @@
     "taskStatus": "Task {status}: {name}",
     "tasksStatus": "{count} tasks: {status}",
     "downloadStatus": "Model {status}: {name}",
-    "downloadsStatus": "{count} models: {status}"
+    "downloadsStatus": "{count} models: {status}",
+    "skipToContent": "Skip to main content",
+    "primaryNavigation": "Main navigation"
   },
   "app": {
     "name": "Pymss Studio",

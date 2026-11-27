@@ -301,7 +301,7 @@ onMounted(async () => {
         </section>
       </nav>
 
-      <main class="audio-tools-content">
+      <div class="audio-tools-content">
         <div v-if="inventoryLoading" class="plugin-tool-loading">
           <n-spin />
           <p v-if="pluginMarket.logs.value.at(-1)">{{ pluginMarket.logs.value.at(-1) }}</p>
@@ -350,7 +350,7 @@ onMounted(async () => {
             </div>
           </Transition>
         </div>
-      </main>
+      </div>
     </div>
     </template>
   </div>

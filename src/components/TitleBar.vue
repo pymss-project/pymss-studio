@@ -11,6 +11,7 @@ import AppBrandMark from '@/components/AppBrandMark.vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useTaskStore } from '@/stores/task'
 import { runWindowCloseGuards, runWindowCloseRecoveries, type WindowClosePersistenceError, type WindowCloseRecovery } from '@/utils/windowCloseGuards'
+import { routeNavKey } from '@/utils/routeTitle'
 
 const studioLog = createLogger('ui.components.TitleBar')
 
@@ -28,7 +29,10 @@ const allowForcedClose = ref(false)
 const closeDialogOpen = ref(false)
 let closeRecoveryCancelled = false
 
-const pageTitle = computed(() => t(`nav.${String(route.name || 'home').startsWith('workflow-') ? 'workflows' : String(route.name || 'home')}`))
+const pageTitle = computed(() => {
+  const key = routeNavKey(route.name)
+  return key ? t(`nav.${key}`) : ''
+})
 const isMainWindow = computed(() => !appWindow || appWindow.label === 'main')
 const runningTaskCount = computed(() => task.runningTasks.length)
 const closeDisabled = computed(() => settings.isModelDirMigrating || closeInProgress.value)

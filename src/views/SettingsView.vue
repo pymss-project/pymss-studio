@@ -1473,7 +1473,7 @@ onMounted(async () => {
         </button>
       </aside>
 
-      <main class="settings-content">
+      <div class="settings-content">
         <section v-if="activeSection === 'about'" class="about-panel">
           <article class="about-hero">
             <div class="about-hero__main">
@@ -2569,7 +2569,7 @@ onMounted(async () => {
           </div>
         </n-card>
         </section>
-      </main>
+      </div>
     </div>
 
     <n-modal :aria-label="t('settings.runtimeRocmManage')" v-model:show="rocmDialogVisible" preset="card" style="width:min(720px, 94vw)" :title="t('settings.runtimeRocmManage')" :mask-closable="!rocmPlanLoading" :closable="!rocmPlanLoading">

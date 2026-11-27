@@ -70,6 +70,36 @@ button, input, select, textarea { font: inherit; }
 code { font-family: inherit; }
 a { color: inherit; text-decoration: none; }
 
+/* Keyboard focus stays visible everywhere. `:where` keeps this fallback at zero specificity,
+   so component focus styles still win. Programmatic focus targets (tabindex="-1") keep the
+   user-agent behaviour. */
+:where(:focus-visible:not([tabindex="-1"])) { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 10000;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--on-surface);
+  transform: translateY(calc(-100% - 16px));
+}
+.skip-link:focus { transform: none; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.24); }
+
 /* MiSans Semibold blooms on a dark canvas and makes every label compete for attention. Keep
    hierarchy through size, colour and spacing in dark mode; light mode retains its existing
    weights. Weight 500 resolves to the regular MiSans face today and remains medium-ready if a
@@ -158,6 +188,8 @@ a { color: inherit; text-decoration: none; }
   overflow: auto;
   padding: 26px 32px 34px;
 }
+/* Focus moves here on navigation so screen readers follow the page change; it is not a control. */
+.app-content:focus { outline: none; }
 
 .app-shell--native-titlebar .app-body {
   padding-top: 0;
