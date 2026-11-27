@@ -47,23 +47,6 @@ def _is_hip_build(torch_mod: Any) -> bool:
     return bool(getattr(getattr(torch_mod, "version", None), "hip", None))
 
 
-def _device_supports_fast_fp16(device_type: str, device_index: int, torch_mod: Any) -> bool:
-    if device_type == "xpu":
-        try:
-            props = torch_mod.xpu.get_device_properties(device_index)
-            return bool(getattr(props, "has_fp16", True))
-        except Exception:
-            return True
-    if device_type == "cuda" and not _is_hip_build(torch_mod):
-        try:
-            major, _minor = torch_mod.cuda.get_device_capability(device_index)
-            # Volta (7.0) and newer have native FP16 Tensor Cores; older cards emulate FP16 slowly.
-            return int(major) >= 7
-        except Exception:
-            return False
-    return False
-
-
 def _device_total_vram_bytes(device_type: str, device_index: int, torch_mod: Any) -> int | None:
     try:
         if device_type == "xpu":
@@ -120,45 +103,6 @@ def _get_inference_option(config: Any, key: str, default: Any = None) -> Any:
     if hasattr(inference, "get"):
         return inference.get(key, default)
     return getattr(inference, key, default)
-
-
-def _maybe_enable_roformer_fp16_weights(
-    model: Any,
-    *,
-    model_type: str,
-    config: Any,
-    device_type: str,
-    device_index: int,
-    amp_enabled: bool,
-    torch_mod: Any,
-) -> bool:
-    """Convert RoFormer weights to FP16 to eliminate per-chunk autocast copy overhead.
-
-    BS-RoFormer and Mel-Band-RoFormer explicitly keep STFT/ISTFT and RotaryEmbedding
-    frequencies in FP32 and cast features at the band_split boundary. Running weights
-    natively in FP16 avoids hundreds of autocast `_to_copy` calls per chunk and cuts
-    peak VRAM nearly in half (also reducing Windows WDDM oversubscription risk).
-    """
-    if not amp_enabled or _env_flag("PYMSS_AMP") is False or _env_flag("PYMSS_STUDIO_FP16_WEIGHTS") is False:
-        return False
-    if model_type not in _ROFORMER_MODEL_TYPES:
-        return False
-    if model is None or not hasattr(model, "half") or not hasattr(model, "band_split"):
-        return False
-    nn_mod = getattr(torch_mod, "nn", None)
-    data_parallel = getattr(nn_mod, "DataParallel", None)
-    if data_parallel is not None and isinstance(model, data_parallel):
-        return False
-    if not _device_supports_fast_fp16(device_type, device_index, torch_mod):
-        return False
-    try:
-        model.half()
-        if hasattr(model, "clear_runtime_cache"):
-            model.clear_runtime_cache()
-        _set_inference_option(config, "use_amp", False)
-        return True
-    except Exception:
-        return False
 
 
 def _install_windows_sdpa_contiguous_guard(
@@ -264,7 +208,6 @@ def optimize_separator_inference(
     """Apply safe, platform-aware inference optimizations to a loaded MSSeparator."""
     result: dict[str, Any] = {
         "tf32": False,
-        "fp16Weights": False,
         "autoBatchSize": None,
         "winSdpaGuardCount": 0,
     }
@@ -288,35 +231,23 @@ def optimize_separator_inference(
         torch_mod=torch_mod,
         platform=active_platform,
     )
-    result["fp16Weights"] = _maybe_enable_roformer_fp16_weights(
-        model,
-        model_type=model_type,
-        config=config,
-        device_type=device_type,
-        device_index=device_index,
-        amp_enabled=amp_enabled,
-        torch_mod=torch_mod,
-    )
     result["autoBatchSize"] = _maybe_tune_batch_size(
         model_type=model_type,
         config=config,
         explicit_params=explicit_params or {},
         device_type=device_type,
         device_index=device_index,
-        low_precision_active=bool(result["fp16Weights"] or amp_enabled),
+        low_precision_active=amp_enabled,
         torch_mod=torch_mod,
         platform=active_platform,
     )
 
     if logger is not None and any((
         result["tf32"],
-        result["fp16Weights"],
         result["autoBatchSize"],
         result["winSdpaGuardCount"],
     )):
         applied = []
-        if result["fp16Weights"]:
-            applied.append("fp16_weights")
         if result["autoBatchSize"]:
             applied.append(f"auto_batch={result['autoBatchSize']}")
         if result["tf32"]:
