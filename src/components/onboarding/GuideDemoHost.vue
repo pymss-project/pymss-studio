@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { normalizeBeginnerGuideProgress, type BeginnerGuideProgress } from '@/features/onboarding/guide'
 import { createLogger } from '@/utils/logger'
@@ -46,11 +46,22 @@ function message(event: MessageEvent) {
   if (data?.type === 'pymss-tutorial-exit' && ['skipped', 'completed'].includes(data.status)) emit('exit', data.status)
   if (data?.type === 'pymss-tutorial-progress') emit('progress', normalizeBeginnerGuideProgress(data.progress))
 }
-onMounted(() => { window.addEventListener('message', message); waitForReady() })
+// The workspace behind the demo is inert, so focus must enter the demo and come back afterwards.
+const returnFocus = document.activeElement
+onMounted(() => {
+  window.addEventListener('message', message)
+  waitForReady()
+  frame.value?.focus()
+})
 onBeforeUnmount(() => {
   clearTimeout(timeout)
   window.removeEventListener('message', message)
   disposeFrame()
+})
+// Unmounted hooks run after the workspace leaves its inert state, so it can take focus again.
+onUnmounted(() => {
+  const target = returnFocus instanceof HTMLElement && returnFocus.isConnected ? returnFocus : document.getElementById('main-content')
+  target?.focus({ preventScroll: true })
 })
 </script>
 
