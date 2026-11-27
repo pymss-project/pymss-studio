@@ -347,6 +347,14 @@ export function getThemeOverrides(
     },
     Tag: {
       borderRadius: '8px',
+      // Naive's default status colors fall below 4.5:1 as small text on light surfaces;
+      // these shades keep WCAG AA on tinted cards while the tag fills stay unchanged.
+      ...(tokens.isDark ? {} : {
+        textColorInfo: '#155fb8',
+        textColorSuccess: '#0e6e3b',
+        textColorWarning: '#8a5700',
+        textColorError: '#ad2039',
+      }),
     },
     Progress: {
       railColor: tokens.surface3,

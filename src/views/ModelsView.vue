@@ -1062,7 +1062,7 @@ function handleModelCardClick(model: ModelEntry, event: MouseEvent | KeyboardEve
   if (!batchSelectMode.value) { selectModel(model); return }
   if (event.type === 'click' && !event.shiftKey && window.getSelection()?.toString()) return
   selectBatchModel(model, !isBatchSelected(model.name), event.shiftKey)
-  if (event.type === 'click' && event.shiftKey) (event.currentTarget as HTMLElement)?.focus?.({ preventScroll: true })
+  if (event.type === 'click' && event.shiftKey) (event.currentTarget as HTMLElement).querySelector<HTMLElement>('.mc-name')?.focus({ preventScroll: true })
 }
 
 function handleBatchRangeMouseDown(event: MouseEvent) {
@@ -2194,18 +2194,10 @@ watch(() => route.query.parameters, async value => {
               'model-card--unsupported': !model.supported,
               'model-card--busy': isModelBusy(model)
             }]"
-            tabindex="0"
-            role="button"
-            :aria-label="t(batchSelectMode ? 'models.batchSelectModelAria' : 'models.viewDetailAria', { name: model.name })"
-            :aria-current="!batchSelectMode && selectedModel === model.name ? 'true' : undefined"
-            :aria-pressed="batchSelectMode ? isBatchSelected(model.name) : undefined"
-            :aria-disabled="(batchSelectMode && !canSelectBatchModel(model) && !isBatchSelected(model.name)) ? true : undefined"
             :title="batchSelectMode && !canSelectBatchModel(model) && !isBatchSelected(model.name) ? t('models.batchNotSelectable') : undefined"
             @click="handleModelCardClick(model, $event)"
             @mousedown="handleBatchRangeMouseDown"
             @contextmenu.stop.prevent="!batchSelectMode && openModelContextMenu($event, model)"
-            @keydown.enter.self.prevent="handleModelCardClick(model, $event)"
-            @keydown.space.self.prevent="handleModelCardClick(model, $event)"
           >
           <div v-if="batchSelectMode" class="mc-batch-select" @pointerdown.stop="startBatchDragSelection($event, model)" @click.capture="handleBatchCheckboxClick($event, model)" @keydown.capture="handleBatchCheckboxKey($event, model)" @keyup.capture="handleBatchCheckboxKey($event, model)">
             <n-checkbox class="mc-batch-check" :checked="isBatchSelected(model.name)"
@@ -2216,7 +2208,16 @@ watch(() => route.query.parameters, async value => {
           <!-- Card Header -->
           <div class="mc-header">
             <div class="mc-title">
-              <span class="mc-name" :title="model.name"><n-tooltip v-if="hasInferenceOverride(model)" trigger="hover">
+              <!-- The name is the card's keyboard control, so the card's own buttons are not nested in it. -->
+              <span
+                class="mc-name" :title="model.name" tabindex="0" role="button"
+                :aria-label="t(batchSelectMode ? 'models.batchSelectModelAria' : 'models.viewDetailAria', { name: model.name })"
+                :aria-current="!batchSelectMode && selectedModel === model.name ? 'true' : undefined"
+                :aria-pressed="batchSelectMode ? isBatchSelected(model.name) : undefined"
+                :aria-disabled="(batchSelectMode && !canSelectBatchModel(model) && !isBatchSelected(model.name)) ? true : undefined"
+                @keydown.enter.self.prevent="handleModelCardClick(model, $event)"
+                @keydown.space.self.prevent="handleModelCardClick(model, $event)"
+              ><n-tooltip v-if="hasInferenceOverride(model)" trigger="hover">
                 <template #trigger>
                   <span
                     class="mc-override-dot"
@@ -3421,7 +3422,8 @@ watch(() => route.query.parameters, async value => {
     color-mix(in srgb, var(--surface-1) 78%, transparent);
 }
 
-.model-card:focus-visible {
+.mc-name:focus-visible { outline: none; }
+.model-card:has(.mc-name:focus-visible) {
   outline: 2px solid color-mix(in srgb, var(--primary) 70%, transparent);
   outline-offset: 2px;
   border-color: color-mix(in srgb, var(--primary) 40%, var(--outline));

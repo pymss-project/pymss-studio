@@ -8,6 +8,7 @@ import {
   ChevronDownOutline,
   DownloadOutline,
   FileTrayFullOutline,
+  HelpCircleOutline,
   InformationCircleOutline,
   Magnet,
   Mic,
@@ -92,6 +93,7 @@ const emit = defineEmits<{
   setTool: [tool: EditorTimelineTool]
   toggleSnapping: []
   togglePanel: [panel: EditorPanel]
+  showShortcuts: []
 }>()
 
 const { t } = useI18n()
@@ -373,6 +375,17 @@ function clearTransportPressed() {
             <n-icon :component="panel.icon" aria-hidden="true" />
           </button>
         </div>
+        <button
+          type="button"
+          class="panel-toggle"
+          :aria-label="t('editor.shortcuts.title')"
+          aria-keyshortcuts="Shift+?"
+          :title="`${t('editor.shortcuts.title')} (?)`"
+          @keydown.space.stop
+          @click="emit('showShortcuts')"
+        >
+          <n-icon :component="HelpCircleOutline" />
+        </button>
         <n-popover trigger="click" placement="bottom-end" :show-arrow="false">
           <template #trigger>
             <button class="master-summary" type="button" :disabled="disabled">
@@ -771,18 +784,6 @@ function clearTransportPressed() {
 .transport-chip--stop {
   width: 31px;
   height: 31px;
-}
-
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
 }
 
 .transport-chip:not(:disabled):hover {

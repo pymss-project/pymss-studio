@@ -1125,7 +1125,7 @@ watch([() => selectedWorkflow.value?.id, () => selectedWorkflow.value?.name], ()
         </div>
       </aside>
 
-      <main class="console__stage" data-guide="workflow-overview">
+      <div class="console__stage" data-guide="workflow-overview">
         <div v-if="!selectedWorkflow" class="wf-overview-empty">
           <n-icon :component="GitNetworkOutline" />
           <strong>{{ t('workflows.overviewEmptyTitle') }}</strong>
@@ -1227,7 +1227,7 @@ watch([() => selectedWorkflow.value?.id, () => selectedWorkflow.value?.name], ()
             <n-button secondary @click="reopenActiveEditor">{{ t('workflows.backToNodeEditor') }}</n-button>
           </div>
         </div>
-      </main>
+      </div>
     </div>
 
     <n-dropdown

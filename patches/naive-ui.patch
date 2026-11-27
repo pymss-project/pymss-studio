@@ -1,0 +1,82 @@
+diff --git a/es/_internal/close/src/Close.mjs b/es/_internal/close/src/Close.mjs
+index 739c6d55eb0cad3c79ed339e5203774253661691..5cbd21abf2276a010038efec977d90dbd71ebd34 100644
+--- a/es/_internal/close/src/Close.mjs
++++ b/es/_internal/close/src/Close.mjs
+@@ -1,5 +1,5 @@
+ import { defineComponent, h, toRef } from 'vue';
+-import { useStyle } from "../../../_mixins/index.mjs";
++import { useLocale, useStyle } from "../../../_mixins/index.mjs";
+ import { NBaseIcon } from "../../icon/index.mjs";
+ import { CloseIcon } from "../../icons/index.mjs";
+ import style from "./styles/index.cssr.mjs";
+@@ -28,6 +28,9 @@ export default defineComponent({
+   },
+   setup(props) {
+     useStyle('-base-close', style, toRef(props, 'clsPrefix'));
++    const {
++      localeRef
++    } = useLocale('Close');
+     return () => {
+       const {
+         clsPrefix,
+@@ -41,7 +44,7 @@ export default defineComponent({
+         type: isButtonTag ? 'button' : undefined,
+         tabindex: disabled || !props.focusable ? -1 : 0,
+         "aria-disabled": disabled,
+-        "aria-label": "close",
++        "aria-label": localeRef.value?.label ?? "close",
+         role: isButtonTag ? undefined : 'button',
+         disabled: disabled,
+         class: [`${clsPrefix}-base-close`, absolute && `${clsPrefix}-base-close--absolute`, disabled && `${clsPrefix}-base-close--disabled`, round && `${clsPrefix}-base-close--round`],
+diff --git a/es/card/src/Card.mjs b/es/card/src/Card.mjs
+index 5f21061f27d614ef6717d4de7cd95fb36f5f68dc..dfefab07daf82a305bd5dcab228d3fffcc49f925 100644
+--- a/es/card/src/Card.mjs
++++ b/es/card/src/Card.mjs
+@@ -194,11 +194,11 @@ export default defineComponent({
+       const mergedChildren = title ? ensureValidVNode(typeof title === 'function' ? [title()] : [title]) : children;
+       return mergedChildren || this.closable ? h("div", {
+         class: [`${mergedClsPrefix}-card-header`, this.headerClass],
+-        style: this.headerStyle,
+-        role: "heading"
++        style: this.headerStyle
+       }, h("div", {
+         class: `${mergedClsPrefix}-card-header__main`,
+-        role: "heading"
++        role: "heading",
++        "aria-level": 2
+       }, mergedChildren), resolveWrappedSlot($slots['header-extra'], children => {
+         const mergedChildren = this.headerExtra ? ensureValidVNode([this.headerExtra()]) : children;
+         return mergedChildren && h("div", {
+diff --git a/lib/_internal/close/src/Close.js b/lib/_internal/close/src/Close.js
+index b108a5d13a53f1d1868a1daa03848d6b375e7f1a..cdfdba311151d92e9e5a80ce5b7631e3f21b55f9 100644
+--- a/lib/_internal/close/src/Close.js
++++ b/lib/_internal/close/src/Close.js
+@@ -32,11 +32,12 @@ exports.default = (0, vue_1.defineComponent)({
+         absolute: Boolean
+     },
+     setup(props) {
++        const { localeRef } = (0, _mixins_1.useLocale)('Close');
+         (0, _mixins_1.useStyle)('-base-close', index_cssr_1.default, (0, vue_1.toRef)(props, 'clsPrefix'));
+         return () => {
+             const { clsPrefix, disabled, absolute, round, isButtonTag } = props;
+             const Tag = isButtonTag ? 'button' : 'div';
+-            return ((0, vue_1.h)(Tag, { type: isButtonTag ? 'button' : undefined, tabindex: disabled || !props.focusable ? -1 : 0, "aria-disabled": disabled, "aria-label": "close", role: isButtonTag ? undefined : 'button', disabled: disabled, class: [
++            return ((0, vue_1.h)(Tag, { type: isButtonTag ? 'button' : undefined, tabindex: disabled || !props.focusable ? -1 : 0, "aria-disabled": disabled, "aria-label": localeRef.value?.label ?? "close", role: isButtonTag ? undefined : 'button', disabled: disabled, class: [
+                     `${clsPrefix}-base-close`,
+                     absolute && `${clsPrefix}-base-close--absolute`,
+                     disabled && `${clsPrefix}-base-close--disabled`,
+diff --git a/lib/card/src/Card.js b/lib/card/src/Card.js
+index 6613454108117cfe394944eb8890e069134c5502..054e2de8c2bd216fadc9fc1f7336f3fc18ba7c5a 100644
+--- a/lib/card/src/Card.js
++++ b/lib/card/src/Card.js
+@@ -153,8 +153,8 @@ exports.default = (0, vue_1.defineComponent)({
+                 const mergedChildren = title
+                     ? (0, resolve_slot_1.ensureValidVNode)(typeof title === 'function' ? [title()] : [title])
+                     : children;
+-                return mergedChildren || this.closable ? ((0, vue_1.h)("div", { class: [`${mergedClsPrefix}-card-header`, this.headerClass], style: this.headerStyle, role: "heading" },
+-                    (0, vue_1.h)("div", { class: `${mergedClsPrefix}-card-header__main`, role: "heading" }, mergedChildren),
++                return mergedChildren || this.closable ? ((0, vue_1.h)("div", { class: [`${mergedClsPrefix}-card-header`, this.headerClass], style: this.headerStyle },
++                    (0, vue_1.h)("div", { class: `${mergedClsPrefix}-card-header__main`, role: "heading", "aria-level": 2 }, mergedChildren),
+                     (0, _utils_1.resolveWrappedSlot)($slots['header-extra'], (children) => {
+                         const mergedChildren = this.headerExtra
+                             ? (0, resolve_slot_1.ensureValidVNode)([this.headerExtra()])

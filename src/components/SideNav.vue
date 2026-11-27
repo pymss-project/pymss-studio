@@ -32,7 +32,7 @@ const bottomItems = computed(() => [
 </script>
 
 <template>
-  <aside class="side-nav" data-guide="workspace-navigation">
+  <nav class="side-nav" data-guide="workspace-navigation" :aria-label="t('accessibility.primaryNavigation')">
     <div class="side-nav__main">
       <router-link
         v-for="item in mainItems"
@@ -42,7 +42,7 @@ const bottomItems = computed(() => [
         :to="item.path"
         :title="item.label"
       >
-        <span class="nav-icon">
+        <span class="nav-icon" aria-hidden="true">
           <n-icon :component="item.icon" :size="18" />
         </span>
         <span>{{ item.label }}</span>
@@ -61,11 +61,11 @@ const bottomItems = computed(() => [
         :to="item.path"
         :title="item.label"
       >
-        <span class="nav-icon">
+        <span class="nav-icon" aria-hidden="true">
           <n-icon :component="item.icon" :size="18" />
         </span>
         <span>{{ item.label }}</span>
       </router-link>
     </div>
-  </aside>
+  </nav>
 </template>

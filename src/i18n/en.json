@@ -8,7 +8,9 @@
     "taskStatus": "Task {status}: {name}",
     "tasksStatus": "{count} tasks: {status}",
     "downloadStatus": "Model {status}: {name}",
-    "downloadsStatus": "{count} models: {status}"
+    "downloadsStatus": "{count} models: {status}",
+    "skipToContent": "Skip to main content",
+    "primaryNavigation": "Main navigation"
   },
   "app": {
     "name": "Pymss Studio",
@@ -1097,6 +1099,28 @@
       "removeScanBlacklistNamed": "Remove {name} from the blacklist",
       "removeScanBlacklist": "Remove",
       "scanBlacklistRemoved": "Removed from the blacklist. Scan again to retry this item."
+    },
+    "shortcuts": {
+      "title": "Keyboard shortcuts",
+      "or": "or",
+      "keySpace": "Space",
+      "groupPlayback": "Playback and navigation",
+      "groupEditing": "Editing",
+      "groupTracks": "Tracks",
+      "groupView": "Tools and view",
+      "togglePlay": "Play or pause",
+      "toStart": "Go to start",
+      "seekBackward": "Back 1 second",
+      "seekForward": "Forward 1 second",
+      "seekBackwardLong": "Back 5 seconds",
+      "seekForwardLong": "Forward 5 seconds",
+      "previousClipEdge": "Go to previous clip edge",
+      "nextClipEdge": "Go to next clip edge",
+      "toggleMute": "Mute or unmute selected track",
+      "toggleSolo": "Solo or unsolo selected track",
+      "toggleAssets": "Show or hide asset library",
+      "toggleMixer": "Show or hide mixer",
+      "toggleInspector": "Show or hide inspector"
     }
   },
   "settings": {

@@ -2,7 +2,8 @@
 import { computed, h, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { AddOutline, EllipsisHorizontal, FolderOpenOutline, LockClosedOutline, MicOutline, RemoveOutline, ScanOutline, SwapHorizontalOutline, SwapVerticalOutline } from '@vicons/ionicons5'
-import { NIcon, type DropdownOption } from 'naive-ui'
+import type { DropdownOption } from 'naive-ui'
+import NIcon from '@/components/AppIcon.vue'
 import type { EditorClip, EditorClipDrop, EditorSource, EditorTimelineTool, EditorTrack } from '@/types/editor'
 import EditorWaveform from '@/components/editor/EditorWaveform.vue'
 import { formatVolumeDb } from '@/utils/editorMeter'
@@ -136,7 +137,12 @@ const laneWidth = computed(() => {
   // Rounding keeps a fitted lane from overflowing the viewport by a fraction of a pixel.
   return Math.max(1, Math.round(Math.max(contentWidth, viewportLaneWidth)))
 })
-const playheadLeft = computed(() => headerWidth.value + Math.max(0, props.currentTime * props.pixelsPerSecond))
+// Markers stay inside the lane: a pixel past its end overflows a fitted timeline, and the
+// resulting scrollbars keep refitting the zoom.
+function laneMarkerLeft(time: number, markerWidth: number) {
+  return headerWidth.value + Math.min(Math.max(0, time * props.pixelsPerSecond), laneWidth.value - markerWidth)
+}
+const playheadLeft = computed(() => laneMarkerLeft(props.currentTime, 2))
 const hasSolo = computed(() => props.tracks.some((track) => track.solo))
 const dropTargetTrackId = ref<string | null>(null)
 const fallbackDropSourceId = ref<string | null>(null)
@@ -1209,7 +1215,7 @@ defineExpose({
           v-if="snappingEnabled && clipSnapTime !== null"
           class="clip-snap-line"
           aria-hidden="true"
-          :style="{ transform: `translateX(${headerWidth + clipSnapTime * pixelsPerSecond}px)` }"
+          :style="{ transform: `translateX(${laneMarkerLeft(clipSnapTime, 1)}px)` }"
         />
       </div>
 
@@ -1555,7 +1561,8 @@ defineExpose({
   white-space: nowrap;
 }
 
-.ruler-tick--end { padding-inline: 0; }
+/* Drawn inside the lane, like the playhead (see laneMarkerLeft). */
+.ruler-tick--end { padding-inline: 0; margin-inline-start: -1px; }
 
 .ruler-tick--end .ruler-tick__label {
   position: absolute;
