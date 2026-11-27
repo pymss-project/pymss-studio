@@ -36,14 +36,19 @@ pub(crate) const RUNTIME: &str = ".pymss-cli-runtime.lock";
 /// an idle inference process, which keeps a shared runtime lease while its modules stay loaded.
 pub(crate) const RUNTIME_RELEASE: &str = ".pymss-cli-runtime.release";
 /// A request older than this was left behind by a CLI process that no longer waits for it.
+// Read by Studio; the standalone CLI binary only writes requests.
+#[cfg_attr(feature = "studio-cli", allow(dead_code))]
 pub(crate) const RUNTIME_RELEASE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
+// Used by the CLI, which the Windows and macOS app binary does not include.
+#[cfg_attr(not(feature = "studio-cli"), allow(dead_code))]
 fn is_busy(result: &AppResult<File>) -> bool {
     matches!(result, Err(AppError::Worker(message)) if message.starts_with("RUNTIME_BUSY:"))
 }
 
 /// Runtime lease for the CLI. An exclusive request first asks Studio to release its idle
 /// inference process and waits briefly before reporting that the runtime is busy.
+#[cfg_attr(not(feature = "studio-cli"), allow(dead_code))]
 pub(crate) fn runtime(root: &Path, exclusive: bool) -> AppResult<File> {
     let result = resource(root, RUNTIME, exclusive);
     if !exclusive || !is_busy(&result) {
@@ -64,6 +69,7 @@ pub(crate) fn runtime(root: &Path, exclusive: bool) -> AppResult<File> {
 }
 
 /// Whether a CLI process is currently waiting for exclusive runtime access.
+#[cfg_attr(feature = "studio-cli", allow(dead_code))]
 pub(crate) fn runtime_release_requested(root: &Path) -> bool {
     fs::metadata(root.join(RUNTIME_RELEASE))
         .and_then(|metadata| metadata.modified())

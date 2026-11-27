@@ -18,7 +18,8 @@ use crate::session_log;
 use crate::state::{AppState, SharedChild};
 
 use super::{
-    acquire_application_operation, acquire_worker_runtime_access, build_worker_command,
+    acquire_application_operation, acquire_worker_runtime_access, attach_cancel_request,
+    build_worker_command, cancel_request_path,
     emit_batch_stderr, emit_task_error_details_to_all, emit_task_error_to_all,
     forward_python_terminal_log, is_background_terminal_event, is_rocm_offload_arch_diagnostic,
     log_worker_event_with_scope,
@@ -204,9 +205,11 @@ pub(super) fn spawn_background(
     app: AppHandle,
     state: State<'_, AppState>,
     task_id: String,
-    payload: Value,
+    mut payload: Value,
     operation_id: String,
 ) -> AppResult<()> {
+    let cancel_request = cancel_request_path(&operation_id);
+    attach_cancel_request(&mut payload, &cancel_request)?;
     let application_access = acquire_application_operation()?;
     let runtime_access = acquire_worker_runtime_access(&app, "infer", &payload)?;
     let release_event = runtime_access
@@ -215,7 +218,7 @@ pub(super) fn spawn_background(
     let registered_ids = registered_task_ids(&task_id, &payload);
     let launch = Arc::new(tauri::async_runtime::Mutex::new(()));
     let launching = launch.try_lock().expect("new inference launch lock");
-    reserve_job(&state, &registered_ids, Arc::clone(&launch))?;
+    reserve_job(&state, &registered_ids, Arc::clone(&launch), cancel_request)?;
     let session = open_session(&app, &operation_id).and_then(|session| {
         session.set_stderr_tasks(&registered_ids);
         let mut tasks = state
@@ -340,6 +343,7 @@ fn reserve_job(
     state: &AppState,
     ids: &[String],
     launch: Arc<tauri::async_runtime::Mutex<()>>,
+    cancel_request: PathBuf,
 ) -> AppResult<()> {
     let tasks = state
         .tasks
@@ -360,6 +364,7 @@ fn reserve_job(
         runtime_tree: None,
         completion: None,
         inference_launch: Some(launch),
+        cancel_request: Some(cancel_request),
     });
     for id in ids {
         background.insert(id.clone(), Arc::clone(&record));
@@ -529,7 +534,7 @@ mod tests {
         ];
         let launch = Arc::new(tauri::async_runtime::Mutex::new(()));
         let starting = launch.try_lock().unwrap();
-        reserve_job(&state, &ids, Arc::clone(&launch)).unwrap();
+        reserve_job(&state, &ids, Arc::clone(&launch), std::path::PathBuf::from("cancel-root")).unwrap();
         assert!(state.tasks.lock().unwrap().is_empty());
         let member_launch = background_inference_launch(&ids[1]).unwrap();
         assert!(Arc::ptr_eq(&member_launch, &launch));
@@ -537,7 +542,8 @@ mod tests {
         assert!(reserve_job(
             &state,
             &ids[1..],
-            Arc::new(tauri::async_runtime::Mutex::new(()))
+            Arc::new(tauri::async_runtime::Mutex::new(())),
+            std::path::PathBuf::from("cancel-member"),
         )
         .is_err());
         drop(starting);

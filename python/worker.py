@@ -5,6 +5,7 @@ import json
 import os
 import sys
 
+from worker_cancel import TaskCancelled, cancellation_requested, finish_device_work, watch as watch_cancellation
 from worker_protocol import bind_request_id, debug_log, emit, emit_error, load_payload, protocol_logging
 from worker_proxy import ProxyConfigError, configure_process_proxy, load_proxy_config, parse_proxy_config
 from worker_rocm import RocmWorkerAbort, rocm_worker_poisoned
@@ -178,6 +179,10 @@ def run_command(command: str, payload: dict) -> int:
     return emit_error("UNKNOWN_COMMAND", f"Unknown command: {command}")
 
 
+# Exit status of a worker that stopped at Studio's cancellation request.
+CANCELLED_EXIT_CODE = 130
+
+
 def run_protocol_command(command: str, payload: dict) -> int:
     with protocol_logging(
         command,
@@ -214,8 +219,13 @@ def serve() -> int:
                 emit_error("UNKNOWN_COMMAND", f"Unknown command: {command}", task_id=payload.get("taskId"))
                 emit("command_finished", {"code": 1})
                 return 1
+            watch_cancellation(payload)
             try:
                 code = run_protocol_command(command, payload)
+            except TaskCancelled:
+                # Studio has already recorded the cancellation and does not reuse this process.
+                finish_device_work()
+                return CANCELLED_EXIT_CODE
             except RocmWorkerAbort as aborted:
                 code = emit_error(getattr(aborted.error, "code", "ROCM_CONTEXT_LOST"), str(aborted.error),
                                   task_id=payload.get("taskId"), extra={"workerRestartRequired": True})
@@ -224,6 +234,10 @@ def serve() -> int:
             except Exception as exc:
                 import traceback
                 code = emit_error("UNKNOWN_ERROR", str(exc), traceback.format_exc(), task_id=payload.get("taskId"))
+            if cancellation_requested():
+                # Cancelled after the last progress report, while outputs were being written.
+                finish_device_work()
+                return CANCELLED_EXIT_CODE
             poisoned = rocm_worker_poisoned()
             emit("command_finished", {"code": (code or 1) if poisoned else code})
             if poisoned:
@@ -239,9 +253,13 @@ def main(argv: list[str]) -> int:
     try:
         payload = load_payload(args.payload)
         debug_log("worker.payload", command=args.command, hasPayload=bool(args.payload))
+        watch_cancellation(payload)
         code = run_protocol_command(args.command, payload)
         debug_log("worker.exit", command=args.command, code=code)
         return code
+    except TaskCancelled:
+        finish_device_work()
+        return CANCELLED_EXIT_CODE
     except RocmWorkerAbort as aborted:
         return emit_error(getattr(aborted.error, "code", "ROCM_CONTEXT_LOST"), str(aborted.error),
                           task_id=payload.get("taskId"), extra={"workerRestartRequired": True})

@@ -81,6 +81,8 @@ struct BackgroundTask {
     runtime_tree: Option<Arc<process_tree::RuntimeProcessTree>>,
     completion: Option<Arc<RuntimeMaintenanceCompletion>>,
     inference_launch: Option<Arc<tauri::async_runtime::Mutex<()>>>,
+    /// File the worker polls between chunks; creating it asks the task to stop on its own.
+    cancel_request: Option<PathBuf>,
 }
 static BACKGROUND_TASKS: OnceLock<Mutex<HashMap<String, Arc<BackgroundTask>>>> = OnceLock::new();
 
@@ -166,9 +168,43 @@ fn wait_runtime_worker(child: &crate::state::SharedChild) -> Option<std::process
     }
 }
 
+/// How long a cancelled inference worker may take to finish its current chunk and exit.
+const COOPERATIVE_CANCEL_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Cancellation request path for one inference request.
+fn cancel_request_path(operation_id: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("pymss-studio-cancel-{}-{operation_id}", std::process::id()))
+}
+
+/// Names the cancellation request file in an inference payload.
+fn attach_cancel_request(payload: &mut Value, path: &Path) -> AppResult<()> {
+    payload
+        .as_object_mut()
+        .ok_or_else(|| AppError::Worker("invalid inference request".into()))?
+        .insert("cancelFile".into(), Value::String(path.to_string_lossy().into_owned()));
+    Ok(())
+}
+
+/// Asks an inference worker to stop after its current chunk and waits for it to exit.
+///
+/// Ending a process while GPU work is in flight makes the display driver reset the engine, which
+/// also drops the WebView's GPU device and blanks the window until it is recreated.
+fn stop_cooperatively(child: &mut Child, request: &Path) {
+    if std::fs::write(request, b"").is_ok() {
+        let deadline = Instant::now() + COOPERATIVE_CANCEL_TIMEOUT;
+        while Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    let _ = std::fs::remove_file(request);
+}
+
 pub(crate) fn terminate_background_worker(task_id: &str, child: &mut Child) -> AppResult<()> {
     let task = BACKGROUND_TASKS.get().and_then(|tasks| tasks.lock().ok())
         .and_then(|tasks| tasks.get(task_id).cloned());
+    if let Some(request) = task.as_ref().and_then(|task| task.cancel_request.as_deref()) {
+        stop_cooperatively(child, request);
+    }
     terminate_worker(child)?;
     if let Some(tree) = task.and_then(|task| task.runtime_tree.clone()) {
         tree.stop_and_confirm().map_err(|error| AppError::Worker(format!(
@@ -1775,6 +1811,10 @@ fn spawn_worker_background_inner(
                 .map(PathBuf::from)
         })
         .flatten();
+    let cancel_request = (command == "infer_workflow").then(|| cancel_request_path(&operation_id));
+    if let Some(request) = &cancel_request {
+        attach_cancel_request(&mut payload, request)?;
+    }
     let payload_file = make_payload_file(command, Some(&task_id), payload)?;
     let mut cmd = match build_worker_command(&app, command, Some(&payload_file), Some(&task_id), &operation_id) {
         Ok(command) => command,
@@ -1860,7 +1900,7 @@ fn spawn_worker_background_inner(
         .then(|| Arc::new(RuntimeMaintenanceCompletion::default()));
     let task = Arc::new(BackgroundTask {
         command: command_name.clone(), runtime_tree: runtime_tree.clone(), completion: maintenance_completion.clone(),
-        inference_launch: None,
+        inference_launch: None, cancel_request,
     });
     for id in &registered_task_ids {
         background_registry.insert(id.clone(), task.clone());
@@ -2484,6 +2524,43 @@ mod tests {
     }
 
     #[test]
+    fn a_cancelled_worker_is_asked_to_exit_before_it_is_terminated() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = dir.path().join("cancel");
+        // Stands in for an inference worker: it exits on its own once the request appears.
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &format!(
+                "while (-not (Test-Path -LiteralPath '{}')) {{ Start-Sleep -Milliseconds 20 }}; exit 7",
+                request.display()
+            )])
+            .spawn()
+            .unwrap();
+        #[cfg(unix)]
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", &format!("while [ ! -e '{}' ]; do sleep 0.02; done; exit 7", request.display())])
+            .spawn()
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        super::stop_cooperatively(&mut child, &request);
+
+        assert!(started.elapsed() < super::COOPERATIVE_CANCEL_TIMEOUT);
+        assert_eq!(child.try_wait().unwrap().and_then(|status| status.code()), Some(7));
+        assert!(!request.exists());
+    }
+
+    #[test]
+    fn inference_payloads_name_their_cancellation_request() {
+        let request = super::cancel_request_path("operation-1");
+        let mut payload = serde_json::json!({ "taskId": "task" });
+        super::attach_cancel_request(&mut payload, &request).unwrap();
+        assert_eq!(payload["cancelFile"], request.to_string_lossy().as_ref());
+        assert_ne!(request, super::cancel_request_path("operation-2"));
+        assert!(super::attach_cancel_request(&mut serde_json::json!([]), &request).is_err());
+    }
+
+    #[test]
     fn cancellation_uses_registered_command_even_with_custom_task_ids() {
         let registry = super::BACKGROUND_TASKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
         for command in ["install_runtime", "runtime_gpu_probe"] {
@@ -2491,7 +2568,7 @@ mod tests {
             let completion = std::sync::Arc::new(super::RuntimeMaintenanceCompletion::default());
             registry.lock().unwrap().insert(id.into(), std::sync::Arc::new(super::BackgroundTask {
                 command: command.into(), runtime_tree: None, completion: Some(completion.clone()),
-                inference_launch: None,
+                inference_launch: None, cancel_request: None,
             }));
             assert!(super::defers_task_cancellation(id));
             let captured = super::runtime_maintenance_completion(id).unwrap();

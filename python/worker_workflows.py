@@ -29,6 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from worker_cancel import raise_if_cancelled
 from worker_protocol import emit, emit_error, task_logging
 from worker_paths import normalize_output_dir as _normalize_output_dir
 from worker_rocm import (
@@ -217,6 +218,7 @@ def _apply_runtime_device(dag: Any, payload: dict[str, Any], *, simple: bool) ->
 def _emit_progress(task_id: str, log_scope: Any = None) -> Any:
     """Forward native overall progress and display only audio-second counters."""
     def cb(event: dict[str, Any]) -> None:
+        raise_if_cancelled()
         if log_scope is not None:
             log_scope.track(event)
         fraction = float(event.get("overall_fraction") or 0)
@@ -242,6 +244,7 @@ def _emit_progress(task_id: str, log_scope: Any = None) -> Any:
 def _emit_execution(task_id: str, log_scope: Any = None) -> Any:
     """Forward native lifecycle events without deriving state from progress."""
     def cb(event: dict[str, Any]) -> None:
+        raise_if_cancelled()
         if log_scope is not None:
             log_scope.track(event)
         fields = {

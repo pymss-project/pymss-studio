@@ -56,6 +56,39 @@ class WarmWorkerProtocolTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(reset.call_count, 2)
 
+    def test_a_cancelled_request_waits_for_device_work_and_exits_without_serving_more(self):
+        from worker_cancel import TaskCancelled
+
+        served = []
+
+        def command(_name, payload):
+            served.append(payload["taskId"])
+            raise TaskCancelled()
+
+        with mock.patch.object(worker, "finish_device_work") as finish:
+            code, events, _ = self.serve(command)
+        self.assertEqual(code, worker.CANCELLED_EXIT_CODE)
+        self.assertEqual(served, ["first"])
+        finish.assert_called_once_with()
+        self.assertNotIn("command_finished", [event["type"] for event in events])
+
+    def test_a_request_cancelled_after_its_last_progress_report_still_ends_the_worker(self):
+        served = []
+
+        def command(_name, payload):
+            served.append(payload["taskId"])
+            return 0
+
+        with (
+            mock.patch.object(worker, "cancellation_requested", return_value=True),
+            mock.patch.object(worker, "finish_device_work") as finish,
+        ):
+            code, events, _ = self.serve(command)
+        self.assertEqual(code, worker.CANCELLED_EXIT_CODE)
+        self.assertEqual(served, ["first"])
+        finish.assert_called_once_with()
+        self.assertNotIn("command_finished", [event["type"] for event in events])
+
     def test_poisoned_context_exits_even_when_inference_returns_an_error_code(self):
         def command(_name, payload):
             return worker.emit_error("ROCM_CONTEXT_LOST", "Context lost", task_id=payload["taskId"])

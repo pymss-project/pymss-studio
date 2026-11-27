@@ -30,6 +30,7 @@ from worker_models import (
     model_path_for,
 )
 from worker_protocol import ProtocolLogHandler, _as_bool, _as_float, _as_int, current_log_task_id, emit, emit_error, task_logging
+from worker_cancel import cancellable
 from worker_inference_constraints import InferenceParameterError, validate_chunk_size
 from worker_inference_snapshot import (
     SNAPSHOT_PARAMS_VERSION,
@@ -786,6 +787,8 @@ def _prepare_separator(
     model_name = payload.get("model")
     if not model_name:
         raise ValueError("Missing model name")
+    # pymss reports progress after each processed chunk, where stopping leaves no GPU work queued.
+    progress_callback = cancellable(progress_callback)
     model_dir = payload.get("modelDir") or None
     download = bool(payload.get("download", True))
     source = payload.get("source") or "modelscope"
