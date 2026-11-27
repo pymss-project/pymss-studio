@@ -625,7 +625,7 @@ async function requestCancel(id?: string) {
         <div class="plugins-catalog-error"><span>{{ t('plugins.catalogUnavailable') }} {{ snapshot.catalogError }}</span><n-button size="small" secondary :loading="catalogLoading" :disabled="disabled" @click="refreshLibrary()">{{ t('plugins.refreshCatalog') }}</n-button></div>
       </n-alert>
       <div v-if="visibleEntries.length" class="plugins-installed" :class="{ 'plugins-installed--card': cardView }" role="list">
-        <article v-for="{ installed: plugin, catalog: offer, key } in visibleEntries" :key="key" class="plugin-card plugin-library-entry" role="listitem" tabindex="-1"
+        <div v-for="{ installed: plugin, catalog: offer, key } in visibleEntries" :key="key" class="plugin-card plugin-library-entry" role="listitem" tabindex="-1"
           :aria-label="plugin ? pluginTitle(plugin) : offer ? catalogTitle(offer) : key"
           :class="{ 'plugin-installed-card': !!plugin, 'plugin-available-card': !plugin, 'plugin-installed-card--active': pluginMenu?.key === key, 'plugin-library-entry--installed-now': !!plugin && recentInstalls.has(key) }"
           @click.self="openEntryDetails(key)"
@@ -633,14 +633,15 @@ async function requestCancel(id?: string) {
           <template v-if="plugin">
             <div class="plugin-installed-summary">
               <div role="button" tabindex="0" class="plugin-installed-toggle"
-                :aria-label="pluginTitle(plugin)" aria-haspopup="dialog" aria-controls="plugin-detail-dialog"
-                :aria-describedby="entryDescription(plugin, offer) ? `plugin-description-${pluginKey(plugin)}` : undefined"
+                :aria-labelledby="`plugin-title-${key}`" aria-haspopup="dialog" aria-controls="plugin-detail-dialog"
+                :aria-describedby="[`plugin-status-${key}`, entryDescription(plugin, offer) && `plugin-description-${pluginKey(plugin)}`].filter(Boolean).join(' ')"
                 @click="openEntryDetails(key)" @keydown.enter.self.prevent="openEntryDetails(key)" @keydown.space.self.prevent @keyup.space.self.prevent="openEntryDetails(key)"
                 @keydown="openPluginKeyboardMenu($event, plugin)">
                 <div class="plugin-installed-icon"><n-icon :component="ExtensionPuzzleOutline" :size="22" /></div>
                 <div class="plugin-installed-main">
                   <div class="plugin-installed-header">
-                    <h2>{{ pluginTitle(plugin) }}</h2>
+                    <h2 :id="`plugin-title-${key}`">{{ pluginTitle(plugin) }}</h2>
+                    <span :id="`plugin-status-${key}`" class="plugin-installed-tags">
                     <n-tag v-if="!plugin.managed" size="small" :bordered="false">{{ t('plugins.readOnly') }}</n-tag>
                     <n-tag v-else-if="!offer && !plugin.preinstalled && plugin.source === 'path'" size="small" :bordered="false">{{ t('plugins.localInstallation') }}</n-tag>
                     <n-tag v-if="recentInstalls.has(key)" size="small" type="success" :bordered="false">{{ t('plugins.installComplete') }}</n-tag>
@@ -652,6 +653,7 @@ async function requestCancel(id?: string) {
                     <n-tag v-else :type="plugin.enabled === false ? 'default' : plugin.loaded == null ? 'warning' : plugin.loaded ? 'success' : 'error'" size="small">{{ plugin.enabled === false ? t('plugins.disabled') : plugin.loaded == null ? t('plugins.notVerified') : plugin.loaded ? t('plugins.loaded') : t('plugins.loadFailed') }}</n-tag>
                     <n-tag v-if="canApplyPluginUpdate(pluginUpdate(plugin))" type="info" size="small">{{ t(pluginUpdateState(pluginUpdate(plugin)) === 'content' ? 'plugins.updateContentReady' : 'plugins.updateReady') }}</n-tag>
                     <n-tag v-else-if="pluginUpdateState(pluginUpdate(plugin)) === 'error'" type="warning" size="small">{{ t('plugins.updateCheckFailed') }}</n-tag>
+                    </span>
                   </div>
                   <div class="plugin-installed-metadata">
                     <span class="plugin-id" :title="`${plugin.name}${plugin.version ? ` · ${plugin.version}` : ''}`">{{ plugin.name }}<span v-if="plugin.version"> · {{ plugin.version }}</span></span>
@@ -706,14 +708,15 @@ async function requestCancel(id?: string) {
           <template v-else-if="offer">
             <div class="plugin-installed-summary">
               <div role="button" tabindex="0" class="plugin-installed-toggle"
-                :aria-label="catalogTitle(offer)" aria-haspopup="dialog" aria-controls="plugin-detail-dialog"
-                @click="openEntryDetails(key)" @keydown.enter.self.prevent="openEntryDetails(key)" @keydown.space.self.prevent @keyup.space.self.prevent="openEntryDetails(key)">
+                :aria-labelledby="`plugin-title-${key}`" aria-haspopup="dialog" aria-controls="plugin-detail-dialog"
+                @click="openEntryDetails(key)" @keydown.enter.self.prevent="openEntryDetails(key)" @keydown.space.self.prevent @keyup.space.self.prevent="openEntryDetails(key)"
+                :aria-describedby="[`plugin-status-${key}`, entryDescription(undefined, offer) && `plugin-offer-description-${key}`].filter(Boolean).join(' ')">
                 <div class="plugin-installed-icon"><n-icon :component="ExtensionPuzzleOutline" :size="22" /></div>
                 <div class="plugin-installed-main">
-                  <div class="plugin-installed-header"><h2>{{ catalogTitle(offer) }}</h2><n-tag v-if="incompatible(offer)" size="small" type="warning">{{ t('plugins.incompatible') }}</n-tag><n-tag v-else size="small" :bordered="false">{{ t('plugins.notInstalled') }}</n-tag><n-tag v-if="bundledOffers.has(offer.name)" size="small">{{ t('plugins.preinstalled') }}</n-tag></div>
+                  <div class="plugin-installed-header"><h2 :id="`plugin-title-${key}`">{{ catalogTitle(offer) }}</h2><span :id="`plugin-status-${key}`" class="plugin-installed-tags"><n-tag v-if="incompatible(offer)" size="small" type="warning">{{ t('plugins.incompatible') }}</n-tag><n-tag v-else size="small" :bordered="false">{{ t('plugins.notInstalled') }}</n-tag><n-tag v-if="bundledOffers.has(offer.name)" size="small">{{ t('plugins.preinstalled') }}</n-tag></span></div>
                   <div class="plugin-installed-metadata"><span class="plugin-id" :title="`${offer.name}${offer.version ? ` · ${offer.version}` : ''}`">{{ offer.name }}<span v-if="offer.version"> · {{ offer.version }}</span></span><div class="plugin-category-list"><n-tag v-for="value in entryCategories(undefined, offer)" :key="value || 'other'" size="small" :bordered="false">{{ categoryLabel(value) }}</n-tag></div></div>
                 </div>
-                <p v-if="entryDescription(undefined, offer)" class="plugin-installed-description" :title="entryDescription(undefined, offer)">{{ entryDescription(undefined, offer) }}</p>
+                <p v-if="entryDescription(undefined, offer)" :id="`plugin-offer-description-${key}`" class="plugin-installed-description" :title="entryDescription(undefined, offer)">{{ entryDescription(undefined, offer) }}</p>
               </div>
               <div class="plugin-installed-actions">
                 <n-button v-if="offer.url" type="primary" size="small" :loading="installing(offer.name)" :disabled="installDisabled(offer.name) || incompatible(offer)" @click="install(offer.name)">{{ installLabel(offer.name) }}</n-button>
@@ -723,9 +726,9 @@ async function requestCancel(id?: string) {
             <p v-if="pluginActivity(offer.name)?.status === 'failed'" class="plugin-error">{{ pluginActivity(offer.name)?.error }}</p>
 
           </template>
-        </article>
+        </div>
       </div>
-      <div v-if="catalogLoading && statusFilter !== 'installed' && statusFilter !== 'attention'" class="plugins-list-skeleton" :aria-label="t('plugins.catalogLoading')"><n-skeleton v-for="index in 3" :key="index" height="88px" :sharp="false" /></div>
+      <div v-if="catalogLoading && statusFilter !== 'installed' && statusFilter !== 'attention'" class="plugins-list-skeleton" role="status"><span class="sr-only">{{ t('plugins.catalogLoading') }}</span><n-skeleton v-for="index in 3" :key="index" height="88px" :sharp="false" /></div>
       <n-empty v-else-if="!visibleEntries.length" size="small" :description="t('plugins.noMatches')" class="plugins-empty" />
 
     </template>
@@ -870,6 +873,7 @@ async function requestCancel(id?: string) {
 .plugins-runtime-details { display: grid; gap: 10px; width: min(360px, calc(100vw - 48px)); font-size: 12px; }
 .plugins-library-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 16px; margin: 6px 0 16px; }
 .plugins-library-hint { color: var(--on-surface-muted); font-size: 11px; }
+.plugin-installed-tags { display: contents; }
 .plugins-list-skeleton { display: grid; gap: 10px; margin-top: 10px; }
 .plugins-catalog-error { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
 .plugins-catalog-error > span { flex: 1; min-width: min(100%, 240px); }
