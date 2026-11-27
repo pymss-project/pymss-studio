@@ -747,8 +747,11 @@ def _migrated_managed_dir(name: str, managed_dir: str, from_root: str, to_root: 
         return None
     try:
         expected = _managed_dir_for_name(to_root, name)
-        # Unregistering a managed model removes the entire directory.
-        if Path(moved_dir) == expected and set(expected.iterdir()) == paths:
+        # Unregistering a managed model removes the entire directory. The expected directory is
+        # resolved, so compare resolved paths: a mapped drive, linked parent or different casing
+        # must not demote a verified copy to a reference whose files are never removed.
+        if (Path(moved_dir).resolve() == expected
+                and {path.resolve() for path in expected.iterdir()} == {path.resolve() for path in paths}):
             return str(expected)
     except (ValueError, OSError, RuntimeError):
         return None

@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -979,6 +980,30 @@ class RemapCommandTests(unittest.TestCase):
         self.assertEqual(payload["count"], 1)
         meta = json.loads(self.sidecar.read_text(encoding="utf-8"))["models"]["copied"]
         self.assertEqual(meta, {"importMode": "reference", "managedDir": None})
+
+    def _assert_copy_stays_managed_when_target_is_spelled(self, to_root):
+        source_dir = self.old_root / "custom" / "copied"
+        self.sidecar.write_text(json.dumps({"version": 1, "models": {
+            "copied": {"importMode": "copy", "managedDir": str(source_dir)},
+        }}), encoding="utf-8")
+        request = {**self._payload("custom/copied/w.ckpt"), "toRoot": to_root}
+
+        _, payload = self._run(request, [self._entry("copied", source_dir / "w.ckpt")])
+
+        self.assertEqual(payload["count"], 1)
+        meta = json.loads(self.sidecar.read_text(encoding="utf-8"))["models"]["copied"]
+        self.assertEqual(meta["importMode"], "copy")
+        self.assertEqual(Path(meta["managedDir"]), self.new_root / "custom" / "copied")
+
+    def test_a_copy_stays_managed_when_the_target_is_reached_through_a_link(self):
+        link = self.root / "linked"
+        if os.name == "nt":
+            import _winapi
+            _winapi.CreateJunction(str(self.root), str(link))
+            self.addCleanup(os.rmdir, link)
+        else:
+            link.symlink_to(self.root, target_is_directory=True)
+        self._assert_copy_stays_managed_when_target_is_spelled(str(link / "new-models"))
 
     def test_remapping_onto_the_same_root_does_nothing(self):
         entry = self._entry("x", self.old_root / "w.ckpt")
