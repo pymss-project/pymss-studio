@@ -1490,7 +1490,9 @@ export const useEditorStore = defineStore('editor', () => {
       const duration = Number(metadata.duration)
       const sampleRate = Number(metadata.sampleRate)
       const channels = Number(metadata.channels)
-      if (existing.duration !== duration || existing.sampleRate !== sampleRate || existing.channels !== channels) {
+      // Durations stored by older projects can differ from a fresh probe by less than a sample.
+      const durationChanged = Math.abs(existing.duration - duration) * Math.max(sampleRate, 1) >= 0.5
+      if (durationChanged || existing.sampleRate !== sampleRate || existing.channels !== channels) {
         pushHistory()
         existing.duration = duration
         existing.sampleRate = sampleRate
