@@ -315,6 +315,7 @@ fn main() {
             }
             tauri::RunEvent::Exit => {
                 app.state::<commands::plugin_host::PluginHostState>().shutdown();
+                python::worker::shutdown_idle_inference();
                 session_log::finish_automatic_reports(app);
             }
             _ => {}

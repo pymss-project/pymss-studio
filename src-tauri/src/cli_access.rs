@@ -32,6 +32,43 @@ pub(crate) fn resource(root: &Path, name: &str, exclusive: bool) -> AppResult<Fi
 }
 
 pub(crate) const RUNTIME: &str = ".pymss-cli-runtime.lock";
+/// Written by the CLI while it waits for exclusive runtime access. Studio answers it by stopping
+/// an idle inference process, which keeps a shared runtime lease while its modules stay loaded.
+pub(crate) const RUNTIME_RELEASE: &str = ".pymss-cli-runtime.release";
+/// A request older than this was left behind by a CLI process that no longer waits for it.
+pub(crate) const RUNTIME_RELEASE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn is_busy(result: &AppResult<File>) -> bool {
+    matches!(result, Err(AppError::Worker(message)) if message.starts_with("RUNTIME_BUSY:"))
+}
+
+/// Runtime lease for the CLI. An exclusive request first asks Studio to release its idle
+/// inference process and waits briefly before reporting that the runtime is busy.
+pub(crate) fn runtime(root: &Path, exclusive: bool) -> AppResult<File> {
+    let result = resource(root, RUNTIME, exclusive);
+    if !exclusive || !is_busy(&result) {
+        return result;
+    }
+    let request = root.join(RUNTIME_RELEASE);
+    let _ = File::create(&request);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let result = loop {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let result = resource(root, RUNTIME, true);
+        if !is_busy(&result) || std::time::Instant::now() >= deadline {
+            break result;
+        }
+    };
+    let _ = fs::remove_file(&request);
+    result
+}
+
+/// Whether a CLI process is currently waiting for exclusive runtime access.
+pub(crate) fn runtime_release_requested(root: &Path) -> bool {
+    fs::metadata(root.join(RUNTIME_RELEASE))
+        .and_then(|metadata| metadata.modified())
+        .is_ok_and(|modified| modified.elapsed().is_ok_and(|age| age < RUNTIME_RELEASE_TTL))
+}
 pub(crate) const MIGRATION: &str = ".pymss-cli-migration.lock";
 pub(crate) const MODELS: &str = ".pymss-cli-models.lock";
 
@@ -116,6 +153,49 @@ pub(crate) fn application(root: &Path, exclusive: bool) -> AppResult<Option<File
 
 #[cfg(all(test, windows))]
 mod tests {
+    #[test]
+    fn an_exclusive_cli_request_asks_an_idle_holder_to_release_the_runtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let idle = super::resource(&root, super::RUNTIME, false).unwrap();
+        assert!(!super::runtime_release_requested(&root));
+        let holder = std::thread::spawn({
+            let root = root.clone();
+            move || {
+                while !super::runtime_release_requested(&root) {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                drop(idle);
+            }
+        });
+
+        let lease = super::runtime(&root, true).unwrap();
+
+        holder.join().unwrap();
+        assert!(!root.join(super::RUNTIME_RELEASE).exists());
+        assert!(super::resource(&root, super::RUNTIME, false).is_err());
+        drop(lease);
+    }
+
+    #[test]
+    fn a_request_left_by_an_exited_cli_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let request = std::fs::File::create(tmp.path().join(super::RUNTIME_RELEASE)).unwrap();
+        assert!(super::runtime_release_requested(tmp.path()));
+        request
+            .set_modified(std::time::SystemTime::now() - super::RUNTIME_RELEASE_TTL * 2)
+            .unwrap();
+        assert!(!super::runtime_release_requested(tmp.path()));
+    }
+
+    #[test]
+    fn a_shared_cli_lease_does_not_ask_for_release() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _idle = super::resource(tmp.path(), super::RUNTIME, false).unwrap();
+        let _reader = super::runtime(tmp.path(), false).unwrap();
+        assert!(!tmp.path().join(super::RUNTIME_RELEASE).exists());
+    }
+
     #[test]
     fn users_share_the_marker_and_maintenance_excludes_them() {
         let tmp = tempfile::tempdir().unwrap();

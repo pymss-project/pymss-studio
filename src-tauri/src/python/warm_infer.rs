@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::io::Write;
 use std::process::{ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -63,9 +64,33 @@ struct WarmSession {
     stderr_task_ids: Arc<Mutex<Vec<String>>>,
     stderr_fault: Arc<AtomicI32>,
     stderr_drained: Receiver<()>,
+    /// Shared runtime lease kept while the process sits idle with the runtime's modules loaded,
+    /// so the CLI cannot replace them underneath it. Released after the process stops.
+    idle_lease: Vec<Arc<std::fs::File>>,
 }
 
 static IDLE_SESSION: Mutex<Option<WarmSession>> = Mutex::new(None);
+/// Identifies the session currently parked in the idle slot for its release watcher.
+static IDLE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Stops the parked process when the CLI asks for exclusive runtime access. The watcher ends as
+/// soon as the slot is emptied or refilled by a later job.
+fn watch_idle_release(root: PathBuf, generation: u64) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(500));
+        let mut idle = IDLE_SESSION.lock().unwrap_or_else(|err| err.into_inner());
+        if idle.is_none() || IDLE_GENERATION.load(Ordering::Acquire) != generation {
+            return;
+        }
+        if crate::cli_access::runtime_release_requested(&root) {
+            let session = idle.take();
+            drop(idle);
+            // Dropping stops the process before its runtime lease is released.
+            drop(session);
+            return;
+        }
+    });
+}
 
 impl WarmSession {
     fn exited(&self) -> AppResult<bool> {
@@ -171,6 +196,7 @@ fn open_session(app: &AppHandle, operation_id: &str) -> AppResult<WarmSession> {
         stderr_task_ids,
         stderr_fault,
         stderr_drained,
+        idle_lease: Vec::new(),
     })
 }
 
@@ -239,7 +265,15 @@ pub(super) fn spawn_background(
             // Runtime maintenance can retire it once this job releases its lease.
             let mut idle = IDLE_SESSION.lock().unwrap_or_else(|err| err.into_inner());
             if RUNTIME_ACCESS.lock().is_ok_and(|access| access.users == 1) && idle.is_none() {
+                #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+                if let Some(access) = runtime_access.as_ref() {
+                    session.idle_lease = access.external.clone();
+                }
                 *idle = Some(session);
+                let generation = IDLE_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+                if let Ok(root) = crate::storage::runtime_envs_dir(&app) {
+                    watch_idle_release(root, generation);
+                }
             } else {
                 drop(idle);
                 drop(session);

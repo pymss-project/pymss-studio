@@ -219,6 +219,12 @@ pub(crate) fn acquire_application_operation() -> AppResult<impl Drop + Send> {
         .ok_or_else(|| AppError::Worker("Unable to reserve the application for this operation".into()))
 }
 
+/// Stops the idle inference process on exit so its runtime files are released before an
+/// installer that follows the update can replace them.
+pub(crate) fn shutdown_idle_inference() {
+    let _ = warm_infer::retire_idle_session();
+}
+
 pub(crate) fn acquire_plugin_source_update() -> AppResult<impl Drop> {
     let guard = acquire_runtime_access(&RUNTIME_ACCESS, "manage_plugin")?
         .ok_or_else(|| AppError::Worker("Unable to reserve plugin source configuration".into()))?;
@@ -428,6 +434,13 @@ fn acquire_worker_runtime_access(app: &AppHandle, command: &str, payload: &Value
         "recover_runtime"
     } else { runtime_access_command(command, payload) };
     let guard = acquire_runtime_access(&RUNTIME_ACCESS, access_command)?;
+    // The idle inference process holds a shared runtime lease, so it must stop before this
+    // process takes the exclusive one.
+    if guard.as_ref().is_some_and(|guard| guard.updating || guard.installing_plugins)
+        || matches!(command, "infer_workflow" | "run_operation")
+    {
+        warm_infer::retire_idle_session()?;
+    }
     #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     let guard = if let Some(mut guard) = guard {
         use crate::cli_access::{resource, RUNTIME, MODELS};
@@ -453,11 +466,6 @@ fn acquire_worker_runtime_access(app: &AppHandle, command: &str, payload: &Value
         }
         Some(guard)
     } else { None };
-    if guard.as_ref().is_some_and(|guard| guard.updating || guard.installing_plugins)
-        || matches!(command, "infer_workflow" | "run_operation")
-    {
-        warm_infer::retire_idle_session()?;
-    }
     Ok(guard)
 }
 

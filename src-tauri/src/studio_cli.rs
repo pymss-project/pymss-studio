@@ -377,7 +377,7 @@ fn run(args: Vec<OsString>, linux_resources: Option<PathBuf>) -> AppResult<ExitS
         developer: settings["developerMode"].as_bool() == Some(true),
     };
     let (write_runtime, writes_registry) = access_for_args(&args);
-    let mut lease = cli_access::resource(&ctx.root, cli_access::RUNTIME, write_runtime)?;
+    let mut lease = cli_access::runtime(&ctx.root, write_runtime)?;
     let mut selected = ctx.selected()?;
     #[cfg(windows)]
     let cold = |path: Option<&Path>| {
@@ -391,7 +391,7 @@ fn run(args: Vec<OsString>, linux_resources: Option<PathBuf>) -> AppResult<ExitS
     let cold = |path: Option<&Path>| path.is_none();
     if cold(selected.as_deref()) {
         drop(lease);
-        let maintenance = cli_access::resource(&ctx.root, cli_access::RUNTIME, true)?;
+        let maintenance = cli_access::runtime(&ctx.root, true)?;
         let current = ctx.selected()?;
         if cold(current.as_deref()) {
             let status = ctx.prepare(current.as_deref())?;
@@ -404,7 +404,7 @@ fn run(args: Vec<OsString>, linux_resources: Option<PathBuf>) -> AppResult<ExitS
             }
         }
         drop(maintenance);
-        lease = cli_access::resource(&ctx.root, cli_access::RUNTIME, write_runtime)?;
+        lease = cli_access::runtime(&ctx.root, write_runtime)?;
         selected = ctx.selected()?;
     }
     let _runtime = lease;
