@@ -60,6 +60,12 @@ Staged build verification runs `python worker.py env_info` and `list_models` to 
 
 GitHub releases include software packages smaller than 2 GiB, required update archives, the version-pinned macOS repair manifest, and public checksums. Larger packages remain single complete files on Hugging Face and ModelScope, linked from the release notes. Runtime wheels are shared by content hash under each mirror's `wheels/` directory and are not uploaded as software release assets.
 
+## Inference Precision
+
+Never force FP16 in Studio. Do not call `model.half()`, cast weights or inputs to half precision, or turn off the kernel's `use_amp` to replace it with a Studio-side precision path. BS-RoFormer and Mel-Band-RoFormer are designed for mixed precision: pymss runs them under autocast and keeps precision-sensitive operations in FP32. Running them entirely in FP16 produces NaN in chunks that contain digital silence, and those chunks are written out as silence. This happened in 0.1.3, where song intros and endings went missing in GUI separations (fixed in `8510dd6`).
+
+Precision belongs to the pymss kernel. Studio may only toggle the kernel's own AMP switch (`PYMSS_AMP`). Propose any other precision change in the kernel repositories, and validate it against CLI output on full-length tracks before it ships.
+
 ## Component Auto-Import
 
 `unplugin-vue-components` with `NaiveUiResolver` auto-imports Naive UI components. No manual imports needed for NButton, NCard, etc. Typings are disabled (`dts: false`) to avoid conflicts.

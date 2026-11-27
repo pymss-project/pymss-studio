@@ -1,4 +1,8 @@
-"""Cross-platform inference acceleration and Windows safety guards for Studio workers."""
+"""Cross-platform inference acceleration and Windows safety guards for Studio workers.
+
+Model precision is owned by the pymss kernel, which runs RoFormer models in mixed precision.
+Optimizations here must not convert weights or inputs to FP16 (see AGENTS.md, Inference Precision).
+"""
 
 from __future__ import annotations
 
