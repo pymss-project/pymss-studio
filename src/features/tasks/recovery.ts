@@ -24,22 +24,25 @@ export function taskRecoveryActions<T extends Pick<SeparationTask, 'status' | 'e
 }
 
 export function failedTasksToRetry<T extends Pick<SeparationTask, 'id' | 'status' | 'retryOf'>>(candidates: readonly T[], allTasks: readonly T[]): T[] {
-  // A queued, active or successful replacement already covers its original failure.
+  // Retries of one input form a lineage rooted at its first task. A queued, active or successful
+  // task anywhere in that lineage already covers every failure in it, including sibling retries
+  // started from an older batch.
   const byId = new Map(allTasks.map(task => [task.id, task]))
-  const covered = new Set<string>()
-  for (const task of allTasks) {
-    if (['failed', 'cancelled'].includes(task.status)) continue
+  const lineageRoot = (task: T) => {
+    let root = task.id
+    const visited = new Set<string>([root])
     let parent = task.retryOf
-    const visited = new Set<string>()
-    while (parent && !visited.has(parent)) {
+    for (; parent && !visited.has(parent); parent = byId.get(parent)?.retryOf) {
       visited.add(parent)
-      covered.add(parent)
-      parent = byId.get(parent)?.retryOf
+      root = parent
     }
+    // A corrupted cyclic link has no first task; every member resolves to the same one.
+    return parent ? [...visited].sort()[0]! : root
   }
+  const coveredRoots = new Set(allTasks.filter(task => !['failed', 'cancelled'].includes(task.status)).map(lineageRoot))
   const seen = new Set<string>()
   return candidates.filter(task => {
-    if (task.status !== 'failed' || covered.has(task.id) || seen.has(task.id)) return false
+    if (task.status !== 'failed' || coveredRoots.has(lineageRoot(task)) || seen.has(task.id)) return false
     seen.add(task.id)
     return true
   })

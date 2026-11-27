@@ -51,6 +51,13 @@ describe('failed task retry selection', () => {
     assert.deepEqual(failedTasksToRetry(all, all).map(item => item.id), ['c'])
   })
 
+  it('does not retry a failure whose input is already being retried from another batch', () => {
+    // a1 failed in its own batch; the user then retried the original a again from the older batch.
+    const all = [task('a', 'failed'), task('a1', 'failed', 'a'), task('a1b', 'queued', 'a')]
+    assert.deepEqual(failedTasksToRetry([all[1]!], all), [])
+    assert.deepEqual(failedTasksToRetry([all[0]!], all), [])
+  })
+
   it('ignores duplicate candidates and stops on cyclic retry links', () => {
     const all = [task('x', 'failed', 'y'), task('y', 'queued', 'x')]
     assert.deepEqual(failedTasksToRetry([all[0], all[0]], all), [])
