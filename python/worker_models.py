@@ -557,6 +557,11 @@ def reset_model_catalog_cache() -> None:
     """Forget the cached catalog so a long-lived worker sees catalog and model changes."""
     load_model_catalog.cache_clear()
     _model_index.cache_clear()
+    # Custom models are imported, relinked and remapped by other worker processes; pymss caches
+    # its registry per process. Only a module that was already imported can hold a stale copy.
+    user_models = sys.modules.get("pymss.user_models")
+    if user_models is not None:
+        user_models.clear_user_model_caches()
 
 
 @lru_cache(maxsize=1)

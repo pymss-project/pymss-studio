@@ -3,7 +3,9 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import types
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -1280,6 +1282,21 @@ class EnvInfoTorchDiagnosticsTests(unittest.TestCase):
         self.assertIn("availability query failed", payload["cudaAvailableError"])
         self.assertEqual(payload["cudaDeviceCount"], 1)
         self.assertEqual([item["name"] for item in payload["cudaDevices"]], ["GPU A"])
+
+
+class ResetModelCatalogCacheTests(unittest.TestCase):
+    def test_reset_forgets_custom_models_cached_by_a_loaded_pymss(self):
+        # A resident worker must see models imported, relinked or remapped by other processes.
+        user_models = types.SimpleNamespace(clear_user_model_caches=mock.Mock())
+        with mock.patch.dict(sys.modules, {"pymss.user_models": user_models}):
+            worker_models.reset_model_catalog_cache()
+        user_models.clear_user_model_caches.assert_called_once_with()
+
+    def test_reset_does_not_import_pymss(self):
+        with mock.patch.dict(sys.modules):
+            sys.modules.pop("pymss.user_models", None)
+            worker_models.reset_model_catalog_cache()
+            self.assertNotIn("pymss.user_models", sys.modules)
 
 
 if __name__ == "__main__":
