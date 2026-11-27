@@ -11,6 +11,7 @@ import { useTaskStore } from '@/stores/task'
 import { useSettingsStore } from '@/stores/settings'
 import EditorAssetPanel from '@/components/editor/EditorAssetPanel.vue'
 import EditorExportDialog from '@/components/editor/EditorExportDialog.vue'
+import EditorShortcutsDialog from '@/components/editor/EditorShortcutsDialog.vue'
 import EditorInspectorPanel from '@/components/editor/EditorInspectorPanel.vue'
 import EditorMixer from '@/components/editor/EditorMixer.vue'
 import EditorMixerConsole from '@/components/editor/EditorMixerConsole.vue'
@@ -648,6 +649,7 @@ onBeforeRouteLeave(async () => {
   }
 })
 
+const showShortcutsDialog = ref(false)
 useEditorShortcuts({
   interceptKeydown: event => mixerRef.value?.interceptKeydown(event) ?? false,
   canUseTimeline: () => Boolean(session.value) && !editor.loading && !showExportDialog.value,
@@ -667,6 +669,7 @@ useEditorShortcuts({
   toggleSnapping,
   seekClipEdge,
   togglePanel,
+  showShortcuts: () => { showShortcutsDialog.value = true },
 })
 
 watch(() => editor.session?.id, () => {
@@ -730,6 +733,7 @@ watch(
         @set-tool="setTimelineTool"
         @toggle-snapping="toggleSnapping"
         @toggle-panel="togglePanel"
+        @show-shortcuts="showShortcutsDialog = true"
         @reset="resetPlayhead"
         @stop="stopPlaybackAndReset"
         @toggle-transport="handleTransportToggleRequest"
@@ -953,6 +957,7 @@ watch(
     </div>
 
     <EditorStatusToasts ref="statusToasts" :animate="settings.animationsEnabled" />
+    <EditorShortcutsDialog v-model:show="showShortcutsDialog" />
 
     <EditorExportDialog
       :show="showExportDialog"

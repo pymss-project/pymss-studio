@@ -1099,6 +1099,28 @@
       "removeScanBlacklistNamed": "将“{name}”移出黑名单",
       "removeScanBlacklist": "移出",
       "scanBlacklistRemoved": "已移出黑名单，请重新扫描以重试此项。"
+    },
+    "shortcuts": {
+      "title": "键盘快捷键",
+      "or": "或",
+      "keySpace": "空格",
+      "groupPlayback": "播放与定位",
+      "groupEditing": "编辑",
+      "groupTracks": "音轨",
+      "groupView": "工具与视图",
+      "togglePlay": "播放或暂停",
+      "toStart": "回到开头",
+      "seekBackward": "后退 1 秒",
+      "seekForward": "前进 1 秒",
+      "seekBackwardLong": "后退 5 秒",
+      "seekForwardLong": "前进 5 秒",
+      "previousClipEdge": "跳到上一个片段边界",
+      "nextClipEdge": "跳到下一个片段边界",
+      "toggleMute": "切换所选音轨静音",
+      "toggleSolo": "切换所选音轨独奏",
+      "toggleAssets": "显示或隐藏资产库",
+      "toggleMixer": "显示或隐藏混音台",
+      "toggleInspector": "显示或隐藏检查器"
     }
   },
   "settings": {
