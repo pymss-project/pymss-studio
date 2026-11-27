@@ -700,12 +700,16 @@ onMounted(() => {
   inset: 0;
   z-index: 3200;
   display: grid;
+  /* Select menus portal into this dialog; the card keeps the one full-size cell so their
+     anchors never take part in centering it. */
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
   place-items: center;
   padding: 32px;
   background: color-mix(in srgb, var(--surface) 94%, transparent);
   backdrop-filter: blur(18px);
 }
 .onboarding-card {
+  grid-area: 1 / 1;
   display: grid;
   grid-template-columns: 218px minmax(0, 1fr);
   width: min(1040px, 100%);
