@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  naive-ui:
+    hash: 146dd0458c8a392dcd94399c5dc500f715e391d41a6969206e4f65a917b6ca5d
+    path: patches/naive-ui.patch
+
 importers:
 
   .:
@@ -34,7 +39,7 @@ importers:
         version: 0.13.0
       naive-ui:
         specifier: ^2.44.1
-        version: 2.44.1(vue@3.5.35(typescript@5.9.3))
+        version: 2.44.1(patch_hash=146dd0458c8a392dcd94399c5dc500f715e391d41a6969206e4f65a917b6ca5d)(vue@3.5.35(typescript@5.9.3))
       pinia:
         specifier: ^3.0.4
         version: 3.0.4(typescript@5.9.3)(vue@3.5.35(typescript@5.9.3))
@@ -1798,7 +1803,7 @@ snapshots:
 
   muggle-string@0.4.1: {}
 
-  naive-ui@2.44.1(vue@3.5.35(typescript@5.9.3)):
+  naive-ui@2.44.1(patch_hash=146dd0458c8a392dcd94399c5dc500f715e391d41a6969206e4f65a917b6ca5d)(vue@3.5.35(typescript@5.9.3)):
     dependencies:
       '@css-render/plugin-bem': 0.15.14(css-render@0.15.14)
       '@css-render/vue3-ssr': 0.15.14(vue@3.5.35(typescript@5.9.3))

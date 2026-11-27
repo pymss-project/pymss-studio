@@ -54,7 +54,8 @@ useRenderDiagnosticState(() => ({
   theme: settings.themeMode, resolvedTheme: themeIsDark.value ? 'dark' : 'light', animations: settings.animationsEnabled, scale: settings.scaleFactor,
   locale: settings.locale, resolvedLocale: locale.value, routePath: route.path,
 }), () => settings.developerMode)
-const componentLocale = computed(() => locale.value.startsWith('zh') ? zhCN : enUS)
+// `Close` is read by the naive-ui close button (see patches/naive-ui.patch).
+const componentLocale = computed(() => ({ ...(locale.value.startsWith('zh') ? zhCN : enUS), Close: { label: t('common.close') } }))
 const bootReady = ref(false)
 const backgroundWarmupsStarted = ref(false)
 const deferredPromptShown = ref(false)
