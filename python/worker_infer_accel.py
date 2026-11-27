@@ -1,7 +1,8 @@
 """Cross-platform inference acceleration and Windows safety guards for Studio workers.
 
 Model precision is owned by the pymss kernel, which runs RoFormer models in mixed precision.
-Optimizations here must not convert weights or inputs to FP16 (see AGENTS.md, Inference Precision).
+Optimizations here must not convert weights or inputs to FP16 or change PyTorch's matmul
+precision such as TF32, so GUI output matches the CLI (see AGENTS.md, Inference Precision).
 """
 
 from __future__ import annotations
@@ -62,27 +63,6 @@ def _device_total_vram_bytes(device_type: str, device_index: int, torch_mod: Any
     except Exception:
         return None
     return None
-
-
-def _configure_cuda_tf32(device_type: str, torch_mod: Any) -> bool:
-    if device_type != "cuda" or _is_hip_build(torch_mod):
-        return False
-    if _env_flag("PYMSS_STUDIO_TF32") is False:
-        return False
-    applied = False
-    try:
-        cuda_backend = getattr(getattr(torch_mod, "backends", None), "cuda", None)
-        matmul = getattr(cuda_backend, "matmul", None)
-        if matmul is not None and hasattr(matmul, "allow_tf32"):
-            matmul.allow_tf32 = True
-            applied = True
-        cudnn_backend = getattr(getattr(torch_mod, "backends", None), "cudnn", None)
-        if cudnn_backend is not None and hasattr(cudnn_backend, "allow_tf32"):
-            cudnn_backend.allow_tf32 = True
-            applied = True
-    except Exception:
-        return False
-    return applied
 
 
 def _set_inference_option(config: Any, key: str, value: Any) -> bool:
@@ -211,7 +191,6 @@ def optimize_separator_inference(
 ) -> dict[str, Any]:
     """Apply safe, platform-aware inference optimizations to a loaded MSSeparator."""
     result: dict[str, Any] = {
-        "tf32": False,
         "autoBatchSize": None,
         "winSdpaGuardCount": 0,
     }
@@ -228,7 +207,6 @@ def optimize_separator_inference(
     model_type = str(getattr(separator, "model_type", "") or "").strip().lower()
     device_type, device_index = _resolve_device_info(getattr(separator, "device", "cpu"), torch_mod)
 
-    result["tf32"] = _configure_cuda_tf32(device_type, torch_mod)
     result["winSdpaGuardCount"] = _install_windows_sdpa_contiguous_guard(
         model,
         device_type=device_type,
@@ -247,15 +225,12 @@ def optimize_separator_inference(
     )
 
     if logger is not None and any((
-        result["tf32"],
         result["autoBatchSize"],
         result["winSdpaGuardCount"],
     )):
         applied = []
         if result["autoBatchSize"]:
             applied.append(f"auto_batch={result['autoBatchSize']}")
-        if result["tf32"]:
-            applied.append("cuda_tf32")
         if result["winSdpaGuardCount"]:
             applied.append(f"win_sdpa_contiguous_guard={result['winSdpaGuardCount']}")
         try:

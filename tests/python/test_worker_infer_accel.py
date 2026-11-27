@@ -35,9 +35,10 @@ def _cuda_torch(total_memory: int) -> types.SimpleNamespace:
 
 
 class OptimizeSeparatorInferenceTests(unittest.TestCase):
-    def test_roformer_weights_stay_in_full_precision_under_amp(self):
+    def test_precision_stays_with_the_kernel(self):
         # Pure FP16 RoFormer weights turn chunks containing digital silence into NaN,
-        # which the overlap-add replaces with zeros (silent song intros and endings).
+        # which the overlap-add replaces with zeros (silent song intros and endings). TF32
+        # matmul likewise makes GUI output drift from the CLI.
         model = _RoformerModel()
         separator = types.SimpleNamespace(
             model=model,
@@ -45,19 +46,21 @@ class OptimizeSeparatorInferenceTests(unittest.TestCase):
             model_type="bs_roformer",
             device="cuda:0",
         )
+        torch_mod = _cuda_torch(8 * 1024 ** 3)
         with mock.patch.dict(worker_infer_accel.os.environ, {}, clear=True):
             result = worker_infer_accel.optimize_separator_inference(
                 separator,
                 explicit_params={},
                 amp_enabled=True,
-                torch_mod=_cuda_torch(8 * 1024 ** 3),
+                torch_mod=torch_mod,
                 platform="win32",
             )
 
         self.assertEqual(model.half_calls, 0)
         self.assertTrue(separator.config.inference["use_amp"])
         self.assertNotIn("fp16Weights", result)
-        self.assertTrue(result["tf32"])
+        self.assertNotIn("tf32", result)
+        self.assertFalse(torch_mod.backends.cuda.matmul.allow_tf32)
         self.assertEqual(result["autoBatchSize"], 2)
         self.assertEqual(separator.config.inference["batch_size"], 2)
 

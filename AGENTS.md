@@ -62,7 +62,7 @@ GitHub releases include software packages smaller than 2 GiB, required update ar
 
 ## Inference Precision
 
-Never force FP16 in Studio. Do not call `model.half()`, cast weights or inputs to half precision, or turn off the kernel's `use_amp` to replace it with a Studio-side precision path. BS-RoFormer and Mel-Band-RoFormer are designed for mixed precision: pymss runs them under autocast and keeps precision-sensitive operations in FP32. Running them entirely in FP16 produces NaN in chunks that contain digital silence, and those chunks are written out as silence. This happened in 0.1.3, where song intros and endings went missing in GUI separations (fixed in `8510dd6`).
+Never force FP16 in Studio. Do not call `model.half()`, cast weights or inputs to half precision, turn off the kernel's `use_amp` to replace it with a Studio-side precision path, or change PyTorch's global matmul precision (such as enabling TF32). BS-RoFormer and Mel-Band-RoFormer are designed for mixed precision: pymss runs them under autocast and keeps precision-sensitive operations in FP32. Running them entirely in FP16 produces NaN in chunks that contain digital silence, and those chunks are written out as silence. This happened in 0.1.3, where song intros and endings went missing in GUI separations (fixed in `8510dd6`).
 
 Precision belongs to the pymss kernel. Studio may only toggle the kernel's own AMP switch (`PYMSS_AMP`). Propose any other precision change in the kernel repositories, and validate it against CLI output on full-length tracks before it ships.
 
