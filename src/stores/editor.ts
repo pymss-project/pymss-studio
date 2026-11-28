@@ -1586,6 +1586,31 @@ export const useEditorStore = defineStore('editor', () => {
     }
   }
 
+  function addEmptyTrack() {
+    if (!session.value) throw new Error('Editor session is not loaded')
+    pushHistory()
+    const track: EditorTrack = {
+      id: makeId('track'),
+      sourceId: '',
+      role: 'reference',
+      type: 'audio',
+      name: String(i18n.global.t('editor.emptyTrackName', { index: session.value.tracks.length + 1 })),
+      autoName: false,
+      color: trackColor('reference'),
+      volume: 1,
+      pan: 0,
+      muted: false,
+      solo: false,
+      fadeIn: 0,
+      fadeOut: 0,
+      clips: [],
+    }
+    session.value.tracks.push(track)
+    selectTrack(track.id)
+    scheduleSave()
+    return track
+  }
+
   function addRecordingTrack() {
     if (!session.value) throw new Error('Editor session is not loaded')
     pushHistory()
@@ -2489,6 +2514,7 @@ export const useEditorStore = defineStore('editor', () => {
     ensureSourceByPath,
     addReferenceSourceByPath,
     addTrackFromSourceId,
+    addEmptyTrack,
     addRecordingTrack,
     addRecordingClip,
     scanAssets,

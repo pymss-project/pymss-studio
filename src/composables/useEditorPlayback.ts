@@ -1,4 +1,4 @@
-import { onBeforeUnmount, toValue, type MaybeRefOrGetter, type Ref, watch } from 'vue'
+import { computed, onBeforeUnmount, toValue, type MaybeRefOrGetter, type Ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import i18n from '@/i18n'
@@ -18,6 +18,8 @@ type PlaybackOptions = {
   editor: EditorStore
   scrollEl: Ref<HTMLElement | null>
   trackHeaderWidth?: MaybeRefOrGetter<number>
+  /** Whether playback turns timeline pages to keep the playhead visible. */
+  followPlayback?: MaybeRefOrGetter<boolean>
 }
 
 type ActiveClipEntry = {
@@ -84,7 +86,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
     isBusy,
     isActuallyPlaying,
   } = storeToRefs(playback)
-  const shouldFollowPlayhead = isActuallyPlaying
+  const shouldFollowPlayhead = computed(() => isActuallyPlaying.value && toValue(options.followPlayback ?? true))
 
   const nativePlayback = useEditorNativePlayback(editor, () => followPlayhead())
   const audioEntries = new Map<string, ManagedAudio>()
@@ -736,7 +738,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
   }
 
   function followPlayhead(mode: FollowPlayheadMode = 'playback') {
-    if (mode === 'playback' && intent.value !== 'play') return
+    if (mode === 'playback' && (intent.value !== 'play' || !toValue(options.followPlayback ?? true))) return
     const el = scrollEl.value
     if (!el) return
     const trackHeaderWidth = toValue(options.trackHeaderWidth ?? 0)

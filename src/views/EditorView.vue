@@ -86,6 +86,8 @@ const {
   setTrackHeaderWidth,
   mixerPanelHeight,
   setMixerPanelHeight,
+  followPlayback,
+  setFollowPlayback,
 } = useEditorLayout({
   shellEl,
   assetRailWidth: ASSET_RAIL_WIDTH,
@@ -166,7 +168,7 @@ const {
   message,
   t,
 })
-const playback = useEditorPlayback({ editor, scrollEl: mixerScrollEl, trackHeaderWidth })
+const playback = useEditorPlayback({ editor, scrollEl: mixerScrollEl, trackHeaderWidth, followPlayback })
 const {
   transportVisualState,
   transportPendingAction,
@@ -710,6 +712,7 @@ watch(
         :transport-pending-action="transportPendingAction"
         :transport-can-toggle="transportCanToggle"
         :loop="playbackLoop"
+        :follow-playback="followPlayback"
         :master-volume="editor.masterVolume"
         :master-pan="editor.masterPan"
         :saving="editor.saving"
@@ -738,6 +741,7 @@ watch(
         @stop="stopPlaybackAndReset"
         @toggle-transport="handleTransportToggleRequest"
         @update:loop="setPlaybackLoop"
+        @update:follow-playback="setFollowPlayback"
         @update:master-volume="setMasterVolume"
         @begin-master-volume="editor.beginInteraction"
         @commit-master-volume="editor.commitInteraction"
@@ -837,6 +841,7 @@ watch(
             @reset-header-width="setTrackHeaderWidth(TRACK_HEADER_DEFAULT_WIDTH)"
             @rename-track="editor.renameTrack"
             @add-recording-track="handleAddRecordingTrack"
+            @add-empty-track="editor.addEmptyTrack()"
             @split-at="splitAtPointer"
             @drop-clip="dropClip"
             @set-clip-locked="setClipLocked"

@@ -885,6 +885,8 @@
     "recordingDeviceFallback": "音频输入设备 {index}",
     "recordingInputLevel": "输入电平",
     "recordingHint": "从当前播放头开始录制；选中录音轨时将覆盖同一时段，否则自动新建录音轨。",
+    "emptyTrackHint": "将素材或片段拖到这里",
+    "emptyTrackName": "音轨 {index}",
     "recordingTrackName": "录音 {index}",
     "recordingAddTrack": "新建录音轨",
     "recordingTrackAdded": "已新建录音轨：{name}",

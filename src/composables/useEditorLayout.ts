@@ -43,6 +43,7 @@ type EditorUiState = {
   assetCollapsed?: boolean
   inspectorCollapsed?: boolean
   mixerCollapsed?: boolean
+  followPlayback?: boolean
   trackHeaderWidth?: number
   mixerPanelHeight?: number | null
   assetPanelWidth?: number
@@ -72,6 +73,8 @@ export function useEditorLayout(options: UseEditorLayoutOptions) {
   const isAssetCollapsed = ref(false)
   const isInspectorCollapsed = ref(true)
   const isMixerCollapsed = ref(true)
+  /** Turn timeline pages to keep the playhead in view during playback. */
+  const followPlayback = ref(true)
   const trackHeaderWidth = ref(TRACK_HEADER_DEFAULT_WIDTH)
   // null keeps the console at the natural height of its channel strips.
   const mixerPanelHeight = ref<number | null>(null)
@@ -162,6 +165,7 @@ export function useEditorLayout(options: UseEditorLayoutOptions) {
       assetCollapsed: isAssetCollapsed.value,
       inspectorCollapsed: isInspectorCollapsed.value,
       mixerCollapsed: isMixerCollapsed.value,
+      followPlayback: followPlayback.value,
       trackHeaderWidth: trackHeaderWidth.value,
       mixerPanelHeight: mixerPanelHeight.value,
       assetPanelWidth: preferredAssetWidth.value,
@@ -228,6 +232,7 @@ export function useEditorLayout(options: UseEditorLayoutOptions) {
       ? stored.inspectorCollapsed
       : true
     isMixerCollapsed.value = stored?.mixerCollapsed !== false
+    followPlayback.value = stored?.followPlayback !== false
     trackHeaderWidth.value = clampTrackHeaderWidth(Number(stored?.trackHeaderWidth) || TRACK_HEADER_DEFAULT_WIDTH)
     const storedConsoleHeight = Number(stored?.mixerPanelHeight)
     mixerPanelHeight.value = Number.isFinite(storedConsoleHeight) && storedConsoleHeight > 0 ? clampMixerPanelHeight(storedConsoleHeight) : null
@@ -276,6 +281,12 @@ export function useEditorLayout(options: UseEditorLayoutOptions) {
 
   function setMixerPanelHeight(height: number | null) {
     mixerPanelHeight.value = height === null ? null : clampMixerPanelHeight(height)
+    savePanelWidths()
+  }
+
+  function setFollowPlayback(value: boolean) {
+    if (followPlayback.value === value) return
+    followPlayback.value = value
     savePanelWidths()
   }
 
@@ -330,5 +341,7 @@ export function useEditorLayout(options: UseEditorLayoutOptions) {
     mixerPanelHeight,
     setMixerPanelHeight,
     toggleMixerPanel,
+    followPlayback,
+    setFollowPlayback,
   }
 }

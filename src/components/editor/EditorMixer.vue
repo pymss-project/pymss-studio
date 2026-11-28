@@ -60,6 +60,7 @@ const emit = defineEmits<{
   setClipMuted: [trackId: string, clipId: string, muted: boolean]
   importTracks: []
   addRecordingTrack: []
+  addEmptyTrack: []
   resizeHeader: [width: number]
   resetHeaderWidth: []
   renameTrack: [trackId: string, name: string, commit?: boolean]
@@ -805,9 +806,13 @@ function handleTimelineWheel(event: WheelEvent) {
   const element = scrollEl.value
   if (!element) return
 
-  if (event.altKey && !event.ctrlKey && !event.metaKey) {
+  // Alt or Ctrl+Shift resizes every track. Chromium on Windows reports Shift+wheel on the X axis.
+  const trackHeightWheel = (event.altKey && !event.ctrlKey && !event.metaKey)
+    || ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey)
+  if (trackHeightWheel) {
     if (event.cancelable) event.preventDefault()
-    if (event.deltaY && !props.editingDisabled) scaleTrackHeightsFromWheel(event.deltaY < 0 ? 'in' : 'out')
+    const delta = event.deltaY || event.deltaX
+    if (delta && !props.editingDisabled) scaleTrackHeightsFromWheel(delta < 0 ? 'in' : 'out')
     return
   }
 
@@ -906,12 +911,14 @@ function nudgeHeaderWidth(event: KeyboardEvent) {
 }
 
 const addTrackOptions = computed<DropdownOption[]>(() => [
+  { key: 'empty', label: t('editor.addTrackEmpty'), icon: () => h(NIcon, null, { default: () => h(AddOutline) }) },
   { key: 'import', label: t('editor.addTrackImport'), icon: () => h(NIcon, null, { default: () => h(FolderOpenOutline) }) },
   { key: 'recording', label: t('editor.addTrackRecording'), icon: () => h(NIcon, null, { default: () => h(MicOutline) }) },
 ])
 
 function handleAddTrack(key: string | number) {
-  if (key === 'import') emit('importTracks')
+  if (key === 'empty') emit('addEmptyTrack')
+  else if (key === 'import') emit('importTracks')
   else if (key === 'recording') emit('addRecordingTrack')
 }
 
@@ -1304,7 +1311,7 @@ defineExpose({
                 v-if="!clipsForTrack(track).length && recordingPreview?.trackId !== track.id"
                 class="track-wave__empty"
               >
-                {{ track.role === 'recording' ? t('editor.recordingTrackReadyHint') : t('editor.laneNoAudio') }}
+                {{ track.role === 'recording' ? t('editor.recordingTrackReadyHint') : track.sourceId ? t('editor.laneNoAudio') : t('editor.emptyTrackHint') }}
               </div>
             </div>
           </div>
@@ -1368,7 +1375,7 @@ defineExpose({
         <button type="button" class="timeline-zoom__button" :aria-label="t('editor.zoomIn')" :title="t('editor.zoomIn')" @keydown.space.stop @click="emit('zoomIn')"><n-icon :component="AddOutline" /></button>
       </div>
       <span class="timeline-zoom__divider" aria-hidden="true" />
-      <div class="timeline-zoom__group" role="group" :aria-label="t('editor.trackHeight')" :title="`${t('editor.trackHeight')} (Alt + ${t('editor.mouseWheel')})`">
+      <div class="timeline-zoom__group" role="group" :aria-label="t('editor.trackHeight')" :title="`${t('editor.trackHeight')} (Alt + ${t('editor.mouseWheel')} / Ctrl + Shift + ${t('editor.mouseWheel')})`">
         <n-icon :component="SwapVerticalOutline" class="timeline-zoom__icon" aria-hidden="true" />
         <button type="button" class="timeline-zoom__button" :disabled="editingDisabled || trackHeightsAtMinimum" :aria-label="t('editor.trackHeightDecrease')" :title="t('editor.trackHeightDecrease')" @keydown.space.stop @click="scaleTrackHeights('out')"><n-icon :component="RemoveOutline" /></button>
         <button type="button" class="timeline-zoom__button" :disabled="editingDisabled" :aria-pressed="tracksFitView" :aria-label="t('editor.trackHeightFit')" :title="t('editor.trackHeightFit')" @keydown.space.stop @click="fitTrackHeights"><n-icon :component="ScanOutline" /></button>

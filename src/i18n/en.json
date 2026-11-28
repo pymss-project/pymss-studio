@@ -885,6 +885,8 @@
     "recordingDeviceFallback": "Audio input device {index}",
     "recordingInputLevel": "Input level",
     "recordingHint": "Recording starts at the playhead. A selected recording track is overwritten in that range; otherwise a new track is created.",
+    "emptyTrackHint": "Drag assets or clips here",
+    "emptyTrackName": "Track {index}",
     "recordingTrackName": "Recording {index}",
     "recordingAddTrack": "New Recording Track",
     "recordingTrackAdded": "Recording track created: {name}",

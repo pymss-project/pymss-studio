@@ -10,6 +10,7 @@ import {
   FileTrayFullOutline,
   HelpCircleOutline,
   InformationCircleOutline,
+  LocateOutline,
   Magnet,
   Mic,
   Navigate,
@@ -47,6 +48,7 @@ const props = defineProps<{
   transportPendingAction: TransportPendingAction
   transportCanToggle: boolean
   loop: boolean
+  followPlayback: boolean
   masterVolume: number
   masterPan: number
   canUndo: boolean
@@ -74,6 +76,7 @@ const emit = defineEmits<{
   toggleTransport: []
   stop: []
   'update:loop': [value: boolean]
+  'update:followPlayback': [value: boolean]
   'update:masterVolume': [value: number]
   beginMasterVolume: []
   commitMasterVolume: []
@@ -349,6 +352,17 @@ function clearTransportPressed() {
             @click="emit('update:loop', !loop)"
           >
             <n-icon :component="RepeatOutline" />
+          </button>
+          <button
+            class="transport-chip"
+            type="button"
+            :class="{ 'transport-chip--active': followPlayback }"
+            :title="t('editor.followPlayback')"
+            :aria-label="t('editor.followPlayback')"
+            :aria-pressed="followPlayback"
+            @click="emit('update:followPlayback', !followPlayback)"
+          >
+            <n-icon :component="LocateOutline" />
           </button>
         </div>
 
