@@ -5,7 +5,8 @@ import EditorInsertList from '@/components/editor/EditorInsertList.vue'
 import EditorPanBar from '@/components/editor/EditorPanBar.vue'
 import EditorParameterSlider from '@/components/editor/EditorParameterSlider.vue'
 import type { EditorPluginSlot } from '@/types/editor'
-import { formatLevel, formatPanShort, formatVolumeDb, METER_TICKS, meterScale, meterValue, normalizeLevel } from '@/utils/editorMeter'
+import EditorLevelMeter from '@/components/editor/EditorLevelMeter.vue'
+import { faderGain, faderPosition, formatLevel, formatPanShort, formatTickDb, formatVolumeDb, METER_TICKS, normalizeLevel } from '@/utils/editorMeter'
 
 const props = defineProps<{
   name: string
@@ -81,26 +82,24 @@ const panLabel = computed(() => `${props.name} · ${t('editor.balance')}`)
       <div class="channel-strip__fader">
         <EditorParameterSlider
           vertical
-          :value="volume" :value-text="formatVolumeDb(volume)"
-          :reset-value="1"
+          :value="faderPosition(volume)" :value-text="formatVolumeDb(volume)"
+          :reset-value="faderPosition(1)"
           :label="volumeLabel"
           :reset-label="t('editor.sliderDefaultVolume')"
           :min="0"
-          :max="2"
-          :step="0.01"
+          :max="1"
+          :step="0.002"
           :tooltip="false"
           :disabled="disabled"
-          @update:value="(value: number) => emit('update:volume', value)"
+          @update:value="(position: number) => emit('update:volume', faderGain(position))"
           @dragstart="emit('beginVolume')"
           @dragend="emit('commitVolume')"
         />
       </div>
       <div class="channel-strip__meter">
-        <div v-for="(value, index) in meterLevels" :key="index" class="channel-strip__meter-bar" role="meter" :aria-label="`${t('editor.channelLevel')} · ${t(index === 0 ? 'editor.panLeft' : 'editor.panRight')}`" :aria-valuemin="-60" :aria-valuemax="0" :aria-valuenow="meterValue(value)" :aria-valuetext="`${formatLevel(value)} dBFS`">
-          <span :class="{ 'channel-strip__meter-fill--full': value >= 1 }" :style="{ clipPath: `inset(${(1 - meterScale(value)) * 100}% 0 0)` }" />
-        </div>
+        <EditorLevelMeter class="channel-strip__meter-bars" :levels="meterLevels" role="group" :aria-label="t('editor.channelLevel')" />
         <div class="channel-strip__meter-scale" aria-hidden="true">
-          <span v-for="tick in METER_TICKS" :key="tick.db" :style="{ top: `${(1 - tick.position) * 100}%` }">{{ tick.db === 0 ? '0' : `−${Math.abs(tick.db)}` }}</span>
+          <span v-for="tick in METER_TICKS" :key="tick.db" :style="{ top: `${(1 - tick.position) * 100}%` }">{{ formatTickDb(tick.db) }}</span>
         </div>
       </div>
     </div>
@@ -210,10 +209,7 @@ const panLabel = computed(() => `${props.name} · ${t('editor.balance')}`)
 /* Double-click or Alt+click on the fader handle resets it; the strip has no room for a reset button. */
 .channel-strip__fader :deep(.editor-parameter-slider__reset) { display: none; }
 
-.channel-strip__meter { display: grid; grid-template-columns: 5px 5px 18px; gap: 2px; }
-.channel-strip__meter-bar { position: relative; overflow: hidden; background: var(--surface-2); border: 1px solid var(--outline); border-radius: 2px; }
-.channel-strip__meter-bar > span { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(255, 106, 106, 0.95), rgba(255, 170, 102, 0.92) 24%, rgba(92, 214, 132, 0.9) 60%); }
-.channel-strip__meter-bar > .channel-strip__meter-fill--full { background: var(--error, var(--warning)); }
+.channel-strip__meter { display: grid; grid-template-columns: 12px 18px; gap: 2px; }
 .channel-strip__meter-scale { position: relative; color: var(--on-surface-muted); font-size: 9px; line-height: 1; font-variant-numeric: tabular-nums; }
 .channel-strip__meter-scale > span { position: absolute; left: 2px; white-space: nowrap; transform: translateY(-50%); }
 

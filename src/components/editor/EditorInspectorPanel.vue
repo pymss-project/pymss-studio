@@ -7,7 +7,8 @@ import { PencilOutline } from '@vicons/ionicons5'
 import { useEditorPlaybackStore } from '@/stores/editorPlayback'
 import type { EditorClip, EditorMasterLimiter as MasterLimiterSettings, EditorSession, EditorSource } from '@/types/editor'
 import { formatTime, formatTimecodeMs, parseTimecode } from '@/utils/editorTime'
-import { formatLevel, formatPanShort, formatVolumeDb, meterScale, normalizeLevel } from '@/utils/editorMeter'
+import EditorLevelMeter from '@/components/editor/EditorLevelMeter.vue'
+import { formatLevel, formatPanShort, formatVolumeDb, normalizeLevel } from '@/utils/editorMeter'
 import { clipTrimBounds } from '@/utils/editorClips'
 import EditorMasterLimiter from '@/components/editor/EditorMasterLimiter.vue'
 import EditorParameterSlider from '@/components/editor/EditorParameterSlider.vue'
@@ -98,7 +99,6 @@ watch(() => props.focusRequest?.serial, () => {
 watch(tabs, (list) => {
   if (list.find(tab => tab.id === activeTab.value)?.disabled) activeTab.value = 'track'
 })
-const channelMeterWidths = computed(() => channelLevels.value.map(value => `${meterScale(value) * 100}%`))
 const clipStartInput = ref<InputNumberInst | null>(null)
 let cancellingClipStart = false
 const renameDraft = ref('')
@@ -378,9 +378,14 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
               <button type="button" class="inspector-channel__flag inspector-channel__flag--mute" :class="{ 'inspector-channel__flag--active': selectedTrack.muted }" :aria-pressed="selectedTrack.muted" :title="t(selectedTrack.muted ? 'editor.unmuteTrack' : 'editor.muteTrack')" :aria-label="t(selectedTrack.muted ? 'editor.unmuteTrack' : 'editor.muteTrack')" @keydown.space.stop @click="toggleTrackFlag('muted')">M</button>
               <button type="button" class="inspector-channel__flag inspector-channel__flag--solo" :class="{ 'inspector-channel__flag--active': selectedTrack.solo }" :aria-pressed="selectedTrack.solo" :title="t(selectedTrack.solo ? 'editor.unsoloTrack' : 'editor.soloTrack')" :aria-label="t(selectedTrack.solo ? 'editor.unsoloTrack' : 'editor.soloTrack')" @keydown.space.stop @click="toggleTrackFlag('solo')">S</button>
             </div>
-            <div class="inspector-channel__meter" role="group" :aria-label="t('editor.channelLevel')" :title="t('editor.channelLevelStereo', { left: formatLevel(channelLevels[0]), right: formatLevel(channelLevels[1]) })">
-              <span v-for="(width, index) in channelMeterWidths" :key="index" class="inspector-channel__meter-bar"><i :style="{ width }" /></span>
-            </div>
+            <EditorLevelMeter
+              class="inspector-channel__meter"
+              orientation="horizontal"
+              :levels="channelLevels"
+              role="group"
+              :aria-label="t('editor.channelLevel')"
+              :title="t('editor.channelLevelStereo', { left: formatLevel(channelLevels[0]), right: formatLevel(channelLevels[1]) })"
+            />
             <small class="inspector-channel__peak">{{ formatLevel(channelPeak) }} dBFS</small>
           </div>
         </section>
@@ -678,9 +683,7 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
 .inspector-channel__flag:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
 .inspector-channel__flag--mute.inspector-channel__flag--active { border-color: transparent; background: var(--warning); color: #1b1b1b; }
 .inspector-channel__flag--solo.inspector-channel__flag--active { border-color: transparent; background: var(--primary); color: #fff; }
-.inspector-channel__meter { display: grid; flex: 1; gap: 2px; min-width: 0; }
-.inspector-channel__meter-bar { position: relative; height: 4px; overflow: hidden; border-radius: 2px; background: var(--surface-2); }
-.inspector-channel__meter-bar > i { position: absolute; inset: 0 auto 0 0; background: linear-gradient(90deg, rgba(92, 214, 132, 0.9) 40%, rgba(255, 170, 102, 0.92) 76%, rgba(255, 106, 106, 0.95)); }
+.inspector-channel__meter { --level-meter-border: 0; flex: 1; height: 10px; }
 .inspector-channel__peak { flex: none; min-width: 64px; color: var(--on-surface-muted); font-size: 11px; font-variant-numeric: tabular-nums; text-align: end; }
 .inspector-group--inserts { min-width: 0; }
 /* The insert list renders nothing while the plugin host is unavailable. */

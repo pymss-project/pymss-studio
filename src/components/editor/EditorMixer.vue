@@ -6,7 +6,8 @@ import type { DropdownOption } from 'naive-ui'
 import NIcon from '@/components/AppIcon.vue'
 import type { EditorClip, EditorClipDrop, EditorSource, EditorTimelineTool, EditorTrack } from '@/types/editor'
 import EditorWaveform from '@/components/editor/EditorWaveform.vue'
-import { formatVolumeDb } from '@/utils/editorMeter'
+import EditorLevelMeter from '@/components/editor/EditorLevelMeter.vue'
+import { formatLevel, formatVolumeDb } from '@/utils/editorMeter'
 import { editorClipShortcutLabel, type EditorClipCommand } from '@/utils/editorClipShortcuts'
 import { formatTime, formatTimecode } from '@/utils/editorTime'
 import {
@@ -655,24 +656,6 @@ function trackLevel(trackId: string) {
   return props.trackLevels[trackId] || [0, 0]
 }
 
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value))
-}
-
-function trackMeterPeak(trackId: string) {
-  const [left, right] = trackLevel(trackId)
-  return Math.max(left, right)
-}
-
-function trackMeterStyle(trackId: string, channel: 0 | 1) {
-  const raw = trackLevel(trackId)[channel]
-  const normalized = clamp(raw > 0.012 ? Math.max(raw, 0.08) : 0, 0, 1)
-  return {
-    transform: `scaleY(${normalized})`,
-    opacity: normalized > 0 ? 1 : 0,
-  }
-}
-
 function rowClass(track: EditorTrack) {
   return {
     'track-row--selected': track.id === props.selectedTrackId,
@@ -1049,14 +1032,13 @@ defineExpose({
                 <small v-if="!sourceMissing(track) && clipsForTrack(track).length" class="track-row__gain">{{ formatVolumeDb(track.volume) }}</small>
               </div>
             </div>
-            <div
+            <EditorLevelMeter
               class="track-meter"
-              :class="{ 'track-meter--active': trackMeterPeak(track.id) > 0.02 }"
-              :title="`${Math.round(trackLevel(track.id)[0] * 100)} / ${Math.round(trackLevel(track.id)[1] * 100)}`"
-            >
-              <span class="track-meter__bar"><i :style="trackMeterStyle(track.id, 0)" /></span>
-              <span class="track-meter__bar"><i :style="trackMeterStyle(track.id, 1)" /></span>
-            </div>
+              :levels="trackLevel(track.id)"
+              role="group"
+              :aria-label="t('editor.channelLevel')"
+              :title="t('editor.channelLevelStereo', { left: formatLevel(trackLevel(track.id)[0]), right: formatLevel(trackLevel(track.id)[1]) })"
+            />
           </div>
 
           <div class="track-row__lane" :data-clip-lane="track.id" @click="seekFromEvent">
@@ -1831,42 +1813,13 @@ defineExpose({
 }
 
 .track-meter {
-  display: grid;
-  grid-template-columns: repeat(2, 3px);
-  gap: 2px;
-  align-items: end;
-  justify-content: center;
-  min-height: 100%;
+  --level-meter-gap: 2px;
+  --level-meter-radius: 999px;
+  --level-meter-border: 0;
+  --level-meter-unlit: color-mix(in srgb, var(--on-surface-muted) 12%, var(--surface-1));
+  width: 8px;
   flex-shrink: 0;
   align-self: stretch;
-  opacity: 1;
-}
-
-.track-meter__bar {
-  position: relative;
-  width: 3px;
-  height: 100%;
-  overflow: hidden;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--on-surface-muted) 10%, transparent);
-}
-
-.track-meter--active {
-  opacity: 1;
-}
-
-.track-meter--active .track-meter__bar {
-  background: color-mix(in srgb, var(--on-surface-muted) 12%, transparent);
-}
-
-.track-meter__bar i {
-  position: absolute;
-  inset: 0;
-  transform-origin: center bottom;
-  border-radius: inherit;
-  opacity: 0;
-  background: linear-gradient(180deg, rgba(255, 106, 106, 0.95), rgba(255, 170, 102, 0.92) 52%, rgba(92, 214, 132, 0.9));
-  transition: transform 70ms linear, opacity 90ms linear;
 }
 
 .track-row__lane {

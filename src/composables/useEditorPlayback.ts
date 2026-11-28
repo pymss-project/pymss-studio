@@ -111,7 +111,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
   let masterMeterSplitter: ChannelSplitterNode | null = null
   let masterMeterAnalyserLeft: AnalyserNode | null = null
   let masterMeterAnalyserRight: AnalyserNode | null = null
-  const analyserBufferCache = new WeakMap<AnalyserNode, Uint8Array<ArrayBuffer>>()
+  const analyserBufferCache = new WeakMap<AnalyserNode, Float32Array<ArrayBuffer>>()
   const audioParamValueCache = new WeakMap<AudioParam, number>()
 
   function webOwnsPlayback() {
@@ -254,24 +254,23 @@ export function useEditorPlayback(options: PlaybackOptions) {
   function ensureMeterBuffer(node: AnalyserNode) {
     let cached = analyserBufferCache.get(node)
     if (!cached) {
-      cached = new Uint8Array<ArrayBuffer>(new ArrayBuffer(node.fftSize))
+      cached = new Float32Array(new ArrayBuffer(node.fftSize * Float32Array.BYTES_PER_ELEMENT))
       analyserBufferCache.set(node, cached)
     }
     return cached
   }
 
+  /** Linear sample peak of the analyser's latest window; above 1 when the mix exceeds 0 dBFS. */
   function analyserLevel(node?: AnalyserNode | null) {
     if (!node) return 0
     const buffer = ensureMeterBuffer(node)
-    node.getByteTimeDomainData(buffer)
-    let sum = 0
+    node.getFloatTimeDomainData(buffer)
+    let peak = 0
     for (let index = 0; index < buffer.length; index += 1) {
-      const sample = (buffer[index] - 128) / 128
-      sum += sample * sample
+      const sample = Math.abs(buffer[index])
+      if (sample > peak) peak = sample
     }
-    const rms = Math.sqrt(sum / Math.max(1, buffer.length))
-    const boosted = Math.pow(clamp(rms * 3.2, 0, 1), 0.72)
-    return clamp(boosted, 0, 1)
+    return peak
   }
 
   function stereoGainForPan(pan: number) {
