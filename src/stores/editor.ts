@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { masterLimiterRenderRate, normalizeMasterLimiter } from '@/utils/masterLimiter'
+import { invalidateWaveformDetail } from '@/utils/editorWaveformDetail'
 import { createLogger } from '@/utils/logger'
 import { normalizeTrackHeight } from '@/utils/editorTrackHeight'
 import { clonePluginChain, hasEditorPlugins, neutralPluginRenderProject, normalizePluginChain, pluginProcessingProject, projectPluginSlots, pluginProjectVersion } from '@/utils/editorPlugins'
@@ -1288,6 +1289,8 @@ export const useEditorStore = defineStore('editor', () => {
     const source = session.value.sources.find((item) => item.id === sourceId)
     if (!source || source.missing || (!refresh && hasRenderablePeaks(source))) return source || null
 
+    // A refresh follows a file replaced in place; its detailed peaks are stale too.
+    if (refresh) invalidateWaveformDetail(source.path)
     if (!refresh) {
       const cachedPeaks = await loadPeaksFromCache(source.peaksPath, source.path)
       if (cachedPeaks?.peaks.length && cachedPeaksMatchSource(source, cachedPeaks)) {

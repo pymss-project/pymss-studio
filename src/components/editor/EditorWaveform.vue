@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { detailBlock, detailBlockRange, detailPeak, requestDetailBlocks } from '@/utils/editorWaveformDetail'
 
 const TILE_CSS_WIDTH = 1024
 const MAX_TILE_BUFFER_WIDTH = 4096
@@ -17,12 +18,23 @@ const props = defineProps<{
   fadeOut?: number
   color?: string
   progress?: number
+  /** Audio file of the asset; zoomed-in views load detailed peaks from it. */
+  sourcePath?: string
 }>()
 
 const rootEl = ref<HTMLElement | null>(null)
 const dpr = computed(() => Math.min(window.devicePixelRatio || 1, 2))
 const tileCount = computed(() => Math.max(1, Math.ceil(Math.max(1, props.width) / TILE_CSS_WIDTH)))
 const tileIndexes = computed(() => Array.from({ length: tileCount.value }, (_, index) => index))
+// Overview peaks stop resolving the waveform once a point spans more than two device pixels.
+const needsDetail = computed(() => {
+  const overview = props.peaks.length
+  if (!props.sourcePath || !overview || props.assetDuration <= 0 || props.duration <= 0) return false
+  const devicePixelsPerSecond = props.width / props.duration * dpr.value
+  return devicePixelsPerSecond > overview / props.assetDuration * 2
+})
+const lookupDetail = (index: number) => (props.sourcePath ? detailBlock(props.sourcePath, index) : undefined)
+
 const resolvedChannels = computed(() => {
   const peakChannels = props.channelPeaks?.filter(channel => channel.length).length || 0
   return Math.max(Number(props.channels || 0), peakChannels)
@@ -74,17 +86,25 @@ function drawTile(canvas: HTMLCanvasElement, tileIndex: number) {
 
   ctx.fillStyle = color
 
-  const drawChannel = (peaks: number[], top: number, height: number) => {
+  const detail = needsDetail.value
+  const offset = Number(props.offset || 0)
+  const secondsPerPixel = props.duration / totalWidth
+
+  const drawChannel = (peaks: number[], channel: number | 'all', top: number, height: number) => {
     const mid = top + height / 2
     for (let localX = 0; localX < tileWidth; localX += step) {
       const globalX = tileLeft + localX
-      const colStart = startIdx + Math.floor((globalX / totalWidth) * span)
-      const colEnd = startIdx + Math.floor(((globalX + step) / totalWidth) * span)
-      let peak = 0
-
-      for (let i = colStart; i < Math.max(colStart + 1, colEnd); i += 1) {
-        const value = peaks[i] || 0
-        if (value > peak) peak = value
+      let peak = detail
+        ? detailPeak(lookupDetail, channel, offset + globalX * secondsPerPixel, offset + (globalX + step) * secondsPerPixel)
+        : null
+      if (peak === null) {
+        peak = 0
+        const colStart = startIdx + Math.floor((globalX / totalWidth) * span)
+        const colEnd = startIdx + Math.floor(((globalX + step) / totalWidth) * span)
+        for (let i = colStart; i < Math.max(colStart + 1, colEnd); i += 1) {
+          const value = peaks[i] || 0
+          if (value > peak) peak = value
+        }
       }
 
       let envelope = 1
@@ -104,40 +124,12 @@ function drawTile(canvas: HTMLCanvasElement, tileIndex: number) {
   if (channels.length >= 2) {
     const laneGap = 3
     const channelHeight = Math.max(1, (totalHeight - laneGap) / 2)
-    drawChannel(channels[0], 0, channelHeight)
-    drawChannel(channels[1], channelHeight + laneGap, channelHeight)
+    drawChannel(channels[0], 0, 0, channelHeight)
+    drawChannel(channels[1], 1, channelHeight + laneGap, channelHeight)
     ctx.fillStyle = 'rgba(128,128,128,0.12)'
     ctx.fillRect(0, channelHeight + laneGap / 2, tileWidth, 1 / ratio)
   } else {
-    drawChannel(primaryPeaks, 0, totalHeight)
-  }
-
-  const fadeInWidth = props.fadeIn && props.duration > 0 ? Math.min(totalWidth, (props.fadeIn / props.duration) * totalWidth) : 0
-  const fadeOutWidth = props.fadeOut && props.duration > 0 ? Math.min(totalWidth, (props.fadeOut / props.duration) * totalWidth) : 0
-
-  if (fadeInWidth > tileLeft) {
-    const localFadeEnd = Math.min(tileWidth, fadeInWidth - tileLeft)
-    if (localFadeEnd > 1) {
-      const gradient = ctx.createLinearGradient(0, 0, localFadeEnd, 0)
-      gradient.addColorStop(0, 'rgba(255,255,255,0.16)')
-      gradient.addColorStop(1, 'rgba(255,255,255,0)')
-      ctx.fillStyle = gradient
-      ctx.fillRect(0, 0, localFadeEnd, totalHeight)
-    }
-  }
-
-  if (fadeOutWidth > 1) {
-    const fadeOutStart = totalWidth - fadeOutWidth
-    const localFadeStart = Math.max(0, fadeOutStart - tileLeft)
-    const localFadeEnd = Math.min(tileWidth, totalWidth - tileLeft)
-    const localFadeWidth = localFadeEnd - localFadeStart
-    if (localFadeWidth > 1) {
-      const gradient = ctx.createLinearGradient(localFadeStart, 0, localFadeStart + localFadeWidth, 0)
-      gradient.addColorStop(0, 'rgba(255,255,255,0)')
-      gradient.addColorStop(1, 'rgba(255,255,255,0.16)')
-      ctx.fillStyle = gradient
-      ctx.fillRect(localFadeStart, 0, localFadeWidth, totalHeight)
-    }
+    drawChannel(primaryPeaks, 'all', 0, totalHeight)
   }
 }
 
@@ -152,6 +144,62 @@ function draw() {
 }
 
 let frame: number | null = null
+const visibleTiles = new Set<number>()
+let tileObserver: IntersectionObserver | null = null
+let detailRequest = 0
+// Each request starts a worker process, so scrolling settles before blocks are fetched.
+const DETAIL_REQUEST_DELAY_MS = 150
+let detailTimer: ReturnType<typeof setTimeout> | null = null
+
+function drawVisibleTiles() {
+  const root = rootEl.value
+  if (!root) return
+  root.querySelectorAll<HTMLCanvasElement>('.editor-waveform__tile').forEach((canvas) => {
+    const index = Number(canvas.dataset.tileIndex || 0)
+    if (visibleTiles.has(index)) drawTile(canvas, index)
+  })
+}
+
+/** Loads the detail blocks behind the tiles on screen and redraws them once they arrive. */
+function loadVisibleDetail() {
+  const path = props.sourcePath
+  if (!path || !needsDetail.value || !visibleTiles.size) return
+  const width = Math.max(1, props.width)
+  const offset = Number(props.offset || 0)
+  const blocks = [...visibleTiles].flatMap((index) => {
+    const left = index * TILE_CSS_WIDTH
+    const right = Math.min(width, left + TILE_CSS_WIDTH)
+    return detailBlockRange(offset + left / width * props.duration, offset + right / width * props.duration)
+  })
+  const request = ++detailRequest
+  void requestDetailBlocks(path, blocks).then(() => {
+    if (request === detailRequest) drawVisibleTiles()
+  })
+}
+
+function scheduleDetailLoad() {
+  if (detailTimer !== null) clearTimeout(detailTimer)
+  detailTimer = setTimeout(() => {
+    detailTimer = null
+    loadVisibleDetail()
+  }, DETAIL_REQUEST_DELAY_MS)
+}
+
+function observeTiles() {
+  tileObserver?.disconnect()
+  visibleTiles.clear()
+  const root = rootEl.value
+  if (!root || typeof IntersectionObserver === 'undefined') return
+  tileObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      const index = Number((entry.target as HTMLElement).dataset.tileIndex || 0)
+      if (entry.isIntersecting) visibleTiles.add(index)
+      else visibleTiles.delete(index)
+    }
+    scheduleDetailLoad()
+  })
+  root.querySelectorAll<HTMLCanvasElement>('.editor-waveform__tile').forEach(canvas => tileObserver?.observe(canvas))
+}
 
 function scheduleDraw() {
   if (frame !== null) cancelAnimationFrame(frame)
@@ -167,10 +215,18 @@ watch(
   { deep: false },
 )
 
-onMounted(scheduleDraw)
+watch(tileCount, () => requestAnimationFrame(observeTiles))
+watch(() => [props.sourcePath, props.peaks, props.offset, props.duration, props.width, needsDetail.value], scheduleDetailLoad)
+
+onMounted(() => {
+  scheduleDraw()
+  observeTiles()
+})
 
 onBeforeUnmount(() => {
   if (frame !== null) cancelAnimationFrame(frame)
+  if (detailTimer !== null) clearTimeout(detailTimer)
+  tileObserver?.disconnect()
 })
 </script>
 

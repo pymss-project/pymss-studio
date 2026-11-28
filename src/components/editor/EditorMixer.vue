@@ -1222,6 +1222,7 @@ defineExpose({
                     :fade-in="clip.fadeIn"
                     :fade-out="clip.fadeOut"
                     :color="clipColor(clip, track)"
+                    :source-path="sourceForClip(clip)?.path"
                   />
                   <div v-else-if="sourceForClip(clip)?.missing" class="track-wave__offline">
                     <strong>{{ t('editor.laneAudioOffline') }}</strong>

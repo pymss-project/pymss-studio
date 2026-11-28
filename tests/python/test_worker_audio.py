@@ -708,3 +708,47 @@ class WaveformPeakCacheTests(unittest.TestCase):
             self.assertAlmostEqual(max(second['peaks']), 0.8, places=3)
             self.assertEqual(second['peaksPath'], first['peaksPath'])
             self.assertEqual(self._peaks(source, root / 'peaks')['peaks'], second['peaks'])
+
+
+class WaveformDetailBlockTests(unittest.TestCase):
+    def _detail(self, payload: dict) -> tuple[int, dict]:
+        import io
+        import json
+        import contextlib
+        from worker_audio import cmd_waveform_peaks
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = cmd_waveform_peaks(payload)
+        return code, json.loads(output.getvalue().strip().splitlines()[-1])['payload']
+
+    def test_detail_blocks_resolve_short_transients_the_overview_averages_away(self) -> None:
+        from worker_audio import DETAIL_BLOCK_SECONDS, DETAIL_POINTS_PER_SECOND
+
+        sample_rate = 8000
+        audio = np.zeros((2, sample_rate * 10), dtype=np.float32)
+        audio[0, sample_rate * 5 + 100] = 0.9      # a single click in block 1
+        audio[1, sample_rate * 9] = 0.4            # a click in the shorter last block
+        with tempfile.TemporaryDirectory() as temp_value:
+            source = Path(temp_value) / 'clicks.wav'
+            sf.write(source, audio.T, sample_rate, subtype='FLOAT')
+            code, payload = self._detail({'path': str(source), 'detailBlocks': [1, 2, 7]})
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payload['blockSeconds'], DETAIL_BLOCK_SECONDS)
+        self.assertEqual(sorted(payload['blocks']), ['1', '2'])
+        left, right = payload['blocks']['1']
+        self.assertEqual(len(left), DETAIL_BLOCK_SECONDS * DETAIL_POINTS_PER_SECOND)
+        click = int((5 + 100 / sample_rate - DETAIL_BLOCK_SECONDS) * DETAIL_POINTS_PER_SECOND)
+        self.assertAlmostEqual(max(left), 0.9, places=4)
+        self.assertLessEqual(abs(left.index(max(left)) - click), 1)
+        self.assertEqual(max(right), 0.0)
+        last_left, last_right = payload['blocks']['2']
+        self.assertEqual(len(last_left), DETAIL_POINTS_PER_SECOND * 2)
+        self.assertAlmostEqual(max(last_right), 0.4, places=4)
+
+    def test_invalid_block_requests_are_rejected(self) -> None:
+        for blocks in ([-1], ['1'], [True], list(range(65))):
+            code, payload = self._detail({'path': 'missing.wav', 'detailBlocks': blocks})
+            self.assertEqual(code, 1, blocks)
+            self.assertEqual(payload['code'], 'WAVEFORM_PEAKS_FAILED')

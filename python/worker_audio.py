@@ -362,11 +362,90 @@ def _read_cached_peaks(peaks_path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+# Zoomed-in timelines draw from fixed blocks of detailed peaks, so one block can be shared by
+# every clip of the same asset and loaded only while it is on screen.
+DETAIL_BLOCK_SECONDS = 4
+DETAIL_POINTS_PER_SECOND = 512
+MAX_DETAIL_BLOCKS_PER_REQUEST = 64
+
+
+def _block_peaks(audio: Any, points: int) -> list[list[float]]:
+    """Per-channel absolute peaks of ``audio`` (channels x frames) in ``points`` equal buckets."""
+    import numpy as np  # type: ignore
+
+    channels, frames = audio.shape
+    if frames <= 0:
+        return [[] for _ in range(channels)]
+    edges = np.linspace(0, frames, num=points + 1).astype(np.int64)
+    result: list[list[float]] = []
+    for channel in np.abs(audio):
+        values = [
+            round(float(channel[start:end].max()), 5) if end > start else 0.0
+            for start, end in zip(edges[:-1], edges[1:])
+        ]
+        result.append(values)
+    return result
+
+
+def _waveform_detail_blocks(path: Path, indexes: list[int]) -> dict[str, list[list[float]]]:
+    import numpy as np  # type: ignore
+
+    points = DETAIL_BLOCK_SECONDS * DETAIL_POINTS_PER_SECOND
+    blocks: dict[str, list[list[float]]] = {}
+    try:
+        import soundfile as sf  # type: ignore
+
+        with sf.SoundFile(str(path)) as audio_file:
+            sample_rate = int(audio_file.samplerate)
+            total = int(audio_file.frames)
+            span = DETAIL_BLOCK_SECONDS * sample_rate
+            for index in indexes:
+                start = index * span
+                if start >= total:
+                    continue
+                audio_file.seek(start)
+                frames = min(span, total - start)
+                block = audio_file.read(frames, dtype="float32", always_2d=True).T
+                # The last block keeps its true length, so it has proportionally fewer points.
+                block_points = max(1, math.ceil(points * frames / span))
+                blocks[str(index)] = _block_peaks(block, block_points)
+        return blocks
+    except Exception:
+        # Formats libsndfile cannot seek in are decoded once per request.
+        audio, sample_rate = _load_audio_channels(path, sample_rate=8000)
+        audio = np.asarray(audio, dtype=np.float32)
+        total = int(audio.shape[-1])
+        span = DETAIL_BLOCK_SECONDS * sample_rate
+        for index in indexes:
+            start = index * span
+            if start >= total:
+                continue
+            block = audio[:, start:min(total, start + span)]
+            block_points = max(1, math.ceil(points * block.shape[-1] / span))
+            blocks[str(index)] = _block_peaks(block, block_points)
+        return blocks
+
+
 def cmd_waveform_peaks(payload: dict[str, Any]) -> int:
     path_value = payload.get("path")
     if not path_value:
         return emit_error("WAVEFORM_PEAKS_FAILED", "Missing audio path")
     path = Path(path_value)
+    detail_blocks = payload.get("detailBlocks")
+    if detail_blocks is not None:
+        if (not isinstance(detail_blocks, list) or len(detail_blocks) > MAX_DETAIL_BLOCKS_PER_REQUEST
+                or not all(isinstance(index, int) and not isinstance(index, bool) and index >= 0 for index in detail_blocks)):
+            return emit_error("WAVEFORM_PEAKS_FAILED", "Invalid waveform detail blocks")
+        try:
+            emit("waveform_peaks", {
+                "path": str(path),
+                "blockSeconds": DETAIL_BLOCK_SECONDS,
+                "pointsPerSecond": DETAIL_POINTS_PER_SECOND,
+                "blocks": _waveform_detail_blocks(path, sorted(set(detail_blocks))),
+            })
+            return 0
+        except Exception as exc:
+            return emit_error("WAVEFORM_PEAKS_FAILED", str(exc), traceback.format_exc())
     resolution = int(payload.get("resolution") or 1400)
     resolution = max(80, min(12000, resolution))
     cache_dir = Path(payload.get("cacheDir") or path.parent / ".pymss-peaks")
