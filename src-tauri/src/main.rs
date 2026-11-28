@@ -75,7 +75,7 @@ fn main() {
     // Managed-update/helper modes return above. Normal launches acquire a
     // process-wide lock so a second launch cannot create another WebView
     // process and operate on the same runtime environment concurrently.
-    let _single_instance = match single_instance::acquire_or_focus() {
+    let mut single_instance = match single_instance::acquire_or_focus() {
         Ok(Some(guard)) => Some(guard),
         Ok(None) => return,
         Err(error) => {
@@ -304,7 +304,7 @@ fn main() {
         ])
         .build(context)
         .expect("error while building Pymss Studio")
-        .run(|app, event| match event {
+        .run(move |app, event| match event {
             tauri::RunEvent::WindowEvent {
                 label,
                 event: tauri::WindowEvent::Destroyed,
@@ -317,6 +317,10 @@ fn main() {
                 app.state::<commands::plugin_host::PluginHostState>().shutdown();
                 python::worker::shutdown_idle_inference();
                 session_log::finish_automatic_reports(app);
+                // A new launch may start normally while this process waits for the update helper.
+                drop(single_instance.take());
+                #[cfg(not(feature = "vst-lab"))]
+                update_manager::wait_for_update_verification();
             }
             _ => {}
         });

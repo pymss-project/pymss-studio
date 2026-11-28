@@ -46,6 +46,48 @@ static UPDATE_RESTART_REQUIRED: AtomicBool = AtomicBool::new(false);
 pub fn restart_required() -> bool {
     UPDATE_RESTART_REQUIRED.load(Ordering::SeqCst)
 }
+
+/// Set when the managed-update helper that launched this process is still verifying it.
+static UNDER_UPDATE_VERIFICATION: AtomicBool = AtomicBool::new(false);
+/// How long the update helper watches a newly launched application before confirming it.
+const STARTUP_VERIFICATION_WINDOW: Duration = Duration::from_secs(20);
+/// Upper bound for keeping a closed application alive while a helper verifies it. Helpers
+/// from 0.1.4 and earlier poll through PowerShell and can take about two minutes.
+const VERIFICATION_EXIT_WAIT: Duration = Duration::from_secs(180);
+
+/// Keeps a closed application alive until the update helper that launched it has confirmed
+/// the update. Helpers treat an exit during verification as a failed start and roll the
+/// update back, and helpers of releases already installed cannot be changed, so the newly
+/// installed application waits on its side.
+pub fn wait_for_update_verification() {
+    if !UNDER_UPDATE_VERIFICATION.load(Ordering::SeqCst) {
+        return;
+    }
+    let Ok(root) = current_app_root() else {
+        return;
+    };
+    let transaction = transaction_path(&root);
+    let confirmed = wait_while(
+        || transaction.exists() && acquire_update_mutex().is_err(),
+        VERIFICATION_EXIT_WAIT,
+        Duration::from_millis(250),
+    );
+    if !confirmed {
+        crate::session_log::early("WARN", "update.diagnostic", "Closed while the managed update was still being verified");
+    }
+}
+
+/// Polls `pending` until it returns false; returns false when `limit` passes first.
+fn wait_while(mut pending: impl FnMut() -> bool, limit: Duration, interval: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    while pending() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(interval);
+    }
+    true
+}
 const UPDATE_ROOT: &str = "https://github.com/pymss-project/pymss-studio/releases/download/updater";
 const UPDATE_GENERATION: &str = if cfg!(windows) { "v2" } else { "v1" };
 const DEFAULT_UPDATE_PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE5NzUyREY2NjAyNDVDQjAKUldTd1hDUmc5aTExcVFtUGM3ajB4R09ueU9xM3B6RG9xRDVKaUM0di9Qc1BpSGhYMXRFNUJvSWQK";
@@ -736,6 +778,7 @@ pub fn recover_interrupted_update_from_startup() -> Option<i32> {
             // application and verifies the replacement.  Let the new process
             // continue booting; exiting here makes the helper treat the
             // update as failed and roll the files back to the old version.
+            UNDER_UPDATE_VERIFICATION.store(true, Ordering::SeqCst);
             return None;
         }
         Err(error) => {
@@ -1075,6 +1118,7 @@ fn schedule_helper_cleanup() {
     let escaped = helper.to_string_lossy().replace('"', "\"\"");
     let _ = Command::new("cmd.exe")
         .args(["/C", &format!("ping 127.0.0.1 -n 2 > nul & del /F /Q \"{escaped}\"")])
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn();
 }
 
@@ -1565,7 +1609,8 @@ fn verify_updated_application(root: &Path, elevated: bool, mut child: std::proce
     if elevated {
         return verify_elevated_application(root);
     }
-    for _ in 0..80 {
+    let deadline = Instant::now() + STARTUP_VERIFICATION_WINDOW;
+    while Instant::now() < deadline {
         if child.try_wait()?.is_some() {
             return Err(AppError::Worker("Updated application stopped during its startup verification window".into()));
         }
@@ -1587,7 +1632,9 @@ fn launch_application(root: &Path, elevated: bool) -> AppResult<std::process::Ch
 fn verify_elevated_application(root: &Path) -> AppResult<()> {
     let exe = root.join("Pymss Studio.exe");
     let mut observed = false;
-    for _ in 0..80 {
+    // Each check starts PowerShell, so the window is bounded by time rather than by a count.
+    let deadline = Instant::now() + STARTUP_VERIFICATION_WINDOW;
+    while Instant::now() < deadline {
         if application_is_running(&exe)? {
             observed = true;
         } else if observed {
@@ -1871,6 +1918,18 @@ mod recovery_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn closing_during_verification_waits_for_the_helper_to_confirm() {
+        use std::time::Duration;
+        let mut polls = 0;
+        assert!(super::wait_while(|| { polls += 1; polls < 3 }, Duration::from_secs(5), Duration::from_millis(1)));
+        assert_eq!(polls, 3);
+        assert!(super::wait_while(|| false, Duration::ZERO, Duration::from_millis(1)));
+        let started = std::time::Instant::now();
+        assert!(!super::wait_while(|| true, Duration::from_millis(30), Duration::from_millis(5)));
+        assert!(started.elapsed() >= Duration::from_millis(30));
+    }
+
     fn failed_update_request(status: Option<&'static str>) -> reqwest::Error {
         use std::io::{Read, Write};
         use std::net::TcpListener;
