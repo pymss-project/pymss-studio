@@ -527,7 +527,7 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
         </div>
         <section class="inspector-group inspector-group--source">
           <div class="inspector-group__header">
-            <strong>{{ selectedSource.name }}</strong>
+            <strong class="inspector-group__title--fill" :title="selectedSource.name">{{ selectedSource.name }}</strong>
           </div>
           <div class="inspector-group__body inspector-group__body--dense">
             <label class="panel-field panel-field--compact">
@@ -707,6 +707,15 @@ function updateFades(patch: { fadeIn?: number; fadeOut?: number }) {
   font-weight: 600;
   letter-spacing: 0.02em;
   color: color-mix(in srgb, var(--on-surface) 88%, var(--on-surface-muted));
+}
+
+/* File names can be far wider than the panel. */
+.inspector-group__header .inspector-group__title--fill {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .inspector-group__header {
