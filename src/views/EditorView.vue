@@ -826,6 +826,7 @@ watch(
             @begin-clip-edit="editor.beginInteraction"
             @update-clip-timing="handleClipTiming"
             @commit-clip-edit="editor.commitInteraction"
+            @set-clip-fades="setClipFades"
             @toggle-mute="(id) => toggleTrackFlag(id, 'muted')"
             @toggle-solo="(id) => toggleTrackFlag(id, 'solo')"
             @seek="seekTimeline"

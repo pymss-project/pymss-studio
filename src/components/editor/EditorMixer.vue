@@ -83,6 +83,7 @@ const emit = defineEmits<{
     patch: Partial<Pick<EditorClip, 'start' | 'offset' | 'duration'>>
   }]
   commitClipEdit: [cancelled: boolean]
+  setClipFades: [payload: { trackId: string; clipId: string; patch: { fadeIn?: number; fadeOut?: number } }]
 }>()
 
 const { t } = useI18n()
@@ -469,6 +470,95 @@ function beginClipPointer(event: PointerEvent, track: EditorTrack, clip: EditorC
   window.addEventListener('pointerup', finishClipPointer)
   window.addEventListener('pointercancel', finishClipPointer)
   window.addEventListener('blur', cancelClipPointer)
+}
+
+type FadeEdge = 'fadeIn' | 'fadeOut'
+const FADE_EDGES: readonly FadeEdge[] = ['fadeIn', 'fadeOut']
+const FADE_KEY_STEP_SECONDS = 0.05
+let fadeDrag: {
+  pointerId: number
+  target: HTMLElement
+  trackId: string
+  clipId: string
+  edge: FadeEdge
+  clientX: number
+  initial: number
+  max: number
+} | null = null
+
+function fadeWidth(clip: EditorClip, edge: FadeEdge) {
+  return Math.min(clipWaveWidth(clip), Math.max(0, Number(clip[edge] || 0)) * props.pixelsPerSecond)
+}
+
+/** Longest fade for this edge that still ends where the opposite fade begins. */
+function fadeLimit(clip: EditorClip, edge: FadeEdge) {
+  const opposite = edge === 'fadeIn' ? clip.fadeOut : clip.fadeIn
+  return Math.max(0, Number(clip.duration || 0) - Math.max(0, Number(opposite || 0)))
+}
+
+function beginFadeDrag(event: PointerEvent, track: EditorTrack, clip: EditorClip, edge: FadeEdge) {
+  if (event.button !== 0 || fadeDrag || clipEditState) return
+  event.preventDefault()
+  event.stopPropagation()
+  focusTimeline()
+  emit('selectClip', { trackId: track.id, clipId: clip.id })
+  if (props.editingDisabled || clip.locked) return
+  const target = event.currentTarget as HTMLElement
+  target.setPointerCapture(event.pointerId)
+  fadeDrag = {
+    pointerId: event.pointerId,
+    target,
+    trackId: track.id,
+    clipId: clip.id,
+    edge,
+    clientX: event.clientX,
+    initial: Math.max(0, Number(clip[edge] || 0)),
+    max: fadeLimit(clip, edge),
+  }
+  emit('beginClipEdit')
+  target.addEventListener('pointermove', moveFadeDrag)
+  target.addEventListener('pointerup', finishFadeDrag)
+  target.addEventListener('pointercancel', cancelFadeDrag)
+  target.addEventListener('lostpointercapture', finishFadeDrag)
+}
+
+function moveFadeDrag(event: PointerEvent) {
+  const active = fadeDrag
+  if (!active || event.pointerId !== active.pointerId) return
+  // The fade-in handle follows the pointer to the right; the fade-out handle to the left.
+  const delta = (event.clientX - active.clientX) / props.pixelsPerSecond
+  const value = Math.min(active.max, Math.max(0, active.initial + (active.edge === 'fadeIn' ? delta : -delta)))
+  emit('setClipFades', { trackId: active.trackId, clipId: active.clipId, patch: { [active.edge]: value } })
+}
+
+function endFadeDrag(cancelled: boolean) {
+  const active = fadeDrag
+  if (!active) return
+  fadeDrag = null
+  active.target.removeEventListener('pointermove', moveFadeDrag)
+  active.target.removeEventListener('pointerup', finishFadeDrag)
+  active.target.removeEventListener('pointercancel', cancelFadeDrag)
+  active.target.removeEventListener('lostpointercapture', finishFadeDrag)
+  if (active.target.hasPointerCapture(active.pointerId)) active.target.releasePointerCapture(active.pointerId)
+  emit('commitClipEdit', cancelled)
+}
+
+function finishFadeDrag() {
+  endFadeDrag(false)
+}
+
+function cancelFadeDrag() {
+  endFadeDrag(true)
+}
+
+function nudgeFade(event: KeyboardEvent, track: EditorTrack, clip: EditorClip, edge: FadeEdge) {
+  const direction = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : 0
+  if (!direction || props.editingDisabled || clip.locked) return
+  event.preventDefault()
+  event.stopPropagation()
+  const step = (event.shiftKey ? 10 : 1) * FADE_KEY_STEP_SECONDS * (edge === 'fadeIn' ? direction : -direction)
+  const value = Math.min(fadeLimit(clip, edge), Math.max(0, Number(clip[edge] || 0) + step))
+  emit('setClipFades', { trackId: track.id, clipId: clip.id, patch: { [edge]: value } })
 }
 
 const razorSnapTargets = computed(() => timelineClipEdges(props.tracks, props.sourceMap))
@@ -1081,6 +1171,39 @@ defineExpose({
                   @pointerdown.stop="beginClipPointer($event, track, clip, 'trim-start')"
                   @click.stop
                 />
+                <template v-if="timelineTool === 'selection' && sourceForClip(clip) && !sourceForClip(clip)?.missing">
+                  <svg
+                    v-if="clip.fadeIn > 0 || clip.fadeOut > 0"
+                    class="track-wave__fades"
+                    :viewBox="`0 0 ${Math.max(1, clipWaveWidth(clip))} 100`"
+                    preserveAspectRatio="none"
+                    aria-hidden="true"
+                  >
+                    <template v-if="clip.fadeIn > 0">
+                      <polygon class="track-wave__fade-shade" :points="`0,0 ${fadeWidth(clip, 'fadeIn')},0 0,100`" />
+                      <line class="track-wave__fade-line" x1="0" y1="100" :x2="fadeWidth(clip, 'fadeIn')" y2="0" />
+                    </template>
+                    <template v-if="clip.fadeOut > 0">
+                      <polygon class="track-wave__fade-shade" :points="`${clipWaveWidth(clip) - fadeWidth(clip, 'fadeOut')},0 ${clipWaveWidth(clip)},0 ${clipWaveWidth(clip)},100`" />
+                      <line class="track-wave__fade-line" :x1="clipWaveWidth(clip) - fadeWidth(clip, 'fadeOut')" y1="0" :x2="clipWaveWidth(clip)" y2="100" />
+                    </template>
+                  </svg>
+                  <button
+                    v-for="edge in FADE_EDGES"
+                    :key="edge"
+                    class="track-wave__fade-handle"
+                    :class="[`track-wave__fade-handle--${edge === 'fadeIn' ? 'in' : 'out'}`, { 'track-wave__fade-handle--set': clip[edge] > 0 }]"
+                    :style="edge === 'fadeIn' ? { left: `${fadeWidth(clip, edge)}px` } : { right: `${fadeWidth(clip, edge)}px` }"
+                    type="button"
+                    :disabled="clip.locked || editingDisabled"
+                    :aria-label="t(edge === 'fadeIn' ? 'editor.clipFadeInHandle' : 'editor.clipFadeOutHandle', { seconds: Number(clip[edge] || 0).toFixed(2) })"
+                    :title="t(edge === 'fadeIn' ? 'editor.clipFadeInHandle' : 'editor.clipFadeOutHandle', { seconds: Number(clip[edge] || 0).toFixed(2) })"
+                    aria-keyshortcuts="ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight"
+                    @keydown="nudgeFade($event, track, clip, edge)"
+                    @pointerdown.stop="beginFadeDrag($event, track, clip, edge)"
+                    @click.stop
+                  />
+                </template>
                 <div v-if="!sourceForClip(clip)?.missing" class="track-wave__label" aria-hidden="true">
                   <n-icon v-if="clip.locked" :component="LockClosedOutline" class="track-wave__lock" />
                   <span v-if="clipWaveWidth(clip) >= 96">{{ sourceForClip(clip)?.name || track.name }}</span>
@@ -1991,6 +2114,53 @@ defineExpose({
   font-weight: 600;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+/* Linear fades: the shaded corner is the attenuated part, the line is the gain ramp. */
+.track-wave__fades {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.track-wave__fade-shade {
+  fill: color-mix(in srgb, var(--surface) 46%, transparent);
+}
+
+.track-wave__fade-line {
+  stroke: color-mix(in srgb, var(--on-surface) 70%, var(--clip-tint));
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.track-wave__fade-handle {
+  position: absolute;
+  top: 0;
+  z-index: 5;
+  width: 9px;
+  height: 9px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--on-surface) 55%, var(--clip-tint));
+  border-radius: 2px;
+  background: var(--surface-1);
+  cursor: ew-resize;
+  opacity: 0;
+  touch-action: none;
+}
+
+.track-wave__clip:hover .track-wave__fade-handle,
+.track-wave__clip--selected .track-wave__fade-handle,
+.track-wave__fade-handle--set,
+.track-wave__fade-handle:focus-visible {
+  opacity: 1;
+}
+
+.track-wave__fade-handle:disabled {
+  cursor: default;
 }
 
 .track-wave__trim {
