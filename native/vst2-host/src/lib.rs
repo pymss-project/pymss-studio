@@ -66,8 +66,8 @@ pub fn instantiate_descriptor(descriptor: &Vst2Descriptor) -> Result<Vst2Plugin,
         instance,
         info,
         pending,
-        inputs: [Vec::new(), Vec::new()],
-        outputs: [Vec::new(), Vec::new()],
+        inputs: Vec::new(),
+        outputs: Vec::new(),
         max_block: 0,
         channels: 2,
         latency: 0,
@@ -87,13 +87,14 @@ pub fn shutdown() {
     pump_ui();
 }
 
-/// A mono/stereo floating-point VST2 effect. Parameter values use normalized 0..1 ranges.
+/// A floating-point VST2 effect with a mono or stereo main signal. Input pins beyond the main
+/// pair carry a sidechain and receive silence. Parameter values use normalized 0..1 ranges.
 pub struct Vst2Plugin {
     instance: ffi::Instance,
     info: &'static PluginInfo,
     pending: Arc<ffi::Shared>,
-    inputs: [Vec<f32>; 2],
-    outputs: [Vec<f32>; 2],
+    inputs: Vec<Vec<f32>>,
+    outputs: Vec<Vec<f32>>,
     max_block: usize,
     channels: usize,
     latency: usize,
@@ -131,9 +132,9 @@ impl Vst2Plugin {
         }
         self.max_block = 0;
         self.instance.prepare(sample_rate, max_block)?;
-        for channel in self.inputs.iter_mut().chain(self.outputs.iter_mut()) {
-            channel.resize(max_block, 0.0);
-        }
+        let (inputs, outputs) = self.instance.channels();
+        self.inputs = vec![vec![0.0; max_block]; inputs];
+        self.outputs = vec![vec![0.0; max_block]; outputs];
         self.channels = channels;
         self.max_block = max_block;
         self.latency = self.instance.latency();
@@ -166,9 +167,13 @@ impl Vst2Plugin {
                     self.inputs[0][i] = 0.5 * (io[0][offset + i] + io[1][offset + i]);
                 }
             } else {
-                for channel in 0..inputs {
-                    self.inputs[channel][..count]
-                        .copy_from_slice(&io[channel.min(channels - 1)][offset..offset + count]);
+                for (channel, pin) in self.inputs.iter_mut().enumerate().take(inputs) {
+                    if channel < ffi::MAIN_PINS {
+                        pin[..count]
+                            .copy_from_slice(&io[channel.min(channels - 1)][offset..offset + count]);
+                    } else {
+                        pin[..count].fill(0.0);
+                    }
                 }
             }
             for channel in self.outputs.iter_mut().take(outputs) {

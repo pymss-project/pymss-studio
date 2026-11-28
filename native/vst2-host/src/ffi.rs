@@ -18,6 +18,11 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::thread::ThreadId;
 
+/// Main input and output pins: a mono or stereo pair.
+pub(crate) const MAIN_PINS: usize = 2;
+/// Input pins accepted on the single VST2 input bus, including sidechain pins.
+pub(crate) const MAX_INPUT_PINS: usize = 64;
+
 const MAX_PARAMS: usize = 4096;
 const MAX_SHELL_CHILDREN: usize = 4096;
 const MAX_STATE: usize = 32 * 1024 * 1024;
@@ -1057,9 +1062,14 @@ impl Instance {
         {
             return Err("VST2 instruments are not supported by this audio-effect host".into());
         }
-        if !(1..=2).contains(&effect.inputs) || !(1..=2).contains(&effect.outputs) {
+        // VST2 has a single input bus. Effects with a sidechain widen it beyond the stereo main
+        // pair (4, 6 or 8 pins); those extra pins are fed silence.
+        if !(1..=MAX_INPUT_PINS as i32).contains(&effect.inputs)
+            || !(1..=MAIN_PINS as i32).contains(&effect.outputs)
+        {
             return Err(
-                "Only VST2 effects with mono/stereo inputs and outputs are supported".into(),
+                "Only VST2 effects with mono or stereo outputs and up to 64 inputs are supported"
+                    .into(),
             );
         }
         if effect.flags & CAN_REPLACING == 0 || effect.process_replacing.is_none() {
@@ -1266,15 +1276,22 @@ impl Instance {
 
     pub(crate) fn process(
         &mut self,
-        inputs: &[Vec<f32>; 2],
-        outputs: &mut [Vec<f32>; 2],
+        inputs: &[Vec<f32>],
+        outputs: &mut [Vec<f32>],
         frames: usize,
         transport: &Transport,
     ) {
         let _context = LoadingGuard::new(&self.shared.host);
         self.shared.host.update_transport(transport);
-        let input_pointers = [inputs[0].as_ptr(), inputs[1].as_ptr()];
-        let mut output_pointers = [outputs[0].as_mut_ptr(), outputs[1].as_mut_ptr()];
+        // Fixed-size pointer tables keep the audio callback free of allocations.
+        let mut input_pointers = [ptr::null::<f32>(); MAX_INPUT_PINS];
+        for (pointer, channel) in input_pointers.iter_mut().zip(inputs) {
+            *pointer = channel.as_ptr();
+        }
+        let mut output_pointers = [ptr::null_mut::<f32>(); MAIN_PINS];
+        for (pointer, channel) in output_pointers.iter_mut().zip(outputs.iter_mut()) {
+            *pointer = channel.as_mut_ptr();
+        }
         if let Some(process) = unsafe { self.effect.as_ref().process_replacing } {
             let _level = ProcessLevelGuard::processing(self.offline);
             unsafe {
@@ -1600,6 +1617,8 @@ mod tests {
         get_level: AtomicI64,
         dispatch_level: AtomicI64,
         tail_queries: AtomicUsize,
+        /// Largest absolute sample seen on input pins beyond the main pair, as f32 bits.
+        sidechain_peak: AtomicU32,
     }
 
     struct Fake {
@@ -1788,6 +1807,16 @@ mod tests {
             .flags
             .store(time.flags as u32, Ordering::Relaxed);
         fake.events.frames.store(frames as usize, Ordering::Relaxed);
+        let mut sidechain_peak = 0.0f32;
+        for pin in MAIN_PINS..unsafe { (*effect).inputs } as usize {
+            let input = unsafe { *inputs.add(pin) };
+            for frame in 0..frames as usize {
+                sidechain_peak = sidechain_peak.max(unsafe { input.add(frame).read() }.abs());
+            }
+        }
+        fake.events
+            .sidechain_peak
+            .store(sidechain_peak.to_bits(), Ordering::Relaxed);
         for channel in 0..unsafe { (*effect).outputs } as usize {
             let input = unsafe { *inputs.add(channel.min((*effect).inputs as usize - 1)) };
             let output = unsafe { *outputs.add(channel) };
@@ -2238,8 +2267,8 @@ mod tests {
                 instance,
                 info,
                 pending,
-                inputs: [Vec::new(), Vec::new()],
-                outputs: [Vec::new(), Vec::new()],
+                inputs: Vec::new(),
+                outputs: Vec::new(),
                 max_block: 0,
                 channels: 2,
                 latency: 0,
@@ -2642,8 +2671,24 @@ mod tests {
         assert!(plugin.try_prepare(f32::NAN, 256, 2).is_err());
         assert!(plugin.try_prepare(48_000.0, 0, 2).is_err());
         assert!(plugin.try_prepare(48_000.0, 256, 8).is_err());
-        let (unsupported, _) = instance(4, 2, false);
-        assert!(unsupported.validate_effect().is_err());
+        for (inputs, outputs) in [(2, 4), (MAX_INPUT_PINS + 1, 2), (0, 2)] {
+            let (unsupported, _) = instance(inputs, outputs, false);
+            assert!(unsupported.validate_effect().is_err(), "{inputs} in / {outputs} out");
+        }
+    }
+
+    #[test]
+    fn sidechain_pins_of_a_stereo_effect_receive_silence() {
+        for (inputs, track_channels) in [(4, 2), (6, 2), (8, 2), (4, 1)] {
+            let (mut plugin, events) = plugin(inputs, 2);
+            plugin.try_prepare(48_000.0, 4, track_channels).unwrap();
+            events.sidechain_peak.store(1.0f32.to_bits(), Ordering::Relaxed);
+            let mut audio = vec![vec![1.0, -0.5, 0.25, 0.0]; track_channels];
+            plugin.try_process(&mut audio, 4).unwrap();
+
+            assert_eq!(audio[0], vec![0.5, -0.25, 0.125, 0.0], "{inputs} pins, {track_channels} ch");
+            assert_eq!(f32::from_bits(events.sidechain_peak.load(Ordering::Relaxed)), 0.0);
+        }
     }
 
     #[test]
