@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { AddOutline, ArrowDownOutline, ArrowUpOutline, OptionsOutline, PowerOutline, TrashOutline } from '@vicons/ionicons5'
 import { useEditorInsertHost } from '@/composables/useEditorInsertHost'
@@ -23,6 +23,73 @@ const host = computed(() => hostRef.value)
 const enabled = computed(() => Boolean(host.value?.capabilities.value?.enabled))
 const busy = computed(() => props.disabled || Boolean(host.value?.busy.value))
 const menu = ref<{ slotId: string; x: number; y: number } | null>(null)
+
+// Pointer reordering: Tauri handles OS drag and drop on Windows, so HTML5 drag events never fire.
+const DRAG_THRESHOLD = 4
+const listEl = ref<HTMLElement | null>(null)
+const dragSlotId = ref<string | null>(null)
+const dropIndex = ref<number | null>(null)
+let pressed: { slotId: string; x: number; y: number } | null = null
+let suppressClick = false
+
+function dropIndexAt(clientY: number) {
+  const items = Array.from(listEl.value?.querySelectorAll<HTMLElement>('[data-insert-slot]') || [])
+  const index = items.findIndex(item => {
+    const rect = item.getBoundingClientRect()
+    return clientY < rect.top + rect.height / 2
+  })
+  return index < 0 ? items.length : index
+}
+
+function startSlotPointer(event: PointerEvent, slot: EditorPluginSlot) {
+  if (event.button !== 0 || busy.value || !host.value || props.chain.length < 2) return
+  pressed = { slotId: slot.id, x: event.clientX, y: event.clientY }
+  window.addEventListener('pointermove', moveSlotPointer)
+  window.addEventListener('pointerup', finishSlotPointer)
+  window.addEventListener('pointercancel', cancelSlotPointer)
+}
+
+function moveSlotPointer(event: PointerEvent) {
+  if (!pressed) return
+  if (!dragSlotId.value && Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) < DRAG_THRESHOLD) return
+  dragSlotId.value = pressed.slotId
+  dropIndex.value = dropIndexAt(event.clientY)
+}
+
+function releaseSlotPointer() {
+  window.removeEventListener('pointermove', moveSlotPointer)
+  window.removeEventListener('pointerup', finishSlotPointer)
+  window.removeEventListener('pointercancel', cancelSlotPointer)
+  const dragged = dragSlotId.value
+  const target = dropIndex.value
+  pressed = null
+  dragSlotId.value = null
+  dropIndex.value = null
+  return { dragged, target }
+}
+
+function finishSlotPointer() {
+  const { dragged, target } = releaseSlotPointer()
+  if (!dragged || target === null) return
+  // The release ends a drag, not a click on the slot under the pointer.
+  suppressClick = true
+  setTimeout(() => { suppressClick = false })
+  const from = props.chain.findIndex(slot => slot.id === dragged)
+  const to = target > from ? target - 1 : target
+  if (from >= 0 && to !== from && host.value) void host.value.move(props.trackId, dragged, to - from)
+}
+
+function cancelSlotPointer() {
+  releaseSlotPointer()
+}
+
+function swallowDragClick(event: MouseEvent) {
+  if (!suppressClick) return
+  event.preventDefault()
+  event.stopPropagation()
+}
+
+onBeforeUnmount(releaseSlotPointer)
 
 const slotName = (slot: EditorPluginSlot) => slot.name || slot.pluginId
 const isOpened = (slot: EditorPluginSlot) => Boolean(host.value?.opened.value.includes(slot.id))
@@ -95,12 +162,22 @@ function runMenuAction(key: string) {
       ><n-icon :component="AddOutline" :size="12" /></button>
     </header>
 
-    <ol v-if="compact" class="insert-list__slots" :style="{ height: `${(rows ?? 4) * 22 - 2}px` }" :aria-label="t('editor.plugins.chainTitle')">
+    <ol
+      v-if="compact"
+      ref="listEl"
+      class="insert-list__slots"
+      :class="{ 'insert-list--dragging': dragSlotId, 'insert-list--drop-end': dropIndex === chain.length }"
+      :style="{ height: `${(rows ?? 4) * 22 - 2}px` }"
+      :aria-label="t('editor.plugins.chainTitle')"
+      @click.capture="swallowDragClick"
+    >
       <li
-        v-for="slot in chain"
+        v-for="(slot, index) in chain"
         :key="slot.id"
+        data-insert-slot
         class="insert-slot"
-        :class="{ 'insert-slot--bypassed': slot.bypassed, 'insert-slot--open': isOpened(slot), 'insert-slot--missing': unavailable(slot) }"
+        :class="{ 'insert-slot--bypassed': slot.bypassed, 'insert-slot--open': isOpened(slot), 'insert-slot--missing': unavailable(slot), 'insert-slot--dragging': dragSlotId === slot.id, 'insert-slot--drop-before': dropIndex === index }"
+        @pointerdown="startSlotPointer($event, slot)"
         @contextmenu.prevent="openMenu($event, slot)"
       >
         <button
@@ -128,8 +205,22 @@ function runMenuAction(key: string) {
     </ol>
 
     <template v-else>
-      <ol v-if="chain.length" class="insert-list__inserts" :aria-label="t('editor.plugins.chainTitle')">
-        <li v-for="(slot, index) in chain" :key="slot.id" class="plugin-insert" :class="{ 'plugin-insert--bypassed': slot.bypassed }">
+      <ol
+        v-if="chain.length"
+        ref="listEl"
+        class="insert-list__inserts"
+        :class="{ 'insert-list--dragging': dragSlotId, 'insert-list--drop-end': dropIndex === chain.length }"
+        :aria-label="t('editor.plugins.chainTitle')"
+        @click.capture="swallowDragClick"
+      >
+        <li
+          v-for="(slot, index) in chain"
+          :key="slot.id"
+          data-insert-slot
+          class="plugin-insert"
+          :class="{ 'plugin-insert--bypassed': slot.bypassed, 'insert-slot--dragging': dragSlotId === slot.id, 'insert-slot--drop-before': dropIndex === index }"
+          @pointerdown="startSlotPointer($event, slot)"
+        >
           <div class="plugin-insert__main">
             <span class="plugin-insert__number">{{ index + 1 }}</span>
             <n-button class="plugin-insert__editor" data-editor-transport size="small" text :type="isOpened(slot) ? 'primary' : 'default'" :disabled="busy || !canOpenEditor(slot)" :aria-label="t(isOpened(slot) ? 'editor.plugins.closeNamedEditor' : 'editor.plugins.openNamedEditor', { name: slotName(slot) })" :title="slotName(slot)" @click="host.toggleEditor(trackId, slot.id)">{{ slotName(slot) }}</n-button>
@@ -168,6 +259,23 @@ function runMenuAction(key: string) {
 
 <style scoped>
 .insert-list { container: insert-list / inline-size; min-width: 0; }
+.insert-list--dragging, .insert-list--dragging * { cursor: grabbing; }
+.insert-list--dragging [data-insert-slot] { position: relative; }
+.insert-slot--dragging { opacity: 0.5; }
+.insert-slot--drop-before::before,
+.insert-list--drop-end > [data-insert-slot]:last-child::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--primary);
+  pointer-events: none;
+  z-index: 1;
+}
+.insert-slot--drop-before::before { top: -1px; }
+.insert-list--drop-end > [data-insert-slot]:last-child::after { bottom: -1px; }
 .insert-list:not(.insert-list--compact) { padding: 8px 7px; }
 .insert-list__header { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin-bottom: 6px; }
 .insert-list__header > strong { display: flex; align-items: baseline; gap: 5px; min-width: 0; font-size: 11px; font-weight: 600; }
